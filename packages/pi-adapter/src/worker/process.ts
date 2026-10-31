@@ -59,6 +59,9 @@ async function relayModels(start: ChannelStart): Promise<Models> {
   return models;
 }
 
+/** The share of the model's window that stays verbatim when the conversation is compacted. */
+const KEEP_RECENT_SHARE = 0.1;
+
 /** The longest extract the process keeps of a conversation it must compact without asking the model. */
 const EXTRACT_CHARS = 6000;
 
@@ -95,7 +98,13 @@ export function contextPolicyOf(context: ChannelStart["context"]): AdapterContex
 /** A rough size of the stored conversation in tokens (three characters to a token, the budget's own estimate), for the resume decision. */
 async function contextTokens(adapter: PiAdapter): Promise<number | undefined> {
   // Not known is not zero: the host then has no size to judge and says so.
-  try { return Math.ceil((await adapter.root().transcript()).reduce((n, e) => n + e.text.length, 0) / 3); } catch { return undefined; }
+  // Only what the model still sees counts: a compaction (or a reset) moves the start of its view forward, and the entries before it stay in storage but are not sent.
+  try {
+    const entries = await adapter.root().transcript();
+    let from = 0;
+    for (const e of entries) if (e.head !== undefined) from = e.head;
+    return Math.ceil(entries.reduce((n, e) => n + (e.id >= from ? e.text.length : 0), 0) / 3);
+  } catch { return undefined; }
 }
 
 /** Runs the process until the host closes it or the input ends. Resolves when everything is released. */
@@ -158,10 +167,19 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     adapter = await PiAdapter.open({
       storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
       tools, ...(cache === undefined ? {} : { cache }), ...(contextPolicy === undefined ? {} : { contextPolicy }),
+      // Pi keeps the newest part of a conversation verbatim when it compacts; its default would be larger than a small model's whole startup share, so nothing would ever be cut. A tenth of the window is kept (provisional, card H12f).
+      settings: { compaction: { keepRecentTokens: Math.max(500, Math.floor(start.model.contextWindow * KEEP_RECENT_SHARE)) } },
     });
+    // Work an earlier process of this attempt left unfinished stays held (Pi refuses to make progress) until the controller has reviewed it; the host says so in the start when it has (a recipe restart, a resume after loss). Interrupted tool calls are not run again:
+    // the bridge answers a repeated call from the controller's ledger, and the model sees what happened to them.
+    if (start.recover !== undefined) {
+      const found = await adapter.interrupted();
+      if (found.held) await adapter.recover({ abandon: [], reason: start.recover.reason, decidedBy: "local-worker-restart" });
+    }
     // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
     try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
-    send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars });
+    // Pi Durable renders no system text of its own and this process gives the adapter no prompt layout, so the conversation has no system prompt: what the model is told besides the tools is the turn's own text.
+    send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars, systemPromptChars: 0 });
   };
 
   const turn = async (requestIdText: string, content: string): Promise<void> => {

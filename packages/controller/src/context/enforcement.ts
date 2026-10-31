@@ -134,11 +134,12 @@ export class ContextEnforcementService {
   // ---- admission --------------------------------------------------------------------------------------------------------------
 
   /**
-   * Decides whether the first call of an attempt may be sent. Repeating it (same task, attempt and round) answers with the recorded decision; a refusal has opened a blocker. While a `context_overflow`
+   * Decides whether the first call of an attempt may be sent. Repeating it (same task, attempt and round) answers with the recorded decision; a refusal has opened a blocker (unless the caller said it will `retry` after making the call smaller). While a `context_overflow`
    * blocker is open on the task nothing is admitted. If an earlier confirmed call on the same route (`route`, default one per window) was larger than estimated, the estimate is scaled by that ratio.
    */
-  async admit(principal: Principal, command: { taskId: string; attemptId: string; round?: number; window: number; route?: string; call: FirstCall }): Promise<FirstCallDecision & { id: string; blockerId?: string; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "window", "route", "call"]);
+  async admit(principal: Principal, command: { taskId: string; attemptId: string; round?: number; window: number; route?: string; call: FirstCall; retry?: boolean }): Promise<FirstCallDecision & { id: string; blockerId?: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "window", "route", "call", "retry"]);
+    if (command.retry !== undefined && typeof command.retry !== "boolean") return invalid("retry", "must be true or false");
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const r = round(command.round); const w = window(command.window);
     const route = command.route === undefined ? `window-${w}` : key("route", command.route);
     const projectId = (await this.#dispatch(principal, taskId))!;
@@ -163,7 +164,8 @@ export class ContextEnforcementService {
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { admit: decision.admit } }),
     }));
     const recorded = view<AdmissionBody>((await this.#runner.get(ref.kind, id))!);
-    const blockerId = recorded.admit ? undefined : await this.#block(principal, taskId, `The first call of attempt ${attemptId} was not sent: ${recorded.reasons.join("; ")}.`);
+    // `retry`: the caller will make the call smaller (compact the stored conversation) and ask again as the next round; that round, if refused, is the one that opens the blocker.
+    const blockerId = recorded.admit || command.retry === true ? undefined : await this.#block(principal, taskId, `The first call of attempt ${attemptId} was not sent: ${recorded.reasons.join("; ")}.`);
     return { admit: recorded.admit, startupTokens: recorded.startupTokens, estimatedTokens: recorded.estimatedTokens, basis: recorded.basis as FirstCallDecision["basis"], workingTokens: recorded.workingTokens, limits: { startup: budget.startupTokens, working: budget.workingTokens }, reasons: recorded.reasons, id, ...(blockerId === undefined ? {} : { blockerId }), replayed: run.replayed };
   }
 

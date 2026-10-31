@@ -23,7 +23,7 @@ export interface HostOrder {
   readonly agentId: string;
   readonly route: string;
   readonly credential: string;
-  readonly recipe: { readonly revision: string; readonly reach: readonly string[] };
+  readonly recipe: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: ResourceLimits };
   readonly expiresAt?: string;
   readonly resumeFrom?: JsonObj;
 }
@@ -135,6 +135,10 @@ export interface OwnerPolicyServices {
 export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch"> {
   return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (record) => services.recordLaunch(record) };
 }
+/** What one named reach of the sandbox adds to the recipe: read-only inputs (under /inputs or /opt) and environment. Nothing else can be added by a name: not a writable path, not a network. */
+export interface ReachGrant { readonly readOnly?: readonly ReadOnlyMount[]; readonly env?: Readonly<Record<string, string>> }
+const REACH_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
+const MAX_REACH = 32;
 
 export interface LocalHostOptions<Call> {
   readonly launcher: Pick<SandboxLauncher, "launch">;
@@ -143,6 +147,11 @@ export interface LocalHostOptions<Call> {
   readonly protectedPaths: readonly string[];
   /** The attempt's checkout, git directory, home and scratch (card A04's workspace). */
   readonly workspace: (order: HostOrder) => Promise<AttemptWorkspace> | AttemptWorkspace;
+  /**
+   * What a named reach of a recipe stands for on this machine (card H12b): the dispatcher's recipe names the tools and servers the sandbox lets the agent reach, the host knows which read-only inputs and which environment that means. A name it does not know
+   * refuses the launch (fail closed: a recipe is never applied in part). Narrowing a recipe drops names and widening adds them; the sandbox is started again with the result, so the mounts change for real.
+   */
+  readonly reach?: (name: string, order: HostOrder) => Promise<ReachGrant | undefined> | ReachGrant | undefined;
   /** The model the attempt uses, as the process addresses it. */
   readonly model: (order: HostOrder) => Promise<ChannelModel> | ChannelModel;
   /** The id part of the agent's own tool namespace. */
@@ -179,7 +188,7 @@ const RELAY_BASE = "http://relay.invalid";
 const DEFAULT_REFRESH = "The owner's decisions changed. Read the decisions that apply to this task again before you act on anything you had planned.";
 const MAX_RUN_MS = 24 * 60 * 60 * 1000;
 
-interface Reserved { readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; process?: WorkerProcess; closed: boolean }
+interface Reserved { readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; readonly limits: ResourceLimits | undefined; process?: WorkerProcess; closed: boolean }
 
 export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   readonly sandbox: { open(recipe: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> };
@@ -190,14 +199,34 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   const reserved = new Map<string, Reserved>();
   const clock = options.clock ?? Date.now;
 
+  /** The mounts and environment the recipe's named reaches stand for. Every name must be known to this host; a name twice, a bad name or too many are refused. */
+  const reachOf = async (summary: HostOrder["recipe"], order: HostOrder): Promise<{ readonly readOnly: readonly ReadOnlyMount[]; readonly env?: Record<string, string> }> => {
+    const names = summary.reach;
+    if (!Array.isArray(names) || names.length > MAX_REACH || names.some((n) => typeof n !== "string" || !REACH_NAME.test(n)) || new Set(names).size !== names.length) throw new Error(`the recipe's reach must be at most ${MAX_REACH} distinct names of letters, digits and . _ : -`);
+    const readOnly: ReadOnlyMount[] = [];
+    const env: Record<string, string> = {};
+    for (const name of names) {
+      const granted = await options.reach?.(name, order);
+      if (granted === undefined) throw new Error(`this host cannot provide the reach "${name}" of the recipe; the sandbox is not started with part of a recipe`);
+      readOnly.push(...(granted.readOnly ?? []));
+      for (const [key, value] of Object.entries(granted.env ?? {})) {
+        if (Object.hasOwn(env, key) && env[key] !== value) throw new Error(`the reaches of the recipe set ${key} to different values`);
+        env[key] = value;
+      }
+    }
+    return { readOnly, ...(Object.keys(env).length === 0 ? {} : { env }) };
+  };
+
   const sandbox = {
-    async open(_summary: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> {
+    async open(summary: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> {
       const workspace = await options.workspace(order);
-      const planned = attemptSandbox(workspace, { protectedPaths: options.protectedPaths });
-      const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts] };
+      const reach = await reachOf(summary, order);
+      const planned = attemptSandbox({ ...workspace, ...(reach.env === undefined ? {} : { env: { ...workspace.env, ...reach.env } }) }, { protectedPaths: options.protectedPaths });
+      const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts, ...reach.readOnly] };
       // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
       const normalized = normalizeRecipe(recipe, planned.protectedPaths);
-      const entry: Reserved = { order, workspace, recipe, closed: false };
+      // The recipe's own limits, when it states some, are the sandbox's limits (narrower or wider than the host's default); otherwise the workspace's.
+      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false };
       reserved.set(order.attemptId, entry);
       return {
         revision: normalized.revision,
@@ -221,6 +250,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let lastRequest = typeof nn?.["lastRequest"] === "string" ? (nn["lastRequest"] as string) : undefined;
       // The conversation is kept in the agent's home on this host. A checkpoint to continue from with no such store (another host, a wiped home) would silently start from nothing: refused instead.
       if (from?.["pi"] !== undefined && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
+      // Work an earlier process of this attempt left unfinished (this host restarted the sandbox, or the attempt resumes from a checkpoint) was reviewed by the controller before it asked: the conversation goes on from it.
+      const goesOn = entry.process !== undefined || from !== undefined;
       await entry.process?.close().catch(() => undefined);
       const remaining = Math.min(MAX_RUN_MS, order.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(1000, Date.parse(order.expiresAt) - clock()));
       // Everything the owner's policy needs is read inside the guard: a setting that cannot be read refuses the launch AND is recorded as refused, with the reason (never an unrecorded throw).
@@ -231,8 +262,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let process: WorkerProcess;
       try {
         const ownerLimits = await options.limits?.(order);
-        requested = strictestLimits(entry.workspace.limits, ownerLimits) ?? {};
-        stricter = stricterThanOwner(entry.workspace.limits, ownerLimits);
+        requested = strictestLimits(entry.limits, ownerLimits) ?? {};
+        stricter = stricterThanOwner(entry.limits, ownerLimits);
         bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(order)) === true;
         if (requested.wallTimeMs !== undefined) wallTimeMs = Math.min(remaining, requested.wallTimeMs);
         const { wallTimeMs: _wall, ...processLimits } = requested;
@@ -264,7 +295,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       try {
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
-          storeDir: `${GUEST.home}/pi`, model, relayBase: options.relayBase ?? RELAY_BASE,
+          storeDir: `${GUEST.home}/pi`, model, ...(goesOn ? { recover: { reason: entry.process !== undefined ? "the controller restarted the sandbox of this attempt" : "the controller resumed this attempt from a checkpoint" } } : {}), relayBase: options.relayBase ?? RELAY_BASE,
           ...(options.context?.(order) === undefined ? {} : { context: options.context(order)! }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
@@ -278,7 +309,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         return { pi: taken.checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }) } };
       };
       return {
-        firstCall: (content) => ({ systemPromptChars: process.info.systemPromptChars ?? UNKNOWN_SYSTEM_PROMPT_CHARS, toolSchemaChars: process.info.toolSchemaChars ?? 0, startupTokens: Math.ceil(content.length / 3), replyReserveTokens: model.maxTokens }),
+        firstCall: (content) => ({ systemPromptChars: process.info.systemPromptChars ?? UNKNOWN_SYSTEM_PROMPT_CHARS, toolSchemaChars: process.info.toolSchemaChars ?? 0, startupTokens: Math.ceil(content.length / 3) + (contextTokens ?? 0), replyReserveTokens: model.maxTokens }),
         async run(content, requestId) {
           let result;
           try { result = await process.run(requestId, content); } catch (error) { return { status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) }; }
@@ -289,11 +320,23 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           try { checkpoint = wrapCheckpoint(await process.checkpoint()); } catch { checkpoint = undefined; }
           return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) } };
         },
-        async checkpoint() { return wrapCheckpoint(await process.checkpoint()); },
+        async checkpoint() {
+          try { return wrapCheckpoint(await process.checkpoint()); } catch (error) {
+            // A turn that has not finished yet has no completed turn to checkpoint (the first turn of an attempt, a recipe change in the middle of it). The conversation is in the agent's home on this host; the restart continues it from there and the record says there was no checkpoint to restore.
+            if (/has no completed turn/.test(String((error as Error)?.message ?? error))) return { nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }), midTurn: true } };
+            throw error;
+          }
+        },
         tell: (text) => process.tell(text),
         activeModelCalls: () => process.modelCallsInFlight,
         // Over the context budget at the first call: the process compacts its stored conversation once and the controller asks again (card H12f).
-        async compact() { await process.compact(); },
+        async compact() {
+          // Nothing stored, nothing to make smaller. An unknown size with a stored conversation is compacted (the process tells the new size).
+          if (contextTokens === undefined ? from?.["pi"] === undefined && turnSeq === 0 : contextTokens === 0) return;
+          const compacted = await process.compact();
+          // The size of what is stored now is what the next admission counts.
+          contextTokens = compacted.contextTokens ?? (await process.checkpoint().then((c) => c.contextTokens, () => undefined)) ?? contextTokens;
+        },
         async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },
         async close() { await process.close(); },
       };

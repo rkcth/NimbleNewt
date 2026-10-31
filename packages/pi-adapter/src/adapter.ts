@@ -574,6 +574,7 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
       stopReason: (firstMessage(entry) as { stopReason?: string }).stopReason,
       toolCallIds: callIdsOf(firstMessage(entry).content),
       data: entry.data,
+      ...(typeof (entry as { head?: unknown }).head === "number" ? { head: (entry as { head: number }).head } : {}),
     }));
   }
 

@@ -14,6 +14,8 @@ export interface RecipeSummary {
   readonly revision: string;
   /** The tools and servers the sandbox lets the agent reach. Changing it is a change of recipe. */
   readonly reach: readonly string[];
+  /** What the sandbox may use (cpus, memoryMb, diskMb, processes). Present: these replace the host's default limits for this launch, narrower or wider. Changing them is a change of recipe. */
+  readonly limits?: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number };
 }
 
 export interface WorkOrder {

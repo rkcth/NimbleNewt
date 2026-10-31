@@ -548,6 +548,11 @@ export class DispatcherService {
     if (change.kind === "grants") return { restarted: false };
     const live = this.#live.get(attemptId) ?? invalid("attemptId", "has no running worker on this dispatcher");
     if (change.recipe === null || typeof change.recipe !== "object" || typeof change.recipe.revision !== "string" || change.recipe.revision.length < 1) invalid("recipe", "must name its revision");
+    if (!Array.isArray(change.recipe.reach) || change.recipe.reach.length > 32 || change.recipe.reach.some((n) => typeof n !== "string" || n.length < 1 || n.length > 80)) invalid("recipe", "reach must be a list of at most 32 names");
+    if (change.recipe.limits !== undefined) {
+      const limits = change.recipe.limits as unknown;
+      if (limits === null || typeof limits !== "object" || Array.isArray(limits) || Object.entries(limits).some(([k, v]) => !["cpus", "memoryMb", "diskMb", "processes"].includes(k) || !Number.isSafeInteger(v) || (v as number) < 1)) invalid("recipe", "limits must be whole numbers for cpus, memoryMb, diskMb and processes");
+    }
     await this.freeze(by, attemptId, change.kind === "narrow" ? "narrowing the sandbox" : "widening the sandbox");
     await this.settle(by, attemptId, { cancel: true });
     const checkpoint = await this.#checkpoint(attemptId, `recipe ${change.kind}`);

@@ -50,10 +50,10 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
   const rounds = new Map<string, number>();
   return {
     context: {
-      async admit(order, call, round) {
+      async admit(order, call, round, retry) {
         const window = binding.window(order);
         if (window === undefined) return { admit: true, reasons: [] };
-        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call });
+        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call, ...(retry === true ? { retry: true } : {}) });
         if (decision.admit) rounds.set(order.attemptId, round);
         return { admit: decision.admit, reasons: decision.reasons };
       },

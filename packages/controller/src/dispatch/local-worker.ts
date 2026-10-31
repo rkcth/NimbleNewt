@@ -4,7 +4,7 @@ import type { FirstCall } from "../context/dispatch.js";
 import type { Capabilities, HostService } from "../hosts/index.js";
 import type { Principal } from "../security/principals.js";
 import type { JsonObject } from "../storage/types.js";
-import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerHandle, WorkerHost, WorkOrder, WorkerTurnResult } from "./ports.js";
+import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, WorkOrder, WorkerTurnResult } from "./ports.js";
 
 /** An isolation session for one attempt (card A03's launcher, behind a port): the host opens one with the recipe the dispatcher stated and closes it when the attempt ends or the recipe changes. */
 export interface SandboxSession { readonly revision: string; close(): Promise<void> }
@@ -29,6 +29,16 @@ export interface AttemptRuntime {
   activeModelCalls?(): number;
   close(): Promise<void>;
 }
+/** Two reports of one turn (the part cut short by a restart and the rest) as one: the same turn number, the cache figures added when they are about the same route. */
+function mergeUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsage | undefined {
+  if (a === undefined || b === undefined) return b ?? a;
+  const sameRoute = a.cache !== undefined && b.cache !== undefined && a.cache.backend === b.cache.backend && a.cache.route === b.cache.route;
+  const cache = sameRoute ? { ...b.cache!, cachedTokens: a.cache!.cachedTokens + b.cache!.cachedTokens, computedTokens: a.cache!.computedTokens + b.cache!.computedTokens, writtenTokens: a.cache!.writtenTokens + b.cache!.writtenTokens } : (b.cache ?? a.cache);
+  const sum = (x: number | undefined, y: number | undefined): number | undefined => (x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0));
+  const costMicros = sum(a.costMicros, b.costMicros), computeMs = sum(a.computeMs, b.computeMs);
+  return { ...(b.turnSeq === undefined ? (a.turnSeq === undefined ? {} : { turnSeq: a.turnSeq }) : { turnSeq: b.turnSeq }), ...(costMicros === undefined ? {} : { costMicros }), ...(computeMs === undefined ? {} : { computeMs }), ...(cache === undefined ? {} : { cache }) };
+}
+
 export type BoundCall = (request: ToolCallRequest, executor: ToolExecutor) => Promise<ToolResult>;
 export interface RuntimeFactory {
   /** Opens the runtime for an attempt. `from` is a checkpoint to continue from (a restart, a resumed attempt); `call` is the one way a tool reaches the world. */
@@ -64,7 +74,8 @@ export type MessageBoundaryName = "interrupt" | "safe-boundary";
  */
 export interface RuntimeGuards {
   readonly context?: {
-    admit(order: WorkOrder, call: FirstCall, round: number): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
+    /** `retry`: the runtime will make the call smaller and ask again as the next round, so a refusal now opens no blocker (the refusal of that round does). */
+    admit(order: WorkOrder, call: FirstCall, round: number, retry?: boolean): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
     /** The first call went out and the provider reported its input size (card C07b): recorded against the admission, which calibrates the estimate for the route. */
     confirm?(order: WorkOrder, usage: { readonly reportedInputTokens: number; readonly promptChars: number }): Promise<void>;
     resume(order: WorkOrder, storedTokens: number): Promise<{ readonly resume: boolean; readonly reason: string }>;
@@ -140,6 +151,9 @@ export class LocalWorker implements WorkerHost {
     let gateway: ToolGateway | undefined;
     let runtime: AttemptRuntime | undefined;
     let inFlight = 0;
+    let generation = 0;
+    let restarting: Promise<void> | undefined;
+    let restartFailed = false;
     const call: BoundCall = async (request, executor) => {
       if (gateway === undefined) throw new DomainError("fenced", "the turn has not started; a tool call needs the attempt's gateway");
       inFlight++;
@@ -155,29 +169,36 @@ export class LocalWorker implements WorkerHost {
     try { runtime = await options.runtimes.open(order, call, from); } catch (error) { await sandbox.close().catch(() => undefined); throw error; }
 
     // The first call is admitted or refused before anything is sent (C07b). A refused one is made smaller once, if the runtime can, and asked again.
-    if (guards?.context !== undefined && runtime.firstCall !== undefined) {
+    let round = 0;
+    const admitFirst = async (rt: AttemptRuntime, text: string): Promise<string | undefined> => {
+      if (guards?.context === undefined || rt.firstCall === undefined) return undefined;
       let refusal: string | undefined;
       try {
-        for (let round = 1; round <= 2; round++) {
-          const first = runtime.firstCall(content);
-          if (first === undefined) break;
-          const decision = await guards.context.admit(order, first, round);
-          if (decision.admit) { refusal = undefined; break; }
+        for (let pass = 1; pass <= 2; pass++) {
+          const first = rt.firstCall(text);
+          if (first === undefined) return undefined;
+          const compactable = pass === 1 && rt.compact !== undefined;
+          const decision = await guards.context.admit(order, first, ++round, compactable);
+          if (decision.admit) return undefined;
           refusal = decision.reasons.join("; ") || "the first call is over the context budget";
-          if (round === 1 && runtime.compact !== undefined) await runtime.compact(); else break;
+          if (!compactable) break;
+          // A compaction that fails is not the end of the road: the second round asks about the unchanged call, is refused, and opens the blocker.
+          try { await rt.compact!(); } catch (error) { report("compaction", error); }
         }
       } catch (error) { refusal = `the context check failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`; report("context admission", error); }
-      if (refusal !== undefined) {
-        await runtime.close().catch(() => undefined);
-        await sandbox.close().catch(() => undefined);
-        return {
-          workerVersion: options.version,
-          run: async () => ({ status: "failed", error: `the first call was not sent: ${refusal}` }),
-          checkpoint: async () => from ?? {},
-          restart: async () => { throw new DomainError("fenced", "the attempt was refused at start"); },
-          stop: async () => undefined,
-        };
-      }
+      return refusal;
+    };
+    const refusal = await admitFirst(runtime, content);
+    if (refusal !== undefined) {
+      await runtime.close().catch(() => undefined);
+      await sandbox.close().catch(() => undefined);
+      return {
+        workerVersion: options.version,
+        run: async () => ({ status: "failed", error: `the first call was not sent: ${refusal}` }),
+        checkpoint: async () => from ?? {},
+        restart: async () => { throw new DomainError("fenced", "the attempt was refused at start"); },
+        stop: async () => undefined,
+      };
     }
 
     // While the turn runs, on each beat: the pause gates are observed and messages for the agent are delivered (L01, U12). One pass at a time: a slow service must not make two passes read the same batch.
@@ -225,7 +246,15 @@ export class LocalWorker implements WorkerHost {
         gateway = g;
         const stop = options.schedule?.(async () => { await g.heartbeat().then(() => undefined, () => undefined); await watch(true); });
         try {
-          return await runtime!.run(content, order.requestId);
+          let carried: TurnUsage | undefined;
+          for (;;) {
+            const at = generation;
+            const result = await runtime!.run(content, order.requestId);
+            // A recipe change ends the process the turn was running in on purpose (card H12b): the restart is waited for, and a turn cut short by it goes on in the new process under the same request ID, from the conversation the checkpoint kept.
+            if (restarting !== undefined) await restarting.catch(() => undefined);
+            if (generation === at || restartFailed || result.status === "completed") { const usage = mergeUsage(carried, result.usage); return carried === undefined || usage === undefined ? result : { ...result, usage }; }
+            carried = mergeUsage(carried, result.usage);
+          }
         } finally {
           stop?.();
           // A turn that ended while the attempt is paused is reported as paused (its calls have settled); nothing is delivered after the turn.
@@ -234,12 +263,20 @@ export class LocalWorker implements WorkerHost {
       },
       checkpoint: () => runtime!.checkpoint(),
       restart: async (recipe, resumeFrom) => {
-        await runtime!.close();
-        await sandbox.close();
-        sandbox = await options.sandbox.open(recipe, order);
-        // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
-        reported = undefined;
-        runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
+        generation++;
+        const done = (async () => {
+          await runtime!.close();
+          await sandbox.close();
+          sandbox = await options.sandbox.open(recipe, order);
+          // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
+          reported = undefined;
+          runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
+          // The new process takes the whole stored conversation into its next call: it is admitted again (and compacted once if it must be), and a refusal leaves the attempt frozen (the dispatcher keeps it so).
+          const again = await admitFirst(runtime, "");
+          if (again !== undefined) throw new DomainError("unavailable", `the restarted sandbox's first call was not sent: ${again}`);
+        })();
+        restarting = done;
+        try { await done; restartFailed = false; } catch (error) { restartFailed = true; throw error; } finally { if (restarting === done) restarting = undefined; }
       },
       tell: async (text) => { await runtime!.tell?.(text); },
       stop: async () => { await runtime!.close().catch(() => undefined); await sandbox.close().catch(() => undefined); },

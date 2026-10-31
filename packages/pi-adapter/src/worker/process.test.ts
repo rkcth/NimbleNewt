@@ -117,6 +117,31 @@ test("the host can ask the process to compact its stored conversation: it answer
   await h.done;
 });
 
+test("after a compaction the size the process reports is what the model still sees, not the whole stored history (card H12f)", async () => {
+  const { offline, hooks } = scripted();
+  const long = "A long answer, said in detail. ".repeat(400);
+  offline.faux.setResponses([fauxAssistantMessage(long), fauxAssistantMessage("short")]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: { ...offlineStart, context: { compaction: { fallback: "extractive" } } } });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "say something long" });
+  assert.equal((await h.next("result")).status, "completed");
+  // More is said to the agent afterwards, so there is an older part to cut and a newer part to keep.
+  for (const id of [50, 51]) { const mark = h.seen.length; h.send({ t: "tell", id, text: `${id}: ${"Another long message. ".repeat(400)}` }); await h.next("tell.ok", mark); }
+  h.send({ t: "checkpoint", id: 40 });
+  const before = (await h.next("checkpoint.ok")).contextTokens ?? 0;
+  assert.ok(before > 6000, `a long conversation is stored (${before})`);
+  h.send({ t: "compact", id: 41 });
+  const answer = await Promise.race([h.next("compact.ok"), h.next("fault")]);
+  assert.equal(answer.t, "compact.ok", JSON.stringify(answer));
+  const after = answer.t === "compact.ok" ? answer.contextTokens ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
+  assert.ok(after < before - 1500, `the compacted conversation is smaller (${before} then ${after})`);
+  h.send({ t: "checkpoint", id: 42 });
+  assert.equal((await h.next("checkpoint.ok", h.seen.findIndex((m) => m.t === "compact.ok"))).contextTokens, after, "a checkpoint after the compaction reports the same size");
+  h.send({ t: "close" });
+  await h.done;
+});
+
 test("a refused bridge call is the model's tool result, not a crash; garbage on the channel is a fault, not a crash", async () => {
   const { offline, hooks } = scripted();
   offline.faux.setResponses([

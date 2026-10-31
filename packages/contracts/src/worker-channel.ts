@@ -54,6 +54,11 @@ export interface ChannelStart {
   readonly credential: string;
   /** The directory (as the process sees it) where the Pi conversation is stored, inside the agent's own home. */
   readonly storeDir: string;
+  /**
+   * Present when the controller has reviewed the work an earlier process of this attempt left unfinished in the store (a restart for a changed recipe, a resume after the worker was lost) and wants the conversation to go on from it. Without it a store with
+   * unfinished work is not touched and the turn is refused (Pi holds interrupted work until it is reviewed). `reason` goes into the audit record.
+   */
+  readonly recover?: { readonly reason: string };
   readonly model: ChannelModel;
   /** The cache key and retention the host derived for this attempt's route (opaque; nothing here can be used to reach another project's cache). */
   readonly cache?: { readonly key?: string; readonly retention?: "none" | "short" | "long" };
@@ -135,6 +140,7 @@ function parseStart(o: Obj): ChannelStart {
   return {
     attemptId: str(o, "attemptId", 200), agentId: str(o, "agentId", 200), namespaceId: /^[a-z0-9]{6,32}$/.test(str(o, "namespaceId", 40)) ? (o["namespaceId"] as string) : fail("namespaceId: 6 to 32 lower-case letters or digits"), credential: str(o, "credential", 4096),
     storeDir: str(o, "storeDir", 1000), model,
+    ...(o["recover"] === undefined ? {} : { recover: { reason: str(obj(o, "recover"), "reason", 300) } }),
     ...(c === undefined ? {} : { cache: { ...(key === undefined ? {} : { key }), ...(retention === undefined ? {} : { retention: retention as "none" | "short" | "long" }) } }),
     relayBase: str(o, "relayBase", 500),
     ...(context === undefined ? {} : { context }),

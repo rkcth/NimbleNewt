@@ -205,6 +205,8 @@ export interface TranscriptEntry {
   readonly toolCallIds: readonly string[];
   /** Application data attached to the entry (for example an update's source). */
   readonly data: unknown;
+  /** Set on an entry that starts a new model view (a compaction summary or a reset): the first entry the model still sees from here on. Entries before it stay in storage but are no longer in the model's context. */
+  readonly head?: number;
 }
 
 /** The controller's decision after reviewing interrupted work: one reviewed step, recorded in the audit trail. */
