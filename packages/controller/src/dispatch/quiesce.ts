@@ -90,7 +90,8 @@ export class QuiesceCoordinator {
     const seen = new Set<string>();
     for (let round = 0; round < 4; round++) {
       const fresh = (await dispatcher.liveAttemptsOf(principal, scope)).filter((id) => !seen.has(id));
-      if (fresh.length === 0) break;
+      // Looked at twice at least: the first look may have been just before an attempt began.
+      if (fresh.length === 0 && round > 0) break;
       for (const attemptId of fresh) { seen.add(attemptId); await makeQuiet(attemptId); }
     }
     let result: T;

@@ -169,4 +169,43 @@ for (const backend of backends) {
       assert.equal(out === undefined || out.checkpoint === undefined, true, "and not returned");
     } finally { await r.store.close(); }
   });
+
+  test(`${backend.name}: a freeze that cannot be lifted after the operation failed, or after a refusal, opens a blocker and is named to the caller (card H12m)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      const real = r.d.release.bind(r.d);
+      let failing = true;
+      (r.d as { release: unknown }).release = async (by: never, id: string, o?: never) => { if (failing) throw new Error("the record could not be written"); return real(by, id, o); };
+      // The operation throws: the original error goes on, the freeze that could not be lifted is named, and a blocker says so.
+      const status = { unreleased: [] as string[] };
+      await assert.rejects(() => r.coordinator.around({ taskId: r.taskId }, "refresh", async () => { throw new Error("the host broke"); }, undefined, "tag-1", status), /the host broke/);
+      assert.deepEqual(status.unreleased, [r.attemptId]);
+      const blocker = await r.w.blockers.openFor("runtime_hold", { kind: "task", id: r.taskId });
+      assert.match(blocker?.summary ?? "", /refresh failed, but an attempt could not be released/);
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "it is still frozen, and the caller knows");
+      failing = false;
+      await r.d.release(r.w.owner, r.attemptId);
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: an attempt that starts while the others are being made quiet is made quiet too (card H12m)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      r.turn.second = async () => "x";
+      // Nothing is live yet. The first look finds nothing; the attempt starts during the operation's preparation, so the scope is looked at again before the operation runs.
+      let listings = 0;
+      const real = r.d.liveAttemptsOf.bind(r.d);
+      (r.d as { liveAttemptsOf: unknown }).liveAttemptsOf = async (by: never, scope: never) => { const found = await real(by, scope); if (++listings === 1) { await r.d.tick(); await r.inCall; return []; } return found; };
+      let frozenInside: boolean | undefined;
+      await r.coordinator.around({ taskId: r.taskId }, "refresh", async (quiet) => { frozenInside = (await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined; return quiet.attempts.length; });
+      assert.equal(frozenInside, true, "the late attempt was frozen before the operation ran");
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
 }

@@ -3242,15 +3242,15 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workspace.request`
 
-Integrates, refreshes or quarantines a task's checkout on the host that holds it. The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why.
+Integrates, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated. An attempt of the task does not start while a request is running. `release` (committing reviewed work) is accepted and run behind the same quiet, but a host answers it with a refusal: the commit has its own permit.
 
 Arguments:
 
-- `operation`: `integration`, `refresh` or `quarantine`
+- `operation`: `integration`, `refresh`, `release` or `quarantine`
 - `taskId`: the task
 - `reason`: why
 
-Result: `{ id, state, operation, taskId, summary?, blocker?, quietAttempts?, replayed }`; `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
+Result: `{ id, state, operation, taskId, requestedBy, assignee?, summary?, detail?, blocker?, quietAttempts?, told?, stopped?, held?, replayed }`; `assignee` is the agent the task was assigned to (the request is recorded against it); `detail` is the host's bounded figures (files written or kept for review, the new base, the quarantine ID); `told` and `stopped` name the attempts told their checkout changed or stopped by a quarantine; `held` names attempts whose freeze could not be lifted (a blocker says so; the recovery lifts it); `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
 
 Completion: finished when accepted (`completed: true`).
 
