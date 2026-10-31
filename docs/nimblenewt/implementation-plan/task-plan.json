@@ -6911,8 +6911,25 @@
         "Y02",
         "H12"
       ],
-      "deliverable": "Research/documentation/design deliverables and simulated service operations",
-      "acceptance_and_verification": "Non-code task produces accepted artifact; operational effect records verified target; scoped repair cannot affect collateral service",
+      "deliverable": "Research/documentation/design deliverables and simulated service operations (built 2026-10-31 as the controller side: artifact.publish, service.operate/observe over a ServiceTarget port with a simulated sandbox target, operational outcomes checked against the effect ledger; the agent-facing bridge tools and real connectors moved to P03b)",
+      "acceptance_and_verification": "Non-code task produces accepted artifact; operational effect records verified target; scoped repair cannot affect collateral service; amended 2026-10-31: the operation is recorded in the effect ledger and read back from the target, and an operational outcome can name only a confirmed, verified operation of its own task; the scope of a repair is a per-resource right (effect.perform on kind service) and an action that reaches another resource is refused before anything is done",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P03b",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Give agents the non-code and service-operation tools and connect real services",
+      "depends_on": [
+        "P03"
+      ],
+      "deliverable": "Split from P03 (2026-10-31). Agent-facing tools in the protected tool bridge (T06) and the Pi extension for artifact.publish, deliverable.draft/submit and service.operate/observe, chat commands for the owner to grant, narrow and read a per-resource service right and to see an operation's outcome, and a ServiceTarget connector for a real system class beyond the simulated sandbox target",
+      "acceptance_and_verification": "An agent in a real attempt publishes its research or design output, drafts and submits the deliverable and repairs a service through the bridge, with the same scope, fence and effect-ledger rules as the API; the owner narrows a service right in chat at once and widening is proposed; the connector reads the real system back before an effect is confirmed; a real-model trial on a non-code task is recorded",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8461,7 +8478,8 @@
         "L03i",
         "T02c",
         "U11c",
-        "K06c"
+        "K06c",
+        "P03b"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

@@ -1519,6 +1519,18 @@ Arguments:
 
 Result: `{ projectId, items, redactions, next?, partial? }`.
 
+#### `service.observe`
+
+What the service reports now about one resource: its system version, its state and the time it was looked at. Needs the same right as operating on the resource.
+
+Arguments:
+
+- `taskId`: the task
+- `service`: the service name
+- `resource`: the resource name
+
+Result: `{ systemVersion, state, observedAt }`.
+
 #### `deliverable.record.get`
 
 One deliverable with its newest (or the named) version: state, content, review, and the state of every version. Hidden as not found where the caller may not read it (the task's read right, narrowed or widened by the access scope).
@@ -4416,6 +4428,37 @@ Arguments:
 - `commandId`: required
 
 Result: `{ id, replayed }`.
+
+#### `artifact.publish`
+
+Publishes the output of a task that is not code (a research note, a document, a design description) as an artifact of that task: text files with a name. The agent holding `artifact.publish` for the task (roles author, docs and qa) or the owner; a task credential reaches its own task only. The artifact records the task, the project and the digest of every file; a deliverable (`deliverable.draft`) then names it, and a later change of the files is found when the deliverable is submitted or accepted. Publishing is not submitting and not acceptance. Repeating the same command ID publishes once.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task
+- `name`: a label (1 to 120 characters)
+- `files`: [{ path, text }] (portable relative paths, UTF-8 text)
+
+Result: `{ id, revision, replayed }`: `id` is the artifact ID.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `service.operate`
+
+Does ONE action on ONE resource of a service for a task and records what the service itself reports afterwards. The scope is judged first: the right `effect.perform` (granted per resource: kind `service`, id `<service>/<resource>`, or project-wide) is needed on the named resource and on every other resource the action would change, otherwise it is refused as `forbidden` and nothing is done. An agent must own the task's current attempt. The intent is written to the effect ledger first; the service applies it once (a repeat with the same command ID applies nothing again); the resource is read back and judged, and the resources next to it are checked to be unchanged. `confirmed` means applied and verified; the result then carries `outcome { reference, systemVersion, observedAt }`, the only thing a deliverable of type `operational-outcome` may name. A change that cannot be verified, or that moved something outside the scope, is `uncertain`: it is never retried blindly and a person decides. No service connected: `unavailable`.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task
+- `service`: the service name
+- `resource`: the resource name
+- `action`: { type, params? }, for example { type: "restart" } or { type: "set", params: { fields: { ... } } }
+
+Result: `{ effectId, status, outcome?, evidence?, note? }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `deliverable.draft`
 

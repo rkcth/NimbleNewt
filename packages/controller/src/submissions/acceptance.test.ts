@@ -46,6 +46,7 @@ for (const backend of backends) {
         rolesOf: async (id) => roles.get(id) ?? [],
         contractVersion: async () => 0,
         verifyArtifact: async (id) => ({ ok: !damaged.has(id), problems: damaged.has(id) ? 1 : 0 }),
+        verifyOutcome: async () => undefined,
         reviewersAvailableIn: async (_p, worker) => [...roles].filter(([id, r]) => id !== worker && (r.includes("reviewer") || r.includes("director"))).map(([id]) => id),
         reviewAssignments: async (p) => assigned.get(p) ?? [],
       }, options);
@@ -109,6 +110,11 @@ for (const backend of backends) {
       assert.equal((await svc.events(owner, second.id, { limit: 50 })).items.filter((e) => e.kind === "accepted" || e.kind === "rejected").length, 1);
       // An outcome needs its reference, system version and time.
       await refuses("invalid_command", () => svc.draft(ann, { commandId: cid("d"), taskId: task, type: "operational-outcome", title: "x", outcome: { reference: "", systemVersion: "v", observedAt: "2026-10-30T09:00:00.000Z" } }));
+      // Without a way to check operations, an outcome cannot be named at all (fail closed), and a refusing check refuses the draft (card P03).
+      const blind = AcceptanceService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [], contractVersion: async () => 0 }, options);
+      await refuses("unavailable", () => blind.draft(ann, { commandId: cid("d"), taskId: task, type: "operational-outcome", title: "x", outcome: { reference: "eff-aaaaaaaaaaaaaaaaaaaa", systemVersion: "v", observedAt: "2026-10-30T09:00:00.000Z" } }));
+      const picky = AcceptanceService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [], contractVersion: async () => 0, verifyOutcome: async () => { throw new DomainError("invalid_command", "outcome.reference: not verified"); } }, options);
+      await refuses("invalid_command", () => picky.draft(ann, { commandId: cid("d"), taskId: task, type: "operational-outcome", title: "x", outcome: { reference: "eff-aaaaaaaaaaaaaaaaaaaa", systemVersion: "v", observedAt: "2026-10-30T09:00:00.000Z" } }), /not verified/);
       const empty = await svc.draft(ann, { commandId: cid("d"), taskId: task, type: "operational-outcome", title: "x" });
       await refuses("invalid_command", () => svc.submit(ann, { commandId: cid("s"), id: empty.id, expectedRevision: empty.revision, contractVersion: 0 }), /outcome/);
     } finally { await world.close(); }
@@ -145,6 +151,7 @@ for (const backend of backends) {
         rolesOf: async (id) => roles.get(id) ?? [],
         contractVersion: async () => 0,
         verifyArtifact: async (id) => { await onVerify?.(id); return { ok: !damaged.has(id), problems: damaged.has(id) ? 1 : 0 }; },
+        verifyOutcome: async () => undefined,
         notify: async (n) => { notices.push(n.text); },
         reviewersAvailableIn: async (_p, worker) => [...roles].filter(([id, r]) => id !== worker && (r.includes("reviewer") || r.includes("director"))).map(([id]) => id),
         reviewAssignments: async (p) => assigned.get(p) ?? [],

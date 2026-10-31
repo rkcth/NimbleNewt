@@ -80,6 +80,11 @@ export interface AcceptancePorts {
   readonly contractVersion: (taskId: string) => Promise<number>;
   /** Checks an artifact against its bytes. Absent: a deliverable that names artifacts cannot be submitted or decided (fail closed). A thrown `not_found` or `integrity` error counts as damaged. */
   readonly verifyArtifact?: (artifactId: string) => Promise<{ readonly ok: boolean; readonly problems: number }>;
+  /**
+   * Checks that an operational outcome names a real operation of this task that the ledger confirmed AND verified against the target, with the system version and observation time the target reported (card P03).
+   * Throws `invalid_command` when it does not. Absent: an operational outcome cannot be named at all (fail closed: an unchecked reference proves nothing).
+   */
+  readonly verifyOutcome?: (taskId: string, outcome: Outcome) => Promise<void>;
   /** The other agents of the project that the acceptance service itself would let decide (director with a grant naming the project, or reviewer); none means review is disabled and only the owner decides. */
   readonly reviewersAvailableIn?: (projectId: string, workerId: string) => Promise<readonly string[]>;
   /** The deliverable IDs and submission IDs this principal was asked to review in the task. A reviewer decides only what is named here (or holds `review.decide` in the project). Absent: nobody is assigned. */
@@ -154,8 +159,8 @@ const sameShape = (s: Shape): JsonObject => JSON.parse(JSON.stringify(s)) as Jso
  * - A version is submitted only with its artifacts intact and against the task contract version in force (card S10); starting a review and deciding re-check the artifacts, and a missing or
  *   changed one voids the review (an `invalidated` event returns the version to `submitted`) instead of accepting.
  * - Artifacts and submissions named by a version must belong to the same task. Source and exported artifacts are grouped under one version.
- * Not done here: gating the task's own `done` on acceptance, checking an operational outcome's reference against the effect ledger or the target system (cards P03, S05), and checking the
- * linked code submission against the landed head (cards P02, P08..P10).
+ * An operational outcome's reference is checked against the effect ledger (card P03, `verifyOutcome`).
+ * Not done here: gating the task's own `done` on acceptance, and checking the linked code submission against the landed head (cards P02, P08..P10).
  */
 export class AcceptanceService {
   readonly #runner: CommandRunner;
@@ -245,6 +250,10 @@ export class AcceptanceService {
       // An artifact of another task or project reads as missing: a deliverable cannot pull in work it has no right to.
       if (body === undefined || body.taskId !== taskId || (body.projectId !== undefined && body.projectId !== projectId)) bad("artifacts", `${a.artifactId} is not an artifact of this task`);
       artifacts.push({ artifactId: a.artifactId, role: a.role, manifestDigest: body!.manifestDigest, ...(a.exportedFrom === undefined ? {} : { exportedFrom: a.exportedFrom }) });
+    }
+    if (s.outcome !== undefined) {
+      if (this.#ports.verifyOutcome === undefined) throw new DomainError("unavailable", "operations cannot be checked on this controller, so a deliverable that names an operational outcome cannot be recorded");
+      await this.#ports.verifyOutcome(taskId, s.outcome);
     }
     const submissions: SubmissionRef[] = [];
     for (const id of s.submissionIds) {

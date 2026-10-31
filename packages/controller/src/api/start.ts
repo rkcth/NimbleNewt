@@ -81,7 +81,8 @@ import { CapacityLimitsService } from "../admission/caps.js";
 import { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
-import { ArtifactService, DeliverableService, FileBlobStore } from "../artifacts/index.js";
+import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
+import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { ConversationTransport, type TransportOptions } from "../transport/index.js";
 
@@ -150,6 +151,11 @@ export interface StartOptions {
    * This controller only reads through it (it publishes nothing here), but opening creates the folder if it is missing, so a mistyped path shows every artifact as not matching until it is corrected. Not defaulted from the remote hosts' blob folder: name it explicitly.
    */
   readonly artifacts?: { readonly directory: string };
+  /**
+   * The services that operations (`service.operate`) reach (card P03). Absent: no operation can be done and no operational outcome can be recorded. Tests and the sandbox pass a `SimulatedServices`;
+   * it reaches nothing outside the process.
+   */
+  readonly serviceTarget?: ServiceTarget;
   /**
    * The built-in backup (card K01): a folder the backups are written to, "back up now" for the owner and, with the dispatcher, a nightly run keeping 7 daily and 4 weekly copies. Off unless given.
    * The folder should be on another disk than the database for the backup to survive that disk.
@@ -447,11 +453,24 @@ export async function startController(options: StartOptions): Promise<Controller
     const notes = WorkingNoteService.withEpoch(storage, epoch);
     // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
     const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), attemptOf: (() => { const of = attemptOfAssignments(assignments); /* the dispatcher names an attempt's owner by its bare agent id, the principals by `agent:<id>`: the same identity either way */ return async (taskId: string) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; }; })() });
+    // Operations on services (card P03): the effect ledger, the fence of the agent's current attempt, and the target. An operational outcome is accepted only if the ledger confirms and verified it.
+    const serviceOps = ServiceOperations.withEpoch(storage, epoch, {
+      effects: EffectService.withEpoch(storage, epoch, assignments, { holder: "service-ops" }),
+      ...(options.serviceTarget === undefined ? {} : { target: options.serviceTarget }),
+      fenceOf: async (taskId, agentId) => {
+        const asg = await assignments.getAssignment(taskId);
+        if (asg === undefined || asg.activeAttemptId === undefined) return undefined;
+        const attempt = await assignments.getAttempt(asg.activeAttemptId);
+        if (attempt === undefined || (attempt.owner.id !== agentId && `agent:${attempt.owner.id}` !== agentId)) return undefined;
+        return { generation: attempt.generation, attemptId: attempt.id };
+      },
+    });
     // Versioned deliverables and their acceptance (card Q01): roles as for submissions, the task contract version from the contract record, artifacts verified against their bytes (absent without an artifact directory: a deliverable that names artifacts is then refused, not trusted).
     const acceptance = AcceptanceService.withEpoch(storage, epoch, {
       rolesOf: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()),
       contractVersion: async (taskId) => ((await contracts.runner.get("task-contract", taskId))?.body as unknown as { version?: number } | undefined)?.version ?? 0,
       reviewersAvailableIn: (projectId, workerId) => agents.decidersAvailableIn(projectId, workerId, new Date().toISOString()),
+      verifyOutcome: (taskId, outcome) => serviceOps.checkOutcome(taskId, outcome),
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "notice", ref: { kind: "deliverable", id: n.deliverableId }, detail: n.text }); },
       ...(checked === undefined ? {} : { verifyArtifact: async (artifactId: string) => { const r = await checked.verify(artifactId); return { ok: r.ok, problems: r.problems.length }; } }),
     });
@@ -641,7 +660,7 @@ export async function startController(options: StartOptions): Promise<Controller
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: n.ref, detail: n.text }); },
       meter: quotaMeter, ...(options.backup === undefined ? {} : { ledger: new DeletionLedger(join(options.backup.directory, LEDGER_FILE)) }), ...(reserve === undefined ? {} : { reserve }), ...(dataDirectory === undefined ? {} : { dataDirectory }), ...(options.retention?.autoEveryMs === undefined ? {} : { autoEveryMs: options.retention.autoEveryMs }),
     });
-    const api = new StateApi({ retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

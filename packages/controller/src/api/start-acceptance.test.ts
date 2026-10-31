@@ -8,13 +8,14 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { PI } from "../dispatch/testing/world.js";
 import { startController } from "./index.js";
 import { CHAT_OPS } from "../chat/commands.js";
+import { SimulatedServices } from "../service-ops/index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
-async function world(name: string) {
+async function world(name: string, serviceTarget?: SimulatedServices) {
   const d = mkdtempSync(join(tmpdir(), `nn-${name}-`));
-  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], artifacts: { directory: join(d, "blobs") } });
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], artifacts: { directory: join(d, "blobs") }, ...(serviceTarget === undefined ? {} : { serviceTarget }) });
   const s = c.services;
   const boot = await s.principals.bootstrapOwner({ name: "rob" });
   const rob = await s.principals.authenticate(boot.token);
@@ -166,17 +167,20 @@ test("a missing or changed artifact voids the review, rejected history is kept, 
 });
 
 test("who may decide: external audience is the owner's alone, a single-agent project is decided by the owner, access scope hides it, outcomes and code deliverables are completed correctly (card Q01)", async () => {
-  const w = await world("acc-who");
+  const sim = new SimulatedServices({ shop: { cart: { state: { replicas: 1 } } } });
+  const w = await world("acc-who", sim);
   try {
     const { call, boot, task, project, s } = w;
     const ann = await w.hire("Ann", ["author", "docs", "reviewer", "director"], project);
     // One agent only: review is disabled and recorded; Ann can neither review nor accept her own work.
-    const out = { reference: "eff-123", systemVersion: "svc 4.2", observedAt: "2026-10-30T10:00:00.000Z" };
+    const done = await call(boot.token, "service.operate", { taskId: task, service: "shop", resource: "cart", action: { type: "restart" } }, "op0");
+    assert.equal(done.ok, true, JSON.stringify(done));
+    const out = done.result.outcome as { reference: string; systemVersion: string; observedAt: string };
     assert.equal((await call(ann.token, "deliverable.draft", { taskId: task, type: "operational-outcome", title: "Restart" , outcome: { ...out, observedAt: "yesterday" } }, "o0")).error.code, "invalid_command");
     const id = (await call(ann.token, "deliverable.draft", { taskId: task, type: "operational-outcome", title: "Restart", outcome: out }, "o1")).result.id as string;
     assert.equal((await call(ann.token, "deliverable.submit", { id, expectedRevision: 1, contractVersion: 0 }, "o2")).ok, true);
     const item = (await call(boot.token, "deliverable.record.get", { id })).result.item;
-    assert.deepEqual([item.version.review, item.version.content.outcome.reference], [{ required: false, reason: "review_disabled_single_agent" }, "eff-123"]);
+    assert.deepEqual([item.version.review, item.version.content.outcome.reference], [{ required: false, reason: "review_disabled_single_agent" }, out.reference]);
     assert.equal((await call(ann.token, "deliverable.review.start", { id, version: 1 }, "o3")).error.code, "forbidden");
     assert.equal((await call(boot.token, "deliverable.review.start", { id, version: 1 }, "o4")).ok, true);
     assert.equal((await call(ann.token, "deliverable.accept", { id, version: 1 }, "o5")).error.code, "forbidden");

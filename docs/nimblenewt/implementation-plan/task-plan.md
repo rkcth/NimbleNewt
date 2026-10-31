@@ -41,7 +41,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N11 / AII-261 | V01, V01b, V01c, V02, V02b, V02c |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M02g, M03, M03b, M03c, M03d, M03e, M03f, M03g, M04, M04b, M04c, M04d, M04e, M04f, M04g, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T02c, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
-| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
+| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P03b, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01e, K01f, K01g, K01h, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06c, K06b, K07 |
@@ -2446,8 +2446,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N14 / AII-264.
 - **Blockers:** P01, T01, S05, Y02, H12.
-- **Deliverable:** Research/documentation/design deliverables and simulated service operations.
-- **Acceptance and verification:** Non-code task produces accepted artifact; operational effect records verified target; scoped repair cannot affect collateral service.
+- **Deliverable:** Research/documentation/design deliverables and simulated service operations (built 2026-10-31 as the controller side: artifact.publish, service.operate/observe over a ServiceTarget port with a simulated sandbox target, operational outcomes checked against the effect ledger; the agent-facing bridge tools and real connectors moved to P03b).
+- **Acceptance and verification:** Non-code task produces accepted artifact; operational effect records verified target; scoped repair cannot affect collateral service; amended 2026-10-31: the operation is recorded in the effect ledger and read back from the target, and an operational outcome can name only a confirmed, verified operation of its own task; the scope of a repair is a per-resource right (effect.perform on kind service) and an action that reaches another resource is refused before anything is done.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P03b — Give agents the non-code and service-operation tools and connect real services
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P03.
+- **Deliverable:** Split from P03 (2026-10-31). Agent-facing tools in the protected tool bridge (T06) and the Pi extension for artifact.publish, deliverable.draft/submit and service.operate/observe, chat commands for the owner to grant, narrow and read a per-resource service right and to see an operation's outcome, and a ServiceTarget connector for a real system class beyond the simulated sandbox target.
+- **Acceptance and verification:** An agent in a real attempt publishes its research or design output, drafts and submits the deliverable and repairs a service through the bridge, with the same scope, fence and effect-ledger rules as the API; the owner narrows a service right in chat at once and widening is proposed; the connector reads the real system back before an effect is confirmed; a real-model trial on a non-code task is recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### P04 — Implement ongoing responsibility checks, incidents and coverage
@@ -2975,7 +2983,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, U14, M02g, M03g, M04g, L03i, T02c, U11c, K06c.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, U14, M02g, M03g, M04g, L03i, T02c, U11c, K06c, P03b.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
