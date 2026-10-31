@@ -877,8 +877,13 @@ export class ChatService {
         if (item["status"] !== "pending") return refuse("invalid_command", `that request is ${String(item["status"]).slice(0, 20)}, not waiting for a decision`);
         args["specDigest"] = item["specDigest"];
         args["expectedRevision"] = item["revision"];
-        const sp = JSON.stringify(item["spec"]);
-        labels[String(item["specDigest"])] = `${String(item["agentId"]).slice(0, 50)} asks: ${String(item["kind"])} ${sp.length > 150 ? `${sp.slice(0, 147)}...` : sp}; install scripts and rollback: see maintenance.get`;
+        // The label always shows what is installed from where (name, version, source, a short digest, install scripts) and what is reached; only the free text is cut.
+        const spec = (item["spec"] ?? {}) as Record<string, unknown>;
+        const pick = (k: string, max: number): string[] => (spec[k] === undefined ? [] : [`${k}=${String(spec[k]).slice(0, max)}`]);
+        // What matters comes first and is short (install scripts, the digest, the version); the source is cut last, so the preview's own limit never hides the first four.
+        const shown = [...pick("installScripts", 5), ...(typeof spec["digest"] === "string" ? [`digest=${spec["digest"].slice(0, 15)}...`] : []), ...pick("version", 20), ...pick("name", 40), ...pick("site", 80), ...pick("port", 6), ...pick("mountPath", 60), ...pick("resource", 50), ...pick("mode", 6), ...pick("setting", 50), ...pick("source", 90)];
+        const free = ["change"].filter((k) => spec[k] !== undefined).map((k) => `${k}: ${String(spec[k]).slice(0, 60)}`);
+        labels[String(item["specDigest"])] = `${String(item["agentId"]).slice(0, 50)} asks: ${String(item["kind"])} ${shown.join(" ")}${free.length === 0 ? "" : ` ${free.join(" ")}`}; rollback and reason: see maintenance.get`;
       }
     }
     if (intent.op === "maintenance.site.set" && typeof args["site"] === "string") extraTargets.push(args["site"]);

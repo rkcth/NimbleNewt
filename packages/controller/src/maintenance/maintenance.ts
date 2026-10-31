@@ -16,37 +16,68 @@ import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } f
  */
 export type MaintenanceKind = "skill" | "package" | "extension" | "mount" | "network" | "host-policy" | "base";
 export type MaintenanceClass = "skill-draft" | "dependency" | "access" | "protected";
-export type MaintenanceStatus = "pending" | "approved" | "applying" | "applied" | "rejected" | "withdrawn" | "failed" | "revoking" | "revoked";
+export type MaintenanceStatus = "pending" | "approved" | "applying" | "applied" | "rejected" | "withdrawn" | "failed" | "revoking" | "revoked" | "apply-uncertain";
 export type SiteRule = "allow" | "deny";
 
-export const MAINTENANCE_LIMITS = { reason: 500, plan: 500, note: 300, pendingPerAgent: 20, sites: 200, catalogue: 200, listDefault: 50, listMax: 200, scan: 1000, driveBatch: 50, leaseMs: 600_000, attempts: 5, effectBytes: 4096, pendingReason: 300 } as const;
+export const MAINTENANCE_LIMITS = { reason: 500, plan: 500, note: 300, pendingPerAgent: 20, sites: 200, catalogue: 200, listDefault: 50, listMax: 200, scan: 1000, driveBatch: 50, leaseMs: 1_800_000, attempts: 5, effectBytes: 4096, pendingReason: 300, requestsPerDay: 200, windowMs: 86_400_000, indexScan: 5000, staleKept: 5, leaseMinMs: 60_000, leaseMaxMs: 86_400_000 } as const;
 
 const CLASS_OF: Readonly<Record<MaintenanceKind, MaintenanceClass>> = { skill: "skill-draft", package: "dependency", extension: "dependency", mount: "access", network: "access", "host-policy": "protected", base: "protected" };
 const KINDS = Object.keys(CLASS_OF) as MaintenanceKind[];
-const NAME = /^[a-z0-9@][a-z0-9._/@-]{0,99}$/;
-const VERSION = /^[0-9A-Za-z.+-]{1,40}$/;
+/** A name has no '/', no '..', no leading '.' and no '@'. Only a package may carry the npm scope form `@scope/name`. */
+const NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+const PKG_NAME = /^(?:@[a-z0-9][a-z0-9._-]{0,60}\/)?[a-z0-9][a-z0-9._-]{0,99}$/;
+/** Exact versions only: three numbers, optionally a pre-release and build part. No `latest`, no tag, no range. */
+const VERSION = /^(?:0|[1-9]\d{0,9})\.(?:0|[1-9]\d{0,9})\.(?:0|[1-9]\d{0,9})(?:-[0-9A-Za-z][0-9A-Za-z.-]{0,30})?(?:\+[0-9A-Za-z.-]{1,30})?$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
-const SOURCE = /^(?:https?:\/\/[^\s"'<>\\]{1,190}|[a-z][a-z0-9._-]{0,60})$/;
 const SITE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+/** A site rule key: `host` (every port for a deny, port 443 for an allow), `host:port`, or for an allow `*.host` (subdomains) with an optional port. */
+const SITE_KEY = /^(?:\*\.)?((?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})(?::([0-9]{1,5}))?$/;
 const RESOURCE = /^[a-z][a-z0-9._-]{0,79}$/;
 const MOUNT = /^\/[A-Za-z0-9._\/-]{0,198}$/;
 const AGENT = /^agent:[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
-const REQ = "maintenance", SETTINGS: AggregateRef = { kind: "maintenance-settings", id: "main" }, OPEN = "maintenance-open";
+const REQ = "maintenance", SETTINGS: AggregateRef = { kind: "maintenance-settings", id: "main" }, OPEN = "maintenance-open", LIVE = "maintenance-live", RATE = "maintenance-rate";
+const WIDENING: readonly MaintenanceKind[] = ["network", "mount", "package", "extension", "host-policy", "base"];
+/** Kinds the owner may hand to supervisors (per kind, off by default). The protected kinds are never handed over. */
+const BOSS_KINDS: readonly MaintenanceKind[] = ["package", "extension", "mount", "network"];
+/** A source is an https URL without credentials. The message never repeats it (it may carry a secret). */
+export function checkSource(v: unknown, field: string): string {
+  const s = lone(v, field, 200);
+  let u: URL;
+  try { u = new URL(s); } catch { return bad(field, "must be an https URL"); }
+  if (u.protocol !== "https:" || /[\s"'<>\\]/.test(s) || u.hostname === "") return bad(field, "must be an https URL without spaces");
+  if (u.username !== "" || u.password !== "" || /^https:\/\/[^/?#]*@/i.test(s)) return bad(field, "must not carry a user name or password");
+  return s;
+}
+/** The rule that counts for a site and port: a deny on a host (or on a parent domain) wins over an allow, a deny without a port covers every port, an allow is for the exact host (or its `*.` rule) and port 443 unless a port is named. */
+export function siteRule(sites: Readonly<Record<string, SiteRule>> | undefined, host: string, port: number): SiteRule | undefined {
+  if (sites === undefined) return undefined;
+  let allow = false;
+  for (const [key, rule] of Object.entries(sites)) {
+    const m = SITE_KEY.exec(key); if (m === null) continue;
+    const wild = key.startsWith("*."), base = m[1]!, kp = m[2] === undefined ? undefined : Number(m[2]);
+    const hostHit = rule === "deny" ? host === base || host.endsWith(`.${base}`) : wild ? host.endsWith(`.${base}`) : host === base;
+    if (!hostHit) continue;
+    if (rule === "deny") { if (kp === undefined || kp === port) return "deny"; }
+    else if ((kp ?? 443) === port) allow = true;
+  }
+  return allow ? "allow" : undefined;
+}
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (v: unknown): string => `sha256:${createHash("sha256").update(canonicalJson(v as never)).digest("hex")}`;
 const lone = (v: unknown, field: string, max: number, re?: RegExp): string => { const s = text(v, field, { min: 1, max }); return re !== undefined && !re.test(s) ? bad(field, "has a form that is not accepted") : s; };
 
 /** What a request asks for, after checking: only these fields, in these forms. No host path, no free-form command and no capability grant can be carried by a spec. */
 export type MaintenanceSpec = JsonObject;
+const name = (v: unknown, field: string, re: RegExp): string => { const s = lone(v, field, 100, re); return s.includes("..") ? bad(field, "must not contain ..") : s; };
 export function checkSpec(kind: MaintenanceKind, value: unknown): MaintenanceSpec {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return bad("spec", "must be an object");
   const s = value as Record<string, unknown>;
   switch (kind) {
-    case "skill": onlyKnown(s, ["name", "digest"]); return { name: lone(s["name"], "spec.name", 100, NAME), digest: lone(s["digest"], "spec.digest", 80, DIGEST) };
+    case "skill": onlyKnown(s, ["name", "digest"]); return { name: name(s["name"], "spec.name", NAME), digest: lone(s["digest"], "spec.digest", 80, DIGEST) };
     case "package": case "extension": {
       onlyKnown(s, ["name", "version", "digest", "source", "installScripts"]);
       if (typeof s["installScripts"] !== "boolean") bad("spec.installScripts", "say whether the package runs install scripts (true or false)");
-      return { name: lone(s["name"], "spec.name", 100, NAME), version: lone(s["version"], "spec.version", 40, VERSION), digest: lone(s["digest"], "spec.digest", 80, DIGEST), source: lone(s["source"], "spec.source", 200, SOURCE), installScripts: s["installScripts"] as boolean };
+      return { name: name(s["name"], "spec.name", kind === "package" ? PKG_NAME : NAME), version: lone(s["version"], "spec.version", 40, VERSION), digest: lone(s["digest"], "spec.digest", 80, DIGEST), source: checkSource(s["source"], "spec.source"), installScripts: s["installScripts"] as boolean };
     }
     case "mount": {
       onlyKnown(s, ["mountPath", "resource", "mode"]);
@@ -61,7 +92,7 @@ export function checkSpec(kind: MaintenanceKind, value: unknown): MaintenanceSpe
       if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) bad("spec.port", "must be a port from 1 to 65535");
       return { site: lone(typeof s["site"] === "string" ? s["site"].toLowerCase() : s["site"], "spec.site", 253, SITE), port: port as number };
     }
-    case "host-policy": onlyKnown(s, ["setting", "change"]); return { setting: lone(s["setting"], "spec.setting", 100, NAME), change: redactText(lone(s["change"], "spec.change", 300)) };
+    case "host-policy": onlyKnown(s, ["setting", "change"]); return { setting: name(s["setting"], "spec.setting", NAME), change: redactText(lone(s["change"], "spec.change", 300)) };
     case "base": onlyKnown(s, ["change", "digest"]); return { change: redactText(lone(s["change"], "spec.change", 300)), ...(s["digest"] === undefined ? {} : { digest: lone(s["digest"], "spec.digest", 80, DIGEST) }) };
   }
 }
@@ -71,16 +102,24 @@ export interface MaintenanceBody {
   readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly spec: MaintenanceSpec; readonly specDigest: string;
   readonly reason: string; readonly rollbackPlan?: string; readonly status: MaintenanceStatus; readonly requestedBy: string; readonly requestedAt: string;
   readonly decision?: MaintenanceDecision;
-  readonly applying?: { readonly epoch: number; readonly since: string; readonly attempts: number };
+  /** The claim: only the holder of `token` may complete the application. `renewedAt` is the last heartbeat. */
+  readonly applying?: { readonly epoch: number; readonly since: string; readonly renewedAt?: string; readonly attempts: number; readonly token: string };
+  /** An application may have started and its outcome is not known (or the effect is not recorded yet): a revert or verify pass must run before the request moves on, and a revocation always calls revert. */
+  readonly maybeApplied?: boolean;
+  readonly uncertain?: { readonly reason: string; readonly at: string };
+  /** Applications started and not finished cleanly (a throw or an expired claim): the request fails after a few. */
+  readonly tries?: number;
+  /** Results that arrived from a claim that no longer held (kept: the five most recent). */
+  readonly stale?: readonly { readonly at: string; readonly outcome: string; readonly reconciled: string; readonly note: string }[];
   readonly effect?: JsonObject; readonly appliedAt?: string;
   readonly failure?: { readonly reason: string; readonly at: string; readonly rollback?: JsonObject };
   readonly pendingReason?: string;
   readonly revoke?: { readonly by: string; readonly at: string; readonly reason: string };
   readonly revertEffect?: JsonObject; readonly revokedAt?: string;
 }
-interface SettingsBody { readonly requests?: boolean; readonly bosses?: boolean; readonly rules?: boolean; readonly sites?: Readonly<Record<string, SiteRule>>; readonly catalogue?: readonly CatalogueEntry[]; readonly updatedBy: string; readonly updatedAt: string }
-export interface CatalogueEntry { readonly name: string; readonly version: string; readonly digest: string; readonly installScripts?: boolean }
-export interface MaintenanceEffective { readonly requests: boolean; readonly bosses: boolean; readonly rules: boolean }
+interface SettingsBody { readonly requests?: boolean; readonly bosses?: boolean; readonly rules?: boolean; readonly bossKinds?: readonly MaintenanceKind[]; readonly leaseMinutes?: number; readonly requestsPerDay?: number; readonly sites?: Readonly<Record<string, SiteRule>>; readonly catalogue?: readonly CatalogueEntry[]; readonly updatedBy: string; readonly updatedAt: string }
+export interface CatalogueEntry { readonly name: string; readonly version: string; readonly digest: string; readonly source: string; readonly installScripts?: boolean }
+export interface MaintenanceEffective { readonly requests: boolean; readonly bosses: boolean; readonly rules: boolean; readonly bossKinds: readonly MaintenanceKind[]; readonly leaseMs: number; readonly requestsPerDay: number }
 
 /** What the applier is shown: the checked request, never the free text. */
 export interface MaintenanceView { readonly id: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly spec: MaintenanceSpec; readonly specDigest: string; readonly rollbackPlan?: string }
@@ -88,8 +127,14 @@ export type ApplyOutcome = { readonly outcome: "applied"; readonly effect: JsonO
 export type RevertOutcome = { readonly outcome: "reverted"; readonly effect?: JsonObject } | { readonly outcome: "unsupported" | "failed"; readonly reason: string };
 /**
  * Applies an approved change to the agent's environment: stage, trial in a disposable environment, suspend without release, checkpoint, restart, validate and restore, roll back on failure. Called only for an approved,
- * unchanged request and keyed by `view.id`: it must be safe to call again for the same ID (a restart may repeat it). Install scripts run inside the boundary and only here, after the approval.
- * `unsupported` leaves the change pending (safe restoration is not possible now); `failed` means it rolled back; a throw is read as "not available now".
+ * unchanged request and keyed by `view.id`: it MUST be safe to call again for the same ID (a restart or an expired claim may repeat it, idempotently); the controller prevents concurrent applications of one request
+ * with a claim token, a heartbeat and a lease, but a lost claim cannot stop an application already running, so a stale result is discarded and reconciled by `revert`. Install scripts run inside the boundary and only here, after the approval.
+ *
+ * Package and extension requests: the applier MUST fetch only `spec.source` and MUST verify the fetched artifact against `spec.digest` (sha256 of the content the controller was told to expect) before anything is installed
+ * or any install script runs, and MUST answer `failed` on a mismatch. The controller does not see the artifact; an applier that does not verify is not a valid applier.
+ *
+ * `unsupported` means nothing was changed and leaves the change pending (safe restoration is not possible now); `failed` means it rolled back; a throw means the state is UNKNOWN: the request becomes `apply-uncertain`
+ * and `revert` is called (as a verify-and-restore pass) before the request moves on.
  */
 export interface MaintenanceApplier {
   apply(view: MaintenanceView): Promise<ApplyOutcome>;
@@ -98,9 +143,15 @@ export interface MaintenanceApplier {
 /** The applier used when none is wired: nothing can be applied safely, so approved changes wait. */
 export const noApplier: MaintenanceApplier = { apply: async () => ({ outcome: "unsupported", reason: "no environment applier is wired into this controller" }), revert: async () => ({ outcome: "unsupported", reason: "no environment applier is wired into this controller" }) };
 
-export interface MaintenanceNotice { readonly maintenanceId: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly to: "owner" | "supervisor" }
+export interface MaintenanceNotice { readonly maintenanceId: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly to: "owner" | "supervisor"; readonly supervisorId?: string }
 
-export interface MaintenanceOptions { readonly applier?: MaintenanceApplier; readonly notify?: (n: MaintenanceNotice) => Promise<void> }
+export interface MaintenanceOptions {
+  readonly applier?: MaintenanceApplier; readonly notify?: (n: MaintenanceNotice) => Promise<void>;
+  /** The claim heartbeat in milliseconds (default a third of the lease; 0 switches it off, for tests). */
+  readonly heartbeatMs?: number;
+  /** Whether the controller that holds a claim is known to be dead. Default: an older storage epoch is fenced out of storage, so it is dead. */
+  readonly claimantDead?: (epoch: number, currentEpoch: number) => boolean;
+}
 
 const inputAgent = (v: unknown, field: string): string => { const s = typeof v === "string" ? v.trim() : ""; const id = s.startsWith("agent:") ? s : `agent:${s}`; return AGENT.test(id) ? id : bad(field, "must be an agent's principal ID such as agent:agt-..."); };
 const openKey = (agentId: string): string => agentId.slice("agent:".length);
@@ -110,8 +161,11 @@ export class MaintenanceService {
   readonly #applier: MaintenanceApplier;
   readonly #notify: ((n: MaintenanceNotice) => Promise<void>) | undefined;
   readonly #inflight = new Set<Promise<unknown>>();
+  readonly #options: MaintenanceOptions;
+  /** Set when a setting narrowed something: the next `tick` re-judges what is already waiting or applied (settings writes never drive the applier themselves). */
+  #dirty = false;
 
-  private constructor(runner: CommandRunner, options: MaintenanceOptions) { this.#runner = runner; this.#applier = options.applier ?? noApplier; this.#notify = options.notify; }
+  private constructor(runner: CommandRunner, options: MaintenanceOptions) { this.#runner = runner; this.#applier = options.applier ?? noApplier; this.#notify = options.notify; this.#options = options; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: MaintenanceOptions = {}, runnerOptions: RunnerOptions = {}): MaintenanceService { return new MaintenanceService(new CommandRunner(storage, epoch, runnerOptions), options); }
 
   /** An application started by a request that a rule approved runs after the maintenance ID is returned; this settles when those have finished (tests, shutdown). */
@@ -130,15 +184,32 @@ export class MaintenanceService {
     try {
       const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
       const body = found?.body as unknown as SettingsBody | undefined;
-      return { found, body, readable: true, eff: { requests: body?.requests ?? true, bosses: body?.bosses ?? profile !== "strict", rules: body?.rules ?? true } };
-    } catch { return { found: undefined, body: undefined, readable: false, eff: { requests: true, bosses: false, rules: false } }; }
+      return { found, body, readable: true, eff: { requests: body?.requests ?? true, bosses: body?.bosses ?? profile !== "strict", rules: body?.rules ?? true, bossKinds: body?.bossKinds ?? [], leaseMs: (body?.leaseMinutes ?? MAINTENANCE_LIMITS.leaseMs / 60_000) * 60_000, requestsPerDay: body?.requestsPerDay ?? MAINTENANCE_LIMITS.requestsPerDay } };
+    } catch { return { found: undefined, body: undefined, readable: false, eff: { requests: true, bosses: false, rules: false, bossKinds: [], leaseMs: MAINTENANCE_LIMITS.leaseMs, requestsPerDay: MAINTENANCE_LIMITS.requestsPerDay } }; }
   }
-  async #agent(id: string): Promise<{ state?: string; supervisorId?: string } | undefined> { return (await this.#runner.get("agent", id.slice("agent:".length)))?.body as unknown as { state?: string; supervisorId?: string } | undefined; }
+  async #agent(id: string): Promise<{ state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined> { return (await this.#runner.get("agent", id.slice("agent:".length)))?.body as unknown as { state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined; }
   async #isSupervisorOf(by: Principal, agentId: string): Promise<boolean> {
     if (by.kind !== "agent" || !by.id.startsWith("agent:") || by.id === agentId) return false;
     const me = await this.#agent(by.id);
     const target = await this.#agent(agentId);
     return me?.state === "active" && target?.supervisorId === by.id.slice("agent:".length);
+  }
+  /**
+   * Whether `by` may stand in for the owner as the requester's boss for this request: it is the requester's active supervisor, it did not create the requester or choose its supervisor (a manager cannot make puppets to approve for
+   * itself), the owner has handed this kind to supervisors (`bossKinds`, off by default: every kind that widens the sandbox is the owner's otherwise), and a mount is for the requester's own resource (`<agent key>.name`) or a
+   * shared one (`shared.name`) read-only: another agent's, the owner's and write access to a shared one are the owner's.
+   */
+  async #bossFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<boolean> {
+    if (b.class === "protected" || by.taskScope !== undefined || !eff.bosses || !eff.bossKinds.includes(b.kind)) return false;
+    if (!(await this.#isSupervisorOf(by, b.agentId))) return false;
+    const target = await this.#agent(b.agentId);
+    if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
+    if (b.kind === "mount") {
+      const resource = String(b.spec["resource"]);
+      const own = resource.startsWith(`${openKey(b.agentId)}.`), shared = resource.startsWith("shared.");
+      if (!own && !(shared && b.spec["mode"] === "read")) return false;
+    }
+    return true;
   }
   #owner(by: Principal, what: string): void { if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not ${what}`); }
 
@@ -222,6 +293,7 @@ export class MaintenanceService {
         const auto = this.#autoDecision(kind, cls, spec, s);
         const base = { agentId, kind, class: cls, spec, specDigest, reason, ...(rollbackPlan === undefined ? {} : { rollbackPlan }), requestedBy: by.id, requestedAt: now } as const;
         const changes: Change[] = [];
+        if (by.kind === "agent") changes.push(await this.#rateChange(agentId, now, s.eff.requestsPerDay));
         let body: MaintenanceBody;
         if (auto !== undefined) body = { ...base, status: auto.verdict === "approve" ? ("approved" as const) : ("rejected" as const), decision: { by: "controller", verdict: auto.verdict, via: "rule", rule: auto.rule, specDigest, at: now } };
         else {
@@ -230,10 +302,11 @@ export class MaintenanceService {
           if (open >= MAINTENANCE_LIMITS.pendingPerAgent) throw new DomainError("invalid_command", `${agentId} already has ${open} requests waiting for a decision; wait for them to be decided or withdraw some`, { field: "agentId" });
           changes.push(idx === undefined ? { type: "create", ref: { kind: OPEN, id: openKey(agentId) }, body: { open: open + 1 } } : { type: "update", ref: { kind: OPEN, id: openKey(agentId) }, expectedRevision: idx.revision, body: { open: open + 1 } });
           body = { ...base, status: "pending" };
-          const toBoss = cls !== "protected" && s.eff.bosses && agent.supervisorId !== undefined;
-          notice = { maintenanceId: id, agentId, kind, class: cls, to: toBoss ? "supervisor" : "owner" };
+          const toBoss = cls !== "protected" && s.eff.bosses && s.eff.bossKinds.includes(kind) && agent.supervisorId !== undefined;
+          notice = { maintenanceId: id, agentId, kind, class: cls, to: toBoss ? "supervisor" : "owner", ...(toBoss ? { supervisorId: `agent:${agent.supervisorId}` } : {}) };
         }
         changes.unshift({ type: "create", ref, body: body as unknown as JsonObject });
+        changes.push(...(await this.#indexChanges(id, body)));
         return { ref, creates: true, changes, detail: { agentId, kind, class: cls, status: body.status, specDigest, ...(auto === undefined ? {} : { rule: auto.rule }) }, contention: async () => new DomainError("stale_revision", "another request of this agent was made at the same moment; ask again") };
       },
     }));
@@ -249,11 +322,11 @@ export class MaintenanceService {
     if (!s.readable) return undefined;
     if (cls === "skill-draft") return { verdict: "approve", rule: "skill-draft" };
     if (kind === "network") {
-      const rule = s.body?.sites?.[spec["site"] as string];
+      const rule = siteRule(s.body?.sites, spec["site"] as string, spec["port"] as number);
       if (rule === "deny") return { verdict: "reject", rule: "site-deny" };
       if (rule === "allow" && s.eff.rules) return { verdict: "approve", rule: "site-allow" };
     }
-    if ((kind === "package" || kind === "extension") && s.eff.rules && (s.body?.catalogue ?? []).some((e) => e.name === spec["name"] && e.version === spec["version"] && e.digest === spec["digest"] && (spec["installScripts"] !== true || e.installScripts === true))) return { verdict: "approve", rule: "catalogue" };
+    if ((kind === "package" || kind === "extension") && s.eff.rules && (s.body?.catalogue ?? []).some((e) => e.name === spec["name"] && e.version === spec["version"] && e.digest === spec["digest"] && e.source === spec["source"] && (spec["installScripts"] !== true || e.installScripts === true))) return { verdict: "approve", rule: "catalogue" };
     return undefined;
   }
 
@@ -261,8 +334,8 @@ export class MaintenanceService {
 
   async #decider(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<"owner" | "supervisor"> {
     if (by.kind === "owner") return "owner";
-    // A supervisor role alone never reaches the protected base or host policy; a task credential never decides; nobody decides their own request.
-    if (b.class === "protected" || by.taskScope !== undefined || by.id === b.agentId || by.id === b.requestedBy || !eff.bosses || !(await this.#isSupervisorOf(by, b.agentId))) throw new DomainError("forbidden", `${by.id} may not decide this maintenance request`);
+    // A supervisor role alone never reaches the protected base or host policy, nor any kind the owner has not handed over; a task credential never decides; nobody decides their own request.
+    if (by.id === b.agentId || by.id === b.requestedBy || !(await this.#bossFor(by, b, eff))) throw new DomainError("forbidden", `${by.id} may not decide this maintenance request`);
     return "supervisor";
   }
 
@@ -288,10 +361,11 @@ export class MaintenanceService {
         const via = await this.#decider(by, b, s.eff);
         if (b.status !== "pending") throw new DomainError("invalid_transition", `the request is ${b.status}, not waiting for a decision`);
         if (digest !== b.specDigest) bad("specDigest", "is not the digest of this request as recorded: read the request again before deciding");
-        if (verdict === "approve" && b.kind === "network" && s.readable && s.body?.sites?.[b.spec["site"] as string] === "deny") throw new DomainError("forbidden", "the owner denied this site; clear the site's rule first");
+        if (verdict === "approve" && b.kind === "network" && s.readable && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") throw new DomainError("forbidden", "the owner denied this site; clear the site's rule first");
         const now = this.#runner.now();
         const next: MaintenanceBody = { ...b, status: verdict === "approve" ? "approved" : "rejected", decision: { by: by.id, verdict, via, specDigest: digest, at: now, ...(note === undefined ? {} : { note }) } };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...(await this.#closePending(b.agentId))], detail: { verdict, via, agentId: b.agentId, kind: b.kind, specDigest: digest } };
+        const idx = await this.#indexChanges(id, next);
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...(await this.#closePending(b.agentId)), ...idx], audit: this.#removed(idx), detail: { verdict, via, agentId: b.agentId, kind: b.kind, specDigest: digest } };
       },
     }));
     const status = ((await this.#runner.get(REQ, id))?.body as unknown as MaintenanceBody).status;
@@ -303,6 +377,26 @@ export class MaintenanceService {
     const idx = await this.#runner.get(OPEN, openKey(agentId));
     const open = (idx?.body as unknown as { open?: number } | undefined)?.open ?? 0;
     return idx === undefined ? [] : [{ type: "update", ref: { kind: OPEN, id: openKey(agentId) }, expectedRevision: idx.revision, body: { open: Math.max(0, open - 1) } }];
+  }
+  /** Keeps the index of requests that still need the controller (to be driven, or applied network changes a denial can revoke) in step with the record; the scans read this index, never the hash-ordered request list. */
+  async #indexChanges(id: string, after: MaintenanceBody): Promise<Change[]> {
+    const cur = await this.#runner.get(LIVE, id);
+    const want = (["approved", "applying", "revoking", "apply-uncertain"] as string[]).includes(after.status) || (after.kind === "network" && after.status === "applied");
+    if (want && cur === undefined) return [{ type: "create", ref: { kind: LIVE, id }, body: { agentId: after.agentId } }];
+    if (!want && cur !== undefined) return [{ type: "delete", ref: { kind: LIVE, id }, expectedRevision: cur.revision }];
+    return [];
+  }
+  /** A removal of an index entry carries an audit entry for its subject. */
+  #removed(changes: readonly Change[]): NonNullable<Built["audit"]> { return changes.filter((c) => c.type === "delete").map((c) => ({ type: "maintenance.live-removed", subject: c.ref, detail: {} })); }
+  /** One agent's requests in a window, whatever their kind and however they were decided (the owner is exempt). */
+  async #rateChange(agentId: string, now: string, limit: number): Promise<Change> {
+    const cur = await this.#runner.get(RATE, openKey(agentId));
+    const b = cur?.body as unknown as { since?: string; count?: number } | undefined;
+    const fresh = b?.since === undefined || Date.parse(now) - Date.parse(b.since) >= MAINTENANCE_LIMITS.windowMs;
+    const count = fresh ? 0 : b?.count ?? 0;
+    if (count >= limit) throw new DomainError("forbidden", `${agentId} has made ${count} environment requests in this day; the limit is ${limit} (the owner can raise it)`, { field: "agentId" });
+    const body = { since: fresh ? now : b!.since!, count: count + 1 };
+    return cur === undefined ? { type: "create", ref: { kind: RATE, id: openKey(agentId) }, body } : { type: "update", ref: { kind: RATE, id: openKey(agentId) }, expectedRevision: cur.revision, body };
   }
   #expected(v: unknown): void { if (v !== undefined && (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0)) bad("expectedRevision", "must be a whole number"); }
 
@@ -332,13 +426,16 @@ export class MaintenanceService {
         let next: MaintenanceBody;
         const extra: Change[] = [];
         switch (b.status) {
-          case "pending": next = { ...b, status: "withdrawn", revoke }; extra.push(...(await this.#closePending(b.agentId))); break;
-          case "approved": next = { ...b, status: "revoked", revoke, revokedAt: now }; break;
+          case "pending": next = b.maybeApplied === true ? { ...b, status: "revoking", revoke } : { ...b, status: "withdrawn", revoke }; extra.push(...(await this.#closePending(b.agentId))); break;
+          // An application may have started (an earlier try that ended unclearly): revert is always called then.
+          case "approved": next = b.maybeApplied === true ? { ...b, status: "revoking", revoke } : { ...b, status: "revoked", revoke, revokedAt: now }; break;
           case "applying": if (b.revoke !== undefined) throw new DomainError("invalid_transition", "a revocation is already waiting for the application to end"); next = { ...b, revoke }; break;
-          case "applied": next = { ...b, status: "revoking", revoke }; break;
+          case "applied": case "apply-uncertain": next = { ...b, status: "revoking", revoke }; break;
           default: throw new DomainError("invalid_transition", `the request is already ${b.status}`);
         }
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...extra], detail: { agentId: b.agentId, kind: b.kind, from: b.status, by: by.id } };
+        const idx = await this.#indexChanges(id, next);
+        extra.push(...idx);
+        return { ref, creates: false, audit: this.#removed(idx), changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...extra], detail: { agentId: b.agentId, kind: b.kind, from: b.status, by: by.id } };
       },
     }));
     await this.drive(id).catch(() => undefined);
@@ -353,28 +450,36 @@ export class MaintenanceService {
     try {
       await this.#runner.command(type, { commandId: `${type}:${found.id}:${found.revision}:${randomUUID()}`, actor: "maintenance" }, async () => ({
         payload: { id: found.id, from: found.revision },
-        build: async (): Promise<Built> => ({ ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...extra], detail: { agentId: next.agentId, kind: next.kind, status: next.status, ...detail } }),
+        build: async (): Promise<Built> => { const idx = await this.#indexChanges(found.id, next); return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...extra, ...idx], audit: this.#removed(idx), detail: { agentId: next.agentId, kind: next.kind, status: next.status, ...detail } }; },
       }));
     } catch (e) { if (e instanceof DomainError && (e.code === "stale_revision" || e.code === "command_conflict")) return undefined; throw e; }
     return this.#runner.get(REQ, found.id);
   }
 
   /** Whether an approval still stands: a rule approval needs its rule, a supervisor approval needs the supervisor's standing, and a site the owner has denied since is refused. */
-  async #standing(b: MaintenanceBody): Promise<"ok" | "lapsed" | "denied" | "gone"> {
+  async #standing(b: MaintenanceBody, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }): Promise<"ok" | "lapsed" | "denied" | "gone"> {
     const agent = await this.#agent(b.agentId);
     if (agent?.state !== "active") return "gone";
-    const s = await this.#settings();
-    if (b.kind === "network" && s.readable && s.body?.sites?.[b.spec["site"] as string] === "deny") return "denied";
+    if (b.kind === "network" && s.readable && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") return "denied";
     const d = b.decision;
     if (d === undefined || d.verdict !== "approve" || d.specDigest !== b.specDigest || sha({ agentId: b.agentId, kind: b.kind, spec: b.spec, rollbackPlan: b.rollbackPlan ?? null }) !== b.specDigest) return "lapsed";
-    if (d.via === "supervisor") return b.class !== "protected" && s.eff.bosses && (await this.#isSupervisorOf({ id: d.by, kind: "agent" } as Principal, b.agentId)) ? "ok" : "lapsed";
+    if (d.via === "supervisor") return await this.#bossFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed";
     if (d.via === "rule") { const again = this.#autoDecision(b.kind, b.class, b.spec, s); return again?.verdict === "approve" && again.rule === d.rule ? "ok" : "lapsed"; }
     return "ok";
   }
 
+  /** Whether the claim in `b` still holds: its lease (renewed by the heartbeat) has not run out, or its holder is known dead only when the lease has not run out and the controller that held it is gone. */
+  #claimHeld(b: MaintenanceBody, now: string, leaseMs: number): boolean {
+    const c = b.applying;
+    if (b.status !== "applying" || c === undefined) return false;
+    if (Date.parse(now) - Date.parse(c.renewedAt ?? c.since) >= leaseMs) return false;
+    if (c.epoch === this.#runner.epoch) return true;
+    return !(this.#options.claimantDead ?? ((old, current) => old < current))(c.epoch, this.#runner.epoch);
+  }
+
   /**
-   * Drives one request as far as it can go now: an approved request is applied (claimed first, so two drivers cannot both apply), a request being reverted is reverted. Safe to call at any time and any number of times;
-   * a request another driver holds is left alone, and one that cannot be applied now stays pending with the reason.
+   * Drives one request as far as it can go now: an approved request is applied (claimed first with a token, so two drivers cannot both complete), a request being reverted is reverted, an uncertain one is
+   * verified/reverted first. Safe to call at any time and any number of times; a request another driver holds (a live lease) is left alone, and one that cannot be applied now stays pending with the reason.
    */
   async drive(id: string): Promise<MaintenanceStatus | undefined> {
     for (let round = 0; round < 6; round++) {
@@ -383,27 +488,43 @@ export class MaintenanceService {
       const b = found.body as unknown as MaintenanceBody;
       const now = this.#runner.now();
       if (b.status === "revoking") {
-        if (b.effect === undefined) { await this.#move(found, "maintenance.revoked", { ...b, status: "revoked", revokedAt: now }); continue; }
+        if (b.effect === undefined && b.maybeApplied !== true) { await this.#move(found, "maintenance.revoked", { ...b, status: "revoked", revokedAt: now }); continue; }
         let out: RevertOutcome;
-        try { out = await this.#applier.revert(this.#view(id, b), b.effect); } catch (e) { out = { outcome: "unsupported", reason: `the applier is not available: ${redactText(String((e as Error).message ?? e)).slice(0, 150)}` }; }
-        const { pendingReason: _p, ...rest } = b;
+        try { out = await this.#applier.revert(this.#view(id, b), b.effect ?? { uncertain: true }); } catch (e) { out = { outcome: "unsupported", reason: `the applier is not available: ${redactText(String((e as Error).message ?? e)).slice(0, 150)}` }; }
+        const { pendingReason: _p, maybeApplied: _m, ...rest } = b;
         const moved = out.outcome === "reverted" ? await this.#move(found, "maintenance.revoked", { ...rest, status: "revoked", revokedAt: now, ...(out.effect === undefined ? {} : { revertEffect: this.#effect(out.effect) }) }) : await this.#move(found, "maintenance.revert-pending", { ...b, pendingReason: redactText(out.reason).slice(0, MAINTENANCE_LIMITS.pendingReason) });
         return (moved?.body as unknown as MaintenanceBody | undefined)?.status ?? b.status;
       }
+      if (b.status === "apply-uncertain") {
+        // The state after a throw is unknown: nothing moves on until a revert (verify and restore) pass has run.
+        let out: RevertOutcome;
+        try { out = await this.#applier.revert(this.#view(id, b), b.effect ?? { uncertain: true }); } catch (e) { out = { outcome: "unsupported", reason: `the applier is not available: ${redactText(String((e as Error).message ?? e)).slice(0, 150)}` }; }
+        const { pendingReason: _p, maybeApplied: _m, uncertain: _u, applying: _a, ...rest } = b; // `tries` stays: a request that keeps ending unclearly fails after a few tries
+        if (out.outcome === "reverted") await this.#move(found, "maintenance.reconciled", b.revoke === undefined ? { ...rest, status: "approved", pendingReason: "an earlier application ended unclearly; the environment was restored, so it is tried again" } : { ...rest, status: "revoked", revokedAt: now, ...(out.effect === undefined ? {} : { revertEffect: this.#effect(out.effect) }) });
+        else { await this.#move(found, "maintenance.uncertain-pending", { ...b, pendingReason: redactText(out.reason).slice(0, MAINTENANCE_LIMITS.pendingReason) }); return "apply-uncertain"; }
+        return b.revoke === undefined ? "approved" : "revoked";
+      }
       if (b.status !== "approved" && b.status !== "applying") return b.status;
-      if (b.status === "applying" && b.applying !== undefined && b.applying.epoch === this.#runner.epoch && Date.parse(now) - Date.parse(b.applying.since) < MAINTENANCE_LIMITS.leaseMs) return b.status;
-      const standing = await this.#standing(b);
+      const s = await this.#settings();
+      if (this.#claimHeld(b, now, s.eff.leaseMs)) return b.status;
+      const standing = await this.#standing(b, s);
       if (standing !== "ok") {
-        const next: MaintenanceBody = standing === "lapsed" ? (({ applying: _x, ...r }) => ({ ...r, status: "pending" as const, pendingReason: "the approval no longer stands; it needs a new decision" }))(b)
-          : (({ applying: _x, ...r }) => ({ ...r, status: "rejected" as const, pendingReason: standing === "denied" ? "the site was denied after the approval" : "the agent is no longer active" }))(b);
-        await this.#move(found, "maintenance.lapsed", next, { standing }, standing === "lapsed" ? await this.#reopen(b.agentId) : []);
+        // An application that may have started (an expired claim, an earlier try) is reverted before anything is decided about the request; it is not just sent back.
+        const maybe = b.maybeApplied === true || b.applying !== undefined;
+        const { applying: _x, ...r } = b;
+        const next: MaintenanceBody = maybe ? { ...r, maybeApplied: true, status: "revoking", revoke: { by: "controller", at: now, reason: standing === "lapsed" ? "the approval no longer stands" : standing === "denied" ? "the site was denied after the approval" : "the agent is no longer active" }, pendingReason: standing === "lapsed" ? "the approval no longer stands; an application may have started, so it is being reverted" : "a denied or gone request had an application that may have started; it is being reverted" }
+          : standing === "lapsed" ? { ...r, status: "pending" as const, pendingReason: "the approval no longer stands; it needs a new decision" }
+          : { ...r, status: "rejected" as const, pendingReason: standing === "denied" ? "the site was denied after the approval" : "the agent is no longer active" };
+        await this.#move(found, "maintenance.lapsed", next, { standing }, standing === "lapsed" && !maybe ? await this.#reopen(b.agentId) : []);
         continue;
       }
-      const attempts = (b.applying?.attempts ?? 0) + 1;
+      const attempts = (b.applying?.attempts ?? b.tries ?? 0) + 1;
       if (attempts > MAINTENANCE_LIMITS.attempts) { const { applying: _x, ...r } = b; await this.#move(found, "maintenance.failed", { ...r, status: "failed", failure: { reason: "the application did not finish after several tries; its effect is unknown", at: now } }); return "failed"; }
-      const claimed = await this.#move(found, "maintenance.claim", { ...b, status: "applying", applying: { epoch: this.#runner.epoch, since: now, attempts } });
+      // The claim write also checks the settings revision seen by the standing check: a denial written in between makes the claim fail and the loop judge again.
+      const guard: Change[] = s.found === undefined ? [] : [{ type: "check", ref: SETTINGS, expectedRevision: s.found.revision }];
+      const claimed = await this.#move(found, "maintenance.claim", { ...b, status: "applying", maybeApplied: true, tries: attempts, applying: { epoch: this.#runner.epoch, since: now, renewedAt: now, attempts, token: randomUUID() } }, {}, guard);
       if (claimed === undefined) continue;
-      return this.#applyClaimed(claimed);
+      return this.#applyClaimed(claimed, s.eff.leaseMs);
     }
     return undefined;
   }
@@ -418,24 +539,80 @@ export class MaintenanceService {
     return JSON.parse(redactText(t)) as JsonObject;
   }
 
-  async #applyClaimed(claimed: Aggregate): Promise<MaintenanceStatus> {
-    const b = claimed.body as unknown as MaintenanceBody;
-    let out: ApplyOutcome;
-    try { out = await this.#applier.apply(this.#view(claimed.id, b)); } catch (e) { out = { outcome: "unsupported", reason: `the applier is not available: ${redactText(String((e as Error).message ?? e)).slice(0, 150)}` }; }
+  /** Renews the lease of the claim `token` holds (the heartbeat while the applier runs). A claim that no longer holds is left alone. */
+  async #renew(id: string, token: string): Promise<void> {
     for (let i = 0; i < 4; i++) {
+      const found = await this.#runner.get(REQ, id);
+      const b = found?.body as unknown as MaintenanceBody | undefined;
+      if (found === undefined || b === undefined || b.status !== "applying" || b.applying?.token !== token) return;
+      if (await this.#move(found, "maintenance.renew", { ...b, applying: { ...b.applying, renewedAt: this.#runner.now() } }) !== undefined) return;
+    }
+  }
+
+  async #applyClaimed(claimed: Aggregate, leaseMs: number): Promise<MaintenanceStatus> {
+    const b = claimed.body as unknown as MaintenanceBody;
+    const token = b.applying!.token;
+    type Out = ApplyOutcome | { readonly outcome: "uncertain"; readonly reason: string };
+    let out: Out;
+    const beat = this.#options.heartbeatMs ?? Math.max(1000, Math.floor(leaseMs / 3));
+    const timer = beat > 0 ? setInterval(() => { void this.#renew(claimed.id, token).catch(() => undefined); }, beat) : undefined;
+    timer?.unref();
+    try { out = await this.#applier.apply(this.#view(claimed.id, b)); } catch (e) { out = { outcome: "uncertain", reason: `the applier threw; the state is unknown: ${redactText(String((e as Error).message ?? e)).slice(0, 150)}` }; } finally { if (timer !== undefined) clearInterval(timer); }
+    for (let i = 0; i < 6; i++) {
       const found = await this.#runner.get(REQ, claimed.id);
       const cur = found?.body as unknown as MaintenanceBody | undefined;
-      if (found === undefined || cur === undefined || cur.status !== "applying") return cur?.status ?? "failed";
+      if (found === undefined || cur === undefined) return "failed";
+      // Only the holder of the claim completes it. A result from a claim that was lost (the lease ran out, the request moved on) is discarded, recorded, and reconciled.
+      if (cur.status !== "applying" || cur.applying?.token !== token) return this.#stale(claimed.id, out);
       const now = this.#runner.now();
-      const { applying: _x, pendingReason: _p, ...rest } = cur;
+      const { applying: _x, pendingReason: _p, maybeApplied: _m, tries: _t, ...rest } = cur;
       let next: MaintenanceBody;
       if (out.outcome === "applied") next = { ...rest, status: cur.revoke === undefined ? "applied" : "revoking", effect: this.#effect(out.effect), appliedAt: now };
       else if (out.outcome === "failed") next = { ...rest, status: "failed", failure: { reason: redactText(out.reason).slice(0, MAINTENANCE_LIMITS.pendingReason), at: now, ...(out.rollback === undefined ? {} : { rollback: this.#effect(out.rollback) }) } };
+      else if (out.outcome === "uncertain") next = { ...rest, maybeApplied: true, ...(cur.tries === undefined ? {} : { tries: cur.tries }), status: "apply-uncertain", uncertain: { reason: redactText(out.reason).slice(0, MAINTENANCE_LIMITS.pendingReason), at: now }, pendingReason: redactText(out.reason).slice(0, MAINTENANCE_LIMITS.pendingReason) };
       else next = cur.revoke === undefined ? { ...rest, status: "approved", pendingReason: redactText(out.reason).slice(0, MAINTENANCE_LIMITS.pendingReason) } : { ...rest, status: "revoked", revokedAt: now };
       const moved = await this.#move(found, "maintenance.finish", next, { outcome: out.outcome });
-      if (moved !== undefined) { const st = (moved.body as unknown as MaintenanceBody).status; if (st === "revoking") await this.drive(claimed.id).catch(() => undefined); return st; }
+      if (moved !== undefined) {
+        const st = (moved.body as unknown as MaintenanceBody).status;
+        if (st === "revoking" || st === "apply-uncertain") await this.drive(claimed.id).catch(() => undefined);
+        else if (st === "applied") await this.#recheckSite(claimed.id);
+        return ((await this.#runner.get(REQ, claimed.id))?.body as unknown as MaintenanceBody | undefined)?.status ?? st;
+      }
     }
     return "applying";
+  }
+
+  /** The applier answered for a claim that no longer holds. The result never overwrites the record; it is recorded as a stale apply result and the effect is reconciled: where the request is not live any more, `revert` is called for it. */
+  async #stale(id: string, out: ApplyOutcome | { readonly outcome: "uncertain"; readonly reason: string }): Promise<MaintenanceStatus> {
+    for (let i = 0; i < 6; i++) {
+      const found = await this.#runner.get(REQ, id);
+      const cur = found?.body as unknown as MaintenanceBody | undefined;
+      if (found === undefined || cur === undefined) return "failed";
+      const live = cur.status === "applying" || cur.status === "applied" || cur.status === "revoking" || cur.status === "apply-uncertain";
+      const effectful = out.outcome === "applied" || out.outcome === "uncertain";
+      let reconciled = live ? "left to the current claim" : "nothing to undo";
+      if (!live && effectful) {
+        let r: RevertOutcome;
+        try { r = await this.#applier.revert(this.#view(id, cur), out.outcome === "applied" ? out.effect : { uncertain: true }); } catch (e) { r = { outcome: "unsupported", reason: String((e as Error).message ?? e) }; }
+        reconciled = r.outcome === "reverted" ? "reverted" : "revert pending";
+      }
+      const note = { at: this.#runner.now(), outcome: out.outcome, reconciled, note: "stale apply result" };
+      const stale = [...(cur.stale ?? []), note].slice(-MAINTENANCE_LIMITS.staleKept);
+      const next: MaintenanceBody = { ...cur, stale, ...(reconciled === "revert pending" ? { maybeApplied: true } : {}) };
+      if ((await this.#move(found, "maintenance.stale-result", next, { reconciled })) !== undefined) return cur.status;
+    }
+    return "applying";
+  }
+
+  /** After an application: a denial written while it ran counts at once. */
+  async #recheckSite(id: string): Promise<void> {
+    const found = await this.#runner.get(REQ, id);
+    const b = found?.body as unknown as MaintenanceBody | undefined;
+    if (found === undefined || b === undefined || b.kind !== "network" || b.status !== "applied") return;
+    const s = await this.#settings();
+    if (!s.readable || siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) !== "deny") return;
+    const moved = await this.#move(found, "maintenance.revoke-by-rule", { ...b, status: "revoking", revoke: { by: "controller", at: this.#runner.now(), reason: "the owner denied this site" } });
+    if (moved !== undefined) await this.drive(id).catch(() => undefined);
   }
 
   /** Applies one approved request now (the owner's retry of a change that waited because the applier could not take it). */
@@ -447,20 +624,41 @@ export class MaintenanceService {
     return { status: (await this.drive(id)) ?? "failed" };
   }
 
-  /** Picks up what a restart or a lost applier left: approved requests that wait, applications whose controller ended, and reverts in progress. Bounded per call; safe to call often. */
-  async resume(): Promise<{ driven: number }> {
-    let after: string | undefined, scanned = 0, driven = 0;
-    while (scanned < MAINTENANCE_LIMITS.scan && driven < MAINTENANCE_LIMITS.driveBatch) {
-      const rows = await this.#runner.list(REQ, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      if (rows.length === 0) break;
+  /** The requests that need the controller, read from the index (never from the hash-ordered request list), in pages. */
+  async #live(visit: (id: string, b: MaintenanceBody, row: Aggregate) => Promise<boolean>): Promise<void> {
+    let after: string | undefined, scanned = 0;
+    while (scanned < MAINTENANCE_LIMITS.indexScan) {
+      const rows = await this.#runner.list(LIVE, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      if (rows.length === 0) return;
       for (const r of rows) {
         scanned++; after = r.id;
-        const st = (r.body as unknown as MaintenanceBody).status;
-        if ((st === "approved" || st === "applying" || st === "revoking") && driven < MAINTENANCE_LIMITS.driveBatch) { driven++; await this.drive(r.id).catch(() => undefined); }
+        const found = await this.#runner.get(REQ, r.id);
+        if (found === undefined) continue;
+        if (!(await visit(r.id, found.body as unknown as MaintenanceBody, found))) return;
       }
-      if (rows.length < 200) break;
+      if (rows.length < 200) return;
     }
+  }
+
+  /** Picks up what a restart or a lost applier left: approved requests that wait, applications whose claim ended, uncertain ones and reverts in progress. Bounded per call; safe to call often. */
+  async resume(): Promise<{ driven: number }> {
+    let driven = 0;
+    await this.#live(async (id, b, row) => {
+      if (b.status === "approved" || b.status === "applying" || b.status === "revoking" || b.status === "apply-uncertain") {
+        if (b.status === "applying" && this.#claimHeld(b, this.#runner.now(), (await this.#settings()).eff.leaseMs)) return true;
+        driven++; await this.drive(row.id).catch(() => undefined);
+      }
+      void id;
+      return driven < MAINTENANCE_LIMITS.driveBatch;
+    });
     return { driven };
+  }
+
+  /** One round of the controller's maintenance loop: re-judges what a narrowed setting no longer allows (when a setting changed), then drives what waits. Bounded; settings writes only mark the work, they never drive the applier. */
+  async tick(): Promise<{ touched: number; driven: number }> {
+    const dirty = this.#dirty; this.#dirty = false;
+    const e = dirty ? await this.enforce() : { touched: 0 };
+    return { touched: e.touched, ...(await this.resume()) };
   }
 
   // ---- settings ------------------------------------------------------------------------------------------------------------------
@@ -478,22 +676,26 @@ export class MaintenanceService {
         return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { ...payload } , contention: async () => new DomainError("stale_revision", "the maintenance settings changed at the same moment; ask again") };
       },
     }));
-    // A narrowing counts for what is already waiting or approved at once: a request the setting no longer allows is looked at again.
-    await this.enforce().catch(() => undefined);
+    // A narrowing counts for what is already waiting or approved: the write only marks the work and the dispatcher loop's tick (or a background tick started now, after the answer) looks at it again, bounded per tick.
+    this.#dirty = true;
+    this.background(this.tick());
     return { revision: result.revision };
   }
 
   /** Full form: `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `sites` ({ site: "allow" | "deny" | null }), `catalogueAdd` and `catalogueRemove`. */
-  async change(owner: Principal, command: NoActor & { requests?: boolean | null; bosses?: boolean | null; rules?: boolean | null; sites?: unknown; catalogueAdd?: unknown; catalogueRemove?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+  async change(owner: Principal, command: NoActor & { requests?: boolean | null; bosses?: boolean | null; rules?: boolean | null; bossKinds?: unknown; leaseMinutes?: number | null; requestsPerDay?: number | null; sites?: unknown; catalogueAdd?: unknown; catalogueRemove?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     this.#owner(owner, "change the maintenance settings");
-    onlyKnown(command, ["commandId", "requests", "bosses", "rules", "sites", "catalogueAdd", "catalogueRemove", "expectedRevision"]);
+    onlyKnown(command, ["commandId", "requests", "bosses", "rules", "bossKinds", "leaseMinutes", "requestsPerDay", "sites", "catalogueAdd", "catalogueRemove", "expectedRevision"]);
     const flag = (v: unknown, f: string): boolean | null | undefined => (v === undefined || v === null || typeof v === "boolean" ? (v as never) : bad(f, "must be true, false or null"));
     const flags = { requests: flag(command.requests, "requests"), bosses: flag(command.bosses, "bosses"), rules: flag(command.rules, "rules") };
     const sites = command.sites === undefined ? undefined : this.#sites(command.sites);
     const add = command.catalogueAdd === undefined ? undefined : this.#entries(command.catalogueAdd, "catalogueAdd");
     const remove = command.catalogueRemove === undefined ? undefined : this.#entries(command.catalogueRemove, "catalogueRemove");
-    if (Object.values(flags).every((v) => v === undefined) && sites === undefined && add === undefined && remove === undefined) bad("requests", "name at least one setting to change");
-    return this.#write("maintenance.settings.set", owner, command.commandId, command.expectedRevision, { flags: Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined)) as unknown as JsonObject, sites: (sites ?? null) as unknown as JsonObject, add: (add ?? null) as unknown as JsonObject, remove: (remove ?? null) as unknown as JsonObject }, (before) => this.#merge(before, flags, sites, add, remove));
+    const num = (v: unknown, f: string, lo: number, hi: number): number | null | undefined => (v === undefined || v === null ? (v as never) : typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi ? v : bad(f, `must be a whole number from ${lo} to ${hi}, or null for the default`));
+    const lease = num(command.leaseMinutes, "leaseMinutes", MAINTENANCE_LIMITS.leaseMinMs / 60_000, MAINTENANCE_LIMITS.leaseMaxMs / 60_000), perDay = num(command.requestsPerDay, "requestsPerDay", 1, 10_000);
+    const kinds = command.bossKinds === undefined || command.bossKinds === null ? (command.bossKinds as null | undefined) : Array.isArray(command.bossKinds) && command.bossKinds.every((k) => (BOSS_KINDS as readonly unknown[]).includes(k)) && new Set(command.bossKinds).size === command.bossKinds.length ? (command.bossKinds as MaintenanceKind[]) : bad("bossKinds", `must be a list of kinds from ${BOSS_KINDS.join(", ")} (host-policy and base are never handed to supervisors), or null`);
+    if (Object.values(flags).every((v) => v === undefined) && lease === undefined && perDay === undefined && kinds === undefined && sites === undefined && add === undefined && remove === undefined) bad("requests", "name at least one setting to change");
+    return this.#write("maintenance.settings.set", owner, command.commandId, command.expectedRevision, { flags: Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined)) as unknown as JsonObject, lease: lease ?? null, perDay: perDay ?? null, kinds: (kinds ?? null) as unknown as JsonObject, sites: (sites ?? null) as unknown as JsonObject, add: (add ?? null) as unknown as JsonObject, remove: (remove ?? null) as unknown as JsonObject }, (before) => this.#merge(before, flags, sites, add, remove, { lease, perDay, kinds }));
   }
 
   /** Turns one switch (or all) on or off: `requests` (agents may ask), `bosses` (supervisors may decide what is not protected), `rules` (preapproved catalogue and allowed sites approve by themselves). */
@@ -516,10 +718,11 @@ export class MaintenanceService {
     return this.#write("maintenance.site.set", owner, command.commandId, command.expectedRevision, { sites: sites as unknown as JsonObject }, (before) => this.#merge(before, {}, sites, undefined, undefined));
   }
 
-  async catalogue(owner: Principal, command: NoActor & { add: boolean; name: string; version: string; digest: string; installScripts?: boolean; expectedRevision?: number }): Promise<{ revision: number }> {
+  /** Adds or removes a preapproved package. Removing an entry stops future automatic approvals only: a package already applied stays applied until the request is revoked (the same holds for switching `rules` off). */
+  async catalogue(owner: Principal, command: NoActor & { add: boolean; name: string; version: string; digest: string; source: string; installScripts?: boolean; expectedRevision?: number }): Promise<{ revision: number }> {
     this.#owner(owner, "change the maintenance settings");
-    onlyKnown(command, ["commandId", "add", "name", "version", "digest", "installScripts", "expectedRevision"]);
-    const entries = this.#entries([{ name: command.name, version: command.version, digest: command.digest, ...(command.installScripts === undefined ? {} : { installScripts: command.installScripts }) }], "entry");
+    onlyKnown(command, ["commandId", "add", "name", "version", "digest", "source", "installScripts", "expectedRevision"]);
+    const entries = this.#entries([{ name: command.name, version: command.version, digest: command.digest, source: command.source, ...(command.installScripts === undefined ? {} : { installScripts: command.installScripts }) }], "entry");
     return this.#write(command.add ? "maintenance.catalogue.add" : "maintenance.catalogue.remove", owner, command.commandId, command.expectedRevision, { entries: entries as unknown as JsonObject, add: command.add }, (before) => this.#merge(before, {}, undefined, command.add ? entries : undefined, command.add ? undefined : entries));
   }
 
@@ -527,7 +730,9 @@ export class MaintenanceService {
     if (v === null || typeof v !== "object" || Array.isArray(v) || Object.keys(v).length === 0 || Object.keys(v).length > 20) return bad("sites", "must map 1 to 20 sites to allow, deny or null");
     const out: Record<string, SiteRule | null> = {};
     for (const [site, rule] of Object.entries(v)) {
-      if (!SITE.test(site.toLowerCase())) bad("sites", `${site.slice(0, 60)} is not a site name (a host name such as pypi.org)`);
+      const m = SITE_KEY.exec(site.toLowerCase());
+      if (m === null || (m[2] !== undefined && (Number(m[2]) < 1 || Number(m[2]) > 65535))) bad("sites", `${site.slice(0, 60)} is not a site name (a host name such as pypi.org, optionally with :port; an allow may be *.host)`);
+      if (site.startsWith("*.") && rule === "deny") bad("sites", "a deny on a host already covers its subdomains; name the host");
       if (rule !== "allow" && rule !== "deny" && rule !== null) bad("sites", "a site's rule is allow, deny or null");
       out[site.toLowerCase()] = rule;
     }
@@ -537,15 +742,18 @@ export class MaintenanceService {
     if (!Array.isArray(v) || v.length === 0 || v.length > 20) return bad(field, "must be a list of 1 to 20 packages");
     return v.map((e, i) => {
       if (e === null || typeof e !== "object" || Array.isArray(e)) return bad(`${field}[${i}]`, "must be an object");
-      onlyKnown(e, ["name", "version", "digest", "installScripts"]);
+      onlyKnown(e, ["name", "version", "digest", "source", "installScripts"]);
       const x = e as Record<string, unknown>;
       if (x["installScripts"] !== undefined && typeof x["installScripts"] !== "boolean") bad(`${field}[${i}].installScripts`, "must be true or false");
-      return { name: lone(x["name"], `${field}[${i}].name`, 100, NAME), version: lone(x["version"], `${field}[${i}].version`, 40, VERSION), digest: lone(x["digest"], `${field}[${i}].digest`, 80, DIGEST), ...(x["installScripts"] === true ? { installScripts: true } : {}) };
+      return { name: name(x["name"], `${field}[${i}].name`, PKG_NAME), version: lone(x["version"], `${field}[${i}].version`, 40, VERSION), digest: lone(x["digest"], `${field}[${i}].digest`, 80, DIGEST), source: checkSource(x["source"], `${field}[${i}].source`), ...(x["installScripts"] === true ? { installScripts: true } : {}) };
     });
   }
-  #merge(before: SettingsBody | undefined, flags: { requests?: boolean | null | undefined; bosses?: boolean | null | undefined; rules?: boolean | null | undefined }, sites: Record<string, SiteRule | null> | undefined, add: CatalogueEntry[] | undefined, remove: CatalogueEntry[] | undefined): Omit<SettingsBody, "updatedBy" | "updatedAt"> {
-    const out: { requests?: boolean; bosses?: boolean; rules?: boolean; sites?: Record<string, SiteRule>; catalogue?: CatalogueEntry[] } = {};
+  #merge(before: SettingsBody | undefined, flags: { requests?: boolean | null | undefined; bosses?: boolean | null | undefined; rules?: boolean | null | undefined }, sites: Record<string, SiteRule | null> | undefined, add: CatalogueEntry[] | undefined, remove: CatalogueEntry[] | undefined, more: { lease?: number | null | undefined; perDay?: number | null | undefined; kinds?: MaintenanceKind[] | null | undefined } = {}): Omit<SettingsBody, "updatedBy" | "updatedAt"> {
+    const out: { requests?: boolean; bosses?: boolean; rules?: boolean; bossKinds?: MaintenanceKind[]; leaseMinutes?: number; requestsPerDay?: number; sites?: Record<string, SiteRule>; catalogue?: CatalogueEntry[] } = {};
     for (const k of ["requests", "bosses", "rules"] as const) { const v = flags[k] === undefined ? before?.[k] : flags[k]; if (typeof v === "boolean") out[k] = v; }
+    const kinds = more.kinds === undefined ? before?.bossKinds : more.kinds ?? undefined; if (kinds !== undefined && kinds.length > 0) out.bossKinds = [...kinds];
+    const lease = more.lease === undefined ? before?.leaseMinutes : more.lease ?? undefined; if (lease !== undefined) out.leaseMinutes = lease;
+    const perDay = more.perDay === undefined ? before?.requestsPerDay : more.perDay ?? undefined; if (perDay !== undefined) out.requestsPerDay = perDay;
     const s: Record<string, SiteRule> = { ...(before?.sites ?? {}) };
     for (const [site, rule] of Object.entries(sites ?? {})) { if (rule === null) delete s[site]; else s[site] = rule; }
     if (Object.keys(s).length > MAINTENANCE_LIMITS.sites) bad("sites", `at most ${MAINTENANCE_LIMITS.sites} sites can carry a rule`);
@@ -561,24 +769,20 @@ export class MaintenanceService {
 
   /**
    * Makes a narrowing count for requests already made: an approved or applied one that a denied site, a withdrawn rule or a lost supervisor no longer allows is looked at again (approved ones are re-judged when they
-   * are next driven; an applied network change for a denied site is revoked). Bounded; returns how many it touched.
+   * are next driven; an applied network change for a denied site is revoked). Reads the index of live requests; bounded per call (what is left is done by the next tick); returns how many it touched.
    */
   async enforce(): Promise<{ touched: number }> {
-    let after: string | undefined, scanned = 0, touched = 0;
+    let touched = 0;
     const s = await this.#settings();
-    while (scanned < MAINTENANCE_LIMITS.scan && s.readable) {
-      const rows = await this.#runner.list(REQ, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      if (rows.length === 0) break;
-      for (const r of rows) {
-        scanned++; after = r.id;
-        const b = r.body as unknown as MaintenanceBody;
-        if (b.kind === "network" && b.status === "applied" && s.body?.sites?.[b.spec["site"] as string] === "deny") {
-          const moved = await this.#move(r, "maintenance.revoke-by-rule", { ...b, status: "revoking", revoke: { by: "controller", at: this.#runner.now(), reason: "the owner denied this site" } });
-          if (moved !== undefined) { touched++; await this.drive(r.id).catch(() => undefined); }
-        } else if (b.status === "approved") { touched++; await this.drive(r.id).catch(() => undefined); }
-      }
-      if (rows.length < 200) break;
-    }
+    if (!s.readable) return { touched };
+    await this.#live(async (id, b, row) => {
+      if (b.kind === "network" && b.status === "applied" && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") {
+        const moved = await this.#move(row, "maintenance.revoke-by-rule", { ...b, status: "revoking", revoke: { by: "controller", at: this.#runner.now(), reason: "the owner denied this site" } });
+        if (moved !== undefined) { touched++; await this.drive(id).catch(() => undefined); }
+      } else if (b.status === "approved") { touched++; await this.drive(id).catch(() => undefined); }
+      if (touched >= MAINTENANCE_LIMITS.driveBatch) { this.#dirty = true; return false; }
+      return true;
+    });
     return { touched };
   }
 }

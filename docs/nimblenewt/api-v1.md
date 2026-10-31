@@ -4884,7 +4884,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `maintenance.request`
 
-Asks for a change to an agent's environment as a maintenance request (card A09). An agent asks for its own; the owner for any agent. `kind`: `skill` (a skill draft: allowed and recorded), `package` or `extension` (an executable dependency: a preapproved catalogue entry approves it, else a decider), `mount` or `network` (broader access: a decider; an allowed site is approved by the owner's rule, a denied site is rejected), `host-policy` or `base` (protected: the owner only). The answer is the maintenance ID at once, before anything is decided or applied. A decided-yes request is applied by the controller and the effect is recorded. Install scripts never run before the approval of this exact request. At most 20 requests of one agent wait at once.
+Asks for a change to an agent's environment as a maintenance request (card A09). An agent asks for its own; the owner for any agent. `kind`: `skill` (a skill draft: allowed and recorded), `package` or `extension` (an executable dependency: a preapproved catalogue entry approves it, else a decider), `mount` or `network` (broader access: a decider; an allowed site is approved by the owner's rule, a denied site is rejected), `host-policy` or `base` (protected: the owner only). The answer is the maintenance ID at once, before anything is decided or applied. A decided-yes request is applied by the controller and the effect is recorded. Install scripts never run before the approval of this exact request. At most 20 requests of one agent wait at once and at most 200 (settable) are accepted per agent per day, however they are decided. A name has no `/`, `..`, leading `.` or `@` (a package may be `@scope/name`); the version is exact (no tag or range); the source is an https URL without credentials, and the applier must verify the fetched artifact against `digest`. A mount `resource` is `<your agent key>.name` (yours) or `shared.name`; only the owner decides another's resource or write access to a shared one. A supervisor never decides for an agent it created or whose supervisor it set.
 
 Arguments:
 
@@ -4946,13 +4946,16 @@ Completion: finished when accepted (`completed: true`).
 
 #### `maintenance.settings.set`
 
-Owner only: sets any of `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `sites` (`{ "pypi.org": "allow" | "deny" | null }`), `catalogueAdd` and `catalogueRemove` (lists of `{ name, version, digest, installScripts? }`). A narrowing counts for requests already made: a request approved for a site now denied is rejected and an applied one is reverted. Optional `expectedRevision`.
+Owner only: sets any of `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `bossKinds` (the kinds supervisors may decide: package, extension, mount, network; none by default, and a supervisor never decides for an agent it created or whose supervisor it set), `leaseMinutes` (how long an application claim lasts without a heartbeat; default 30), `requestsPerDay` (requests per agent per day, default 200; the owner is exempt), `sites` (`{ "pypi.org": "allow" | "deny" | null }`; a key may be `host:port` or, for an allow, `*.host`; a deny on a host also covers its subdomains and every port unless a port is named), `catalogueAdd` and `catalogueRemove` (lists of `{ name, version, digest, source, installScripts? }`). A narrowing counts for requests already made, judged by the next maintenance tick (not inside this call): a request approved for a site now denied is rejected and an applied one is reverted. Removing a catalogue entry or switching `rules` off only stops future automatic approvals: packages already applied stay until revoked. Optional `expectedRevision`.
 
 Arguments:
 
 - `requests` (optional): true, false or null
 - `bosses` (optional): true, false or null
 - `rules` (optional): true, false or null
+- `bossKinds` (optional): list of kinds supervisors may decide, or null
+- `leaseMinutes` (optional): 1 to 1440 or null
+- `requestsPerDay` (optional): 1 to 10000 or null
 - `sites` (optional): map of site to allow, deny or null
 - `catalogueAdd` (optional): entries to preapprove
 - `catalogueRemove` (optional): entries to remove
@@ -5008,13 +5011,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `maintenance.catalogue.add`
 
-Owner only: preapproves one exact package (name, version, digest); a request for exactly that is approved by itself. `installScripts` true also preapproves its install scripts.
+Owner only: preapproves one exact package (name, version, digest and https source); a request for exactly that (same source too) is approved by itself. `installScripts` true also preapproves its install scripts.
 
 Arguments:
 
 - `name`: package name
 - `version`: exact version
 - `digest`: sha256:...
+- `source`: the https URL it is fetched from
 - `installScripts` (optional): true to preapprove install scripts
 - `expectedRevision` (optional): the revision you read
 - `commandId`: required
@@ -5025,13 +5029,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `maintenance.catalogue.remove`
 
-Owner only: removes one package from the preapproved catalogue. Requests for it are decided by a person again.
+Owner only: removes one package from the preapproved catalogue. Requests for it are decided by a person again; a package already applied is not reverted by this (revoke its request).
 
 Arguments:
 
 - `name`: package name
 - `version`: exact version
 - `digest`: sha256:...
+- `source`: the https URL it is fetched from
 - `expectedRevision` (optional): the revision you read
 - `commandId`: required
 

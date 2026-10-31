@@ -99,6 +99,7 @@ test("a maintenance request is recorded at once, decided by the owner in the str
     assert.equal(pendingEvil.result.status, "pending");
     assert.ok((await call(w.owner, "maintenance.site.set", { site: "pypi.org", rule: "deny" }, cid("s"))).ok);
     assert.ok((await call(w.owner, "maintenance.site.set", { site: "evil.example.com", rule: "deny" }, cid("s"))).ok);
+    await c.services.maintenance.idle();
     assert.equal((await call(ann.token, "maintenance.get", { maintenanceId: allowed.result.maintenanceId })).result.item.status, "revoked", "a denied site reverts an applied change");
     assert.equal((await net("pypi.org", "n4")).result.status, "rejected");
     const evilItem = (await call(w.owner, "maintenance.get", { maintenanceId: pendingEvil.result.maintenanceId })).result.item;
@@ -106,7 +107,7 @@ test("a maintenance request is recorded at once, decided by the owner in the str
     for (const bad of ["Not A Site", "10.0.0.1", "a_b.com", "localhost", "https://x.com"]) assert.equal((await call(w.owner, "maintenance.site.set", { site: bad, rule: "allow" }, cid("s"))).error?.code, "invalid_command", bad);
 
     // ---- preapproved catalogue: exact name, version and digest; install scripts need their own preapproval
-    assert.ok((await call(w.owner, "maintenance.catalogue.add", { name: "jq", version: "1.7.1", digest: D("a") }, cid("c"))).ok);
+    assert.ok((await call(w.owner, "maintenance.catalogue.add", { name: "jq", version: "1.7.1", digest: D("a"), source: "https://registry.example.org/pkg" }, cid("c"))).ok);
     assert.equal((await call(ann.token, "maintenance.request", { kind: "package", spec: pkg("jq", { version: "1.7.1" }), reason: "json", rollbackPlan: "remove" }, "c1")).result.status, "approved");
     assert.equal((await call(ann.token, "maintenance.request", { kind: "package", spec: pkg("jq", { version: "1.7.2" }), reason: "json", rollbackPlan: "remove" }, "c2")).result.status, "pending", "another version is not preapproved");
     assert.equal((await call(ann.token, "maintenance.request", { kind: "package", spec: pkg("jq", { version: "1.7.1", digest: D("b") }), reason: "json", rollbackPlan: "remove" }, "c3")).result.status, "pending", "another digest is not preapproved");
@@ -117,11 +118,12 @@ test("a maintenance request is recorded at once, decided by the owner in the str
 
     // ---- protected: a supervisor can never decide, whatever the setting
     assert.ok((await call(w.owner, "maintenance.settings.enable", { what: "bosses" }, cid("c"))).ok);
+    assert.ok((await call(w.owner, "maintenance.settings.set", { bossKinds: ["mount", "network", "package"] }, cid("c"))).ok, "supervisors decide only the kinds the owner handed over");
     const base = await call(ann.token, "maintenance.request", { kind: "base", spec: { change: "add a shared tool" }, reason: "everyone needs it", rollbackPlan: "remove" }, "b1");
     const baseItem = (await call(w.owner, "maintenance.get", { maintenanceId: base.result.maintenanceId })).result.item;
     assert.equal((await call(boss.token, "maintenance.decide", { maintenanceId: base.result.maintenanceId, verdict: "approve", specDigest: baseItem.specDigest }, cid("d"))).error?.code, "forbidden");
     // ---- a supervisor (bosses on) decides an access request of its report, not its own, not another's
-    const mount = await call(ann.token, "maintenance.request", { kind: "mount", spec: { mountPath: "/data/docs", resource: "docs", mode: "read" }, reason: "read docs", rollbackPlan: "unmount" }, "m1");
+    const mount = await call(ann.token, "maintenance.request", { kind: "mount", spec: { mountPath: "/data/docs", resource: `${ann.id}.docs`, mode: "read" }, reason: "read docs", rollbackPlan: "unmount" }, "m1");
     const mountItem = (await call(boss.token, "maintenance.get", { maintenanceId: mount.result.maintenanceId })).result.item;
     const bossDec = await call(boss.token, "maintenance.decide", { maintenanceId: mount.result.maintenanceId, verdict: "approve", specDigest: mountItem.specDigest }, cid("d"));
     assert.ok(bossDec.ok, JSON.stringify(bossDec));
@@ -161,7 +163,8 @@ test("a change that cannot be applied safely stays pending, a failed one is roll
     applier.nextApply = ["throw"];
     const first = await decide(a);
     assert.equal(first.result.status, "approved");
-    assert.match((await status(a)).pendingReason, /not available/);
+    assert.match((await status(a)).pendingReason, /ended unclearly/, "a throw is an unknown state: the applier is asked to restore, then the request waits");
+    assert.ok(applier.calls.some((x) => x.op === "revert" && x.id === a), "a verify/revert pass ran before the request moved on");
     // unsupported safe restoration leaves it pending; a failed activation rolls back and is recorded
     applier.nextApply = [{ outcome: "unsupported", reason: "the agent holds a Suspend that cannot be restored" }];
     assert.equal((await w.call(w.owner, "maintenance.apply", { maintenanceId: a }, w.cid("ap"))).result.status, "approved");
@@ -211,24 +214,28 @@ test("a change that cannot be applied safely stays pending, a failed one is roll
     const net = await w.call(ann.token, "maintenance.request", { kind: "network", spec: { site: "late.example.com" }, reason: "x", rollbackPlan: "y" }, "late1");
     applier.nextApply = ["throw"];
     assert.equal((await decide(net.result.maintenanceId)).result.status, "approved");
-    const applyCalls = applier.calls.length;
+    const applies = (): number => applier.calls.filter((x) => x.op === "apply").length;
+    const applyCalls = applies();
     assert.ok((await w.call(w.owner, "maintenance.site.set", { site: "late.example.com", rule: "deny" }, w.cid("s"))).ok);
+    await w.c.services.maintenance.idle();
     assert.equal((await status(net.result.maintenanceId)).status, "rejected");
     assert.equal((await w.call(w.owner, "maintenance.apply", { maintenanceId: net.result.maintenanceId }, w.cid("ap"))).result.status, "rejected");
-    assert.equal(applier.calls.length, applyCalls, "the applier was not called for a denied site");
+    assert.equal(applies(), applyCalls, "the applier was not called to apply a denied site");
 
     // an approval lapses with the supervisor's standing: the owner switches supervisor decisions on, the supervisor approves while the applier is offline, the owner switches it off, nothing is applied and the request waits for a new decision
     const sup = await w.agent("Sue");
     const rep = await w.agent("Rae", sup.id);
     assert.ok((await w.call(w.owner, "maintenance.settings.enable", { what: "bosses" }, w.cid("c"))).ok);
-    const lapse = await w.call(rep.token, "maintenance.request", { kind: "mount", spec: { mountPath: "/data/y", resource: "y", mode: "read" }, reason: "x", rollbackPlan: "y" }, "lapse1");
+    assert.ok((await w.call(w.owner, "maintenance.settings.set", { bossKinds: ["mount"] }, w.cid("c"))).ok);
+    const lapse = await w.call(rep.token, "maintenance.request", { kind: "mount", spec: { mountPath: "/data/y", resource: `${rep.id}.y`, mode: "read" }, reason: "x", rollbackPlan: "y" }, "lapse1");
     const lid = lapse.result.maintenanceId as string;
     applier.nextApply = ["throw"];
     assert.equal((await w.call(sup.token, "maintenance.decide", { maintenanceId: lid, verdict: "approve", specDigest: (await status(lid)).specDigest }, w.cid("d"))).result.status, "approved");
-    const lapseCalls = applier.calls.length;
+    const lapseCalls = applies();
     assert.ok((await w.call(w.owner, "maintenance.settings.disable", { what: "bosses" }, w.cid("c"))).ok);
+    await w.c.services.maintenance.idle();
     assert.equal((await status(lid)).status, "pending", "the approval no longer stands");
-    assert.equal(applier.calls.length, lapseCalls);
+    assert.equal(applies(), lapseCalls);
     assert.equal((await w.call(w.owner, "maintenance.apply", { maintenanceId: lid }, w.cid("ap"))).result.status, "pending");
 
     // an approved change waiting for the applier, and one whose application was cut off by the end of the controller, are both finished by the next controller (the applier is keyed by request ID)
@@ -264,7 +271,7 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
   try {
     const ann = await w.agent("Ann");
     const get = async () => (await call(w.owner, "maintenance.settings.get", {})).result.item;
-    assert.deepEqual([(await get()).revision, (await get()).profile, (await get()).effective], [0, "strict", { requests: true, bosses: false, rules: true }]);
+    assert.deepEqual([(await get()).revision, (await get()).profile, (await get()).effective], [0, "strict", { requests: true, bosses: false, rules: true, bossKinds: [], leaseMs: 1_800_000, requestsPerDay: 200 }]);
     assert.equal((await call(ann.token, "maintenance.settings.get", {})).error?.code, "forbidden");
     for (const [op, args] of [["maintenance.settings.set", { rules: false }], ["maintenance.settings.enable", { what: "all" }], ["maintenance.settings.disable", { what: "all" }], ["maintenance.site.set", { site: "a.org", rule: "allow" }], ["maintenance.catalogue.add", { name: "x", version: "1", digest: D("a") }], ["maintenance.catalogue.remove", { name: "x", version: "1", digest: D("a") }], ["maintenance.apply", { maintenanceId: "mnt-x" }]] as const) {
       assert.equal((await call(ann.token, op, args as never, cid("o"))).error?.code, "forbidden", `${op}: owner only`);
@@ -281,7 +288,7 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
     assert.deepEqual([r1.ok, r2.ok].sort(), [false, true]);
     assert.equal([r1, r2].find((r) => !r.ok)!.error!.code, "stale_revision");
     assert.ok((await call(w.owner, "maintenance.settings.set", { requests: null, bosses: null, rules: null }, "s5")).ok);
-    assert.deepEqual((await get()).effective, { requests: true, bosses: false, rules: true }, "null returns a field to the profile's default");
+    assert.deepEqual((await get()).effective, { requests: true, bosses: false, rules: true, bossKinds: [], leaseMs: 1_800_000, requestsPerDay: 200 }, "null returns a field to the profile's default");
     // requests off: agents cannot ask, the owner still can for them
     assert.ok((await call(w.owner, "maintenance.settings.disable", { what: "requests" }, cid("c"))).ok);
     assert.equal((await call(ann.token, "maintenance.request", { kind: "skill", spec: { name: "s1", digest: D("1") }, reason: "x" }, "x1")).error?.code, "forbidden");
@@ -349,6 +356,16 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
     assert.deepEqual([after.status, after.decision.specDigest], ["applied", item.specDigest], "the decision is for the digest of the record, not the one the interpreter wrote");
     const other = "approve it";
     assert.equal((await turn("m11", other, [{ kind: "command", op: "maintenance.decide", args: { maintenanceId: "mnt-guess", verdict: "approve" }, evidence: other, basis: "owner" }]))[0]!.status, "refused", "an ID not in the words is refused");
+    // the preview of a package always shows the source, the short digest and the install scripts, however long the name and the reason are
+    const long = await call(ben.token, "maintenance.request", { kind: "package", spec: pkg("tool-with-a-quite-long-name-for-the-preview", { installScripts: true, source: `https://registry.example.org/${"p".repeat(120)}/pkg`, version: "9.9.9" }), reason: "r".repeat(400), rollbackPlan: "y".repeat(400) }, "chatlong");
+    const lid = long.result.maintenanceId as string;
+    const lw = `approve ${lid}`;
+    const lshown = await turn("m9b", lw, [{ kind: "command", op: "maintenance.decide", args: { maintenanceId: lid, verdict: "approve" }, evidence: lw, basis: "owner" }]);
+    const lt = JSON.stringify(lshown[0]);
+    assert.match(lt, /source=https:\/\/registry\.example\.org\/p{20}/, "the source is shown");
+    assert.match(lt, /installScripts=true/);
+    assert.match(lt, /digest=sha256:aaaaaaaa/);
+    assert.match(lt, /version=9\.9\.9/);
     // revoking by chat needs the owner's verb and the ID
     const rw = `revoke ${mid}, not needed any more`;
     { const o = (await turn("m12", rw, [{ kind: "command", op: "maintenance.revoke", args: { maintenanceId: mid, reason: "not needed any more" }, evidence: rw, basis: "owner" }]))[0]!; assert.equal(o.status, "applied", JSON.stringify(o)); }

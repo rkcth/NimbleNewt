@@ -37,6 +37,8 @@ export interface AgentBody {
   readonly teamId?: string;
   /** The agent this one reports to. Organisational only: it is not a task dependency and grants no write to this agent's desk and no read of its scratch. */
   readonly supervisorId?: string;
+  /** Who set `supervisorId` last (a principal ID). A reviewed environment change (card A09) is never approved by the one who made the requester or chose its supervisor. */
+  readonly supervisorSetBy?: string;
   /** A name from the routing configuration (card R01), not a model: changing the model or harness behind it leaves the agent the same agent. */
   readonly defaultProfile?: string;
   readonly permittedOverrides: readonly string[];
@@ -293,7 +295,8 @@ export class AgentService {
         payload: { fields: fieldsPayload(fields) },
         build: async () => {
           const id = derivedId("agt", this.#commandIdOf(by, command.commandId));
-          const body: AgentBody = { ...(await this.#resolved(id, undefined, fields)), state: "active", principalId: `agent:${id}`, createdBy: by.id };
+          const resolved = await this.#resolved(id, undefined, fields);
+          const body: AgentBody = { ...resolved, state: "active", principalId: `agent:${id}`, createdBy: by.id, ...(resolved.supervisorId === undefined ? {} : { supervisorSetBy: by.id }) };
           return this.#creation(id, body);
         },
       };
@@ -314,8 +317,8 @@ export class AgentService {
           if (source === undefined) throw new DomainError("not_found", `agent ${sourceId} does not exist`);
           const from = source.body as unknown as AgentBody;
           const id = derivedId("agt", this.#commandIdOf(by, command.commandId));
-          const { friendlyName: _n, state: _s, principalId: _p, createdBy: _c, clonedFrom: _f, importedFrom: _i, ...keep } = from;
-          const body: AgentBody = { ...keep, friendlyName: friendlyName ?? `${from.friendlyName} (copy)`.slice(0, AGENT_LIMITS.name), state: "active", principalId: `agent:${id}`, createdBy: by.id, clonedFrom: sourceId };
+          const { friendlyName: _n, state: _s, principalId: _p, createdBy: _c, clonedFrom: _f, importedFrom: _i, supervisorSetBy: _ss, ...keep } = from;
+          const body: AgentBody = { ...keep, friendlyName: friendlyName ?? `${from.friendlyName} (copy)`.slice(0, AGENT_LIMITS.name), state: "active", principalId: `agent:${id}`, createdBy: by.id, clonedFrom: sourceId, ...(keep.supervisorId === undefined ? {} : { supervisorSetBy: by.id }) };
           await this.#resolved(id, undefined, parseFields(body as unknown as Record<string, unknown>, false));
           return this.#creation(id, body);
         },
@@ -338,7 +341,8 @@ export class AgentService {
         build: async () => {
           if ((await this.#runner.get("agent", sourceId)) !== undefined) throw new DomainError("invalid_command", `collision: ${sourceId} is already an agent of this installation, so it cannot be imported as another`, { field: "sourceId" });
           const id = derivedId("agt", this.#commandIdOf(by, command.commandId));
-          const body: AgentBody = { ...(await this.#resolved(id, undefined, fields)), state: "active", principalId: `agent:${id}`, createdBy: by.id, importedFrom: sourceId };
+          const resolved = await this.#resolved(id, undefined, fields);
+          const body: AgentBody = { ...resolved, state: "active", principalId: `agent:${id}`, createdBy: by.id, importedFrom: sourceId, ...(resolved.supervisorId === undefined ? {} : { supervisorSetBy: by.id }) };
           const marker: AggregateRef = { kind: "agent-import", id: sourceId };
           const built = this.#creation(id, body);
           return { ...built, changes: [...built.changes, { type: "create", ref: marker, body: { agentId: id } }], contention: async () => ((await this.#runner.get("agent-import", sourceId)) === undefined ? raced() : new DomainError("invalid_command", `collision: ${sourceId} was already imported`, { field: "sourceId" })) };
@@ -361,7 +365,9 @@ export class AgentService {
           const current = await this.#runner.existing("agent", id, command.expectedRevision);
           const before = current.body as unknown as AgentBody;
           if (before.state === "retired") invalid("agentId", "a retired agent cannot be changed");
-          const next: AgentBody = { ...(await this.#resolved(id, before, fields)), state: "active", principalId: before.principalId, createdBy: before.createdBy, ...(before.clonedFrom === undefined ? {} : { clonedFrom: before.clonedFrom }), ...(before.importedFrom === undefined ? {} : { importedFrom: before.importedFrom }) };
+          const resolvedNext = await this.#resolved(id, before, fields);
+          const setBy = resolvedNext.supervisorId === undefined ? undefined : resolvedNext.supervisorId !== before.supervisorId || before.supervisorSetBy === undefined ? by.id : before.supervisorSetBy;
+          const next: AgentBody = { ...resolvedNext, state: "active", principalId: before.principalId, createdBy: before.createdBy, ...(setBy === undefined ? {} : { supervisorSetBy: setBy }), ...(before.clonedFrom === undefined ? {} : { clonedFrom: before.clonedFrom }), ...(before.importedFrom === undefined ? {} : { importedFrom: before.importedFrom }) };
           const ref: AggregateRef = { kind: "agent", id };
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { agent: id, fields: Object.keys(fields).join(",") } };
         },
@@ -508,7 +514,7 @@ export class AgentService {
   }
 
   /** The agent's fields after the change, with every reference checked: roles defined and not conflicting, team and supervisor existing and active, no reporting cycle. */
-  async #resolved(id: string, before: AgentBody | undefined, fields: Fields): Promise<Omit<AgentBody, "state" | "principalId" | "createdBy" | "clonedFrom" | "importedFrom">> {
+  async #resolved(id: string, before: AgentBody | undefined, fields: Fields): Promise<Omit<AgentBody, "state" | "principalId" | "createdBy" | "supervisorSetBy" | "clonedFrom" | "importedFrom">> {
     const pick = <K extends keyof Fields>(key: K, old: unknown): unknown => (key in fields ? fields[key] : old);
     const friendlyName = (pick("friendlyName", before?.friendlyName) as string | undefined) ?? invalid("friendlyName", "is required");
     const roles = (pick("roles", before?.roles) as readonly string[] | undefined) ?? [];
