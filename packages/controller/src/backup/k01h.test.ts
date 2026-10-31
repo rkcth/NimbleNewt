@@ -52,7 +52,7 @@ test("the agents' conversation stores are in the backup, verified, and come back
     await assert.rejects(restoreBackup(path, other, { piTarget: (id) => join(d, "out2", id) }), RestoreRefused);
     assert.equal(existsSync(join(d, "out2")), false);
     assert.equal(await other.currentEpoch(), 0);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("a restore never writes into a conversation folder that already has files, and index paths cannot leave their store (card K01h)", async () => {
@@ -65,7 +65,7 @@ test("a restore never writes into a conversation folder that already has files, 
     assert.equal(readFileSync(join(d, "out", "att-1", "mine.txt"), "utf8"), "keep");
     for (const bad of ["../x", "/abs", "C:/x", "a\\b", "a//b", "", "a/./b", "a/../b", "a/b:c"]) assert.equal(validRel(bad), false, bad);
     for (const good of ["a", "a/b.jsonl", "sub/dir/f.json"]) assert.equal(validRel(good), true, good);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("an encrypted backup seals the conversation files too: nothing readable on disk, and the passcode restores them (card K01h)", async () => {
@@ -86,7 +86,7 @@ test("an encrypted backup seals the conversation files too: nothing readable on 
     // A manifest that drops the Pi state is refused (the MAC covers it).
     const m = JSON.parse(readFileSync(join(path, "manifest.json"), "utf8")); delete m.piState; writeFileSync(join(path, "manifest.json"), JSON.stringify(m));
     assert.equal((await verifyBackup(path, { unlock: key })).ok, false);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("the maintenance barrier holds participants in order, lets them go in reverse, undoes a failed raise and allows one at a time (card K01h)", async () => {
@@ -109,13 +109,18 @@ test("the maintenance barrier holds participants in order, lets them go in rever
   assert.equal(b.held, false);
 });
 
+/** Every database a test opens in its rig: closed before the folder is removed (Windows will not delete a file that is still open). */
+const openStores: SqliteStorage[] = [];
+const openTracked = async (path: string): Promise<SqliteStorage> => { const s = await SqliteStorage.open({ path }); openStores.push(s); return s; };
+const cleanup = async (d: string): Promise<void> => { for (const s of openStores.splice(0)) await s.close().catch(() => undefined); try { process.chdir(tmpdir()); } catch { /* */ } rmSync(d, { recursive: true, force: true }); };
+
 async function rig() {
   const d = tmp();
   const data = join(d, "data"); mkdirSync(data);
   const live = join(d, "live");
   const pi = makeStores(live);
   const sqlite = join(data, "c.sqlite");
-  let storage = await SqliteStorage.open({ path: sqlite });
+  let storage = await openTracked(sqlite);
   await populate(storage, "before");
   const backups = new BackupService(storage, { root: join(d, "b"), version: "t", now: () => new Date(AT), piState: pi });
   const made = await backups.backUpNow("manual");
@@ -165,7 +170,7 @@ test("a restore from inside the controller is previewed, needs the approved toke
     assert.ok(readdirSync(r.live).some((n) => n.startsWith("att-1.before-restore-")), "the old conversation folder is kept");
     assert.match(readFileSync(join(r.live, readdirSync(r.live).find((n) => n.startsWith("att-1.before-restore-"))!, "history.jsonl"), "utf8"), /after the backup/);
     assert.equal(readdirSync(r.data).some((n) => n.includes(".nn-staged-")) || readdirSync(r.live).some((n) => n.includes(".nn-staged-")), false, "staging is gone");
-  } finally { rmSync(r.d, { recursive: true, force: true }); }
+  } finally { await cleanup(r.d); }
 });
 
 test("a prepared restore can be cancelled and leaves the live data exactly as it was; a refused barrier stages nothing that stays (card K01h)", async () => {
@@ -189,7 +194,7 @@ test("a prepared restore can be cancelled and leaves the live data exactly as it
     assert.equal(existsSync(`${r.sqlite}.nn-staged-20261031T110000Z`), false);
     await assert.rejects(sr.preview("backup-20200101T000000Z-manual"), /no complete backup/);
     await assert.rejects(sr.preview("../etc"), /name of a backup/);
-  } finally { rmSync(r.d, { recursive: true, force: true }); }
+  } finally { await cleanup(r.d); }
 });
 
 test("an interrupted swap is finished by the next start, and a marker for another database or with paths outside its staging is refused (card K01h)", async () => {
@@ -211,7 +216,7 @@ test("an interrupted swap is finished by the next start, and a marker for anothe
     // A marker that anything else wrote (names files elsewhere, no valid MAC) is refused.
     writeFileSync(join(r.data, "pending-restore.json"), JSON.stringify({ ...marker, pi: [{ id: "att-1", staged: join(r.d, "elsewhere"), target: join(r.d, "t") }] }));
     await assert.rejects(applyPendingRestore(r.data, r.sqlite, undefined, { piFinal: r.piFinal }), /not authentic/);
-  } finally { rmSync(r.d, { recursive: true, force: true }); }
+  } finally { await cleanup(r.d); }
 });
 
 test("an encrypted backup is restored from inside the controller with the passcode from the host file; the passcode never reaches the plan (card K01h)", { skip: !POSIX && "secret files need POSIX modes" }, async () => {
@@ -222,7 +227,7 @@ test("an encrypted backup is restored from inside the controller with the passco
     const { keyring } = await createKeyring({ passcode: PASS, scrypt: FAST });
     const passFile = join(d, "pass"); writeFileSync(passFile, PASS, { mode: 0o600 }); chmodSync(passFile, 0o600);
     const enc = new BackupEncryption({ keyring, passcodeFile: passFile });
-    const storage = await SqliteStorage.open({ path: sqlite }); await populate(storage, "sealed");
+    const storage = await openTracked(sqlite); await populate(storage, "sealed");
     const backups = new BackupService(storage, { root: join(d, "b"), version: "t", now: () => new Date(AT), encryption: keyring, piState: makeStores(join(d, "live")) });
     const made = await backups.backUpNow("manual");
     const barrier = new MaintenanceBarrier(); barrier.add({ name: "backups", hold: async () => backups.hold() });
@@ -243,7 +248,7 @@ test("an encrypted backup is restored from inside the controller with the passco
       await assert.rejects(none.apply(plan2.name, plan2.token), /no unlock method/);
       assert.equal(existsSync(join(data, "pending-restore.json")), false);
     } finally { await again.close(); }
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("path separators: the index keeps forward slashes whatever the platform (card K01h)", async () => {
@@ -255,5 +260,5 @@ test("path separators: the index keeps forward slashes whatever the platform (ca
     assert.ok(index.includes('"rel":"sub/marker.json"'));
     assert.equal(index.includes("\\\\"), false);
     assert.ok(sep.length === 1);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });

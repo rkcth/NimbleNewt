@@ -4237,3 +4237,10 @@ Code: `dispatch/model-stream.ts` (`ModelStreamDecoder`, `ModelStreamTap`, `Model
 ## Sweep b36 macOS/Windows test fixes (unverified off Linux)
 - h12k disk-limit test: the macOS launcher shows host paths, so the test now uses guestPaths "host" on darwin (the command is the real node, not /opt/node/bin/node, which does not exist on macOS and made the Seatbelt library lookup fail first: "node cannot be read to find its libraries"). Needs a macOS run to confirm.
 - workspace-ask "fifth is not sent": the four waiting asks now last 2 s and the test waits until all four are listed; a slow runner let the 300 ms asks expire first. Needs macOS/Windows runs to confirm.
+
+
+## Windows fix, K01h restore tests (CI run 41236956725)
+
+- Root cause 1 (production): `canonSync` used `fs.realpathSync` (JS implementation, keeps 8.3 short names such as `RUNNER~1`) while `canon` used `fs.promises.realpath` (native, expands to the long name). The marker stored the target through `canonSync` and the start compared it with `canon`, so on Windows every restore with a conversation folder was refused ("a conversation folder is not where this installation keeps att-1"). `canonSync` now uses `realpathSync.native`, the same spelling as `canon`. This also explains the child-process crash helper returning 1 instead of 3 (the child hit the same refusal).
+- Root cause 2 (tests): rigs in `k01h.test.ts` and `k01h-fixes.test.ts` removed the temp folder while the SQLite file was still open (EBUSY on Windows). Rigs now open through `openTracked` and `cleanup` closes every tracked database before removing the folder.
+- Not verified without Windows: that no other mismatch hides behind the first refusal (tests that failed only as a cascade: relative data dir, mid-swap rename, EBUSY retry, lock takeover, encrypted unlock, failed-marker order, missing staged folder, crash helper). Each was traced to one of the two causes from the log text; a Windows run is the proof. If `realpath.native` returns a `\\?\` form for some path, `canon` and `canonSync` would still agree (both native).

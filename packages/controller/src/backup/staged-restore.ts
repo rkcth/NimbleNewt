@@ -127,10 +127,10 @@ export async function canon(p: string, depth = 0): Promise<string> {
     return parent === r ? r : join(await canon(parent, depth), basename(r));
   }
 }
-/** `canon`, synchronously (the restore asks for a store's place from a synchronous callback). */
+/** `canon`, synchronously (the NATIVE realpath, like `fs.promises.realpath`: the JS one keeps 8.3 short names such as RUNNER~1 on Windows, so the two spellings of one place would differ and the marker check would refuse a good restore). (The restore asks for a store's place from a synchronous callback). */
 export function canonSync(p: string, depth = 0): string {
   const r = resolve(p);
-  try { return realpathSync(r); } catch (error) {
+  try { return realpathSync.native(r); } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     let link = false;

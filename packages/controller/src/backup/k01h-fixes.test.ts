@@ -23,6 +23,11 @@ async function populate(storage: MemoryStorage | SqliteStorage, title = "t", ext
 }
 const stores = (dir: string): PiStateSource => { mkdirSync(join(dir, "att-1"), { recursive: true }); writeFileSync(join(dir, "att-1", "history.jsonl"), LINE); return { list: async () => [{ id: "att-1", dir: join(dir, "att-1") }] }; };
 
+/** Every database a test opens in its rig: closed before the folder is removed (Windows will not delete a file that is still open). */
+const openStores: SqliteStorage[] = [];
+const openTracked = async (path: string): Promise<SqliteStorage> => { const s = await SqliteStorage.open({ path }); openStores.push(s); return s; };
+const cleanup = async (d: string): Promise<void> => { for (const s of openStores.splice(0)) await s.close().catch(() => undefined); try { process.chdir(tmpdir()); } catch { /* */ } rmSync(d, { recursive: true, force: true }); };
+
 async function rig(opts: { relative?: boolean } = {}) {
   const d = tmp();
   const base = opts.relative === true ? "." : d;
@@ -31,7 +36,7 @@ async function rig(opts: { relative?: boolean } = {}) {
   mkdirSync(dataRel);
   const live = join(d, "live");
   const sqlite = join(dataRel, "c.sqlite");
-  const storage = await SqliteStorage.open({ path: sqlite });
+  const storage = await openTracked(sqlite);
   await populate(storage, "before");
   let bt = Date.parse(AT);
   const backups = new BackupService(storage, { root: join(d, "b"), version: "t", now: () => new Date(bt += 1000), piState: stores(live) });
@@ -46,7 +51,6 @@ async function rig(opts: { relative?: boolean } = {}) {
   const restore = (extra: Partial<ConstructorParameters<typeof StagedRestore>[0]> = {}) => new StagedRestore({ backups, root: join(d, "b"), barrier, sqlitePath: sqlite, dataDirectory: dataRel, storage, piFinal, now: () => clock, ...extra });
   return { d, base, dataRel, live, sqlite, backups, made, barrier, restore, piFinal, storage, tick: (ms: number) => { clock = new Date(clock.getTime() + ms); } };
 }
-const rm_ = (d: string): void => { try { process.chdir(tmpdir()); } catch { /* */ } rmSync(d, { recursive: true, force: true }); };
 const dbTitle = async (path: string, id: string): Promise<unknown> => { const s = await SqliteStorage.open({ path }); try { return (await s.getAggregate({ kind: "task", id }))?.body["title"]; } finally { await s.close(); } };
 
 test("a RELATIVE data directory does not brick the start: the marker is written and checked in one absolute form (finding 1)", async () => {
@@ -61,7 +65,7 @@ test("a RELATIVE data directory does not brick the start: the marker is written 
     assert.equal(await applyPendingRestore("data", "data/c.sqlite", undefined, { piFinal: r.piFinal }), r.made.manifest.name);
     assert.equal(await dbTitle("data/c.sqlite", "task-late"), undefined);
     assert.equal(readFileSync(join(r.live, "att-1", "history.jsonl"), "utf8"), LINE);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 async function prepared() {
@@ -102,7 +106,7 @@ test("a rename that fails mid-swap (cross-device, in use) rolls the moves alread
     assert.equal(existsSync(join(r.dataRel, "pending-restore.json")), false);
     assert.equal(readdirSync(r.live).some((n) => n.includes(".nn-staged-")) || readdirSync(r.dataRel).some((n) => n.includes(".nn-staged-")), false);
     void sr;
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("a file another program holds (EBUSY) is tried again and the swap goes through; if the rollback itself cannot finish the next start continues it (finding 1)", async () => {
@@ -112,7 +116,7 @@ test("a file another program holds (EBUSY) is tried again and the swap goes thro
     const busy = async (from: string, to: string) => { if (once) { once = false; throw Object.assign(new Error("busy"), { code: "EBUSY" }); } nodeFs.renameSync(from, to); };
     assert.equal(await applyPendingRestore(r.dataRel, r.sqlite, undefined, { piFinal: r.piFinal, rename: busy, retryDelayMs: 1 }), r.made.manifest.name);
     assert.equal(await dbTitle(r.sqlite, "task-late"), undefined);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
   const second = await prepared();
   try {
     const { r } = second;
@@ -126,7 +130,7 @@ test("a file another program holds (EBUSY) is tried again and the swap goes thro
     assert.equal(existsSync(join(r.dataRel, "restore-journal.json")), false);
     assert.equal(await dbTitle(r.sqlite, "task-late"), "late");
     assert.equal(readFileSync(join(r.live, "att-1", "history.jsonl"), "utf8").includes("after"), true);
-  } finally { rm_(second.r.d); }
+  } finally { await cleanup(second.r.d); }
 });
 
 test("at apply time the restored data must be on the device it goes to: a different device refuses and stages nothing (finding 1)", async () => {
@@ -139,7 +143,7 @@ test("at apply time the restored data must be on the device it goes to: a differ
     assert.equal(existsSync(join(r.dataRel, "pending-restore.json")), false);
     assert.equal(existsSync(`${r.sqlite}.nn-staged-20261031T110000Z`), false);
     assert.equal(readdirSync(r.live).some((n) => n.includes(".nn-staged-")), false);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("the marker is authenticated and its targets are only places this installation keeps conversation stores (finding 2)", async () => {
@@ -166,7 +170,7 @@ test("the marker is authenticated and its targets are only places this installat
     await assert.rejects(applyPendingRestore(r.dataRel, r.sqlite, undefined, { piFinal: r.piFinal }), /not authentic/);
     const st = await r.restore().status();
     assert.match(st.markerProblem ?? "", /not authentic/);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("a store folder that is a link is not followed; a link, a hard link, a fifo and a link-named entry are reported, not copied (finding 3)", { skip: !POSIX && "links and fifos need POSIX" }, async () => {
@@ -189,7 +193,7 @@ test("a store folder that is a link is not followed; a link, a hard link, a fifo
     const text = (manifest.piState?.problems ?? []).join("\n");
     assert.match(text, /att-1: the store folder is a link/);
     assert.match(text, /link\.json is a link/); assert.match(text, /hard\.json has more than one hard link/); assert.match(text, /pipe is not a plain file/);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("a store folder that cannot be read is reported as a problem, not recorded as an empty store (finding 4)", { skip: (!POSIX || ROOT) && "needs POSIX modes and a non-root user" }, async () => {
@@ -205,7 +209,7 @@ test("a store folder that cannot be read is reported as a problem, not recorded 
     // A missing store root is a problem too.
     const { manifest: m2 } = await createBackup(store, { root: join(d, "b2"), kind: "manual", version: "t", now: () => new Date(AT), piState: { list: async () => [{ id: "att-9", dir: join(d, "gone") }] } });
     assert.match((m2.piState?.problems ?? []).join(), /att-9: the store folder cannot be read/);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("a file that shrinks or is replaced while it is copied is tried again; if it keeps changing it is reported inconsistent and not recorded as a shorter copy (finding 4)", async () => {
@@ -230,7 +234,7 @@ test("a file that shrinks or is replaced while it is copied is tried again; if i
     assert.equal(once.bytes, LINE.length * 10, "copied up to the last complete line of the file as it then was");
     assert.ok(once.bytes < big);
     rmSync(s1, { recursive: true, force: true }); rmSync(s2, { recursive: true, force: true });
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("the approval token covers the whole backup, expires, is used once and is checked again at apply (findings 5, 6)", async () => {
@@ -267,7 +271,7 @@ test("the approval token covers the whole backup, expires, is used once and is c
     assert.equal(p3.expiresAt, undefined);
     r.tick(10 * 24 * 3_600_000);
     await forever.apply(p3.name, p3.token); await forever.cancel();
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("a restore does not bring a deleted artifact's files back, also when it is cancelled (finding 7)", async () => {
@@ -295,7 +299,7 @@ test("a restore does not bring a deleted artifact's files back, also when it is 
     // And through the staged restore: delete -> restore -> cancel leaves them deleted.
     await blobs.remove(kept.digest); await blobs.remove(shared.digest);
     const data = join(d, "data"); mkdirSync(data);
-    const live = await SqliteStorage.open({ path: join(data, "c.sqlite") }); await populate(live);
+    const live = await openTracked(join(data, "c.sqlite")); await populate(live);
     const backups = new BackupService(live, { root: join(d, "b"), version: "t", now: () => new Date("2026-10-31T10:30:00.000Z") });
     const barrier = new MaintenanceBarrier();
     // The live store needs the same schema as the backup (it was made from the memory store).
@@ -306,7 +310,7 @@ test("a restore does not bring a deleted artifact's files back, also when it is 
     await sr.cancel();
     assert.equal(await blobs.has(gone.digest), false);
     await live.close();
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 const basenameOf = (p: string): string => p.split(/[\\/]/).pop()!;
 
@@ -320,7 +324,7 @@ test("the status says whether Pi state is in backups; a backup without it is lab
     assert.equal(made.manifest.piState, undefined);
     const withPi = new BackupService(store, { root: join(d, "b2"), version: "t", now: () => new Date(AT), piState: stores(join(d, "live")) });
     assert.equal((await withPi.status()).piStateIncluded, true);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
   const r = await rig();
   try {
     const noPi = await createBackup(await (async () => { const s = new MemoryStorage(); await populate(s); return s; })(), { root: join(r.d, "b"), kind: "manual", version: "t", now: () => new Date("2026-10-30T10:00:00.000Z") });
@@ -329,7 +333,7 @@ test("the status says whether Pi state is in backups; a backup without it is lab
     assert.equal(plan.piStateIncluded, false);
     const text = plan.warnings.join(" ");
     assert.match(text, /Pi state is NOT included/); assert.match(text, /AHEAD of the restored records/); assert.match(text, /do not include the agents' conversation state at all/);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("starting a restore swap takes the data directory's lock: an overlapping start is refused, a stale lock is taken over (finding 9)", async () => {
@@ -345,7 +349,7 @@ test("starting a restore swap takes the data directory's lock: an overlapping st
     writeFileSync(join(r.dataRel, ".nn-data.lock"), JSON.stringify({ pid: 2 ** 22 + 12345, host: (await import("node:os")).hostname(), nonce: "dead", at: AT }));
     assert.equal(await applyPendingRestore(r.dataRel, r.sqlite, undefined, { piFinal: r.piFinal }), r.made.manifest.name);
     assert.equal(existsSync(join(r.dataRel, ".nn-data.lock")), false, "the swap's own lock is let go");
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("snapshots before a restore are their own kind; all are kept unless the owner sets a count, and they never count as the nightly backup (finding 10)", async () => {
@@ -363,7 +367,7 @@ test("snapshots before a restore are their own kind; all are kept unless the own
     assert.equal(copy.manifest.kind, "pre-restore"); assert.match(copy.path, /-pre-restore$/);
     assert.equal((await svc.lastGood()).at, undefined, "not a good nightly backup");
     assert.equal(validRel("a/b"), true);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
 
 test("an unlock refused for a reason is a typed error with that reason; the preview refuses a backup of another schema; the status reads the marker after a restart (finding 11)", async () => {
@@ -385,7 +389,7 @@ test("an unlock refused for a reason is a typed error with that reason; the prev
     const p = await real.preview(r.made.manifest.name); await real.apply(p.name, p.token);
     assert.equal((await r.restore().status()).pending?.name, r.made.manifest.name);
     assert.equal(unlockWithPasscode.length >= 0, true);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("cancel brings the barrier down even when the marker cannot be removed, and says so (finding 12)", { skip: (!POSIX || ROOT) && "needs POSIX modes and a non-root user" }, async () => {
@@ -401,7 +405,7 @@ test("cancel brings the barrier down even when the marker cannot be removed, and
     // Trying again works and reports the marker gone.
     assert.equal((await sr.cancel()).cancelled, true);
     assert.equal(existsSync(join(r.dataRel, "pending-restore.json")), false);
-  } finally { rm_(r.d); }
+  } finally { await cleanup(r.d); }
 });
 
 test("paths Windows cannot keep are refused on every platform: device names, trailing dots and spaces (finding 13)", () => {
@@ -415,7 +419,7 @@ test("an encrypted backup restores from inside the controller with an unlock fun
     const data = join(d, "data"); mkdirSync(data);
     const sqlite = join(data, "c.sqlite");
     const { keyring } = await createKeyring({ passcode: "correct horse battery staple 42", scrypt: FAST });
-    const storage = await SqliteStorage.open({ path: sqlite }); await populate(storage, "sealed");
+    const storage = await openTracked(sqlite); await populate(storage, "sealed");
     const live = join(d, "live");
     const backups = new BackupService(storage, { root: join(d, "b"), version: "t", now: () => new Date(AT), encryption: keyring, piState: stores(live) });
     const made = await backups.backUpNow("manual");
@@ -427,5 +431,5 @@ test("an encrypted backup restores from inside the controller with an unlock fun
     assert.equal(JSON.stringify(done).includes("correct horse"), false);
     await storage.close();
     assert.equal(await applyPendingRestore(data, sqlite, undefined, { piFinal: (id) => join(live, id) }), made.manifest.name);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { await cleanup(d); }
 });
