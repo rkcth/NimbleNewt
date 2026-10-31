@@ -75,6 +75,7 @@ import { checkLocalWorkerLimits } from "./worker-limits.js";
 import { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
+import { CleanupSettingsService, ScratchCleanupService, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService } from "../workspace-ops/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore } from "../artifacts/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
@@ -157,6 +158,12 @@ export interface StartOptions {
   readonly stage?: (attempt: EndingAttempt) => Promise<StagedWork>;
   /** What the task's checkout changed against its base and what the landing branch changed since (card H12n). Absent: the checkout is unknown, so a submit cannot be checked. */
   readonly landing?: (taskId: string) => Promise<Landed | undefined>;
+  /**
+   * The HOST PORT of the scratch cleanup (owner decision 2026-10-30): executes a cleanup order on the attempt's controller-created scratch workspace and reports what an agent installed or left running (never removed). Idempotent by `order.key`.
+   * Absent (no host here can do it): scratch is kept. `cleanupDefault` is the start-up default of the owner's `cleanup` setting (`after-handoff` unless set).
+   */
+  readonly scratchHost?: { readonly remove: NonNullable<ScratchPorts["order"]> };
+  readonly cleanupDefault?: ScratchMode;
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
   readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date };
   /**
@@ -385,7 +392,25 @@ export async function startController(options: StartOptions): Promise<Controller
     const notes = WorkingNoteService.withEpoch(storage, epoch);
     // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
     const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), attemptOf: (() => { const of = attemptOfAssignments(assignments); /* the dispatcher names an attempt's owner by its bare agent id, the principals by `agent:<id>`: the same identity either way */ return async (taskId: string) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; }; })() });
-    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId) });
+    const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault);
+    // The leftovers of a finished attempt (installed or still running, never removed by the controller) go to the agent's boss as a needs-you message; with no boss, or one who cannot be told about the task, to the owner.
+    const scratchCleanup = ScratchCleanupService.withEpoch(storage, epoch, {
+      mode: async () => (await cleanupSettings.effective()).scratch,
+      ...(options.scratchHost === undefined ? {} : { order: options.scratchHost.remove }),
+      report: async (a, leftovers, key) => {
+        const lines = leftovers.map((l) => `${l.kind}: ${l.what}`).join("; ").slice(0, 1500);
+        const text = `Attempt ${a.attemptId} ended and left things behind that the controller did not remove: ${lines}. Decide for each: clean it up, keep it, or adopt it.`;
+        const own = a.agentId.startsWith("agent:") ? a.agentId.slice("agent:".length) : a.agentId;
+        const boss = ((await storage.getAggregate({ kind: "agent", id: own }))?.body as unknown as { supervisorId?: string } | undefined)?.supervisorId;
+        if (boss !== undefined) {
+          try { await messages.noticeFromController({ commandId: `scl-left:${a.attemptId}`, taskId: a.taskId, to: `agent:${boss}`, purpose: "needs-you: leftovers of a finished attempt", text }); return; } catch (error) {
+            if (!(error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found"))) throw error;
+          }
+        }
+        await notifications.emitFromController({ commandId: `scl-left:${a.attemptId}`, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: scratchRecordId(a.attemptId) }, projectId: a.projectId, detail: text.slice(0, 1800) });
+      },
+    });
+    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => dispatch !== undefined && (await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined)) !== undefined } });
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork, { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
@@ -490,7 +515,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
     // How long an attempt may run and how many attempts are admitted: off unless the owner (or a start-up option) turns them on.
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
-    const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
@@ -534,6 +559,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Endings still open when the controller went down are completed once, from their first undone step (the tick's sweep does the same for what is left).
     // The dispatcher asks the ending before it ends an attempt for any reason: a stop drops it with its true reason, the turn completing after work.end completes it with the agent's result.
     dispatch?.dispatcher.onEnd((attemptId, how) => workEnd.resolveOnEnd(attemptId, how));
+    dispatch?.dispatcher.onEnded((attemptId) => workEnd.cleanupAfterEnd(attemptId));
     if (dispatch !== undefined) await workEnd.recover().catch((error: unknown) => { options.onInternalError?.(error); });
     let tools: ToolExecutionService | undefined;
     if (options.tools !== undefined && dispatch !== undefined) {

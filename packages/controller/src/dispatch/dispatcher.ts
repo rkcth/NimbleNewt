@@ -243,6 +243,7 @@ export class DispatcherService {
   readonly #usageSeq = new Map<string, number>();
   readonly #ending = new Set<Promise<unknown>>();
   #endHook: EndHook | undefined;
+  #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned" }) => Promise<void>) | undefined;
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
@@ -1344,6 +1345,8 @@ export class DispatcherService {
    */
   /** Binds the agent's ending: asked before an attempt ends for any reason (the turn completing, a stop, a lost worker), so an ending the agent asked for is completed or dropped with its true reason. */
   onEnd(hook: EndHook | undefined): void { this.#endHook = hook; }
+  /** Called once an attempt is finished and its worker let go (never before): a failure is reported and changes nothing. The scratch cleanup uses it. */
+  onEnded(hook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned" }) => Promise<void>) | undefined): void { this.#endedHook = hook; }
 
   async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
@@ -1422,6 +1425,7 @@ export class DispatcherService {
     if (late !== undefined && late.handle !== live?.handle) await late.handle.stop().catch(() => undefined);
     this.#live.delete(attemptId);
     this.#usageSeq.delete(attemptId);
+    if (this.#endedHook !== undefined) await this.#endedHook(attemptId, { outcome }).catch((error: unknown) => { this.#options.onError?.(error); });
     if (outcome === "failed") {
       const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:failed:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${attemptId} failed (${summary.slice(0, 300)}); the task is as it was and no further attempt starts by itself.`, resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);

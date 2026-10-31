@@ -30,6 +30,7 @@ import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
+import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
@@ -128,6 +129,7 @@ export interface StateApiDeps {
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
+  readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
@@ -255,6 +257,7 @@ export class StateApi {
         ...(this.#deps.setup === undefined ? {} : { setup: this.#deps.setup }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
+        ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),
         ...(this.#deps.catalogRevocation === undefined ? {} : { catalogRevocation: this.#deps.catalogRevocation }),

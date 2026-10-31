@@ -158,6 +158,18 @@ Result: `{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; 
 
 Completion: finished when accepted (`completed: true`).
 
+#### `cleanup.settings.get`
+
+What happens to an attempt's scratch workspace when the attempt ends (owner only): `scratch` is the owner's entry (null when none), `default`, and the `effective` mode. `after-handoff` (the default) lets the controller order the controller-created scratch removed once the work was handed onward (submission or recorded checkpoint, settled calls, message passed on); `keep` never does. Anything an agent installed or left running is never removed: it is reported to the agent's supervisor.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, scratch, default, effective: { scratch }, damaged? } }`. A damaged record shows `damaged` and acts as `keep`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `dispatch.limits.get`
 
 The dispatcher's two limits (owner only): the owner's entries (on or off, with the kept figure), the start-up options, and what applies now. Both are off (no limit) unless set.
@@ -1604,6 +1616,22 @@ Arguments:
 
 - `set` (optional): for example `{ "memoryMb": 4096 }`
 - `unset` (optional): figure names to clear, for example `["processes"]`
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `cleanup.settings.change`
+
+The owner changes the scratch cleanup (owner only). `set` has `scratch`: `after-handoff` or `keep`; `enable` (`["scratch"]`) is `after-handoff`; `disable` is `keep`; `unset` forgets the entry so the start-up default applies. Name `scratch` once. It counts from the next attempt that ends; a cleanup already decided stays as recorded. This is the form the chat uses.
+
+Arguments:
+
+- `set` (optional): for example `{ "scratch": "keep" }`
+- `enable` (optional): `["scratch"]`
+- `disable` (optional): `["scratch"]`
+- `unset` (optional): `["scratch"]`
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.

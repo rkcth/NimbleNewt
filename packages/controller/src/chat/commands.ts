@@ -58,6 +58,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
   "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
+  // Whether the controller may remove an ended attempt's scratch workspace is a data-keeping decision: shown first in every profile (owner decision 2026-10-30; default after-handoff).
+  "cleanup.settings.change": { verb: "Change whether an ended attempt's scratch workspace is removed", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },
