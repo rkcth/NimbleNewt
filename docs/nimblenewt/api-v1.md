@@ -3578,6 +3578,10 @@ Arguments:
 - `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher (default 60)
 - `sendTimeoutSeconds` (optional): seconds (1 to 120) one channel send may take before it is retried later (default 10)
 - `urgentInterruptsQuietHours` (optional): true (default): an escalated Urgent item and its retries are also sent in quiet hours; false: they wait for the end of quiet hours
+- `backupMaxAgeHours` (optional): whole hours (1 to 8760) without a good backup before the controller raises an Urgent item (default 48); null turns it off
+- `hostDownAfterMinutes` (optional): whole minutes (1 to 1440) a host may stay silent before the controller raises an Urgent item (default 10); null turns it off
+- `deniedThreshold` (optional): refusals of one agent (2 to 10000) within deniedWindowMinutes that raise an Urgent item; not set or null: off
+- `deniedWindowMinutes` (optional): whole minutes (1 to 1440) the refusals are counted in (default 60)
 - `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
 
 Result: `{ revision }`.

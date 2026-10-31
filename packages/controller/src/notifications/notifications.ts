@@ -40,6 +40,14 @@ export interface NotificationSettings {
   readonly sendTimeoutSeconds?: number;
   /** An escalated Urgent item is sent, and its retries go out, also in quiet hours (default true, as the card says); false: they wait for the end of quiet hours like everything else. */
   readonly urgentInterruptsQuietHours?: boolean;
+  /** Hours without a good backup after which the controller raises an Urgent item (card U11c, K01); default 48, `null` turns it off. */
+  readonly backupMaxAgeHours?: number | null;
+  /** Minutes an enrolled host may stay silent (stale) before the controller raises an Urgent item (card U11c, H01); default 10, `null` turns it off. */
+  readonly hostDownAfterMinutes?: number | null;
+  /** Policy denials of one agent within `deniedWindowMinutes` that raise an Urgent item (card U11c); a single denial is routine. Not set (or `null`): off until the owner sets it. */
+  readonly deniedThreshold?: number | null;
+  /** The span the denials are counted in (default 60 minutes). */
+  readonly deniedWindowMinutes?: number;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
   readonly levelByKind?: Readonly<Partial<Record<NotificationKind, NotificationLevel>>>;
 }
@@ -49,6 +57,9 @@ export const DEFAULT_NOTICE_RETENTION_DAYS = 7;
 export const DEFAULT_ESCALATIONS_PER_HOUR = 10;
 export const DEFAULT_SWEEP_SECONDS = 60;
 export const DEFAULT_SEND_TIMEOUT_SECONDS = 10;
+export const DEFAULT_BACKUP_MAX_AGE_HOURS = 48;
+export const DEFAULT_HOST_DOWN_AFTER_MINUTES = 10;
+export const DEFAULT_DENIED_WINDOW_MINUTES = 60;
 /** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
 const WAITS_ON_OWNER: ReadonlySet<NotificationKind> = new Set<NotificationKind>(["blocker", "review-request", "owner-question"]);
 
@@ -171,6 +182,10 @@ export interface Emit extends NoActor {
   readonly urgent?: boolean;
   /** The level the controller gives this item (controller only; an agent cannot set it). Default: the level of the kind, Needs you for maintenance. */
   readonly level?: NotificationLevel;
+  /** An Urgent trigger of the controller (card U11c): sent at once, also in quiet hours unless the owner set `urgentInterruptsQuietHours` to false. Controller only. */
+  readonly interrupt?: boolean;
+  /** Controller only: the text that may leave the installation for this item, built by the controller from names and counts (default: the kind of record and its code). */
+  readonly label?: string;
   /** The project of a controller-side report that has no record to look it up from. */
   readonly projectId?: string;
 }
@@ -199,9 +214,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -243,6 +258,13 @@ export class NotificationService {
       if (typeof command.urgentInterruptsQuietHours !== "boolean") invalid("urgentInterruptsQuietHours", "must be true or false");
       next = { ...next, urgentInterruptsQuietHours: command.urgentInterruptsQuietHours };
     }
+    // The Urgent triggers of card U11c: a number sets one, null turns it off (and a number turns it on again).
+    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"]] as const) {
+      const v = command[field];
+      if (v === null) next = { ...next, [field]: null };
+      else if (v !== undefined) next = { ...next, [field]: whole(v, field, lo, hi, unit) };
+    }
+    if (command.deniedWindowMinutes !== undefined) next = { ...next, deniedWindowMinutes: whole(command.deniedWindowMinutes, "deniedWindowMinutes", 1, 24 * 60, "minutes") };
     if (command.levelByKind !== undefined) {
       const given = command.levelByKind;
       if (typeof given !== "object" || given === null || Array.isArray(given)) invalid("levelByKind", "must map kinds to notice, needs-you or urgent (null puts a kind back to its default)");
@@ -264,6 +286,9 @@ export class NotificationService {
     }));
     return { revision: result.revision };
   }
+
+  /** The settings as the controller's own sweeps read them (an internal call, never exposed through the state API). */
+  async controllerSettings(): Promise<NotificationSettings & { revision: number }> { return this.#settings(); }
 
   async settings(owner: Principal): Promise<NotificationSettings & { revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
@@ -287,7 +312,7 @@ export class NotificationService {
   }
 
   async #emit(actor: string, controller: boolean, by: Principal | undefined, command: Emit): Promise<{ itemId: string; coalesced: boolean; immediate: boolean }> {
-    onlyKnown(command, ["commandId", "kind", "ref", "detail", "critical", "urgent", "level", "projectId"]);
+    onlyKnown(command, ["commandId", "kind", "ref", "detail", "critical", "urgent", "level", "interrupt", "label", "projectId"]);
     if (!NOTIFICATION_KINDS.includes(command.kind)) invalid("kind", `must be one of ${NOTIFICATION_KINDS.join(", ")}`);
     const ref = command.ref;
     // A record ID is a short code, not free text: nothing a reporter writes can ride along in it.
@@ -295,20 +320,23 @@ export class NotificationService {
     if (command.critical !== undefined && typeof command.critical !== "boolean") invalid("critical", "must be true or false");
     if (command.urgent !== undefined && typeof command.urgent !== "boolean") invalid("urgent", "must be true or false");
     if (command.level !== undefined && !LEVELS.includes(command.level)) invalid("level", `must be one of ${LEVELS.join(", ")}`);
+    if (command.interrupt !== undefined && typeof command.interrupt !== "boolean") invalid("interrupt", "must be true or false");
     if (command.critical === true && command.kind !== "blocker") invalid("critical", "applies to a blocker only");
     if (command.urgent === true && command.kind !== "review-request") invalid("urgent", "applies to a review request only");
-    if (!controller && (!PRODUCER_KINDS.has(command.kind) || command.critical === true || command.urgent === true || command.detail !== undefined || command.level !== undefined || command.projectId !== undefined)) {
+    if (!controller && (!PRODUCER_KINDS.has(command.kind) || command.critical === true || command.urgent === true || command.detail !== undefined || command.level !== undefined || command.interrupt !== undefined || command.label !== undefined || command.projectId !== undefined)) {
       throw new DomainError("forbidden", `${actor} may report blockers, review requests and owner questions about records it can report for; safety stops, maintenance, presence, critical blockers, urgency and extra text are for the controller`);
     }
     const record = await this.#describe(command.kind, ref, command.projectId);
+    if (command.label !== undefined) record.label = redactText(text(command.label, "label", { min: 1, max: NOTIFICATION_LIMITS.label }));
     if (!controller && (by === undefined || record.projectId === undefined || !allows(by, "notification.emit", record.projectId))) throw new DomainError("forbidden", `${actor} may not report notifications about that record`);
     const detail = command.detail === undefined ? undefined : redactText(text(command.detail, "detail", { min: 1, max: NOTIFICATION_LIMITS.detail }));
     const settings = await this.#settings();
     const now = this.#runner.now();
-    const interrupts = command.kind === "safety-stop" || command.critical === true;
-    const level: NotificationLevel = command.level ?? KIND_LEVEL[command.kind];
+    // An Urgent trigger (`interrupt`) is sent at once also in quiet hours, unless the owner chose that Urgent waits for their end.
+    const interrupts = command.kind === "safety-stop" || command.critical === true || (command.interrupt === true && settings.urgentInterruptsQuietHours !== false);
+    const level: NotificationLevel = command.interrupt === true ? "urgent" : command.level ?? KIND_LEVEL[command.kind];
     // A controller-set Urgent that is not an interruption waits out quiet hours like an urgent review.
-    const urgent = command.urgent === true || command.level === "urgent";
+    const urgent = command.urgent === true || command.level === "urgent" || command.interrupt === true;
     const immediate = interrupts || (urgent && !this.#quiet(settings, now, await this.#zone()));
     const base = `${command.kind}|${record.projectId ?? "-"}|${ref.kind}:${ref.id}`;
     for (let attempt = 1; ; attempt++) {

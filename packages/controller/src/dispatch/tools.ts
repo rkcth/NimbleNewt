@@ -235,7 +235,7 @@ export class ToolPath {
       ...(spent === undefined ? {} : { spentSoFar: spent }),
     });
     const info = { mode: decision.mode, via: decision.via, reasons: decision.reasons.slice(0, 5).map((r) => clip(redactText(r), DISPATCH_LIMITS.diagnostic)) };
-    if (decision.mode === "deny") return { kind: "refused", reason: `denied by policy: ${info.reasons.join("; ")}` };
+    if (decision.mode === "deny") { void Promise.resolve(this.#deps.denied?.({ agentId: d.agentId, projectId: d.projectId })).catch(() => undefined); return { kind: "refused", reason: `denied by policy: ${info.reasons.join("; ")}` }; }
     // An exact-operation review (A05: a call that runs a script, or installs something that runs) inside an approved ceiling still goes to the owner; a policy-level agent review stays with any reviewer.
     const exact = (c.script !== undefined || cls === "install-executable") && decision.via === "scope";
     if (exact) return { kind: "park", decision: { mode: "owner", via: "exact-operation", reasons: [`${c.tool.name} needs an exact-operation review, which goes to the owner even inside an approved ceiling`, ...info.reasons].slice(0, 5) }, ownerOnly: true };

@@ -91,6 +91,8 @@ export interface DispatcherDeps {
   /**
    * Whether a push or a merge changes a protected branch of the project, decided here and not by the worker (card A07f). Without it the worker's own `branchProtected` flag is used as before, so a controller always passes it.
    */
+  /** Told when the approval policy denies a tool call outright (card U11c: repeated denials of one agent can become Urgent). Best effort: a failure never changes the refusal. */
+  readonly denied?: (denial: { readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
   readonly blockers: Pick<BlockerService, "openBlocker">;
