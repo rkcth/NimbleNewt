@@ -30,7 +30,7 @@ export interface RetentionValues {
   readonly preRestoreMaxAgeDays: number | null;
   /** How many minutes another start waits for the data directory lock's refresh before calling it stale when it cannot look for the holder's process (another host name, e.g. a container). `null`: never by age. Takes effect on the holder's next refresh. */
   readonly dataLockStaleMinutes: number | null;
-  /** A restore is refused (ask for a new preview) when more than this many recorded changes were made between the preview and the apply. `null`: not checked. 0: any growth refuses. Provisional default 20. */
+  /** A restore is refused (ask for a new preview) when more than this many recorded changes were made between the preview and the apply. `null`: not checked. 0: any growth refuses. Counted in audit rows, not operations. Provisional default 200. */
   readonly restoreChangeMargin: number | null;
   /** How many minutes the owner's approval of a restore (the token of its preview) stays good. `null`: it does not expire. */
   readonly restoreConfirmMinutes: number | null;
@@ -55,7 +55,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, contextRouteDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 20, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 

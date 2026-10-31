@@ -6,7 +6,7 @@ import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
-import { JOURNAL_FILE, PENDING_FILE, acquireDataLocks, type DataLock } from "../backup/index.js";
+import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
 import { BackupEncryption, BackupKeyPinService, BackupService, MaintenanceBarrier, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile } from "node:fs/promises";
 import { defaultEventSources } from "./default-sources.js";
@@ -103,6 +103,8 @@ export interface StartOptions {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** Where start-up notices go. Default: standard error. */
   readonly print?: (line: string) => void;
+  /** What the data directory lock asks the system (tests inject a clock, a heartbeat period, ...). */
+  readonly dataLockEnv?: LockEnv;
   /** Names this controller in the epoch record. */
   readonly holder?: string;
   /** For tests: what the process is running on, instead of detecting it. */
@@ -276,13 +278,13 @@ async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<st
 export async function startController(options: StartOptions): Promise<Controller> {
   const dir = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
   // One controller owns a data directory at a time (card K01h): a second start, or a restore swap under a running one, is refused with the holder named. The lock is taken once the environment checks have passed (a refused start creates nothing).
-  const box: { lock?: DataLock } = {};
-  const take = options.storage.kind !== "sqlite" || dir === undefined ? undefined : async (): Promise<DataLock | undefined> => {
-    try { box.lock = await acquireDataLocks([dir, dirname(resolve((options.storage as { path: string }).path))]); return box.lock; } catch (error) {
-      // A second controller on the same store takes the epoch and the first stops (card F04i); the lock only refuses a start that is about to swap a restore in under a live holder.
-      if ((error as { code?: string }).code !== "unavailable" || existsSync(join(dir, PENDING_FILE)) || existsSync(join(dir, JOURNAL_FILE))) throw error;
-      return undefined;
-    }
+  const box: { lock?: DataLockKeeper } = {};
+  const say = options.print ?? ((line: string) => { process.stderr.write(`${line}\n`); });
+  const take = options.storage.kind !== "sqlite" || dir === undefined ? undefined : async (): Promise<DataLockKeeper | undefined> => {
+    // A second controller on the same store takes the epoch and the first stops (card F04i), so a start that finds a LIVE holder goes on without the lock (told once; the keeper takes it when the holder lets go), unless it is about to swap a restore in under that holder.
+    // Any other reason the lock cannot be taken (a torn lock file, a takeover in progress, ...) refuses the start.
+    box.lock = await keepDataLocks([dir, dirname(resolve((options.storage as { path: string }).path))], { warn: say, ...(options.dataLockEnv ?? {}) }, { tolerateBusy: () => !existsSync(join(dir, PENDING_FILE)) && !existsSync(join(dir, JOURNAL_FILE)) });
+    return box.lock;
   };
   try {
     const controller = await startControllerWith(options, take);
@@ -291,7 +293,7 @@ export async function startController(options: StartOptions): Promise<Controller
   } catch (error) { await box.lock?.release(); throw error; }
 }
 
-async function startControllerWith(options: StartOptions, takeLock: (() => Promise<DataLock | undefined>) | undefined): Promise<Controller> {
+async function startControllerWith(options: StartOptions, takeLock: (() => Promise<DataLockKeeper | undefined>) | undefined): Promise<Controller> {
   if (options.meetingWake !== undefined) checkMeetingWakeTimeout(options.meetingWake.timeoutMs);
   if (options.tools !== undefined && options.dispatch === undefined) throw new Error("options.tools needs options.dispatch: the tool bridge runs over the dispatcher, so without it the tools would be ignored");
   const print = options.print ?? ((line: string) => { process.stderr.write(`${line}\n`); });
@@ -325,7 +327,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   const dataLock = takeLock === undefined ? undefined : await takeLock();
   const piState = options.backup?.piState ?? options.dispatch?.local?.piState?.source;
   const piFinal = options.backup?.restore?.piFinal ?? options.dispatch?.local?.piState?.final;
-  if (options.storage.kind === "sqlite" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, resolve(options.storage.path), print, { ...(piFinal === undefined ? {} : { piFinal }), ...(dataLock === undefined ? {} : { lock: dataLock }) });
+  if (options.storage.kind === "sqlite" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, resolve(options.storage.path), print, { ...(piFinal === undefined ? {} : { piFinal }), ...(dataLock === undefined || !(await dataLock.isHeld()) ? {} : { lock: dataLock }) });
   // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
   const beforeUpgrade: BeforeUpgrade | undefined = options.backup === undefined ? undefined : async (notice) => {
     await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }), ...(piState === undefined ? {} : { piState }) });
@@ -686,7 +688,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const barrier = new MaintenanceBarrier();
     if (backups !== undefined) barrier.add({ name: "backups", hold: async () => backups.hold() });
     barrier.add({ name: "dispatcher", hold: async () => { await dispatch?.driver.settle(); const live = dispatch === undefined ? [] : await dispatch.dispatcher.liveAttempts(dispatch.principal); if (live.length > 0) throw new Error(`${live.length} agent attempt(s) are still running: stop or pause the work first`); return () => undefined; } });
-    const stagedRestore = backups === undefined || dataDirectory === undefined || options.storage.kind !== "sqlite" ? undefined : new StagedRestore({ backups, root: options.backup!.directory, barrier, sqlitePath: resolve(options.storage.path), dataDirectory, storage, ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(piFinal === undefined ? {} : { piFinal }), piStateConfigured: piState !== undefined, confirmMinutes: async () => (await retentionSettings.effective()).restoreConfirmMinutes, changeMargin: async () => (await retentionSettings.effective()).restoreChangeMargin, ...(backupEncryption === undefined ? {} : { unlock: (m) => backupEncryption!.unlock(m) }), deletions: () => new DeletionLedger(join(options.backup!.directory, LEDGER_FILE)).read(), ...(options.backup!.restore?.onStaged === undefined ? {} : { onStaged: options.backup!.restore.onStaged }), ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
+    const stagedRestore = backups === undefined || dataDirectory === undefined || options.storage.kind !== "sqlite" ? undefined : new StagedRestore({ backups, root: options.backup!.directory, barrier, sqlitePath: resolve(options.storage.path), dataDirectory, storage, ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(piFinal === undefined ? {} : { piFinal }), piStateConfigured: piState !== undefined, ...(dataLock === undefined ? {} : { lock: dataLock }), confirmMinutes: async () => (await retentionSettings.effective()).restoreConfirmMinutes, changeMargin: async () => (await retentionSettings.effective()).restoreChangeMargin, ...(backupEncryption === undefined ? {} : { unlock: (m) => backupEncryption!.unlock(m) }), deletions: () => new DeletionLedger(join(options.backup!.directory, LEDGER_FILE)).read(), ...(options.backup!.restore?.onStaged === undefined ? {} : { onStaged: options.backup!.restore.onStaged }), ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
     // The controller's own Urgent triggers (card U11c): no good backup in time, a silent host, repeated policy denials; swept by the dispatcher and told through the notification service.
     const urgentClock = options.notifications?.clock;
     const urgentWatch = new UrgentWatch({ notifications, ...(backups === undefined ? {} : { backups }), hosts: HostService.withEpoch(storage, epoch, assignments, urgentClock === undefined ? {} : { clock: urgentClock }), ...(urgentClock === undefined ? {} : { clock: urgentClock }) });

@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { link, lstat, mkdir, open, readFile, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { constants, createReadStream, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { link, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { FileBlobStore } from "../artifacts/index.js";
@@ -18,7 +18,9 @@ import { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js"
 import { manifestDigestOf, readManifest, verifyBackup } from "./verify.js";
 import { tableFile, type BackupManifest } from "./format.js";
 import { validStoreId } from "./pi-state.js";
-import { acquireDataLocks, type DataLock } from "./data-lock.js";
+import { acquireDataLocks, LINK_FALLBACK_CODES, type DataLock } from "./data-lock.js";
+import { canon, canonSync } from "./canon.js";
+export { canon, canonSync };
 
 /**
  * Restoring from inside the running controller (card K01h), for the owner. A running controller owns its database, so a restore cannot write into it: the backup is verified, restored into a NEW database and new
@@ -34,7 +36,8 @@ export const KEY_FILE = ".nn-restore.key";
 /** Kept for callers of the first slice: staging is now beside each target (`<target>.nn-staged-<stamp>`), so this folder is no longer made. */
 export const STAGING_DIR = ".nn-restore";
 export const DEFAULT_CONFIRM_MINUTES = 30;
-export const DEFAULT_CHANGE_MARGIN = 20;
+/** Counted in recorded audit rows (a busy installation writes several per operation), so the default is generous; the owner sets it (`restoreChangeMargin`, null: not checked). */
+export const DEFAULT_CHANGE_MARGIN = 200;
 
 export interface RestorePlan {
   /** The proposal's confirmation: apply needs exactly this. It is bound to the whole manifest of the backup (every file, the artifact and conversation indexes), the installation's epoch and the time it was issued; the expiry is the owner's CURRENT setting applied to that time when it is used, so an approved preview cannot be applied to something else or later than allowed. */
@@ -97,10 +100,14 @@ export interface StagedRestoreOptions {
   readonly now?: () => Date;
   /** How long an approval token is accepted, in minutes: the owner's setting (`restoreConfirmMinutes`); null: no expiry; absent: 30. */
   readonly confirmMinutes?: () => Promise<number | null | undefined>;
-  /** How many more recorded changes than the preview showed an apply tolerates before it asks for a new preview (the owner's setting `restoreChangeMargin`); null: not checked; absent: 20. Provisional. */
+  /** How many more recorded changes than the preview showed an apply tolerates before it asks for a new preview (the owner's setting `restoreChangeMargin`); null: not checked; absent: 200 (audit rows, not operations). Provisional. */
   readonly changeMargin?: () => Promise<number | null | undefined>;
   /** Whether the backups made here include the agents' conversation state (false: `piState` is not configured on this installation, and every plan says so). */
   readonly piStateConfigured?: boolean;
+  /** The data directory lock this controller keeps: a restore is prepared only while it is held (it is taken now if it is not, or the restore is refused). Absent: not checked (a host that does not lock). */
+  readonly lock?: { require(): Promise<void> };
+  /** The hard link used to make the key file (tests inject one that fails the way some file systems do). */
+  readonly link?: (existing: string, path: string) => Promise<void>;
   /** The device of a path (tests). */
   readonly deviceOf?: (path: string) => Promise<number>;
 }
@@ -114,32 +121,6 @@ const STAGED = ".nn-staged-";
 const inside = (root: string, p: string): boolean => { const r = relative(resolve(root), resolve(p)); return r !== "" && !r.startsWith("..") && !isAbsolute(r); };
 
 async function exists(p: string): Promise<boolean> { return stat(p).then(() => true, () => false); }
-
-/** An absolute path with every link in its existing part resolved: the one spelling the marker stores and compares, so a relative data directory or a link cannot make the same place look like two. A link that dangles is followed to where it points. */
-export async function canon(p: string, depth = 0): Promise<string> {
-  const r = resolve(p);
-  try { return await realpath(r); } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    const info = await lstat(r).catch(() => undefined);
-    if (info?.isSymbolicLink() === true && depth < 40) return canon(resolve(dirname(r), await readlink(r)), depth + 1);
-    const parent = dirname(r);
-    return parent === r ? r : join(await canon(parent, depth), basename(r));
-  }
-}
-/** `canon`, synchronously (the NATIVE realpath, like `fs.promises.realpath`: the JS one keeps 8.3 short names such as RUNNER~1 on Windows, so the two spellings of one place would differ and the marker check would refuse a good restore). (The restore asks for a store's place from a synchronous callback). */
-export function canonSync(p: string, depth = 0): string {
-  const r = resolve(p);
-  try { return realpathSync.native(r); } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    let link = false;
-    try { link = lstatSync(r).isSymbolicLink(); } catch { /* not there */ }
-    if (link && depth < 40) return canonSync(resolve(dirname(r), readlinkSync(r)), depth + 1);
-    const parent = dirname(r);
-    return parent === r ? r : join(canonSync(parent, depth), basename(r));
-  }
-}
 
 async function countRows(file: string, test: (row: Record<string, unknown>) => boolean): Promise<number> {
   let n = 0;
@@ -164,7 +145,7 @@ async function readKeyFile(path: string): Promise<Buffer | undefined> {
  * The key that authenticates the marker and the journal: made on first use (written complete under a temporary name and linked into place, mode 600), readable by the controller's user only. A missing, empty or torn key file
  * is replaced only when no marker or journal depends on it; otherwise it is an error (a new key would make the recorded restore unreadable).
  */
-async function markerKey(dataDirectory: string, create: boolean): Promise<Buffer | undefined> {
+async function markerKey(dataDirectory: string, create: boolean, linkFn: (existing: string, path: string) => Promise<void> = link): Promise<Buffer | undefined> {
   const path = join(dataDirectory, KEY_FILE);
   const have = await readKeyFile(path);
   if (have !== undefined || !create) return have;
@@ -172,14 +153,14 @@ async function markerKey(dataDirectory: string, create: boolean): Promise<Buffer
   if (await lstat(path).then(() => true, () => false)) await rm(path, { force: true });
   const tmp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(tmp, `${randomBytes(32).toString("hex")}\n`, { flag: "wx", mode: 0o600 });
-  try { await link(tmp, path); } catch (error) {
+  try { await linkFn(tmp, path); } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EEXIST") { if (code !== "EPERM" && code !== "ENOSYS" && code !== "ENOTSUP" && code !== "EXDEV" && code !== "EOPNOTSUPP") throw error; if (!(await lstat(path).then(() => true, () => false))) await rename(tmp, path); }
+    if (code !== "EEXIST") { if (code === undefined || !LINK_FALLBACK_CODES.includes(code)) throw error; if (!(await lstat(path).then(() => true, () => false))) await rename(tmp, path); }
   } finally { await rm(tmp, { force: true }).catch(() => undefined); }
   return readKeyFile(path);
 }
-async function requireKey(dataDirectory: string, create = false): Promise<Buffer> {
-  const key = await markerKey(dataDirectory, create);
+async function requireKey(dataDirectory: string, create = false, linkFn?: (existing: string, path: string) => Promise<void>): Promise<Buffer> {
+  const key = await markerKey(dataDirectory, create, linkFn);
   if (key === undefined) throw new Error(`the restore key file ${KEY_FILE} is missing or damaged; nothing recorded by a restore can be checked. Cancel the restore or restore the key file from a copy.`);
   return key;
 }
@@ -262,6 +243,8 @@ export interface ApplyOptions {
   /** Wait before trying a rename again after EBUSY/EPERM/EACCES (a file another program holds open, Windows). Default 150 ms; tries: 4. */
   readonly retryDelayMs?: number;
   readonly now?: () => Date;
+  /** Removes a file of the swap's bookkeeping (tests end the process between two removals). */
+  readonly remove?: (path: string) => Promise<void>;
 }
 
 async function renameRetry(o: ApplyOptions, from: string, to: string): Promise<void> {
@@ -290,7 +273,7 @@ async function planMoves(p: PendingRestore): Promise<{ moves: Move[] } | { missi
   return { moves };
 }
 
-/** Undoes the moves of a journal, last first, recording progress after each. Throws (with what is left) when one cannot be undone. */
+/** Undoes the moves of a journal, last first. Each undo is checked against what is on disk (a move already undone is skipped), so a rollback that is interrupted is simply run again; progress is recorded in the journal only when a move cannot be undone. Throws (with what is left) when one cannot be undone. */
 async function rollBack(data: string, key: Buffer, j: Journal, o: ApplyOptions): Promise<void> {
   for (let i = j.at; i > 0; i--) {
     const m = j.moves[i - 1]!;
@@ -320,14 +303,17 @@ export async function applyPendingRestore(dataDirectory: string, livePath: strin
     if (hasJournal && key === undefined) throw new Error("the restore journal cannot be checked (the restore key file is missing or damaged); the data directory may be half-swapped. Restore the key file or undo the moves listed in the journal by hand.");
     let journal = hasJournal ? await readJournal(data, key!) : undefined;
     let pending: PendingRestore | undefined;
+    const remove = options.remove ?? ((p: string) => rm(p, { force: true }));
     if (journal !== undefined) {
-      pending = await readMarkerRaw(data);
       if (journal.mode === "done") {
-        await rm(join(data, PENDING_FILE), { force: true });
-        await rm(join(data, JOURNAL_FILE), { force: true });
+        // The swap already happened: the clean-up is finished whether or not the marker can still be read (a marker that fails to authenticate must not leave the data directory looking half-done).
+        pending = await readMarkerRaw(data).catch(() => undefined);
+        await remove(join(data, PENDING_FILE));
+        await remove(join(data, JOURNAL_FILE));
         print(`The restore${pending === undefined ? "" : ` of ${pending.name}`} was applied: the previous database and conversation folders are kept beside, named .before-restore-${journal.stamp}.`);
         return pending?.name;
       }
+      pending = await readMarkerRaw(data);
       if (pending === undefined) throw new Error(`a restore journal (${JOURNAL_FILE}) is there but the restore marker is not: the data directory may be half-swapped. Nothing was changed; the journal lists every move, undo them by hand, then remove the journal.`);
     } else {
       const found = await readMarker(dataDirectory, livePath, options.piFinal);
@@ -365,8 +351,8 @@ export async function applyPendingRestore(dataDirectory: string, livePath: strin
       if (failure === undefined) {
         // Recorded as done before anything is removed: a crash from here on finishes the clean-up, it is never planned again.
         await writeJournal(data, k, { stamp: journal.stamp, mode: "done", moves: journal.moves, at: journal.moves.length });
-        await rm(join(data, PENDING_FILE), { force: true });
-        await rm(join(data, JOURNAL_FILE), { force: true });
+        await remove(join(data, PENDING_FILE));
+        await remove(join(data, JOURNAL_FILE));
         print(`The restore of ${pending.name} was applied: the previous database and conversation folders are kept beside, named .before-restore-${pending.stamp}.`);
         return pending.name;
       }
@@ -519,9 +505,21 @@ export class StagedRestore {
     return left;
   }
 
+  /** The owner approved a preview that showed some number of discarded changes: much more than that since is a different decision. Checked before the work and again after the backup was written out (which takes time, and the installation keeps running meanwhile). */
+  async #checkMargin(manifest: BackupManifest, margin: number | null, shown: number | undefined): Promise<void> {
+    if (margin === null || shown === undefined) return;
+    const last = await this.#lastAuditSeq();
+    const backupRows = manifest.files.find((f) => f.table === "audit")?.rows;
+    if (last === undefined || backupRows === undefined) return;
+    const now = Math.max(0, last - backupRows);
+    if (now > shown + margin) throw new DomainError("invalid_command", `${now - shown} more recorded changes (audit rows) than the preview showed were written since it (it showed ${shown}, and ${margin} more are tolerated); ask for a new preview and approve it again`);
+  }
+
   /** Stages the restore and raises the barrier; needs the token the preview gave (the owner approved exactly that). */
   async apply(name: unknown, confirm: unknown, method?: UnlockMethod): Promise<{ plan: RestorePlan; pending: PendingRestore; result: RestoreResult; safetyCopy: string; changesDiscarded?: number }> {
     if (this.#busy || this.#pending !== undefined) throw new DomainError("unavailable", "a restore is already being prepared or waits for the restart");
+    // The swap at the next start needs this controller to be the one that holds the data directory: if another controller holds it, a restore prepared here would be swapped in under it.
+    if (this.#o.lock !== undefined) await this.#o.lock.require();
     this.#busy = true;
     // Where this attempt put staged copies, so a failure at any point removes all of them (the targets are known before the backup is written out).
     const targets = new Map<string, string>();
@@ -538,16 +536,9 @@ export class StagedRestore {
       if (await exists(join(data, PENDING_FILE))) throw new DomainError("unavailable", "a restore is already recorded for the next start (or one that failed is still recorded): cancel it first");
       const { path, manifest } = await this.#find(name);
       const nonce = await this.#checkToken(manifest, confirm);
-      // The owner approved a preview that showed some number of discarded changes: much more than that since is a different decision.
       const margin = await this.#marginOf();
       const shown = this.#previewed.get(nonce);
-      if (margin !== null && shown !== undefined) {
-        const last = await this.#lastAuditSeq();
-        const backupRows = manifest.files.find((f) => f.table === "audit")?.rows;
-        if (last !== undefined && backupRows !== undefined && Math.max(0, last - backupRows) > shown + margin) {
-          throw new DomainError("invalid_command", `${Math.max(0, last - backupRows) - shown} more changes were recorded since the preview (it showed ${shown}, and ${margin} more are tolerated); ask for a new preview and approve it again`);
-        }
-      }
+      await this.#checkMargin(manifest, margin, shown);
       let unlock: BackupKey | undefined;
       if (manifest.encryption !== undefined) {
         if (this.#o.unlock === undefined) throw new DomainError("unavailable", "the backup is encrypted and no unlock method is set up on this host");
@@ -573,6 +564,7 @@ export class StagedRestore {
         result = await restoreBackup(path, fresh, { ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
       } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error; }
       await fresh.close();
+      await this.#checkMargin(manifest, margin, shown);
       for (const [id, target] of targets) {
         const folder = stagedOf(target, stamp);
         // Every staged folder the marker will name must be there: a swap that skipped one would put the database in place without its conversation state.
@@ -590,7 +582,7 @@ export class StagedRestore {
         const safety = await this.#o.backups.safetyCopy();
         const lastSeq = await this.#lastAuditSeq();
         const backupSeq = manifest.files.find((f) => f.table === "audit")?.rows;
-        const key = await requireKey(data, true);
+        const key = await requireKey(data, true, this.#o.link);
         const body: Omit<PendingRestore, "mac"> = { format: 2, name: manifest.name, stamp, preparedAt: this.#now().toISOString(), stagedDb, liveDb: live, pi: staged.pi };
         const pending: PendingRestore = { ...body, mac: macOf(key, body) };
         markerPath = join(data, PENDING_FILE);
@@ -618,6 +610,13 @@ export class StagedRestore {
   async cancel(): Promise<{ cancelled: boolean; leftovers?: string[] }> {
     const mem = this.#pending;
     const data = await canon(this.#o.dataDirectory);
+    // A journal that cannot be read or checked is not a swap that is over: say so and keep it (the next start refuses it too), instead of reporting the restore cancelled.
+    if (await exists(join(data, JOURNAL_FILE))) {
+      const key = await markerKey(data, false);
+      try { if (key === undefined) throw new Error("the restore key file is missing or damaged"); await readJournal(data, key); } catch (error) {
+        throw new DomainError("unavailable", `the restore was not cancelled: the journal ${JOURNAL_FILE} of a half-done swap cannot be checked (${error instanceof Error ? error.message : "error"}). Nothing was changed; undo the moves it lists by hand, then remove the journal and the marker.`);
+      }
+    }
     let disk: PendingRestore | undefined;
     try { disk = (await readMarker(data, this.#o.sqlitePath, this.#o.piFinal))?.pending; } catch { disk = await readMarkerRaw(data).catch(() => undefined); }
     const p = mem?.pending ?? disk;
@@ -626,7 +625,7 @@ export class StagedRestore {
     let markerGone = false;
     try {
       const key = await markerKey(data, false);
-      const journal = key === undefined ? undefined : await readJournal(data, key).catch(() => undefined);
+      const journal = key === undefined ? undefined : await readJournal(data, key);
       // A swap that was finished (journal "done") is not undone by a cancel: only its leftovers are cleared.
       if (journal !== undefined && key !== undefined) { if (journal.mode !== "done") await rollBack(data, key, journal, {}); await rm(join(data, JOURNAL_FILE), { force: true }).catch(() => leftovers.push(JOURNAL_FILE)); }
       try { await rm(join(data, PENDING_FILE), { force: true }); markerGone = true; } catch { leftovers.push(PENDING_FILE); }

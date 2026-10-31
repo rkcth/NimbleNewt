@@ -75,7 +75,9 @@ test("a staged conversation folder that is missing at the first start refuses th
   } finally { rmSync(r.d, { recursive: true, force: true }); }
 });
 const readlinkReal = (p: string): string => nodeRealpath(p);
-import { realpathSync as nodeRealpath } from "node:fs";
+import { realpathSync } from "node:fs";
+// The native realpath, as production returns it (os.tmpdir() may be an 8.3 short path on Windows).
+const nodeRealpath = (p: string): string => realpathSync.native(p);
 
 test("a crash mid-swap with a symlinked conversation folder (now dangling) is resumed from the journal; a journal without its marker is refused, never ignored (finding 2)", { skip: !POSIX && "needs symlinks" }, async () => {
   const r = await rig({ linkedPi: true });
@@ -84,7 +86,7 @@ test("a crash mid-swap with a symlinked conversation folder (now dangling) is re
     const plan = await sr.preview(r.made.manifest.name);
     await sr.apply(plan.name, plan.token);
     await r.storage.close();
-    // The process dies right after the real folder went aside: the link dangles.
+    // The process dies right after the real folder went aside: the link dangles (canon follows a dangling link, so the marker still matches; that the journal is read FIRST is tested in k01h-review3).
     assert.equal(applyAndCrashAfter(r.data, r.sqlite, r.live, 1), 3);
     assert.equal(existsSync(join(r.live, "att-1")), false, "the link dangles");
     assert.equal(existsSync(join(r.data, "restore-journal.json")), true);
@@ -103,7 +105,7 @@ test("a crash mid-swap with a symlinked conversation folder (now dangling) is re
   } finally { rmSync(r.d, { recursive: true, force: true }); }
 });
 
-test("a crash after the last move but before the clean-up finishes the clean-up and is never planned again (finding 1, journal done)", async () => {
+test("a crash right after the last rename (before the journal knows it) finds every move made and finishes the swap (finding 1; the journal-done branch itself is tested in k01h-review3)", async () => {
   const r = await rig();
   try {
     const sr = r.restore();

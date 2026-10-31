@@ -90,3 +90,36 @@ test("the chat proposes a restore with the plan worked out by the controller, it
     assert.equal((await call("backup.restore.status", {})).result.item.pending, undefined, "a proposal stages nothing");
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
 });
+
+test("a second start on a live holder goes on without the lock, says so, takes the lock when the first closes, and prepares a restore only then; a torn lock file refuses the start (card K01h, re-review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-bkl-"));
+  const told: string[][] = [[], []];
+  const open = (i: number) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: (l: string) => { told[i]!.push(l); }, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
+    dataLockEnv: { heartbeatMs: 30 }, backup: { directory: join(d, "backups") } } as never);
+  const a = await open(0);
+  let b: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    b = await open(1);
+    assert.equal(told[1]!.filter((l) => /WITHOUT the data directory lock/.test(l)).length, 1);
+    const boot = await b.services.principals.bootstrapOwner({ name: "rob" });
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await b!.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const made = await call("backup.now", {}, "b1");
+    const name = made.result.item.name as string;
+    const preview = await call("backup.restore.preview", { name });
+    // While the first controller holds the directory a restore is not prepared.
+    const refused = await call("backup.restore.apply", { name, confirm: preview.result.item.token }, "r1");
+    assert.equal(refused.error?.code, "unavailable", JSON.stringify(refused));
+    assert.match(refused.error.message, /does not hold the data directory lock/);
+    assert.equal(existsSync(join(d, "pending-restore.json")), false);
+    await a.close();
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(told[1]!.some((l) => /now holds the data directory lock/.test(l)), told[1]!.join("\n"));
+    const applied = await call("backup.restore.apply", { name, confirm: preview.result.item.token }, "r2");
+    assert.ok(applied.ok, JSON.stringify(applied));
+    await call("backup.restore.cancel", {}, "r3");
+    await b.close(); b = undefined;
+    // A lock file that cannot be read is not tolerated.
+    writeFileSync(join(d, ".nn-data.lock"), "{ torn");
+    await assert.rejects(open(1), /cannot be read/);
+  } finally { await b?.close().catch(() => undefined); await a.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
+});

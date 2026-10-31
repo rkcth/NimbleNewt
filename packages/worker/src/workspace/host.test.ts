@@ -366,7 +366,9 @@ test("the same file changed by two tasks on one head: the second landing is refu
     }
     const [x, y] = await Promise.all([w.host.run(call("landing", { taskId: "tsk-one" })), w.host.run(call("landing", { taskId: "tsk-second" }))]);
     assert.equal([x, y].filter((r) => r.ok && detailOf(r)["landed"] === true).length, 1);
-    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 'one';\n");
+    // The two run at once: which one wins is not decided (a slower machine may run the second first); what matters is that the one that landed is what is in the tree.
+    const winner = x.ok && detailOf(x)["landed"] === true ? "one" : "two";
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), `export const a = '${winner}';\n`);
   } finally { await w.done(); }
 });
 
