@@ -66,6 +66,16 @@ Arguments:
 
 Result: `{ item }`: the grant, with its revision.
 
+#### `setup.readiness`
+
+Owner only: what is set up and what is missing before a first agent can work (owner identity, approval profile, a project, a model route, a host, notifications, an agent, a first task). Read-only; each item says whether it is done, left at its default, missing or optional, what was found and how to set it up.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `ready` (every required item is done), `items` (each with `id`, `label`, `state`, `required`, `detail`, `how`) and `next` (the first required item still missing).
+
 #### `placement.get`
 
 Where local-only data may go (owner only): the hosts the owner allowed and excluded, the approval profile that gives the default, and the hosts that may hold local-only data now. The strict profile allows only listed hosts; the derived and autonomous profiles allow every enrolled host of the owner that is not excluded.

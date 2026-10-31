@@ -54,6 +54,7 @@ import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
+import type { SetupReadinessService } from "../setup/index.js";
 import type { JsonObject } from "../storage/types.js";
 
 export interface Context {
@@ -93,6 +94,8 @@ export interface Context {
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
+  /** Absent when the controller runs without the setup readiness view (card U14). */
+  readonly setup?: Pick<SetupReadinessService, "check">;
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
@@ -223,6 +226,7 @@ const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]
 const resumeSettingsOf = (c: Context): NonNullable<Context["resumeSettings"]> => c.resumeSettings ?? unavailable("resume settings");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
 const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
+const setupOf = (c: Context): NonNullable<Context["setup"]> => c.setup ?? unavailable("the setup readiness view");
 const placementOf = (c: Context): NonNullable<Context["placement"]> => c.placement ?? unavailable("placement settings");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
@@ -346,6 +350,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["grantId"]); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner may read grants"); return found("grant", await grantsOf(c).getGrant(str(a, "grantId"))); } },
   { name: "grant.create", kind: "command", summary: "The owner gives a principal a right (owner only). A service may hold only recovery actions and a client only conversation actions. Repeating the same command ID gives the same grant.", args: { grantee: "the principal, for example `service:dispatcher`", action: "the action, for example `recovery.stall-scan`", project: "a project ID, or `*` for every project", basis: "the reason, in the owner's words", "notBefore?": "ISO time the grant starts", "expiresAt?": "ISO time the grant ends" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantee", "action", "project", "basis", "notBefore", "expiresAt"]); return written(await grantsOf(c).grant(c.principal, { commandId: need(id), ...(a as object), source: "direct" } as never)); } },
+  { name: "setup.readiness", kind: "query", summary: "Owner only: what is set up and what is missing before a first agent can work (owner identity, approval profile, a project, a model route, a host, notifications, an agent, a first task). Read-only; each item says whether it is done, left at its default, missing or optional, what was found and how to set it up.", args: {}, result: "`{ item }`: `ready` (every required item is done), `items` (each with `id`, `label`, `state`, `required`, `detail`, `how`) and `next` (the first required item still missing).",
+    run: async (c, a) => { only(a, []); notFromTask(c, "read the setup readiness"); return asJson({ item: await setupOf(c).check(c.principal) }); } },
   { name: "placement.get", kind: "query", summary: "Where local-only data may go (owner only): the hosts the owner allowed and excluded, the approval profile that gives the default, and the hosts that may hold local-only data now. The strict profile allows only listed hosts; the derived and autonomous profiles allow every enrolled host of the owner that is not excluded.", args: {}, result: "`{ item }`: `allow`, `exclude`, `profile`, `dataHosts` and the revision.",
     run: async (c, a) => { only(a, []); return asJson({ item: await placementOf(c).get(c.principal) }); } },
   { name: "placement.set", kind: "command", summary: "The owner says which hosts may hold local-only data (owner only). `allow` and `exclude` are lists of host IDs (`host:name`); each replaces the earlier list, and one left out stays as it was. A task whose data is local-only is placed only on a host this allows; the change counts from the next placement.", args: { "allow?": "hosts that may hold local-only data, for example `[\"host:laptop\"]`", "exclude?": "hosts that may not, even when the profile would allow them", "expectedRevision?": "the revision you read (0 when none is set)" }, result: "`{ revision }`.", completion: { kind: "completed" },

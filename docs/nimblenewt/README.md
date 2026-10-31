@@ -26,6 +26,7 @@ The [current implementation plan](implementation-plan/README.md) is authoritativ
 | --- | --- |
 | This README | Product behavior and relationships between features. |
 | [Resume reconciliation](resume-reconciliation.md) | Dependency versions, change detection, targeted updates, stale evidence and race-safe continuation. |
+| [Getting started](getting-started.md) | Step-by-step first run: from a clean install to a first working agent, what to decide, and which steps are not built yet (card U14). |
 | [Operational contracts](operational-contracts.md) | Definitions, state/ownership rules, authority, durable operations, and recovery boundaries. |
 | [Agent state and conversation APIs](agent-apis.md) | Durable state edits and two-way agent conversations, with transport choices still open. |
 | [MCP integrations](mcp-integrations.md) | Approved external MCP tools/resources/prompts and the controller-backed adapter for other agents. |

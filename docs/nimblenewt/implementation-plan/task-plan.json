@@ -5473,6 +5473,32 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "U14",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "First-run setup assistant: guided configuration through chat before the first agent exists",
+      "depends_on": [
+        "U03",
+        "U03b",
+        "U10",
+        "H11",
+        "A07c",
+        "P08",
+        "F02",
+        "F09",
+        "R01",
+        "H12k"
+      ],
+      "deliverable": "Added 2026-10-30 after the owner asked how a person does the initial configuration before the first agent exists (guide: docs/nimblenewt/getting-started.md). A launcher that starts the controller from a configuration file (storage choice SQLite or PostgreSQL, data directory, secret references, the supported-environment check with its override) and creates the owner once, keeping the owner credential in the operating system's secret store; a first-run conversation that works through the setup readiness view (setup.readiness, built) in order: approval profile (explains derived in plain words, keeps strict if declined), first project and its repository, per project which version control host and CI it uses (GitHub, GitLab, self-hosted or none; nothing assumes GitHub), model providers and routes (the fallback-list rule explained, a local model or a free route as the starting point), hosts and workers, notification channel, first agent with its role, rights and credential, first task; budgets and time limits are offered and left off unless the owner sets them; operations for the steps that are code-only today (routing table editing, host and agent credentials)",
+      "acceptance_and_verification": "On a clean machine the launcher starts the controller and the owner reaches a first working agent and first task using only the launcher and the chat, with no code written; every answer is changeable later by chat and nothing is applied unasked; setup.readiness lists exactly what is still missing at each point and reads no secret; declining a step (for example a paid provider or a budget) leaves it unset and the system still works; a restart half-way resumes at the first missing item; a project can be created for a non-GitHub repository and for one with no remote; docs/nimblenewt/getting-started.md is updated so every step uses a built command",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "V01",
       "parent": "N11",
       "existing_issue": "AII-261",
@@ -8199,7 +8225,8 @@
         "X09b",
         "L03h",
         "V02c",
-        "H12q"
+        "H12q",
+        "U14"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
