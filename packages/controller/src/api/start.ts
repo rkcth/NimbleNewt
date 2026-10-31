@@ -70,7 +70,7 @@ import { ContinuationService, ResumeCheckService, ResumeSettingsService, control
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService } from "../activity/index.js";
 import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
-import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
+import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, hostLocalWork, swarmDescendants, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
@@ -512,7 +512,11 @@ export async function startController(options: StartOptions): Promise<Controller
       return attempt === undefined ? false : checkpointVerdict(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
     } } });
     workEndLate = workEnd;
-    const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork, { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
+    const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork ?? hostLocalWork(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }, {
+      descendants: (taskId) => swarmDescendants(storage, taskId),
+      cancelJob: (by, jobId, o) => jobs.requestCancel(by, { commandId: `stopjob-${jobId}-${o.force ? "force" : "ask"}`, jobId, reason: o.reason, ...(o.force ? { force: true } : {}) }),
+      charge: (by, c) => budgets.charge(by, { commandId: c.commandId, activity: "stop-cleanup", taskId: c.taskId, ...(c.agentId === undefined ? {} : { agentId: c.agentId }), ...(c.costMicros > 0 ? { costMicros: c.costMicros } : {}), ...(c.computeMs > 0 ? { computeMs: c.computeMs } : {}) }),
+    }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
     const cutover = CutoverService.withEpoch(storage, epoch, routing, {});

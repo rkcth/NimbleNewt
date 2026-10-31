@@ -37,7 +37,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { sealContract } from "../remote/contract.js";
-import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
+import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
@@ -711,6 +711,32 @@ export class DispatcherService {
       if ((scope.taskId === undefined || d.body.taskId === scope.taskId) && (scope.agentId === undefined || d.body.agentId === scope.agentId)) out.push(id);
     }
     return out;
+  }
+
+  /**
+   * What the worker hosts still hold for these attempts (card L02d): local processes and child work, and the cleanup cost so far as a running total per attempt. Only staff may ask. Each host answers for the attempts it knows;
+   * a host that throws fails the whole look (the caller treats that as unknown, never as nothing running). Bounded: at most 500 attempts, 200 entries per host.
+   */
+  async localWorkOf(by: Principal, attemptIds: readonly string[]): Promise<HostLocalWork> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not ask what workers still hold`);
+    const ids = attemptIds.filter((id) => typeof id === "string" && ATTEMPT.test(id)).slice(0, 500);
+    const processes: HostLocalWork["processes"][number][] = [];
+    const costs = new Map<string, { costMicros: number; computeMs: number }>();
+    for (const host of this.#deps.workers) {
+      if (host.localWork === undefined) continue;
+      const got = await host.localWork(ids);
+      for (const p of (Array.isArray(got?.processes) ? got.processes : []).slice(0, 200)) processes.push(p);
+      for (const c of Array.isArray(got?.costs) ? got.costs : []) {
+        // A figure for an attempt that was not asked about is not taken, and a figure that is not a whole count of zero or more is not trusted: the entry is dropped.
+        if (typeof c?.attemptId !== "string" || !ids.includes(c.attemptId)) continue;
+        const cost = c.costMicros ?? 0; const compute = c.computeMs ?? 0;
+        if (!Number.isSafeInteger(cost) || cost < 0 || !Number.isSafeInteger(compute) || compute < 0) continue;
+        const had = costs.get(c.attemptId) ?? { costMicros: 0, computeMs: 0 };
+        costs.set(c.attemptId, { costMicros: had.costMicros + cost, computeMs: had.computeMs + compute });
+      }
+    }
+    return { processes, costs: [...costs].map(([attemptId, v]) => ({ attemptId, ...v })) };
   }
 
   /** Every attempt the dispatcher holds live (not finished) with the dispatcher's state for it, each read once, for the staff passes that look at where work runs (the quiet-host pass). Only staff may ask. */

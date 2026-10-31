@@ -2223,7 +2223,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `lifecycle.stop`
 
-Suspends or stops a task, an agent, a team or the installation: it is paused at once, prepared inside a deadline (scoped cleanup only), and called suspended only after a durable checkpoint; a stop then ends execution. Assignments and the task goal are untouched and nothing is resumed. The first steps run now; the answer says where it stands, and `blocked` lists the choices when work will not settle.
+Suspends or stops a task, an agent, a team or the installation: it is paused at once, prepared inside a deadline (scoped cleanup only), and called suspended only after a durable checkpoint; a stop then ends execution, including local processes, the work of swarm children and background jobs (a Pause leaves those running; a permitted remote job the controller tracks is named as an exception and keeps running). A process or job that will not end is listed and Force Stop is offered. Assignments and the task goal are untouched and nothing is resumed. The first steps run now; the answer says where it stands, and `blocked` lists the choices when work will not settle.
 
 Arguments:
 
@@ -2231,7 +2231,7 @@ Arguments:
 - `mode`: `suspend` or `stop`
 - `reason`: why, in words
 - `deadlineMs` (optional): preparation deadline in milliseconds (default 60,000; at most one hour)
-- `spendBudget` (optional): most the cleanup may spend
+- `spendBudget` (optional): most the cleanup may spend, in millionths of the budget currency (cost only; optional, no limit when left out). Whatever the cleanup and the ending cost is charged to the budgets of the tasks it served, with or without this limit
 
 Result: `{ intentId, replayed, phase, outcome?, blocked? }`.
 

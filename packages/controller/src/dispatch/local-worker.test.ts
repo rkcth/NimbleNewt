@@ -40,6 +40,27 @@ for (const backend of backends) {
   };
   const ops = async (w: DispatchWorld, attemptId: string) => (await w.storage.listAggregates(operationKind(attemptId), { limit: 50 })).map((a) => a.body as unknown as ToolOperationBody);
 
+  test(`${backend.name}: the local worker reports what its sandboxes still hold for Stop, also after the attempt ended, and asks only about attempts it started; a sandbox that cannot say contributes nothing (card L02d)`, async () => {
+    let closed = false;
+    let fail = false;
+    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary) => ({ revision: recipe.revision, close: async () => { closed = true; }, work: async () => { if (fail) throw new Error("backend down"); return { processes: closed ? [{ ref: "pid-9 (left behind)", kind: "process" as const, state: "uncooperative" as const }] : [], costMicros: 250, computeMs: 40 }; } }) };
+    const { store, w, local, d } = await setup({ sandbox });
+    try {
+      const ann = await w.agent("ann", workGrants(w.project, ["read-file"]));
+      const { attemptId } = await w.task("t", ann);
+      await d.tick();
+      await d.idle();
+      assert.equal(closed, true, "the attempt ended and its sandbox was closed");
+      assert.deepEqual(await local.localWork([attemptId!, "att-unknownunknownunkn"]), { processes: [{ attemptId: attemptId!, ref: "pid-9 (left behind)", kind: "process", state: "uncooperative" }], costs: [{ attemptId: attemptId!, costMicros: 250, computeMs: 40 }] });
+      // The dispatcher aggregates it for staff only, and a host that fails fails the look.
+      const got = await d.localWorkOf(w.owner, [attemptId!]);
+      assert.deepEqual(got.costs, [{ attemptId: attemptId!, costMicros: 250, computeMs: 40 }]);
+      await assert.rejects(d.localWorkOf(await w.agent("bob", workGrants(w.project, ["read-file"])) as never, [attemptId!]), /may not ask/);
+      fail = true;
+      await assert.rejects(d.localWorkOf(w.owner, [attemptId!]), /backend down/);
+    } finally { await store.close(); }
+  });
+
   test(`${backend.name}: the local worker registers from its own facts, runs an attempt in a sandbox with every call through the gateway, and closes both`, async () => {
     const { store, w, local, self, d, log } = await setup();
     try {

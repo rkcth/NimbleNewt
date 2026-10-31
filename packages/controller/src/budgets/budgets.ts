@@ -45,7 +45,7 @@ interface TreeBody { /** Set by the owner closing the budget: no further reserva
 export interface CacheUsage { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
 export interface CacheTotals { readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number; readonly calls: number }
 
-export type Activity = "model-call" | "background-job" | "meeting" | "supervision" | "review";
+export type Activity = "model-call" | "background-job" | "meeting" | "supervision" | "review" | "stop-cleanup";
 export interface UsageEntry {
   readonly taskId?: string;
   readonly projectId?: string;
@@ -152,7 +152,7 @@ const AGG_TOTAL = "budget-aggregate-total";
 type TotalsSeen = Map<string, Awaited<ReturnType<CommandRunner["get"]>>>;
 const AGG_REASON = "budget: the owner's aggregate cap";
 const PRINCIPAL = /^(?:owner|agent|host):[a-z0-9][a-z0-9-]{0,39}$/;
-const ACTIVITIES: readonly Activity[] = ["model-call", "background-job", "meeting", "supervision", "review"];
+const ACTIVITIES: readonly Activity[] = ["model-call", "background-job", "meeting", "supervision", "review", "stop-cleanup"];
 const CURRENCY = /^[A-Z]{3,8}$/;
 const BACKEND_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const cacheUsage = (value: unknown): CacheUsage | undefined => {

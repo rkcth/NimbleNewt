@@ -100,6 +100,11 @@ export interface WorkerHandle {
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
 export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
 
+export interface HostLocalWork {
+  readonly processes: readonly { readonly attemptId?: string; readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[];
+  readonly costs?: readonly { readonly attemptId: string; readonly costMicros?: number; readonly computeMs?: number }[];
+}
+
 export interface WorkerHost {
   /** The host principal (`host:<name>`) this worker runs on: its place is asked of admission under this name. */
   readonly hostId: string;
@@ -115,6 +120,12 @@ export interface WorkerHost {
    * that does not say leaves it out and is judged only when the worker starts (card H07e).
    */
   refuses?(probe: HostProbe): Promise<{ readonly reasons: readonly string[]; /** False when every reason is a passing condition (not connected, not heard from lately): the attempt just waits and the owner is not told. */ readonly lasting: boolean }>;
+  /**
+   * What this host still holds for these attempts, for Stop (card L02d): the local processes and child work they started (running, asked to stop and not stopped, or of unknown state), and what the cleanup after the stop has
+   * cost so far, as a running total per attempt (the controller charges only what it has not charged yet). A host that cannot say leaves it out, and nothing is claimed about what is not known. It answers only for attempts it knows and
+   * throws when it cannot look (the stop then shows one unknown item instead of a clean stop).
+   */
+  localWork?(attemptIds: readonly string[]): Promise<HostLocalWork>;
   /** The host's side of integration, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }

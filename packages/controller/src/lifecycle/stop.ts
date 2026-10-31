@@ -29,16 +29,21 @@ export interface StopPorts {
   /** Why a stop cannot be done for this scope at all (so it is refused before anything is paused or recorded), or undefined. */
   unsupported?(scope: PauseScope): string | undefined;
   /** Scoped cleanup only (finish or checkpoint what is running, nothing new). `backup` asks for an eligible backup model after the first one was lost. */
-  cleanup(scope: PauseScope, options: { deadlineAt: string; spendBudget?: number; backup: boolean }): Promise<{ remaining: readonly InventoryItem[]; spent?: number; modelLost?: boolean }>;
+  cleanup(scope: PauseScope, options: { deadlineAt: string; spendBudget?: number; backup: boolean; by: Principal }): Promise<{ remaining: readonly InventoryItem[]; spent?: number; modelLost?: boolean; costs?: readonly CleanupCost[] }>;
   /** The checkpoint of the scope's state, and whether it and the artifacts it names are durable. */
   checkpoint(scope: PauseScope): Promise<{ checkpointId: string; durable: boolean; artifactsDurable: boolean }>;
   /** Ends execution. `force` skips waiting. `unresolved` names what could not be settled (effects of unknown outcome, children still running). */
-  terminate(scope: PauseScope, options: { force: boolean }): Promise<{ ended: boolean; unresolved: readonly string[] }>;
+  terminate(scope: PauseScope, options: { force: boolean; by: Principal }): Promise<{ ended: boolean; unresolved: readonly string[]; costs?: readonly CleanupCost[] }>;
+  /** Charges the cleanup cost of one attempt to the budget of its task (card L02d). Safe to repeat with the same `commandId`; the amounts are what is new since the last charge. Absent: nothing is charged. */
+  charge?(charge: { commandId: string; attemptId: string; costMicros: number; computeMs: number }): Promise<void>;
   /** The attempt IDs the runtime has seen for the scope in this stop (so the request can record them and a restart still asks about one that ended during preparation). */
   attempts?(scope: PauseScope): readonly string[];
   /** Gives the runtime the attempt IDs recorded on the request, after a restart lost its memory. */
   remember?(scope: PauseScope, attempts: readonly string[]): void;
 }
+
+/** What cleanup (and the ending) has cost for one attempt, as a running total: the stop charges only the part it has not charged yet. */
+export interface CleanupCost { readonly attemptId: string; readonly costMicros?: number; readonly computeMs?: number }
 
 export type StopSettled = (by: Principal, event: { intentId: string; scope: PauseScope; mode: StopMode; outcome: StopOutcome }) => Promise<void>;
 export interface StopOutcome { readonly state: "suspended" | "stopped" | "recovery-required"; readonly graceful: boolean; readonly unresolved: readonly string[]; readonly at: string }
@@ -59,6 +64,8 @@ export interface StopIntentBody {
   readonly inventory: readonly InventoryItem[];
   /** The attempts the runtime saw for the scope while preparing (so a process of one that ended meanwhile is still asked about after a restart). */
   readonly attempts?: readonly string[];
+  /** What has been charged to budgets so far for the cleanup, per attempt (running totals), so a repeated pass or a restart charges only what is new. */
+  readonly charged?: Readonly<Record<string, { readonly costMicros: number; readonly computeMs: number }>>;
   readonly blocked?: { readonly reason: string; readonly choices: readonly StopChoice[]; /** The phase `wait` goes back to. */ readonly resume?: StopPhase } | undefined;
   /** The pause request that held the scope when this request was made: a later stop reuses this request's checkpoint only if the same hold is still in place. */
   readonly gateRequestId?: string;
@@ -249,22 +256,26 @@ export class StopService {
         let result: Awaited<ReturnType<StopPorts["cleanup"]>>;
         try {
           if (inventory.length === 0) inventory = (await this.#ports.inventory(b.scope)).slice(0, STOP_LIMITS.inventory);
-          result = await this.#ports.cleanup(b.scope, { deadlineAt: b.deadlineAt, ...(b.spendBudget === undefined ? {} : { spendBudget: b.spendBudget }), backup: b.backupUsed });
+          result = await this.#ports.cleanup(b.scope, { deadlineAt: b.deadlineAt, ...(b.spendBudget === undefined ? {} : { spendBudget: b.spendBudget }), backup: b.backupUsed, by });
         } catch (error) {
           await this.#block(id, by.id, `cleanup could not run: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["preparing"]);
           continue;
         }
+        // Cleanup is billed even when this pass turns out stale: what was spent was spent.
+        const billed = await this.#charge(id, by, result.costs);
         // The attempts the runtime saw are recorded, so a restart still asks about a process of one that has ended since.
         const seenNow = this.#ports.attempts?.(b.scope) ?? [];
         if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(-STOP_LIMITS.inventory) }), ["preparing"]);
         // Something else (a Force Stop, a choice, a resume) may have moved the request while the cleanup ran: then this pass is stale and does nothing more.
         if (((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.phase !== "preparing") continue;
-        const spent = b.spent + (result.spent ?? 0);
+        const spent = b.spent + (result.spent ?? billed.costMicros);
         if (result.modelLost === true && !b.backupUsed) { await this.#update(id, (x) => ({ ...x, backupUsed: true, spent, inventory, history: this.#push(x, "preparing", by.id, "the cleanup model was lost; an eligible backup model is used") }), ["preparing"]); continue; }
         if (result.modelLost === true) { await this.#block(id, by.id, "the cleanup model was lost and the backup model could not finish the cleanup", ["preparing"]); continue; }
-        if (b.spendBudget !== undefined && spent > b.spendBudget && result.remaining.length > 0) { await this.#update(id, (x) => ({ ...x, spent }), ["preparing"]); await this.#block(id, by.id, "the cleanup budget is used up with work still running", ["preparing"]); continue; }
-        if (result.remaining.length > 0) {
-          const stuck = result.remaining.filter((i) => i.state !== "settled" && i.state !== "tracked");
+        // A Stop ends processes, child work and background jobs itself, in the ending step (card L02d): only calls in flight, and anything that was asked to stop and did not, are waited for in preparation. A Suspend waits for everything.
+        const settling = b.mode === "stop" ? result.remaining.filter((i) => i.kind === "foreground" || i.state === "uncooperative") : result.remaining;
+        if (b.spendBudget !== undefined && spent > b.spendBudget && settling.length > 0) { await this.#update(id, (x) => ({ ...x, spent }), ["preparing"]); await this.#block(id, by.id, "the cleanup budget is used up with work still running", ["preparing"]); continue; }
+        if (settling.length > 0) {
+          const stuck = settling.filter((i) => i.state !== "settled" && i.state !== "tracked");
           await this.#update(id, (x) => ({ ...x, spent, inventory: result.remaining.slice(0, STOP_LIMITS.inventory) }), ["preparing"]);
           if (Date.parse(now) >= Date.parse(b.deadlineAt) || stuck.some((i) => i.state === "uncooperative")) { await this.#block(id, by.id, stuck.some((i) => i.state === "uncooperative") ? "an uncooperative operation will not settle" : "the deadline passed with work still running", ["preparing"]); continue; }
           return view<StopIntentBody>((await this.#runner.get(KIND, id))!); // still settling: the next call looks again
@@ -290,11 +301,14 @@ export class StopService {
       if (b.phase === "terminating") {
         await this.#observe(by, b.scope, id, "stopping", b.forced === undefined ? "ending execution after preparation" : "force stop: ending execution without cleanup");
         let ended: Awaited<ReturnType<StopPorts["terminate"]>>;
-        try { ended = await this.#ports.terminate(b.scope, { force: b.forced !== undefined }); } catch (error) {
+        try { ended = await this.#ports.terminate(b.scope, { force: b.forced !== undefined, by }); } catch (error) {
           await this.#block(id, by.id, `execution could not be ended: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["terminating"], "terminating");
           continue;
         }
         const graceful = b.forced === undefined;
+        // What the ending cost is billed too; a charge that cannot be made is named, never dropped.
+        const billed = await this.#charge(id, by, ended.costs);
+        if (billed.failed) ended = { ...ended, unresolved: [...ended.unresolved, "cleanup spend not charged"] };
         if (ended.ended && ended.unresolved.length === 0) {
           await this.#observe(by, b.scope, id, "stopped", graceful ? "ended after preparation" : "force stopped; incomplete state may need reconciling");
           await this.#settle(id, by, { state: "stopped", graceful, unresolved: [], at: now }, "done", graceful ? "stopped" : "force stopped", ["terminating"]);
@@ -392,6 +406,37 @@ export class StopService {
    * Changes the record only if it is still in one of the phases the decision was made in (`from`); otherwise someone else got there first and nothing is written (false). The command ID carries the new body's digest, so two
    * different writes at the same revision are never mistaken for one replayed command.
    */
+  /**
+   * Charges the part of the cleanup cost that has not been charged (card L02d). The totals charged so far are on the request, so a repeated pass, a retry or a restart charges only what is new; the charge's command ID is derived from the
+   * new totals, so a crash between the charge and the note of it makes the next try a replay, not a second charge. A figure that is not a whole number of zero or more, or that is for an attempt the runtime did not name, is ignored.
+   * A charge that fails is left for the next try (the total on the request is not moved) and reported as `failed`.
+   */
+  async #charge(id: string, by: Principal, costs: readonly CleanupCost[] | undefined): Promise<{ costMicros: number; failed: boolean }> {
+    let billed = 0;
+    let failed = false;
+    if (costs === undefined || this.#ports.charge === undefined) return { costMicros: 0, failed: false };
+    const have = ((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.charged ?? {};
+    for (const c of costs.slice(0, STOP_LIMITS.inventory)) {
+      const cost = c?.costMicros ?? 0, compute = c?.computeMs ?? 0;
+      if (typeof c?.attemptId !== "string" || !Number.isSafeInteger(cost) || cost < 0 || !Number.isSafeInteger(compute) || compute < 0) continue;
+      const prev = have[c.attemptId] ?? { costMicros: 0, computeMs: 0 };
+      const newCost = Math.max(cost, prev.costMicros), newCompute = Math.max(compute, prev.computeMs);
+      const dCost = newCost - prev.costMicros, dCompute = newCompute - prev.computeMs;
+      if (dCost === 0 && dCompute === 0) continue;
+      if (Object.keys(have).length >= STOP_LIMITS.inventory && have[c.attemptId] === undefined) { failed = true; continue; }
+      const commandId = `stopcl-${createHash("sha256").update(`${id}:${c.attemptId}:${newCost}:${newCompute}`).digest("hex").slice(0, 40)}`;
+      try {
+        await this.#ports.charge({ commandId, attemptId: c.attemptId, costMicros: dCost, computeMs: dCompute });
+        await this.#update(id, (x) => {
+          const now = x.charged?.[c.attemptId] ?? { costMicros: 0, computeMs: 0 };
+          return { ...x, charged: { ...(x.charged ?? {}), [c.attemptId]: { costMicros: Math.max(now.costMicros, newCost), computeMs: Math.max(now.computeMs, newCompute) } } };
+        });
+        billed += dCost;
+      } catch { failed = true; }
+    }
+    return { costMicros: billed, failed };
+  }
+
   async #update(id: string, change: (b: StopIntentBody) => StopIntentBody, from?: readonly StopPhase[]): Promise<boolean> {
     for (let attempt = 1; ; attempt++) {
       const found = await this.#runner.get(KIND, id);

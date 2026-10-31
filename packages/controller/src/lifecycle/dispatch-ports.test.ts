@@ -20,7 +20,7 @@ test("the dispatcher ports: live attempts of a task, calls in flight as inventor
   const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }));
   const task = { kind: "task", id: "task-x" } as const;
   assert.deepEqual(await ports.inventory(task), [{ kind: "foreground", ref: "att-1/c1", state: "running" }]);
-  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 5000).toISOString(), backup: false });
+  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 5000).toISOString(), backup: false, by: staff });
   assert.deepEqual(cleaned.remaining, [], "the call in flight settled");
   assert.deepEqual(await ports.checkpoint(task), { checkpointId: "task:task-x", durable: true, artifactsDurable: true });
   checkpoint = { id: "cp", artifactsDurable: false };
@@ -28,7 +28,7 @@ test("the dispatcher ports: live attempts of a task, calls in flight as inventor
   checkpoint = undefined;
   assert.equal((await ports.checkpoint(task)).durable, false, "no checkpoint from the hook is not a durable one");
   inflight = [{ callId: "c9", state: "uncertain" }];
-  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["att-1/c9"] });
+  assert.deepEqual(await ports.terminate(task, { force: true, by: staff }), { ended: true, unresolved: ["att-1/c9"] });
   assert.ok(log.includes("stop att-1 emergency"));
   await ports.release!(task);
   assert.ok(log.includes("release att-1"), "what preparation froze can be let go");
@@ -40,12 +40,12 @@ test("the dispatcher ports: live attempts of a task, calls in flight as inventor
   // No dispatcher in this controller: nothing can be running. One that should exist but is not up: nothing is claimed.
   const none = dispatchStopPorts(() => undefined, () => "none");
   assert.deepEqual(await none.inventory(task), []);
-  assert.deepEqual(await none.terminate(task, { force: false }), { ended: true, unresolved: [] });
+  assert.deepEqual(await none.terminate(task, { force: false, by: staff }), { ended: true, unresolved: [] });
   assert.equal((await none.checkpoint(task)).durable, true);
   const pending = dispatchStopPorts(() => undefined, () => "pending");
   await assert.rejects(pending.inventory(task), /cannot be known/);
   await assert.rejects(pending.checkpoint(task), /cannot be known/);
-  await assert.rejects(pending.terminate(task, { force: true }), /cannot be known/);
+  await assert.rejects(pending.terminate(task, { force: true, by: staff }), /cannot be known/);
 });
 
 test("a team or installation scope covers the agents whose team chain passes through it, and its attempts are every one of theirs (card L02b)", async () => {
@@ -68,10 +68,10 @@ test("a team or installation scope covers the agents whose team chain passes thr
   };
   const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", (scope) => agentsUnder(storage, scope));
   assert.equal(ports.unsupported!({ kind: "team", id: "team-a" }), undefined);
-  assert.deepEqual(await ports.terminate({ kind: "team", id: "team-a" }, { force: false }), { ended: true, unresolved: [] });
+  assert.deepEqual(await ports.terminate({ kind: "team", id: "team-a" }, { force: false, by: staff }), { ended: true, unresolved: [] });
   assert.deepEqual(stopped.sort(), ["att-1", "att-2", "att-3"], "every attempt under the team, none of another team's");
   stopped.length = 0;
-  await ports.terminate({ kind: "installation", id: "installation" }, { force: true });
+  await ports.terminate({ kind: "installation", id: "installation" }, { force: true, by: staff });
   assert.equal(stopped.length, 4);
 });
 
@@ -92,7 +92,7 @@ test("the stop inventory counts a task's running jobs, names one asked to stop a
     { kind: "job", ref: "job-b", state: "uncooperative" },
     { kind: "job", ref: "job-c", state: "unknown" },
   ]);
-  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["job-b", "job-c"] });
+  assert.deepEqual(await ports.terminate(task, { force: true, by: staff }), { ended: true, unresolved: ["job-b", "job-c"] });
   jobStates = [];
   assert.deepEqual(await ports.inventory(task), []);
 });
@@ -128,8 +128,8 @@ test("the stop inventory lists the local processes and child work a runtime repo
     { kind: "process", ref: "pid-41", state: "running" }, { kind: "child", ref: "child-7", state: "uncooperative" }, { kind: "process", ref: "pid-42", state: "unknown" },
   ]);
   assert.deepEqual(asked, [["att-1"]], "asked about the scope's attempts only");
-  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["pid-41", "child-7", "pid-42"] }, "a process still running after the stop did not end");
-  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false });
+  assert.deepEqual(await ports.terminate(task, { force: true, by: staff }), { ended: true, unresolved: ["pid-41", "child-7", "pid-42"] }, "a process still running after the stop did not end");
+  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false, by: staff });
   assert.equal(cleaned.spent, 12);
   assert.equal(cleaned.remaining.length, 3);
   report = "down";
@@ -138,14 +138,14 @@ test("the stop inventory lists the local processes and child work a runtime repo
   report = [{ ref: "run sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234", kind: "process", state: "running" }, { ref: 7 as never, kind: "process", state: "running" }];
   assert.deepEqual((await ports.inventory(task)).map((i) => i.ref), ["run [redacted]", "runtime:processes#1"]);
   const odd = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, { spent: async () => Number.NaN });
-  assert.equal((await odd.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false })).spent, undefined);
+  assert.equal((await odd.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false, by: staff })).spent, undefined);
   let live = ["att-1"];
   const asked2: (readonly string[])[] = [];
   const ending = { ...dispatcher, liveAttemptsOf: async () => live };
   const p2 = dispatchStopPorts(() => ({ dispatcher: ending as never, principal: staff }), () => "pending", undefined, undefined, { processes: async (a) => { asked2.push(a); return [{ ref: "pid-5", kind: "process", state: "uncooperative" }]; } });
   await p2.inventory(task);
   live = [];
-  assert.deepEqual(await p2.terminate(task, { force: false }), { ended: true, unresolved: ["pid-5"] });
+  assert.deepEqual(await p2.terminate(task, { force: false, by: staff }), { ended: true, unresolved: ["pid-5"] });
   assert.deepEqual(asked2.at(-1), ["att-1"]);
   // A look-only inventory (a readiness check) remembers nothing: a later stop is not asked about attempts only a readiness check saw.
   let live2 = ["att-7"];
@@ -154,7 +154,7 @@ test("the stop inventory lists the local processes and child work a runtime repo
   const p3 = dispatchStopPorts(() => ({ dispatcher: looking as never, principal: staff }), () => "pending", undefined, undefined, { processes: async (a) => { asked3.push(a); return []; } });
   await p3.inventory(task, { lookOnly: true });
   live2 = [];
-  await p3.terminate(task, { force: false });
+  await p3.terminate(task, { force: false, by: staff });
   assert.deepEqual(asked3, [["att-7"]], "only the look itself asked; terminate had nothing remembered to ask about");
   // A restart empties the seen map; the attempts recorded on the stop request are given back, so a process of an attempt that ended before the restart is still asked about.
   const before = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, { processes: async () => [] });
@@ -163,12 +163,12 @@ test("the stop inventory lists the local processes and child work a runtime repo
   const asked4: (readonly string[])[] = [];
   const restarted = dispatchStopPorts(() => ({ dispatcher: { ...dispatcher, liveAttemptsOf: async () => [] } as never, principal: staff }), () => "pending", undefined, undefined, { processes: async (a) => { asked4.push(a); return [{ ref: "pid-9", kind: "process", state: "running" }]; } });
   restarted.remember!(task, before.attempts!(task));
-  assert.deepEqual(await restarted.terminate(task, { force: false }), { ended: true, unresolved: ["pid-9"] });
+  assert.deepEqual(await restarted.terminate(task, { force: false, by: staff }), { ended: true, unresolved: ["pid-9"] });
   assert.deepEqual(asked4.at(-1), ["att-1"]);
   // Without the hook nothing is listed and nothing is charged.
   const bare = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending");
   assert.deepEqual(await bare.inventory(task), []);
-  assert.equal((await bare.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false })).spent, undefined);
+  assert.equal((await bare.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false, by: staff })).spent, undefined);
 });
 
 test("a stop goes on for the other attempts when one has ended meanwhile, and a begun stop drops the agent's ending at once (H12n review 2, 3b)", async () => {
@@ -184,6 +184,50 @@ test("a stop goes on for the other attempts when one has ended meanwhile, and a 
   const task = { kind: "task", id: "task-x" } as const;
   await ports.begin!(task, { force: false });
   assert.deepEqual(dropped, ["att-1:owner_stop", "att-2:owner_stop"]);
-  assert.deepEqual(await ports.terminate(task, { force: false }), { ended: true, unresolved: [] });
+  assert.deepEqual(await ports.terminate(task, { force: false, by: staff }), { ended: true, unresolved: [] });
   assert.deepEqual(stops, ["att-2"]);
+});
+
+test("terminate asks a task's jobs and its swarm children's jobs to stop (not a tracked remote one), Force Stop escalates one already asked, a job the asker may not control is unresolved, and the children's attempts are stopped and listed (card L02d)", async () => {
+  const stopped: string[] = [];
+  const dispatcher = {
+    liveAttemptsOf: async (_by: Principal, s: { taskId?: string }) => (s.taskId === "task-x" ? ["att-1"] : s.taskId === "task-kid" ? ["att-2"] : []),
+    get: async (_by: Principal, id: string) => ({ taskId: id === "att-1" ? "task-x" : "task-kid", agentId: "agent:a", state: stopped.includes(id) ? "finished" : "running" }) as never,
+    operations: async () => [] as never, stop: async (_by: Principal, id: string) => { stopped.push(id); }, quiesce: async () => ({}), release: async () => undefined,
+  };
+  const jobs: Record<string, { id: string; state: string; kind: string; background: boolean; resumability: string }[]> = {
+    "task-x": [{ id: "job-a", state: "running", kind: "process", background: true, resumability: "none" }, { id: "job-t", state: "running", kind: "remote", background: true, resumability: "remote_tracked" }, { id: "job-asked", state: "cancellation_requested", kind: "process", background: true, resumability: "none" }],
+    "task-kid": [{ id: "job-k", state: "running", kind: "process", background: false, resumability: "none" }, { id: "job-nope", state: "running", kind: "process", background: false, resumability: "none" }],
+  };
+  const asked: string[] = [];
+  const by = { id: "owner:rob", kind: "owner" } as unknown as Principal;
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async (_by, taskId) => jobs[taskId] ?? [], undefined, undefined, {
+    descendants: async (taskId) => (taskId === "task-x" ? ["task-kid"] : []),
+    cancelJob: async (who, jobId, o) => { assert.equal(who, by, "asked as whoever advances the stop"); if (jobId === "job-nope") throw new DomainError("forbidden", "no"); asked.push(`${jobId}${o.force ? " force" : ""}`); },
+  });
+  const task = { kind: "task", id: "task-x" } as const;
+  const listed = await ports.inventory(task);
+  assert.ok(listed.some((i) => i.kind === "child" && i.ref === "att-2" && i.state === "running"), JSON.stringify(listed));
+  const graceful = await ports.terminate(task, { force: false, by });
+  assert.deepEqual(stopped.sort(), ["att-1", "att-2"], "the child's attempt is stopped with the task's");
+  assert.deepEqual(asked, ["job-a", "job-k"], "running jobs of the task and of its child, not the tracked remote one, not the one already asked");
+  assert.ok(graceful.unresolved.includes("job-nope") && graceful.unresolved.includes("job-asked"), JSON.stringify(graceful));
+  asked.length = 0;
+  await ports.terminate(task, { force: true, by });
+  assert.ok(asked.includes("job-asked force"), "Force Stop escalates a stop that was asked for");
+  assert.ok(!asked.some((x) => x.startsWith("job-t")), "a tracked remote job is never cancelled");
+  // A Stop of an agent scope or a Pause (no terminate) asks no job to stop.
+});
+
+test("the cleanup cost is read for every attempt seen, also one that ended, and charged to the attempt's task through the budget port (card L02d)", async () => {
+  const dispatcher = { liveAttemptsOf: async () => ["att-1"], get: async (_by: Principal, id: string) => ({ taskId: id === "att-1" ? "task-x" : "task-y", agentId: "agent:a" }) as never, operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined };
+  const charges: unknown[] = [];
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, { processes: async () => [], costs: async (a) => a.map((attemptId) => ({ attemptId, costMicros: 5 })) }, undefined, { charge: async (_by, c) => { charges.push(c); } });
+  const task = { kind: "task", id: "task-x" } as const;
+  ports.remember!(task, ["att-gone"]);
+  await ports.inventory(task);
+  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false, by: staff });
+  assert.deepEqual(cleaned.costs?.map((c) => c.attemptId).sort(), ["att-1", "att-gone"]);
+  await ports.charge!({ commandId: "c1", attemptId: "att-gone", costMicros: 5, computeMs: 0 });
+  assert.deepEqual(charges, [{ commandId: "c1", taskId: "task-y", agentId: "agent:a", costMicros: 5, computeMs: 0 }]);
 });

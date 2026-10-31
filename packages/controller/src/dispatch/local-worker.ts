@@ -6,10 +6,18 @@ import type { Capabilities, HostService } from "../hosts/index.js";
 import type { Principal } from "../security/principals.js";
 import type { JsonObject } from "../storage/types.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
-import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, WorkOrder, WorkerTurnResult } from "./ports.js";
+import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, HostLocalWork, WorkOrder, WorkerTurnResult } from "./ports.js";
 
 /** An isolation session for one attempt (card A03's launcher, behind a port): the host opens one with the recipe the dispatcher stated and closes it when the attempt ends or the recipe changes. */
-export interface SandboxSession { readonly revision: string; close(): Promise<void> }
+export interface SandboxSession {
+  readonly revision: string;
+  close(): Promise<void>;
+  /**
+   * What is still alive in this confinement and what the cleanup after a stop has cost so far (card L02d), as the backend sees it; it is asked also after `close()` (a process that outlived its confinement is `uncooperative`).
+   * Optional: a sandbox that cannot list its processes leaves it out and nothing is claimed about them. `costMicros` and `computeMs` are running totals for the session.
+   */
+  work?(): Promise<{ readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[]; readonly costMicros?: number; readonly computeMs?: number }>;
+}
 export interface SandboxPort {
   /** Opens the sandbox for a recipe. It refuses (throws) when this host has no confinement: nothing ever runs unconfined as a fallback. */
   open(recipe: RecipeSummary, order: WorkOrder): Promise<SandboxSession>;
@@ -41,6 +49,7 @@ function mergeUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsa
   return { ...(b.turnSeq === undefined ? (a.turnSeq === undefined ? {} : { turnSeq: a.turnSeq }) : { turnSeq: b.turnSeq }), ...(costMicros === undefined ? {} : { costMicros }), ...(computeMs === undefined ? {} : { computeMs }), ...(cache === undefined ? {} : { cache }) };
 }
 
+type Mutable<T extends readonly unknown[]> = T[number][];
 export type BoundCall = (request: ToolCallRequest, executor: ToolExecutor) => Promise<ToolResult>;
 export interface RuntimeFactory {
   /** Opens the runtime for an attempt. `from` is a checkpoint to continue from (a restart, a resumed attempt); `call` is the one way a tool reaches the world. */
@@ -119,6 +128,28 @@ export class LocalWorker implements WorkerHost {
     this.#options = options;
   }
 
+  /** The sandbox session of each attempt this process started, kept after the attempt ends so that Stop can still ask what outlived it. Bounded; the oldest are forgotten first. */
+  readonly #sessions = new Map<string, () => SandboxSession>();
+  #remember(attemptId: string, session: () => SandboxSession): void {
+    this.#sessions.delete(attemptId);
+    this.#sessions.set(attemptId, session);
+    while (this.#sessions.size > 500) this.#sessions.delete(this.#sessions.keys().next().value!);
+  }
+
+  /** What Stop needs from this host (card L02d): asked for the attempts it knows, answered from their sandbox sessions. A session that cannot say is left out; one that fails to answer fails the whole look (the stop then names an unknown item). */
+  async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
+    const processes: Mutable<HostLocalWork["processes"]> = [];
+    const costs: Mutable<NonNullable<HostLocalWork["costs"]>> = [];
+    for (const attemptId of attemptIds.slice(0, 500)) {
+      const session = this.#sessions.get(attemptId)?.();
+      if (session?.work === undefined) continue;
+      const w = await session.work();
+      for (const p of w.processes.slice(0, 200)) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state });
+      if (w.costMicros !== undefined || w.computeMs !== undefined) costs.push({ attemptId, ...(w.costMicros === undefined ? {} : { costMicros: w.costMicros }), ...(w.computeMs === undefined ? {} : { computeMs: w.computeMs }) });
+    }
+    return { processes, costs };
+  }
+
   /** Announces this host's capabilities (from its own facts) under its own credential, and beats once. */
   async register(hosts: Pick<HostService, "announce" | "heartbeat">, self: Principal): Promise<void> {
     if (self.id !== this.hostId || self.kind !== "host") throw new DomainError("forbidden", `${self.id} is not ${this.hostId}; a worker registers as itself`);
@@ -154,6 +185,7 @@ export class LocalWorker implements WorkerHost {
     }
     const content = note === undefined ? order.content : `${order.content}\n\n[${note}]`;
     let sandbox = await options.sandbox.open(order.recipe, order);
+    this.#remember(order.attemptId, () => sandbox);
     let gateway: ToolGateway | undefined;
     let runtime: AttemptRuntime | undefined;
     let inFlight = 0;

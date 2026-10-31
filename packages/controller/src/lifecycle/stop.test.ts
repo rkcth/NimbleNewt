@@ -47,7 +47,16 @@ class Runtime implements StopPorts {
   async inventory(): Promise<InventoryItem[]> { this.calls.push("inventory"); return this.items; }
   async cleanup(_s: unknown, o: { backup: boolean }) { this.calls.push("cleanup"); const hook = this.duringCleanup; this.duringCleanup = undefined; if (hook !== undefined) await hook(); this.backups.push(o.backup); return this.cleanups.length > 1 ? this.cleanups.shift()! : this.cleanups[0]!; }
   async checkpoint() { this.calls.push("checkpoint"); if (this.throwOnCheckpoint) throw new Error("no runtime to checkpoint"); return { checkpointId: "cp-1", durable: this.checkpointDurable, artifactsDurable: this.artifactsDurable }; }
-  async terminate(_s: unknown, o: { force: boolean }) { this.calls.push(o.force ? "terminate-force" : "terminate"); if (this.crashOnTerminate) await new Promise(() => undefined); if (this.throwOnTerminate) throw new Error("cannot reach the host"); return { ended: this.ended, unresolved: this.unresolved }; }
+  /** The cleanup costs terminate reports, and the charges made (a charge fails while `failCharges` is above zero). */
+  terminateCosts: Array<{ attemptId: string; costMicros?: number; computeMs?: number }> | undefined;
+  charges: Array<{ commandId: string; attemptId: string; costMicros: number; computeMs: number }> = [];
+  failCharges = 0;
+  async charge(c: { commandId: string; attemptId: string; costMicros: number; computeMs: number }): Promise<void> {
+    if (this.failCharges > 0) { this.failCharges--; throw new Error("the budget could not be reached"); }
+    // A repeated command ID is the same charge (as the budget ledger answers it).
+    if (!this.charges.some((x) => x.commandId === c.commandId)) this.charges.push(c);
+  }
+  async terminate(_s: unknown, o: { force: boolean }) { this.calls.push(o.force ? "terminate-force" : "terminate"); if (this.crashOnTerminate) await new Promise(() => undefined); if (this.throwOnTerminate) throw new Error("cannot reach the host"); return { ended: this.ended, unresolved: this.unresolved, ...(this.terminateCosts === undefined ? {} : { costs: this.terminateCosts }) }; }
   count(call: string): number { return this.calls.filter((c) => c === call).length; }
 }
 
@@ -395,6 +404,74 @@ for (const backend of backends) {
     assert.equal((await c.stops.advance(c.mgr, { intentId: b.intentId })).phase, "cancelled");
     assert.equal(c.rt.count("release"), before + 1);
   });
+  suite("the cleanup cost is charged as it grows, once, and what could not be charged is kept for the next try; the part counted against the budget is what was charged (card L02d)", async (c) => {
+    c.rt.items = [{ kind: "foreground", ref: "att-a/c1", state: "running" }];
+    c.rt.cleanups = [
+      { remaining: [{ kind: "foreground", ref: "att-a/c1", state: "running" }], costs: [{ attemptId: "att-a", costMicros: 1000, computeMs: 100 }] },
+      { remaining: [{ kind: "foreground", ref: "att-a/c1", state: "running" }], costs: [{ attemptId: "att-a", costMicros: 1800, computeMs: 100 }] },
+      { remaining: [{ kind: "foreground", ref: "att-a/c1", state: "running" }], costs: [{ attemptId: "att-a", costMicros: 1800, computeMs: 100 }] },
+      { remaining: [], costs: [{ attemptId: "att-a", costMicros: 1500, computeMs: 100 }, { attemptId: "att-b", costMicros: -5 }, { attemptId: "att-c", costMicros: 1.5 }] },
+    ];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x", spendBudget: 5000 });
+    await c.stops.advance(c.owner, { intentId });
+    assert.deepEqual(c.rt.charges.map((x) => [x.attemptId, x.costMicros, x.computeMs]), [["att-a", 1000, 100]]);
+    c.rt.failCharges = 1;
+    await c.stops.advance(c.owner, { intentId });
+    assert.equal(c.rt.charges.length, 1, "the second charge failed and was not recorded as charged");
+    assert.equal((await c.stops.get(c.owner, intentId))?.charged?.["att-a"]?.costMicros, 1000);
+    await c.stops.advance(c.owner, { intentId });
+    assert.deepEqual(c.rt.charges.map((x) => [x.attemptId, x.costMicros, x.computeMs]), [["att-a", 1000, 100], ["att-a", 800, 0]], "the missed part is charged by the next pass, nothing twice");
+    const done = await c.stops.advance(c.owner, { intentId });
+    assert.equal(c.rt.charges.length, 2, "a lower total (a restarted counter) and figures that are not whole numbers of zero or more charge nothing");
+    assert.equal(done.outcome?.state, "suspended");
+    assert.equal(done.spent, 1800, "the spend counted against the cleanup budget is what was charged");
+    assert.equal(new Set(c.rt.charges.map((x) => x.commandId)).size, 2, "each charge has its own command ID");
+    await c.stops.advance(c.owner, { intentId });
+    assert.equal(c.rt.charges.length, 2, "a finished request charges nothing more");
+  });
+
+  suite("what the ending cost is charged too, and a charge that cannot be made is named in the result instead of dropped (card L02d)", async (c) => {
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 400, computeMs: 5 }];
+    const ok = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    const done = await c.stops.advance(c.owner, { intentId: ok.intentId });
+    assert.equal(done.outcome?.state, "stopped");
+    assert.deepEqual(c.rt.charges.map((x) => [x.attemptId, x.costMicros, x.computeMs]), [["att-a", 400, 5]]);
+  });
+
+  suite("a charge that fails while the ending is charged makes the result recovery-required and names it", async (c) => {
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 400 }];
+    c.rt.failCharges = 5;
+    const r = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    const done = await c.stops.advance(c.owner, { intentId: r.intentId });
+    assert.equal(done.outcome?.state, "recovery-required");
+    assert.deepEqual(done.outcome?.unresolved, ["cleanup spend not charged"]);
+  });
+
+  suite("a Stop does not wait in preparation for processes, child work or jobs (it ends them itself), a Suspend does; an uncooperative one blocks either (card L02d)", async (c) => {
+    const items: InventoryItem[] = [{ kind: "process", ref: "node", state: "running" }, { kind: "child", ref: "att-child", state: "running" }, { kind: "job", ref: "job-1", state: "running" }];
+    c.rt.items = items;
+    c.rt.cleanups = [{ remaining: items }];
+    const stop = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    const done = await c.stops.advance(c.owner, { intentId: stop.intentId });
+    assert.equal(done.outcome?.state, "stopped", "the stop went on to end them");
+    assert.equal(c.rt.count("terminate"), 1);
+  });
+
+  suite("a Suspend waits for a running process; an uncooperative job blocks a Stop with Force Stop offered", async (c) => {
+    const proc: InventoryItem = { kind: "process", ref: "node", state: "running" };
+    c.rt.items = [proc];
+    c.rt.cleanups = [{ remaining: [proc] }];
+    const sus = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    const waiting = await c.stops.advance(c.owner, { intentId: sus.intentId });
+    assert.equal(waiting.phase, "preparing", "still settling");
+    const job: InventoryItem = { kind: "job", ref: "job-1", state: "uncooperative" };
+    c.rt.cleanups = [{ remaining: [job] }];
+    const up = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    const blocked = await c.stops.advance(c.owner, { intentId: up.intentId });
+    assert.equal(blocked.phase, "blocked");
+    assert.ok(blocked.blocked?.choices.includes("force-stop"));
+  });
+
   suite("a scope that cannot be stopped yet is refused before anything is paused or recorded", async (c) => {
     c.rt.unsupportedWith = "stopping a whole team is not supported yet";
     await refuses("unavailable", () => c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" }));
