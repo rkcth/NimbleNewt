@@ -48,7 +48,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N18 / AII-268 | G06, X11, X09, X09b, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
-| N10a / AII-520 | U02, U02b, U12, U12b, U12c, U12d, U12e, T05 |
+| N10a / AII-520 | U02, U02b, U12, U12b, U12c, U12d, U12e, T05, T05b |
 | N16a / AII-615 | B02, B03, B04, B05, B06 |
 
 ## Cards
@@ -2432,6 +2432,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Both initiation directions survive reconnect; no duplicate turns or cross-scope leakage; protocol session not task owner; a protocol-version upgrade preserves thread IDs, cursors and audit history.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### T05b — Finish the MCP conversation door: client conformance, push, resources and a switch
+
+- **Parent:** N10a / AII-520.
+- **Blockers:** T05.
+- **Deliverable:** Split from T05 (2026-10-31): the adapter and a plain request/response door (POST /mcp on the conversation listener, one JSON-RPC message per request, no session id) are built; what remains is what a stock MCP client needs and what the owner can switch: the MCP-Protocol-Version header and Accept negotiation checked against a real MCP SDK client, an optional server-to-client event stream (GET /mcp) with listChanged-style notices that carry no state beyond the cursor, thread resources and prompts, stdio for a local client, a chat-settable switch (enable or disable, owner only) for the MCP door apart from the REST door, and the cursor edge where more than about 5000 hidden messages follow the cursor.
+- **Acceptance and verification:** A stock MCP client connects, lists the tools and holds a conversation across a dropped stream; the door can be switched off by chat and a request already refused stays refused; a stream carries no history of its own and a reconnect resumes only from the cursor; the door's own rate limit is separate from the REST door's.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### T06 — Implement the protected agent tool bridge and execution service
 
 - **Parent:** N13 / AII-263.
@@ -3071,7 +3079,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

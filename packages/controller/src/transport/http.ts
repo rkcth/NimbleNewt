@@ -2,6 +2,7 @@ import { createServer as createHttp, type IncomingMessage, type Server, type Ser
 import { createServer as createHttps } from "node:https";
 import { isIP } from "node:net";
 import type { ConversationService } from "../conversations/index.js";
+import { McpConversationAdapter } from "../mcp/conversation-adapter.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal, PrincipalService } from "../security/index.js";
 import { redactText } from "../security/redact.js";
@@ -68,12 +69,14 @@ export class ConversationTransport {
   readonly #polls = new Map<string, number>();
   readonly #aborts = new Set<AbortController>();
   readonly #now: () => number;
+  readonly #mcp: McpConversationAdapter;
   #total = 0;
   readonly url: string;
   readonly port: number;
 
   private constructor(server: Server, options: TransportOptions, limits: TransportLimits, hosts: Set<string>, url: string, port: number) {
     this.#server = server; this.#options = options; this.#limits = limits; this.#hosts = hosts; this.url = url; this.port = port; this.#now = options.clock ?? Date.now;
+    this.#mcp = new McpConversationAdapter(options.conversations, options.principals);
   }
 
   static async listen(options: TransportOptions): Promise<ConversationTransport> {
@@ -118,7 +121,7 @@ export class ConversationTransport {
       this.#limit(`addr:${req.socket.remoteAddress ?? "?"}`, this.#limits.perAddressPerMinute);
       const principal = await this.#authenticate(req);
       this.#limit(`principal:${principal.id}`, this.#limits.perPrincipalPerMinute);
-      const result = await this.#route(req, principal, aborter);
+      const result = new URL(req.url ?? "/", "http://listener").pathname === "/mcp" ? await this.#mcpRoute(req) : await this.#route(req, principal, aborter);
       this.#send(res, result.status, result.body);
     } catch (error) {
       if (aborter.signal.aborted && res.destroyed) return;
@@ -231,6 +234,31 @@ export class ConversationTransport {
       return { status: 204 };
     }
     throw new HttpError(404, "not_found", "no such route");
+  }
+
+  /**
+   * The MCP door (card T05): one JSON-RPC message per POST to /mcp, answered as one JSON body (no event stream, no `Mcp-Session-Id`: a protocol session owns nothing, so there is nothing to
+   * resume but the cursor). The adapter authenticates the bearer credential again for the message, so the principal is never cached here. A notification gets 202 and no body; GET (the
+   * server-to-client stream) and DELETE (ending a session) answer 405 because there is neither. The same host check, rate limits and size bound as the REST routes apply.
+   */
+  async #mcpRoute(req: IncomingMessage): Promise<{ status: number; body?: unknown }> {
+    if (req.method !== "POST") throw new HttpError(405, "method_not_allowed", "use POST", { allow: "POST" });
+    const declared = Number(req.headers["content-length"] ?? 0);
+    if (declared > this.#limits.bodyBytes) throw new HttpError(413, "too_large", `a request body is at most ${this.#limits.bodyBytes} bytes`);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += (chunk as Buffer).length;
+      if (size > this.#limits.bodyBytes) throw new HttpError(413, "too_large", `a request body is at most ${this.#limits.bodyBytes} bytes`);
+      chunks.push(chunk as Buffer);
+    }
+    const type = req.headers["content-type"];
+    if (typeof type !== "string" || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(type)) throw new HttpError(415, "unsupported_media_type", "send application/json");
+    let message: unknown;
+    try { message = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return { status: 200, body: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the body is not valid JSON" } } }; }
+    const token = /^Bearer ([^\s]{20,400})$/.exec(String(req.headers.authorization ?? ""))?.[1];
+    const answer = await this.#mcp.handle(token, message);
+    return answer === undefined ? { status: 202 } : { status: 200, body: answer };
   }
 
   #page(url: URL): { afterId?: string; limit?: number } {

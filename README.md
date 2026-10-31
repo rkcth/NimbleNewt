@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **209 of 329 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **209 of 330 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -116,7 +116,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 60% | 12 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 62% | 31 of 50 |
-| Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 7 of 8 |
+| Agent messaging | `▓▓▓▓▓▓▓▓▓░░░` 77% | 7 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓░░░░` 70% | 22 of 31 |
 | Tools and skills | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
@@ -417,13 +417,14 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 </details>
 
 <details>
-<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 7 of 8</summary>
+<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓▓▓░░░ 7 of 9</summary>
 
 Durable conversations between agents, delivery classes, and the MCP conversation adapter.
 
 - [x] **U02** · P24 · Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 - [x] **U02b** · P25 · Implement the conversation transport and remote exposure _(needs U02)_
 - [ ] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
+- [ ] **T05b** · P27 · Finish the MCP conversation door: client conformance, push, resources and a switch _(needs T05)_
 - [x] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 - [x] **U12b** · P30 · Deliver informational messages at check-ins and show agent questions in chat _(needs U02, S08, L05, M01)_
 - [x] **U12c** · P32 · Finish agent messages: owner questions in chat, stand-up boundary _(needs U12b, M03b)_
@@ -631,7 +632,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i)_
 
 </details>
 
