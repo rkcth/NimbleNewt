@@ -1639,6 +1639,45 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `maintenance.get`
+
+One maintenance request in full, as a reviewer needs it: kind, class, the exact spec (package version, source, install behaviour, mount, site), its digest, the rollback plan, the decision, the recorded effect, any pending reason. The requester, its supervisor and the owner may read it.
+
+Arguments:
+
+- `maintenanceId`: the request
+
+Result: `{ item }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.list`
+
+Maintenance requests the caller may read (the owner all; an agent its own and its reports'), oldest first, optionally by `status` or `agentId`.
+
+Arguments:
+
+- `status` (optional): pending, approved, applying, applied, rejected, withdrawn, failed, revoking or revoked
+- `agentId` (optional): one agent
+- `after` (optional): the `next` of the last page
+- `limit` (optional): 1 to 200 (default 50)
+
+Result: `{ items, next? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.settings.get`
+
+Owner only: the maintenance settings: `requests` (agents may ask; default on), `bosses` (supervisors may decide what is not protected; default off in the strict profile, on otherwise), `rules` (the preapproved catalogue and allowed sites approve by themselves; default on), per-site rules and the preapproved catalogue; what counts now, the profile and the revision.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, set, effective, profile } }`.
+
+Completion: finished when accepted (`completed: true`).
+
 ### Commands
 
 #### `grant.create`
@@ -4840,5 +4879,162 @@ Arguments:
 - `timeboxMinutes` (optional): minutes to spend on it, or null
 
 Result: `{ id, revision, replayed, shown }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.request`
+
+Asks for a change to an agent's environment as a maintenance request (card A09). An agent asks for its own; the owner for any agent. `kind`: `skill` (a skill draft: allowed and recorded), `package` or `extension` (an executable dependency: a preapproved catalogue entry approves it, else a decider), `mount` or `network` (broader access: a decider; an allowed site is approved by the owner's rule, a denied site is rejected), `host-policy` or `base` (protected: the owner only). The answer is the maintenance ID at once, before anything is decided or applied. A decided-yes request is applied by the controller and the effect is recorded. Install scripts never run before the approval of this exact request. At most 20 requests of one agent wait at once.
+
+Arguments:
+
+- `agentId` (optional): the agent (an agent's own by default)
+- `kind`: skill, package, extension, mount, network, host-policy or base
+- `spec`: skill `{ name, digest }`; package or extension `{ name, version, digest, source, installScripts }`; mount `{ mountPath, resource, mode: read|write }`; network `{ site, port? }`; host-policy `{ setting, change }`; base `{ change, digest? }`
+- `reason`: why (1 to 500 characters)
+- `rollbackPlan` (optional): how the change is undone (required except for skill drafts)
+- `commandId`: required
+
+Result: `{ maintenanceId, status, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.decide`
+
+A decider approves or rejects a waiting request. `specDigest` must be the digest of the request as you read it (the verdict is for that exact package version, source, access, install behaviour and rollback plan). Who decides: the owner always; in a profile other than strict also the requester's supervisor when the owner's `bosses` setting is on, except for host policy and the shared base, which are the owner's alone. Nobody decides their own request. Approval starts the application.
+
+Arguments:
+
+- `maintenanceId`: the request
+- `verdict`: approve or reject
+- `specDigest`: the request's `specDigest`
+- `note` (optional): a short reason
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision, status }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.revoke`
+
+Takes a maintenance change back: a waiting or approved request is ended (the requester may withdraw its own); an applied one is reverted by the controller and the revert is recorded. The owner may revoke any; the requester's supervisor what a supervisor may decide.
+
+Arguments:
+
+- `maintenanceId`: the request
+- `reason`: why
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision, status }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.apply`
+
+Owner only: tries again to apply an approved request that is waiting (the applier could not take it, or safe restoration was not possible). It does nothing for a request that is not approved.
+
+Arguments:
+
+- `maintenanceId`: the request
+- `commandId`: required
+
+Result: `{ status }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.settings.set`
+
+Owner only: sets any of `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `sites` (`{ "pypi.org": "allow" | "deny" | null }`), `catalogueAdd` and `catalogueRemove` (lists of `{ name, version, digest, installScripts? }`). A narrowing counts for requests already made: a request approved for a site now denied is rejected and an applied one is reverted. Optional `expectedRevision`.
+
+Arguments:
+
+- `requests` (optional): true, false or null
+- `bosses` (optional): true, false or null
+- `rules` (optional): true, false or null
+- `sites` (optional): map of site to allow, deny or null
+- `catalogueAdd` (optional): entries to preapprove
+- `catalogueRemove` (optional): entries to remove
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.settings.enable`
+
+Owner only: turns on `requests`, `bosses`, `rules` or `all` of them.
+
+Arguments:
+
+- `what`: requests, bosses, rules or all
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.settings.disable`
+
+Owner only: turns off `requests`, `bosses`, `rules` or `all` of them (the owner still decides). Requests already made are judged again under the new setting.
+
+Arguments:
+
+- `what`: requests, bosses, rules or all
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.site.set`
+
+Owner only: one network site's rule: `allow` (requests for it are approved by themselves), `deny` (rejected; an applied one is reverted) or `clear` (back to the installation profile).
+
+Arguments:
+
+- `site`: a host name such as pypi.org
+- `rule`: allow, deny or clear
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.catalogue.add`
+
+Owner only: preapproves one exact package (name, version, digest); a request for exactly that is approved by itself. `installScripts` true also preapproves its install scripts.
+
+Arguments:
+
+- `name`: package name
+- `version`: exact version
+- `digest`: sha256:...
+- `installScripts` (optional): true to preapprove install scripts
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `maintenance.catalogue.remove`
+
+Owner only: removes one package from the preapproved catalogue. Requests for it are decided by a person again.
+
+Arguments:
+
+- `name`: package name
+- `version`: exact version
+- `digest`: sha256:...
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).

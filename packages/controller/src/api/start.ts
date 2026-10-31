@@ -79,6 +79,7 @@ import { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import { CapacityLimitsService } from "../admission/caps.js";
 import { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
+import { MaintenanceService, type MaintenanceApplier } from "../maintenance/index.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
@@ -136,6 +137,8 @@ export interface StartOptions {
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
    */
   readonly dispatch?: DispatchStartOptions;
+  /** Reviewed environment changes (card A09). The applier makes an approved change in the agent's environment; without one every approved change waits (pending) and the owner is not misled. */
+  readonly maintenance?: { readonly applier?: MaintenanceApplier };
   /**
    * How the owner is reached outside the inbox (card U11b): the named channel adapters the notification service delivers through when the owner sets the channel to `external` (Urgent items, escalations and digests
    * all go through them), and a fixed clock for tests. With the dispatcher, each tick runs `notifications.runDue` (escalation of unattended Needs-you items, Notice expiry, digests, retries); without it nothing runs it.
@@ -208,6 +211,8 @@ export interface Controller {
     /** Retention, quotas, archive, export and deletion, and their settings (card K06). */
     readonly retention: RetentionService; readonly retentionSettings: RetentionSettingsService;
     readonly backups?: BackupService;
+    /** Reviewed environment changes (card A09). */
+    readonly maintenance: MaintenanceService;
     readonly workEnd: WorkEndService; readonly scratchCleanup: ScratchCleanupService; readonly acceptance: AcceptanceService;
     /** The one catalogue (revoke path and tool bridge share it). */
     readonly catalog: CatalogService;
@@ -660,7 +665,9 @@ export async function startController(options: StartOptions): Promise<Controller
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: n.ref, detail: n.text }); },
       meter: quotaMeter, ...(options.backup === undefined ? {} : { ledger: new DeletionLedger(join(options.backup.directory, LEDGER_FILE)) }), ...(reserve === undefined ? {} : { reserve }), ...(dataDirectory === undefined ? {} : { dataDirectory }), ...(options.retention?.autoEveryMs === undefined ? {} : { autoEveryMs: options.retention.autoEveryMs }),
     });
-    const api = new StateApi({ serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    // Reviewed environment changes (card A09): a request is recorded at once, decided per the installation profile, applied through the applier port and logged. A new request that a person must decide files one notice for the owner.
+    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? {} : { applier: options.maintenance.applier }), notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}) that you decide. Read it with maintenance.get and decide with maintenance.decide.`.slice(0, 400) }); } });
+    const api = new StateApi({ maintenance, serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
@@ -715,12 +722,14 @@ export async function startController(options: StartOptions): Promise<Controller
       });
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
+    // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
+    maintenance.background(maintenance.resume());
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
+      api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { tools?.dispose(); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
+      close: async () => { await maintenance.idle().catch(() => undefined); tools?.dispose(); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     toolsLive?.dispose();

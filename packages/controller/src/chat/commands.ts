@@ -140,6 +140,16 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "release.issuers.enable": { verb: "Let QA agents or their supervisors start release tests", mode: "propose" },
   "release.issuers.disable": { verb: "Stop QA agents or their supervisors starting release tests", mode: "apply" },
   "difficulty.set": { verb: "Set difficulty of task", mode: "profile", revision: "contract", needsProject: true },
+  // Environment changes an agent asked for (card A09). Deciding one lets something be installed, mounted or reached: always shown first, with the exact request. Widening the settings (turning a switch on, allowing a site,
+  // preapproving a package) is shown first; narrowing (turning one off, denying a site, removing a package, revoking a change) applies at once, and a deny or a revoke only when the owner's own words say it and name the site or request.
+  "maintenance.decide": { verb: "Decide an agent's environment change request", mode: "propose" },
+  "maintenance.revoke": { verb: "Revoke an environment change", mode: "apply" },
+  "maintenance.apply": { verb: "Try applying an approved environment change again", mode: "apply" },
+  "maintenance.settings.enable": { verb: "Turn on environment change requests, supervisor decisions or automatic rules", mode: "propose" },
+  "maintenance.settings.disable": { verb: "Turn off environment change requests, supervisor decisions or automatic rules", mode: "apply" },
+  "maintenance.site.set": { verb: "Set the rule for a network site", mode: "propose" },
+  "maintenance.catalogue.add": { verb: "Preapprove a package", mode: "propose" },
+  "maintenance.catalogue.remove": { verb: "Remove a package from the preapproved list", mode: "apply" },
 };
 
 /** Names the owner may use in place of an ID; each is resolved from records and an unclear match asks. */
@@ -195,12 +205,14 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "resource.bind": /\b(bind|add|attach|connect|link)/i,
   "task.transfer": /\b(transfer|hand over|reassign|move)/i,
   "task.assign": /\b(assign|give|allocate)/i,
+  "maintenance.revoke": /\b(revoke|undo|remove|take back|withdraw|roll back|uninstall|cancel)/i,
+  "maintenance.site.set:deny": /\b(deny|block|forbid|ban|disallow|stop)/i,
   "host.move-work": /\b(move|relocate|re-?place|reassign|transfer|shift|take)/i,
 };
 
 /** The key into `MOVE_VERBS` for a command, or undefined when the command needs no verb. */
 export function moveKey(op: string, args: Readonly<Record<string, unknown>>): string | undefined {
-  const key = op === "task.transition" ? `${op}:${String(args["to"])}` : op === "project.update" ? `${op}:${String(args["state"])}` : op;
+  const key = op === "task.transition" ? `${op}:${String(args["to"])}` : op === "project.update" ? `${op}:${String(args["state"])}` : op === "maintenance.site.set" && args["rule"] === "deny" ? `${op}:deny` : op;
   return key in MOVE_VERBS ? key : undefined;
 }
 
@@ -211,9 +223,12 @@ export function ownerSaysMove(op: string, args: Readonly<Record<string, unknown>
   const verb = MOVE_VERBS[key] as RegExp;
   const names = targets.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0);
   const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const named = names.map((n) => new RegExp(`(^|[^a-z0-9])${esc(n)}($|[^a-z0-9])`, "i"));
+  // A name with a dot in it (a site such as pypi.org) stays in one piece: its dots are not sentence ends.
+  const dotless = (x: string): string => x.replace(/\./g, "\u2024");
+  const joined = names.filter((n) => n.includes(".")).reduce((t, n) => t.replace(new RegExp(`(^|[^a-z0-9])${esc(n)}(?=$|[^a-z0-9])`, "gi"), (m, lead: string) => `${lead}${dotless(m.slice(lead.length))}`), ownText);
+  const named = names.map((n) => new RegExp(`(^|[^a-z0-9])${esc(dotless(n))}($|[^a-z0-9])`, "i"));
   // A question is not an order: sentences ending in "?" never count.
-  const sentences = (ownText.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((s) => !s.trimEnd().endsWith("?"));
+  const sentences = (joined.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((s) => !s.trimEnd().endsWith("?"));
   return sentences.some((s) => verb.test(s) && named.some((r) => r.test(s)));
 }
 
@@ -243,7 +258,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.
-  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false)) return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
   if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
@@ -258,10 +273,12 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest"]);
 
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
 export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
+/** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
+export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set()): string | undefined {

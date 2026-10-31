@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -459,7 +459,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
@@ -867,6 +867,21 @@ export class ChatService {
       }
       args["participants"] = resolved;
     }
+    // An environment change request (card A09): named by an ID the owner said; deciding it is bound to the request as it is now (its digest and revision are read from the record, never said), and the owner sees what it asks for.
+    if (intent.op === "maintenance.decide" || intent.op === "maintenance.revoke" || intent.op === "maintenance.apply") {
+      if (typeof args["maintenanceId"] !== "string") return refuse("invalid_command", "say which request: its maintenance ID");
+      const item = await this.#get(token, "maintenance.get", { maintenanceId: args["maintenanceId"] });
+      if (item === undefined) return refuse("not_found", "no such maintenance request");
+      extraTargets.push(args["maintenanceId"]);
+      if (intent.op === "maintenance.decide") {
+        if (item["status"] !== "pending") return refuse("invalid_command", `that request is ${String(item["status"]).slice(0, 20)}, not waiting for a decision`);
+        args["specDigest"] = item["specDigest"];
+        args["expectedRevision"] = item["revision"];
+        const sp = JSON.stringify(item["spec"]);
+        labels[String(item["specDigest"])] = `${String(item["agentId"]).slice(0, 50)} asks: ${String(item["kind"])} ${sp.length > 150 ? `${sp.slice(0, 147)}...` : sp}; install scripts and rollback: see maintenance.get`;
+      }
+    }
+    if (intent.op === "maintenance.site.set" && typeof args["site"] === "string") extraTargets.push(args["site"]);
     steps.push({ op: intent.op, args, commandId: "" });
     const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
     const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: (intent.op !== "host.move-work" || (typeof args["hostId"] === "string" && ordersHostMove(words, args["hostId"]))) && ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(intent.op === "host.move-work" && typeof args["hostId"] === "string" ? [args["hostId"]] : []).concat(extraTargets)) });
