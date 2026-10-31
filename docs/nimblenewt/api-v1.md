@@ -841,6 +841,7 @@ Arguments:
 
 - `projectId`: the project
 - `includeEnded` (optional): also list ended stand-ups
+- `endedOnly` (optional): list only the ended ones
 - `limit` (optional): most items, 1 to 50, default 20
 
 Result: `{ item: { items, more } }`.

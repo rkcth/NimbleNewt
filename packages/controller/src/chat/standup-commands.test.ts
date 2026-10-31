@@ -89,6 +89,26 @@ for (const backend of backends) {
     const listed = await w.api.handle(w.ownerToken, { v: 1, op: "standup.list", args: { projectId: a } } as never) as unknown as { ok: boolean; result: { item: { items: { title: string }[] } } };
     assert.deepEqual(listed.result.item.items.map((i) => i.title).sort(), ["Afternoon check", "Morning sync"], "the ended one is left out");
 
+    // A readable project with no stand-ups answers an empty list, not "not found".
+    const empty = await w.api.handle(w.ownerToken, { v: 1, op: "standup.list", args: { projectId: await w.project("Empty") } } as never) as unknown as { ok: boolean; result: { item: { items: unknown[]; more: boolean } } };
+    assert.deepEqual([empty.ok, empty.result?.item.items.length, empty.result?.item.more], [true, 0, false]);
+    // Ended stand-ups never hide an active one, by title or by ID: the active list is asked first, and an ID is read directly.
+    const crowd = await w.project("Crowd");
+    const dead: string[] = [];
+    for (let i = 0; i < 3; i++) { const d = await ctl.sched(crowd, `Old ${i}`); await w.api.handle(w.ownerToken, { v: 1, op: "standup.update", commandId: cid("end"), args: { scheduleId: d, expectedRevision: (await ctl.schedule(d)).revision, state: "ended" } } as never); dead.push(d); }
+    const live = await ctl.sched(crowd, "Live one");
+    const chat2 = w.chat();
+    await chat2.setFocus(w.ownerToken, { commandId: cid("f"), projectId: crowd });
+    script["Pause the live one."] = [cmd("standup.update", { standupTitle: "live", state: "paused" }, "Pause the live one")];
+    assert.equal(only((await say(w, chat2, "Pause the live one.")).outcomes).status, "applied");
+    assert.equal((await ctl.schedule(live)).state, "paused");
+    script[`Pause ${dead[0]}.`] = [cmd("standup.update", { scheduleId: dead[0], state: "paused" }, `Pause ${dead[0]}`)];
+    const deadOut = only((await say(w, chat2, `Pause ${dead[0]}.`)).outcomes);
+    assert.equal(deadOut.status, "refused");
+    assert.match(String(deadOut.message), /has ended/);
+    const act = await w.api.handle(w.ownerToken, { v: 1, op: "standup.list", args: { projectId: crowd } } as never) as unknown as { result: { item: { items: { title: string }[] } } };
+    assert.deepEqual(act.result.item.items.map((i) => i.title), ["Live one"]);
+
     // A stand-up of another project cannot be reached by its ID from this one.
     const other = await ctl.sched(await w.project("B"), "Other team");
     script[`Pause ${other}.`] = [cmd("standup.update", { scheduleId: other, state: "paused" }, `Pause ${other}`)];

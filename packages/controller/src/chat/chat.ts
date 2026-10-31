@@ -708,25 +708,30 @@ export class ChatService {
       delete args["standupTitle"];
       if (named !== undefined && args["scheduleId"] !== undefined) return refuse("invalid_command", "give either scheduleId or standupTitle, not both");
       if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "standupTitle must be text");
-      const listed = await this.#get(token, "standup.list", { projectId, includeEnded: true, limit: 50 });
-      const everything = (listed?.["items"] as Record<string, unknown>[] | undefined) ?? [];
-      const more = listed?.["more"] === true;
-      const all = everything.filter((i) => i["state"] !== "ended");
-      if (args["scheduleId"] === undefined) {
+      if (args["scheduleId"] !== undefined) {
+        // An ID is looked at directly, so a project with many ended stand-ups cannot hide it.
+        const got = typeof args["scheduleId"] === "string" ? await this.#get(token, "standup.get", { scheduleId: args["scheduleId"] }) : undefined;
+        const schedule = got?.["schedule"] as { projectId?: string; state?: string; title?: string } | undefined;
+        if (schedule === undefined || schedule.projectId !== projectId) return refuse("not_found", "that stand-up is not in this project");
+        if (schedule.state === "ended") return refuse("invalid_command", "that stand-up has ended and cannot be changed or started again");
+        labels[String(args["scheduleId"])] = String(schedule.title);
+      } else {
         const words = typeof named === "string" ? named.trim().toLowerCase() : "";
-        const matches = all.filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
+        const listed = await this.#get(token, "standup.list", { projectId, limit: 50 });
+        const more = listed?.["more"] === true;
+        const matches = ((listed?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
         if (matches.length === 0) {
-          const ended = everything.filter((i) => i["state"] === "ended" && (words === "" || String(i["title"]).toLowerCase().includes(words)));
+          // Ended stand-ups are only looked up to explain a miss.
+          const endedList = more ? undefined : await this.#get(token, "standup.list", { projectId, endedOnly: true, limit: 50 });
+          const ended = ((endedList?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
           if (ended.length > 0) return refuse("invalid_command", `the stand-up "${String(ended[0]!["title"]).slice(0, 80)}" has ended and cannot be changed or started again`);
-          if (more) return refuse("not_found", "the project has more than 50 stand-ups and none of those looked at matches; give the stand-up's ID");
+          if (more) return refuse("not_found", "the project has more than 50 active stand-ups and none of those looked at matches; give the stand-up's ID");
           return refuse("not_found", words === "" ? "there is no stand-up in that project" : `no stand-up in that project is called "${words.slice(0, 80)}"`);
         }
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["scheduleId"])} (${String(m["title"]).slice(0, 60)})`), field: "scheduleId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["scheduleId"])) };
         args["scheduleId"] = String(matches[0]!["scheduleId"]);
-      } else if (everything.some((i) => i["scheduleId"] === args["scheduleId"] && i["state"] === "ended")) return refuse("invalid_command", "that stand-up has ended and cannot be changed or started again");
-      else if (!all.some((i) => i["scheduleId"] === args["scheduleId"])) return refuse("not_found", more ? "that stand-up was not found among the first 50 of this project" : "that stand-up is not in this project");
-      const chosen = all.find((i) => i["scheduleId"] === args["scheduleId"]);
-      if (chosen !== undefined) labels[String(args["scheduleId"])] = String(chosen["title"]);
+        labels[String(args["scheduleId"])] = String(matches[0]!["title"]);
+      }
     }
     // A question to the owner named by its words (or the only one waiting): the one open question whose words, task or asker contain them, else the owner is asked.
     if (intent.op === "owner.answer") {

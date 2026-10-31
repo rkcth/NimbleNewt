@@ -274,14 +274,15 @@ export class StandupService {
   }
 
   /**
-   * A project's stand-ups (not the ended ones unless asked), oldest first, found by reading every stand-up record of the installation page by page (there is no per-project index; stand-ups are few), for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. At most `limit` (default 20, at most 50) are returned;
+   * A project's stand-ups (not the ended ones unless asked), in no particular order (the records are read in ID order, which is random), found by reading every stand-up record of the installation page by page (there is no per-project index; stand-ups are few), for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. At most `limit` (default 20, at most 50) are returned;
    * `more` says some were left out. Added for the chat (card M03g), which names a stand-up by its title.
    */
-  async list(viewer: Principal, projectId: string, options: { includeEnded?: boolean; limit?: number } = {}): Promise<{ items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[]; more: boolean } | undefined> {
+  async list(viewer: Principal, projectId: string, options: { includeEnded?: boolean; endedOnly?: boolean; limit?: number } = {}): Promise<{ items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[]; more: boolean } | undefined> {
     const project = checkProjectId(projectId);
     const limit = options.limit === undefined ? 20 : whole(options.limit, "limit", 1, STANDUP_LIMITS.agendaPage);
     const items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[] = [];
-    let readable = false;
+    // Whether the viewer may read the project's meetings is asked directly, so a readable project with no stand-ups answers an empty list, not "not found".
+    if ((await this.#meetings.planned(viewer, project, { limit: 1 })) === undefined) return undefined;
     let after: string | undefined;
     for (;;) {
       const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
@@ -290,15 +291,14 @@ export class StandupService {
         if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
         const schedule = await this.#meetings.schedule(viewer, c.id);
         if (schedule === undefined) continue;
-        readable = true;
-        if (schedule.state === "ended" && options.includeEnded !== true) continue;
+        if (options.endedOnly === true ? schedule.state !== "ended" : schedule.state === "ended" && options.includeEnded !== true) continue;
         if (items.length >= limit) return { items, more: true };
         items.push({ scheduleId: c.id, title: schedule.title, state: schedule.state, time: schedule.time, timeZone: schedule.timeZone, revision: schedule.revision });
       }
       after = chunk[chunk.length - 1]!.id;
       if (chunk.length < 100) break;
     }
-    return readable || items.length > 0 ? { items, more: false } : undefined;
+    return { items, more: false };
   }
 
   // ---- preparation ---------------------------------------------------------------------------------------------------------------
@@ -806,11 +806,15 @@ export function allocationFrom(configuration: { effective(by: Principal): Promis
   };
 }
 
-/** The same allocation from a reader of single installation settings (`ConfigurationService.installationSetting`), which needs no principal. Only a figure the owner set counts: a built-in default (floor 0, ceiling 100) is not an allocation, so with none set the review says "no P/PC allocation is set". A failing read gives undefined. */
-export function allocationFromValue(read: (key: string) => Promise<{ value: unknown; set: boolean }>): () => Promise<Allocation | undefined> {
+/**
+ * The same allocation from a reader of installation settings (`ConfigurationService.installationSettings`), which needs no principal and reads all the keys from one combined view, so a change applied meanwhile cannot give a mix of old and new figures.
+ * Only a figure the owner set counts: a built-in default (floor 0, ceiling 100) is not an allocation, so with none set the review says "no P/PC allocation is set". A failing read throws; the caller (the review) catches it and says no allocation is set.
+ */
+export function allocationFromValue(read: (keys: readonly string[]) => Promise<Readonly<Record<string, { value: unknown; set: boolean }>>>): () => Promise<Allocation | undefined> {
   return async () => {
-    const num = async (key: string): Promise<number | undefined> => { const v = await read(key); return v.set && typeof v.value === "number" ? v.value : undefined; };
-    const floor = await num("workClass.pcFloor"); const target = await num("workClass.pcTarget"); const ceiling = await num("workClass.pcCeiling");
+    const got = await read(["workClass.pcFloor", "workClass.pcTarget", "workClass.pcCeiling"]);
+    const num = (key: string): number | undefined => { const v = got[key]; return v !== undefined && v.set && typeof v.value === "number" ? v.value : undefined; };
+    const floor = num("workClass.pcFloor"); const target = num("workClass.pcTarget"); const ceiling = num("workClass.pcCeiling");
     return { ...(floor === undefined ? {} : { floor }), ...(target === undefined ? {} : { target }), ...(ceiling === undefined ? {} : { ceiling }) };
   };
 }
