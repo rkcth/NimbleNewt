@@ -1,4 +1,4 @@
-import type { WorkspaceAnswer, WorkspaceAsk } from "./protocol.js";
+import type { RemoteWorkspaceAnswer, WorkspaceAsk } from "./protocol.js";
 import type { RemoteWorkerClient } from "./client.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 
@@ -12,7 +12,7 @@ export class WorkspaceResponder {
   readonly #port: WorkspacePort;
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #running = new Set<string>();
-  readonly #unsent = new Map<string, WorkspaceAnswer>();
+  readonly #unsent = new Map<string, RemoteWorkspaceAnswer>();
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly onError?: (error: unknown) => void }) {
@@ -34,7 +34,7 @@ export class WorkspaceResponder {
   async idle(): Promise<void> { await this.#tail; }
 
   async #carryOut(ask: WorkspaceAsk): Promise<void> {
-    let answer: WorkspaceAnswer;
+    let answer: RemoteWorkspaceAnswer;
     try { answer = await this.#port.run({ ...ask, quietAttempts: [...ask.quietAttempts] }); } catch (error) {
       // The work may be half done: this is told as a refusal that says so, and the port's journal refuses to run the request again.
       answer = { ok: false, reason: `the host could not finish the request and may have done part of it: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
@@ -43,7 +43,7 @@ export class WorkspaceResponder {
     this.#running.delete(ask.requestId);
   }
 
-  async #send(requestId: string, answer: WorkspaceAnswer): Promise<void> {
+  async #send(requestId: string, answer: RemoteWorkspaceAnswer): Promise<void> {
     try { await this.#client.answerWorkspace(requestId, answer); this.#unsent.delete(requestId); } catch (error) {
       this.#unsent.set(requestId, answer);
       if (this.#unsent.size > 100) this.#unsent.delete(this.#unsent.keys().next().value as string);

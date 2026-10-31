@@ -15,7 +15,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
-import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type WorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 export const SESSION_KIND = "remote-session";
 export const PLACEMENT_KIND = "remote-placement";
@@ -152,7 +152,7 @@ export function capabilityReasons(host: string, status: HostStatus | undefined, 
   return out;
 }
 
-interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: WorkspaceAnswer; readonly waiters: Set<() => void> }
+interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: RemoteWorkspaceAnswer; readonly waiters: Set<() => void> }
 
 /** The request as it is sent to a host: every field checked and bounded, nothing else carried. */
 function checkAsk(call: WorkspaceCall): WorkspaceAsk {
@@ -169,7 +169,7 @@ function checkAsk(call: WorkspaceCall): WorkspaceAsk {
 }
 
 /** A host's answer, checked: the typed outcome and nothing more, with the text and the detail bounded. */
-function checkAnswer(value: unknown): WorkspaceAnswer {
+function checkAnswer(value: unknown): RemoteWorkspaceAnswer {
   if (value === null || typeof value !== "object" || Array.isArray(value)) invalid("outcome", "must be an object");
   const o = value as Record<string, unknown>;
   for (const key of Object.keys(o)) if (!["ok", "summary", "detail", "reason"].includes(key)) invalid("outcome", `${key} is not a field of an answer`);
@@ -381,7 +381,7 @@ export class RemoteWorkerService {
    * answer within `waitMs` leaves the request as it is: this throws `unavailable` (the operation may or may not have been carried out) and the ask is withdrawn, so the host does not start it later; an answer that comes after is
    * accepted and dropped. The same request ID asked again joins the first ask and gets the same answer.
    */
-  async askWorkspace(by: Principal, hostId: string, call: WorkspaceCall, options: { readonly waitMs: number }): Promise<WorkspaceAnswer> {
+  async askWorkspace(by: Principal, hostId: string, call: WorkspaceCall, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     this.#staff(by);
     const host = hostIdOf(hostId);
     const wire = checkAsk(call);

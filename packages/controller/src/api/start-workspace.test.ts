@@ -46,6 +46,9 @@ test("integration, refresh, release and quarantine are requested through the sta
     assert.equal(calls.length, 2, "only the two allowed requests reached the host");
     const grant = await c.api.handle(boot.token, { v: 1, op: "workspace.request", commandId: "w5", args: { operation: "integration", taskId: task, reason: "ready" } } as never) as { ok: boolean; result?: any };
     assert.equal(grant.result.state, "done", "the owner may always ask");
+    // The host's port is reachable only through the workspace service: the dispatch handle has no way to it.
+    assert.equal(Object.keys(c.dispatch!).some((k) => /workspacePort|portOf/i.test(k)), false);
+    assert.equal("workspacePortOf" in c.dispatch!, false);
     // The dispatcher's tick runs the recovery of requests a stopped controller left open; with none open it resolves nothing.
     const tick = await c.dispatch!.dispatcher.tick();
     assert.ok(tick.loops.some((l) => l.name === "workspace.recover" && l.ok), "the recovery loop ran");

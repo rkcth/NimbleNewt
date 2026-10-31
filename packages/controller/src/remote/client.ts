@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerTurnResult } from "../dispatch/ports.js";
-import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type WorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
 
@@ -110,7 +110,7 @@ export class RemoteWorkerClient {
   }
 
   /** Answers one workspace request. The same answer sent again is accepted as a repeat; the key is derived from the request, so a retry applies once. */
-  async answerWorkspace(requestId: string, outcome: WorkspaceAnswer): Promise<void> {
+  async answerWorkspace(requestId: string, outcome: RemoteWorkspaceAnswer): Promise<void> {
     await this.#send("POST", `/worker/session/workspace/${encodeURIComponent(requestId)}`, { body: { outcome: outcome as unknown as Json }, key: `workspace-answer:${requestId}`, session: true });
   }
 

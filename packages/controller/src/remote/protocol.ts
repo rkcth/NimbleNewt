@@ -110,4 +110,4 @@ export interface WorkspaceAsk {
   readonly assignee?: string;
 }
 /** What the host answers: the same typed outcomes a local host gives (done, or a refusal with its reason). */
-export type WorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };
+export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };

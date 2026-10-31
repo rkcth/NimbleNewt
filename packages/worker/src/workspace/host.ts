@@ -32,7 +32,8 @@ export interface HostWorkspaceCall {
   /** The agent the task is assigned to, when the controller says (named as the author of what is carried into the shared workspace). */
   readonly assignee?: string;
 }
-export type HostWorkspaceOutcome = { readonly ok: true; readonly summary: string; readonly detail?: { readonly [key: string]: unknown } } | { readonly ok: false; readonly reason: string };
+export type HostJson = null | boolean | number | string | readonly HostJson[] | { readonly [key: string]: HostJson };
+export type HostWorkspaceOutcome = { readonly ok: true; readonly summary: string; readonly detail?: { readonly [key: string]: HostJson } } | { readonly ok: false; readonly reason: string };
 
 /** Where a task's checkout lives on this host. Every path is absolute and chosen by the host's own configuration, never by the request. */
 export interface CheckoutLocation {
@@ -139,7 +140,7 @@ export class WorkspaceHost {
     if (operation === "refresh") {
       // Never over work: a changed or new file, or commits not yet integrated, refuse the refresh whatever the base is (the same check the move itself makes).
       const state = await git.status({ gitDir: where.gitDir, checkout: where.checkout });
-      if (state.dirty) return no(`the checkout holds ${state.entries.length} changed or new file(s); it was left as it was (integrate or quarantine it first)`);
+      if (state.dirty) return no(`the checkout holds ${state.entries.length} changed or new file(s); it was left as it was (its work must be committed, or the checkout quarantined, before a refresh)`);
       const before = await git.baseOf(where.gitDir);
       let target: string;
       try { target = await git.head(where.shared); } catch (error) { return no(`the shared workspace's head could not be read: ${(error as Error).message}`); }
