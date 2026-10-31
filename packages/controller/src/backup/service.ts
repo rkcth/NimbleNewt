@@ -2,7 +2,8 @@ import { stat } from "node:fs/promises";
 import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
-import { DEFAULT_RETENTION, listBackups, pruneBackups, type BackupInfo } from "./retention.js";
+import { basename } from "node:path";
+import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo } from "./retention.js";
 import type { Keyring } from "./crypto.js";
 import { createBackup } from "./write.js";
 
@@ -15,6 +16,8 @@ export interface BackupServiceOptions {
   /** How long after a failed scheduled run the next one waits. Default one hour. */
   readonly retryAfterMs?: number;
   readonly retention?: { daily: number; weekly: number };
+  /** The counts now in force (card K06: the owner's retention settings). Takes precedence over `retention` and is read at each prune. */
+  readonly retentionSource?: () => Promise<{ daily: number; weekly: number }>;
   readonly pageSize?: number;
   /** The artifact store, if the installation has one: its blobs are part of each backup. */
   readonly blobs?: FileBlobStore;
@@ -70,7 +73,7 @@ export class BackupService {
       try {
         const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }) });
         this.#lastError = undefined;
-        await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: this.#options.retention ?? DEFAULT_RETENTION }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
+        await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.#counts() }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
         return made;
       } catch (error) {
         this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backup failed" };
@@ -102,6 +105,25 @@ export class BackupService {
   async finish(): Promise<void> { await this.#running?.catch(() => undefined); }
 
   list(): Promise<BackupInfo[]> { return listBackups(this.#options.root); }
+
+  /** The counts in force: the owner's setting when one is wired, else the option, else the 7 daily and 4 weekly of the first release. A source that fails leaves the option (never fewer copies than before). */
+  async #counts(): Promise<{ daily: number; weekly: number }> {
+    if (this.#options.retentionSource !== undefined) { try { return await this.#options.retentionSource(); } catch { /* keep the fixed counts */ } }
+    return this.#options.retention ?? DEFAULT_RETENTION;
+  }
+
+  /** The names of the backups the rule would delete under these counts (default: those in force). Nothing is deleted. */
+  async preview(retention?: { daily: number; weekly: number }): Promise<string[]> {
+    const all = await listBackups(this.#options.root);
+    const kept = chooseKept(all, retention ?? await this.#counts());
+    return all.filter((b) => !kept.has(b.path)).map((b) => b.manifest.name);
+  }
+
+  /** Deletes the backups outside the rule (the newest, every pre-upgrade snapshot and any backup that cannot be trusted by name are kept) and returns their names. Used by the retention runner. */
+  async prune(retention?: { daily: number; weekly: number }): Promise<string[]> {
+    const result = await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: retention ?? await this.#counts() });
+    return result.deleted.map((p) => basename(p));
+  }
 
   async status(): Promise<BackupStatus> {
     const all = await listBackups(this.#options.root).catch(() => [] as BackupInfo[]); // an unreadable folder shows as empty, with the reason in lastError

@@ -10,6 +10,7 @@ import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseService } from "../release/index.js";
 import type { AcceptanceService, SubmissionService } from "../submissions/index.js";
 import type { SwarmService } from "../swarm/index.js";
+import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
 import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
@@ -141,6 +142,8 @@ export interface StateApiDeps {
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
+  readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
+  readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
@@ -273,6 +276,8 @@ export class StateApi {
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
         ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
         ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
+        ...(this.#deps.retention === undefined ? {} : { retention: this.#deps.retention }),
+        ...(this.#deps.retentionSettings === undefined ? {} : { retentionSettings: this.#deps.retentionSettings }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.setup === undefined ? {} : { setup: this.#deps.setup }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),

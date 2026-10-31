@@ -10,7 +10,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant" | "decision" | "notifications" | "difficulty-profiles";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -56,6 +56,12 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
   // The coverage-lapse alert is off by default and only tells the owner; turning it on or off, or changing its period, is reversible and applies at once (provisional, see the notes).
+  // Retention (card K06): settings are shown first (they decide what may be deleted and how much room is kept back); a deletion, a run, an archive and a restore always are. Reading and checking is not a command.
+  "retention.settings.set": { verb: "Change the retention, quota and reserve settings", mode: "propose", revision: "retention" },
+  "retention.run": { verb: "Run retention (delete what the rule expires)", mode: "propose" },
+  "retention.delete": { verb: "Delete a record and what was made from it", mode: "propose" },
+  "retention.archive": { verb: "Archive a finished task's records", mode: "propose" },
+  "retention.restore": { verb: "Restore a task's archived records", mode: "propose" },
   "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
   // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.

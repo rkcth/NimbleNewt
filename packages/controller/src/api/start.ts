@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { assignedTaskIn, type RouteProbes } from "../dispatch/loops.js";
+import { assignedTaskIn, projectIds, type RouteProbes } from "../dispatch/loops.js";
 import { allows } from "../security/access.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
+import { QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
 import { BackupEncryption, BackupKeyPinService, BackupService, createBackup, readKeyringFile } from "../backup/index.js";
 import { readFile } from "node:fs/promises";
 import { defaultEventSources } from "./default-sources.js";
@@ -21,7 +22,7 @@ import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { WaitService } from "../domain/waits.js";
 import { DeskService, HistoryService, RetrievalService, WorkingNoteService } from "../context/index.js";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   UnsupportedEnvironmentError, checkEnvironment, checkFilesystems, checkPrerequisites, decideStartup, detectDistribution, detectEnvironment, hostLine, overrideRequested, overriddenCheck, prerequisiteProblems, realProbes, recordHost, recordOverride,
   type EnvironmentFacts, type FilesystemDetector, type FilesystemReport, type PrerequisiteNeed, type PrerequisiteReport, type Probes, type StartupCheck,
@@ -172,6 +173,8 @@ export interface StartOptions {
    */
   readonly scratchHost?: { readonly remove: NonNullable<ScratchPorts["order"]> };
   readonly cleanupDefault?: ScratchMode;
+  /** The installation's retention defaults (card K06): the profile the owner's chat settings override. Everything that deletes is off unless a default here turns it on; the owner changes any value by chatting. */
+  readonly retention?: { readonly defaults?: Partial<RetentionValues> };
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
   readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date;
     /** Encrypted backups (card K01b). Off unless given. `keyringFile` is made on the host by `backup encryption-setup`; the passcode and recovery files are the out-of-band files the owner points the proof at (never the chat). If the keyring cannot be read the controller does not start: it never falls back to plain backups. */
@@ -196,6 +199,8 @@ export interface Controller {
   /** What each prerequisite probe found. */
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
+    /** Retention, quotas, archive, export and deletion, and their settings (card K06). */
+    readonly retention: RetentionService; readonly retentionSettings: RetentionSettingsService;
     readonly backups?: BackupService;
     readonly workEnd: WorkEndService; readonly scratchCleanup: ScratchCleanupService; readonly acceptance: AcceptanceService;
     /** The one catalogue (revoke path and tool bridge share it). */
@@ -298,11 +303,25 @@ export async function startController(options: StartOptions): Promise<Controller
     storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
   }
 
+  // Retention in front of writes (card K06): the disk-full reserve and the optional quotas. The meter reads the unwrapped storage; the settings the guard consults are wired below once the epoch is known.
+  const reserve = dataDirectory === undefined ? undefined : new ReserveFile(join(dataDirectory, ".nn-reserve"));
+  const quotaMeter = new QuotaMeter(storage);
+  let currentRetention: () => Promise<RetentionValues> = async () => ({ ...RETENTION_DEFAULTS, ...(options.retention?.defaults ?? {}) });
+  storage = guardStorage(storage, { ...(reserve === undefined ? {} : { reserve }), meter: quotaMeter, values: () => currentRetention() });
+
   let dispatch: DispatchHandle | undefined;
   let toolsLive: ToolExecutionService | undefined;
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
+    // The retention policy (card K06): the owner's chat settings over the installation defaults. Cached for a few seconds for the write guard; a change refreshes it and sets the reserve again.
+    let retentionCache: { at: number; values: RetentionValues } | undefined;
+    const retentionSettings: RetentionSettingsService = RetentionSettingsService.withEpoch(storage, epoch, {
+      ...(options.retention?.defaults === undefined ? {} : { defaults: options.retention.defaults }),
+      onChange: async (values) => { retentionCache = { at: Date.now(), values }; quotaMeter.invalidate(); await reserve?.apply(values.reserveBytes).catch((error: unknown) => print(`The retention reserve could not be set: ${error instanceof Error ? error.message : String(error)}`)); },
+    });
+    currentRetention = async () => { if (retentionCache !== undefined && Date.now() - retentionCache.at < 5_000) return retentionCache.values; const values = await retentionSettings.effective(); retentionCache = { at: Date.now(), values }; return values; };
+    try { await reserve?.apply((await currentRetention()).reserveBytes); } catch (error) { print(`The retention reserve could not be set: ${error instanceof Error ? error.message : String(error)}`); }
     // The backup public key is pinned the first time it is loaded; a different one is refused until the owner approved its fingerprint (card K01b).
     const backupKeyPin = backupEncryption === undefined ? undefined : BackupKeyPinService.withEpoch(storage, epoch);
     if (backupEncryption !== undefined) {
@@ -563,7 +582,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Forwarding goes through the policy-edit service, which exists only when chat is configured and after the API (it uses the API).
     let policyEditsLive: PolicyEditService | undefined;
     const policyForward = { forward: async (by: Principal, request: { commandId: string; threadId: string; seq: number }) => { if (policyEditsLive === undefined) throw new DomainError("unavailable", "forwarding owner messages needs chat to be configured"); return policyEditsLive.forward(by, request); } };
-    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }) });
+    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), retentionSource: async () => { const v = await retentionSettings.effective(); return { daily: v.backupDaily, weekly: v.backupWeekly }; }, ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }) });
     const improvements = ImprovementService.withEpoch(storage, epoch, { meetings });
     // Which of the event sources the owner has turned off (card H13f); the list is the host's, or the built-in one.
     const eventSourceList = options.eventSources ?? defaultEventSources(projects);
@@ -617,7 +636,12 @@ export async function startController(options: StartOptions): Promise<Controller
       },
     };
     const releaseService = ReleaseService.withEpoch(storage, epoch);
-    const api = new StateApi({ acceptance, reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const retention = RetentionService.withEpoch(storage, epoch, {
+      settings: retentionSettings, ...(backups === undefined ? {} : { backups }), incidents, projects: () => projectIds(projects),
+      notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: n.ref, detail: n.text }); },
+      meter: quotaMeter, ...(reserve === undefined ? {} : { reserve }), ...(dataDirectory === undefined ? {} : { dataDirectory }),
+    });
+    const api = new StateApi({ retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
@@ -641,7 +665,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ release: releaseService, quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, bindWorkspacePort: (f) => { workspacePort = f; }, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
+        dispatch = await composeDispatch({ retention: { sweep: (by) => retention.sweep(by), restoreReserve: async () => { await reserve?.restore(); } }, release: releaseService, quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, bindWorkspacePort: (f) => { workspacePort = f; }, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
           // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
           const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });
@@ -673,7 +697,7 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
+      api, storage, epoch, check, filesystems, prerequisites, services: { retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),

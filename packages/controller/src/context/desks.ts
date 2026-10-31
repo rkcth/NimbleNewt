@@ -32,6 +32,10 @@ export interface DeskRecordBody {
   readonly sources?: readonly string[];
   /** The record this one was copied from, and the original at the root of any chain of copies. A copy's claims are the original's, not independent evidence. */
   readonly copiedFrom?: string;
+  /** Set by the owner's deletion (card K06): the text is gone; only a digest of it, who and when remain. Such a record is not revised or copied. */
+  readonly deleted?: { readonly at: string; readonly by: string; readonly reason: string; readonly contentDigest: string };
+  /** Set by archiving (card K06): the text is held in the archive record and returns on restore. */
+  readonly archived?: { readonly at: string; readonly by: string; readonly archiveId: string };
   readonly origin?: { readonly recordId: string; readonly owner: string; readonly projectId: string };
 }
 
@@ -158,6 +162,7 @@ export class DeskService {
           // Not yours, and not there, are the same answer.
           if (found === undefined || current === undefined || current.owner !== principal.id) throw new DomainError("forbidden", `${principal.id} may not revise that record`);
           if (found.revision !== expected) throw new DomainError("stale_revision", `desk record ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
+          if (current.deleted !== undefined || current.archived !== undefined) throw new DomainError("invalid_command", current.deleted !== undefined ? "that record was deleted at the owner's request" : "that record is archived; the owner restores it first", { field: "recordId" });
           // Writing needs the grant now, not only when the record was first written: revoking it ends the right to change what is already there.
           if (!allows(principal, "desk.write", current.projectId)) throw new DomainError("forbidden", `${principal.id} may not revise that record`);
           if (current.status === "superseded" && status !== undefined && status !== "superseded") throw new DomainError("invalid_command", "a superseded record stays superseded", { field: "status" });
@@ -209,6 +214,7 @@ export class DeskService {
           const found = await this.#runner.get("desk-record", sourceId);
           const source = found?.body as unknown as DeskRecordBody | undefined;
           if (found === undefined || source === undefined || !(await this.#readable(principal, source))) throw new DomainError("forbidden", `${principal.id} may not copy that record`);
+          if (source.deleted !== undefined || source.archived !== undefined) throw new DomainError("invalid_command", "that record was deleted or archived; there is nothing to copy", { field: "recordId" });
           // A copy is never more public than what it was copied from: a private record or a draft can only be copied into private scratch.
           const publishable = source.visibility === "shared" && source.status !== "draft";
           if (visibility === "shared" && !publishable) throw new DomainError("invalid_command", "visibility: a private record or a draft can be copied only into your own private scratch; publish your own account of it instead", { field: "visibility" });

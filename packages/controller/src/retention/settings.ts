@@ -1,0 +1,151 @@
+import { DomainError } from "../domain/errors.js";
+import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
+import { scopedCommandId } from "../security/credentials.js";
+import type { NoActor, Principal } from "../security/principals.js";
+import type { ControllerStorage, JsonObject } from "../storage/types.js";
+
+const REF = { kind: "retention-settings", id: "main" } as const;
+
+/**
+ * The retention policy (card K06). Everything that deletes anything is OFF until the owner sets it (owner decision: keep everything by default; deletion is always an owner action and is itself recorded),
+ * and every limit is optional. The values below are the installation defaults; a stored value overrides them, and the owner changes any of them by chatting (`retention.settings.set`).
+ */
+export interface RetentionValues {
+  /** Derived summaries (summary records, meeting summaries, stand-up briefs) older than this many days are removed by the runner. `null`: never. */
+  readonly derivedDays: number | null;
+  /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
+  readonly autoRun: boolean;
+  /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). Recorded here; the deletion itself needs adapter support (card K06c). */
+  readonly thinkingDays: number;
+  /** Backup counts the nightly run keeps (the K01 rule: 7 daily, 4 weekly). The newest backup and every pre-upgrade snapshot are always kept. */
+  readonly backupDaily: number;
+  readonly backupWeekly: number;
+  /** Resolved incidents are soft-archived after this many days, and removed this many days after being archived. `null`: never. */
+  readonly incidentArchiveDays: number | null;
+  readonly incidentPurgeDays: number | null;
+  /** Optional storage quotas in bytes of records written (desk records, notes, summaries, artifacts): per project and per agent. `null`: no quota. */
+  readonly quotaProjectBytes: number | null;
+  readonly quotaAgentBytes: number | null;
+  /** Visible warning at this percent of a quota. */
+  readonly quotaWarnPercent: number;
+  /** Disk kept back for shutdown, checkpoint and recovery records, in bytes (a file in the data directory that a critical write may take when the disk is full). 0: none. */
+  readonly reserveBytes: number;
+}
+
+export const RETENTION_DEFAULTS: RetentionValues = {
+  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null,
+  quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
+};
+
+type Kind = "days" | "flag" | "bytes" | "percent" | "count";
+interface Spec { readonly kind: Kind; readonly min: number; readonly max: number; readonly nullable: boolean }
+export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
+  derivedDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  autoRun: { kind: "flag", min: 0, max: 1, nullable: false },
+  thinkingDays: { kind: "days", min: 1, max: 365, nullable: false },
+  backupDaily: { kind: "count", min: 1, max: 365, nullable: false },
+  backupWeekly: { kind: "count", min: 0, max: 520, nullable: false },
+  incidentArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  incidentPurgeDays: { kind: "days", min: 30, max: 3650, nullable: true },
+  quotaProjectBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
+  quotaAgentBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
+  quotaWarnPercent: { kind: "percent", min: 50, max: 99, nullable: false },
+  reserveBytes: { kind: "bytes", min: 0, max: 1024 * 1024 * 1024, nullable: false },
+};
+const NAMES = Object.keys(RETENTION_FIELDS) as (keyof RetentionValues)[];
+
+function fieldOk(name: keyof RetentionValues, value: unknown): boolean {
+  const spec = RETENTION_FIELDS[name];
+  if (value === null) return spec.nullable;
+  if (spec.kind === "flag") return typeof value === "boolean";
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= spec.min && value <= spec.max;
+}
+const describe = (name: keyof RetentionValues): string => { const s = RETENTION_FIELDS[name]; return s.kind === "flag" ? "true or false" : `a whole number from ${s.min} to ${s.max}${s.nullable ? ", or null for none" : ""}`; };
+
+export interface RetentionChange { readonly field: keyof RetentionValues; readonly old: number | boolean | null; readonly new: number | boolean | null }
+
+/**
+ * The retention settings: owner only, race-safe (`expectedRevision`), replay-safe (command ID). An unset value falls back to the installation default (`defaults`, itself the built-in default unless the installation profile
+ * gave others). A damaged stored record is an error (`unavailable`), never a silent default, so a deletion rule never changes meaning by itself. The answer to a change names each old and new value (the owner is told back).
+ */
+export class RetentionSettingsService {
+  readonly #runner: CommandRunner;
+  readonly #defaults: RetentionValues;
+  readonly #onChange: ((effective: RetentionValues) => Promise<void>) | undefined;
+  private constructor(runner: CommandRunner, defaults: RetentionValues, onChange: ((effective: RetentionValues) => Promise<void>) | undefined) { this.#runner = runner; this.#defaults = defaults; this.#onChange = onChange; }
+
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { defaults?: Partial<RetentionValues>; onChange?: (effective: RetentionValues) => Promise<void> } = {}): RetentionSettingsService {
+    const defaults = { ...RETENTION_DEFAULTS, ...(options.defaults ?? {}) };
+    for (const n of NAMES) if (!fieldOk(n, defaults[n])) throw new RangeError(`retention default ${n}: must be ${describe(n)}`);
+    return new RetentionSettingsService(new CommandRunner(storage, epoch, options), defaults, options.onChange);
+  }
+
+  get defaults(): RetentionValues { return this.#defaults; }
+
+  async get(by: Principal): Promise<{ revision: number; settings: Partial<RetentionValues>; defaults: RetentionValues; effective: RetentionValues }> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read the retention settings`);
+    const found = await this.#runner.get(REF.kind, REF.id);
+    const effective = await this.effective();
+    return { revision: found?.revision ?? 0, settings: found === undefined ? {} : this.#parse(found.body) ?? {}, defaults: this.#defaults, effective };
+  }
+
+  /** What applies now. A damaged record throws. */
+  async effective(): Promise<RetentionValues> {
+    const found = await this.#runner.get(REF.kind, REF.id);
+    if (found === undefined) return this.#defaults;
+    const stored = this.#parse(found.body);
+    if (stored === undefined) throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)");
+    return { ...this.#defaults, ...stored };
+  }
+
+  /** Only the fields given change; `null` on an optional field clears it, `"default"` returns it to the installation default. */
+  async set(owner: Principal, command: NoActor & Partial<Record<keyof RetentionValues, unknown>> & { expectedRevision?: number }): Promise<{ revision: number; changed: RetentionChange[]; summary: string }> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not change the retention settings`);
+    const allowed = new Set<string>(["commandId", "expectedRevision", ...NAMES]);
+    const unknown = Object.keys(command).filter((k) => !allowed.has(k));
+    if (unknown.length > 0) throw new DomainError("invalid_command", `${unknown[0]}: is not a field of this command`, { field: unknown[0]! });
+    const given = NAMES.filter((n) => command[n] !== undefined);
+    if (given.length === 0) throw new DomainError("invalid_command", `give at least one of ${NAMES.join(", ")}`, { field: NAMES[0]! });
+    for (const n of given) { const v = command[n]; if (v !== "default" && !fieldOk(n, v)) throw new DomainError("invalid_command", `${n}: must be ${describe(n)}, or "default"`, { field: n }); }
+    if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number", { field: "expectedRevision" });
+    let changed: RetentionChange[] = [];
+    const result = await this.#runner.command("retention.settings.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { values: Object.fromEntries(given.map((n) => [n, command[n] as never])) as JsonObject, expectedRevision: command.expectedRevision ?? null },
+      build: async () => {
+        const current = await this.#runner.get(REF.kind, REF.id);
+        if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the retention settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
+        const stored = current === undefined ? {} : this.#parse(current.body) ?? {};
+        const before = { ...this.#defaults, ...stored } as RetentionValues;
+        const next: Record<string, number | boolean | null> = { ...stored };
+        for (const n of given) { const v = command[n]; if (v === "default") delete next[n]; else next[n] = v as number | boolean | null; }
+        const after = { ...this.#defaults, ...next } as RetentionValues;
+        changed = NAMES.filter((n) => before[n] !== after[n]).map((n) => ({ field: n, old: before[n], new: after[n] }));
+        const body = { values: next, updatedBy: owner.id, updatedAt: this.#runner.now() } as unknown as JsonObject;
+        const change = current === undefined ? { type: "create" as const, ref: REF, body } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body };
+        return { ref: REF, creates: current === undefined, changes: [change], detail: { changed: changed as unknown as JsonObject[] } };
+      },
+    }));
+    if (result.replayed) {
+      // A replay reports the change it recorded, from the audit entry of its own record.
+      const seq = (await this.#runner.storage.getOperation(`cmd:${scopedCommandId(owner.id, command.commandId)}`))?.result.auditSeqs[0];
+      const audit = seq === undefined ? undefined : (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
+      changed = (audit?.detail["changed"] as unknown as RetentionChange[] | undefined) ?? [];
+    }
+    if (this.#onChange !== undefined) await this.#onChange(await this.effective());
+    const fmt = (v: unknown): string => (v === null ? "none" : String(v));
+    const summary = changed.length === 0 ? "No retention value changed." : `Retention changed: ${changed.map((c) => `${c.field} ${fmt(c.old)} -> ${fmt(c.new)}`).join("; ")}.`;
+    return { revision: result.revision, changed, summary };
+  }
+
+  #parse(body: unknown): Partial<RetentionValues> | undefined {
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return undefined;
+    const values = (body as Record<string, unknown>)["values"];
+    if (values === null || typeof values !== "object" || Array.isArray(values)) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(values as Record<string, unknown>)) {
+      if (!(NAMES as string[]).includes(k) || !fieldOk(k as keyof RetentionValues, v)) return undefined;
+      out[k] = v;
+    }
+    return out as Partial<RetentionValues>;
+  }
+}

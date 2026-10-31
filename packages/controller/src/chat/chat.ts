@@ -935,6 +935,11 @@ export class ChatService {
         const item = await this.#get(token, "notifications.settings", {});
         return item === undefined || typeof item["revision"] !== "number" ? { ok: true } : { ok: true, name: "expectedRevision", value: item["revision"] + ahead("notifications") };
       }
+      case "retention": {
+        // Never set: the operation takes 0.
+        const item = await this.#get(token, "retention.settings.get", {});
+        return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("retention") };
+      }
       case "difficulty-profiles": {
         // Never set: the operation takes 0.
         const item = await this.#get(token, "difficulty.profiles", {});
@@ -1484,6 +1489,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     case "notifications.configure": return "notifications";
+    case "retention.settings.set": return "retention";
     default: return undefined;
   }
 }
