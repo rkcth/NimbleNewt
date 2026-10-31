@@ -355,4 +355,5 @@ test("a folder inside a conversation store swapped for a link between the listin
 test("the crash helper gives the child a file: URL to import, also for a Windows path (Node refuses D:\\... with ERR_UNSUPPORTED_ESM_URL_SCHEME)", () => {
   assert.match(importSpecifier("D:\\a\\b\\staged-restore.js", true), /^file:\/\/\/D:\/a\/b\/staged-restore\.js$/);
   assert.match(importSpecifier(join(tmpdir(), "x.js")), /^file:\/\//);
+  assert.match(importSpecifier("/a/b/c.js", false), /^file:\/\/\/a\/b\/c\.js$/);
 });

@@ -7,8 +7,8 @@ import { LOCK_FILE } from "./data-lock.js";
 /** Where the child dies besides "after the nth rename": between the "done" record and the removal of the marker, or between the removal of the marker and that of the journal. */
 export type CrashAt = number | "before-marker-removal" | "before-journal-removal";
 
-/** What `import()` in the child is given for a module file: a file: URL (Node refuses a Windows path such as D:\\x\\y.js with ERR_UNSUPPORTED_ESM_URL_SCHEME). `windows` is for the unit test. */
-export function importSpecifier(path: string, windows = false): string { return pathToFileURL(path, { windows }).href; }
+/** What `import()` in the child is given for a module file: a file: URL (Node refuses a Windows path such as D:\\x\\y.js with ERR_UNSUPPORTED_ESM_URL_SCHEME). `windows` is for the unit test only: left undefined, the platform decides how the path is read (an explicit false would force POSIX parsing of a drive path). */
+export function importSpecifier(path: string, windows?: boolean): string { return (windows === undefined ? pathToFileURL(path) : pathToFileURL(path, { windows })).href; }
 
 /**
  * Test helper: runs `applyPendingRestore` in a CHILD process that really dies (process.exit) where asked, so the data directory is left as a crash leaves it. `at`: a number n dies right after the nth rename (journal written, some moves
