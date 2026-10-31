@@ -55,6 +55,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
+  // The coverage-lapse alert is off by default and only tells the owner; turning it on or off, or changing its period, is reversible and applies at once (provisional, see the notes).
+  "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
   // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.
   "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },

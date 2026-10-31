@@ -19,7 +19,7 @@ import type { SubmissionService } from "../submissions/index.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { View } from "../domain/model.js";
 import type { SwarmService } from "../swarm/index.js";
-import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
@@ -86,6 +86,9 @@ export interface Context {
   /** Child tasks with delegated allowances, and cancelling a whole swarm (card H10). */
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
+  /** Coverage of responsibilities and its alert setting (card P04). */
+  readonly coverage?: Pick<CoverageService, "report">;
+  readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
   /** Submissions by role (card Q01b). */
   readonly submissions?: Pick<SubmissionService, "record" | "get" | "list">;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
@@ -272,6 +275,8 @@ const releaseOf = (c: Context): NonNullable<Context["release"]> => c.release ?? 
 const swarmOf = (c: Context): NonNullable<Context["swarm"]> => c.swarm ?? unavailable("child tasks");
 const submissionsOf = (c: Context): NonNullable<Context["submissions"]> => c.submissions ?? unavailable("submissions");
 const incidentsOf = (c: Context): NonNullable<Context["incidents"]> => c.incidents ?? unavailable("responsibility incidents");
+const coverageOf = (c: Context): NonNullable<Context["coverage"]> => c.coverage ?? unavailable("coverage");
+const coverageSettingsOf = (c: Context): NonNullable<Context["coverageSettings"]> => c.coverageSettings ?? unavailable("coverage settings");
 const checksOf = (c: Context): NonNullable<Context["responsibilityChecks"]> => c.responsibilityChecks ?? unavailable("responsibility checks");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -984,6 +989,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["projectId", "open"]); return asJson({ items: (await incidentsOf(c).list(c.principal, str(a, "projectId"), { open: a["open"] === true })) ?? ((): never => { throw new DomainError("not_found", "no such project"); })() } as never); } },
   { name: "responsibility.observed", kind: "query", summary: "What the checks found for a responsibility, apart from what is wanted: `unknown` without a check in the last two periods, never healthy by default.", args: { responsibilityId: "the responsibility" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["responsibilityId"]); return found("responsibility", await incidentsOf(c).observed(c.principal, str(a, "responsibilityId"))); } },
+  { name: "responsibility.coverage", kind: "query", summary: "The active responsibilities of a project with a coverage gap: no active holder, no recent check (none yet, or older than twice the period) or no check schedule, with how long and whether it is beyond the alert period. Paged by responsibility ID. A paused or retired responsibility is not listed.", args: { projectId: "the project", "afterId?": "the `next` of the previous page", "limit?": "1 to 100 (default 50)" }, result: "`{ items, next?, asOf, alert }`.",
+    run: async (c, a) => { only(a, ["projectId", "afterId", "limit"]); return asJson((await coverageOf(c).report(c.principal, str(a, "projectId"), { ...(a["afterId"] === undefined ? {} : { afterId: a["afterId"] as string }), ...(a["limit"] === undefined ? {} : { limit: a["limit"] as number }) })) ?? ((): never => { throw new DomainError("not_found", "no such project"); })() as never); } },
+  { name: "coverage.settings.get", kind: "query", summary: "Owner only: whether the coverage-lapse alert is on (off by default), after how many minutes of a lapse the owner is told, the default, and the revision to quote when changing it.", args: {}, result: "`{ item }`.",
+    run: async (c, a) => { only(a, []); return asJson({ item: await coverageSettingsOf(c).get(c.principal) }); } },
+  { name: "coverage.settings.set", kind: "command", summary: "Owner only: turns the coverage-lapse alert on or off (`enabled`) and/or sets after how many minutes a responsibility without coverage is told to the owner (`afterMinutes`, 1 to 525600; null for the default of 1440). Only the fields given change. Off by default. This is the form the chat uses.", args: { "enabled?": "true or false", "afterMinutes?": "whole minutes, or null for the default", "expectedRevision?": "the revision you read (0 when none was set yet)" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["enabled", "afterMinutes", "expectedRevision"]); return asJson({ ...(await coverageSettingsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "incident.report", kind: "command", summary: "Reports an alert on a responsibility: the first of a signature opens an incident, later ones add to it.", args: { responsibilityId: "the responsibility", signature: "what the alert is about, for example `disk-full:web-1`", summary: "what was found", outcome: "`attention` or `failed`", commandId: "required" }, result: "`{ id, replayed }`.",
     run: async (c, a, id) => written(await incidentsOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "incident.resolve", kind: "command", summary: "Resolves an open incident with the evidence that it is over.", args: { incidentId: "the incident", evidence: "what shows it is resolved", commandId: "required" }, result: "`{ id, replayed }`.",

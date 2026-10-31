@@ -325,6 +325,21 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
   } }];
 }
 
+/** P04: a responsibility whose coverage has lapsed beyond the owner's period is told to the owner once (the notice id is fixed by the responsibility and the start of the lapse). Does nothing while the setting is off. One project's failure does not skip the others. */
+export function coverageLoops(coverage: { lapsed(by: Principal, projectId: string): Promise<readonly { alertId: string; responsibilityId: string; projectId: string; title: string; reasons: readonly string[] }[]> }, projects: () => Promise<readonly string[]>, notify: (lapse: { alertId: string; responsibilityId: string; projectId: string; title: string; reasons: readonly string[] }) => Promise<void>): DispatcherLoop[] {
+  return [{ name: "responsibilities.coverage", run: async (by) => {
+    let failure: unknown;
+    for (const projectId of await projects()) {
+      try {
+        for (const g of await coverage.lapsed(by, projectId)) {
+          try { await notify(g); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) failure ??= error; /* a conflict: already told under this id */ }
+        }
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  } }];
+}
+
 /** K06: old resolved incidents are soft-archived, per project, so one project's failure does not skip the others. Not wired into the controller yet. */
 export function archiveLoops(incidents: { archive(by: Principal, options: { projectId?: string }): Promise<number> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [{ name: "responsibilities.archive", run: async (by) => {

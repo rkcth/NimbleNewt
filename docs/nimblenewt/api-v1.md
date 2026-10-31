@@ -1395,6 +1395,28 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `responsibility.coverage`
+
+The active responsibilities of a project with a coverage gap: no active holder, no recent check (none yet, or older than twice the period) or no check schedule, with how long and whether it is beyond the alert period. Paged by responsibility ID. A paused or retired responsibility is not listed.
+
+Arguments:
+
+- `projectId`: the project
+- `afterId` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100 (default 50)
+
+Result: `{ items, next?, asOf, alert }`.
+
+#### `coverage.settings.get`
+
+Owner only: whether the coverage-lapse alert is on (off by default), after how many minutes of a lapse the owner is told, the default, and the revision to quote when changing it.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
 #### `submission.list`
 
 The submissions recorded for a task, in ID order, visible exactly as `submission.get`: the owner sees all; an agent that may read the task sees the ones it made and the ones it was asked to review (a reviewer sees only the submission its review request names). A task the caller may not read is `not_found`. A listing is not a feed: IDs are hash-ordered, so new records can land before a cursor you hold and pages are not a stable snapshot; page through to collect, do not poll for news.
@@ -4043,6 +4065,20 @@ Arguments:
 - `taskId` (optional): the task it produced
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `coverage.settings.set`
+
+Owner only: turns the coverage-lapse alert on or off (`enabled`) and/or sets after how many minutes a responsibility without coverage is told to the owner (`afterMinutes`, 1 to 525600; null for the default of 1440). Only the fields given change. Off by default. This is the form the chat uses.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `afterMinutes` (optional): whole minutes, or null for the default
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 

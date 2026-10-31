@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, assignedTaskIn, attendanceLoops, coverageLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -259,4 +259,13 @@ test("archive loop: one project's failure does not skip the others and is raised
   const [loop] = archiveLoops({ archive: async (_by, o) => { seen.push(o.projectId!); if (o.projectId === "proj-a") throw new Error("boom"); return 0; } }, async () => ["proj-a", "proj-b"]);
   await assert.rejects(loop!.run({ id: "svc" } as never), /boom/);
   assert.deepEqual(seen, ["proj-a", "proj-b"]);
+});
+
+test("the coverage loop tells every lapse of every project, a failing project does not skip the others, and an already-told id is not a failure (card P04)", async () => {
+  const told: string[] = [];
+  const lapse = (id: string, p: string) => ({ alertId: id, responsibilityId: `r-${id}`, projectId: p, title: "t", reasons: ["no-holder"] });
+  const [loop] = coverageLoops({ lapsed: async (_by, p) => { if (p === "proj-a") throw new Error("boom"); return p === "proj-b" ? [lapse("x", p), lapse("y", p)] : [lapse("z", p)]; } }, async () => ["proj-a", "proj-b", "proj-c"], async (g) => { told.push(g.alertId); if (g.alertId === "x") throw Object.assign(new DomainError("command_conflict", "already"), {}); });
+  assert.equal(loop!.name, "responsibilities.coverage");
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
+  assert.deepEqual(told, ["x", "y", "z"]);
 });
