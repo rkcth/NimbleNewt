@@ -584,6 +584,8 @@ export class DispatcherService {
     const fresh = (await this.#load(attemptId))!.body;
     if (fresh.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-move:${attemptId}:${fresh.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: fresh.requestId, reason: `the attempt moves to ${move.hostId}` }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     const old = this.#live.get(attemptId);
+    // The old placement's task credential ends now, not when the attempt starts on the new host: a host that was partitioned and comes back cannot present it to the state API in between. The restart issues a new one (a new secret) for the new placement.
+    await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-move-cred:${attemptId}:${fresh.requests ?? 0}`, attemptId, reason: `the attempt moves to ${move.hostId}` }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#update(attemptId, (x) => {
       const { requestId: _r, lease: _l, ...kept } = x; void _r; void _l;
       const rest = withoutFreeze(kept, false);
@@ -611,14 +613,14 @@ export class DispatcherService {
     return out;
   }
 
-  /** Every attempt the dispatcher holds live (not finished), for the staff passes that look at where work runs (the quiet-host pass). Only staff may ask. */
-  async liveAttemptIds(by: Principal): Promise<string[]> {
+  /** Every attempt the dispatcher holds live (not finished) with the dispatcher's state for it, each read once, for the staff passes that look at where work runs (the quiet-host pass). Only staff may ask. */
+  async liveAttempts(by: Principal): Promise<{ attemptId: string; state: string }[]> {
     const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
     if (!staff) throw new DomainError("forbidden", `${by.id} may not list live attempts`);
-    const out: string[] = [];
+    const out: { attemptId: string; state: string }[] = [];
     for (const id of await this.#liveIds()) {
       const d = await this.#load(id);
-      if (d !== undefined && d.body.state !== "finished") out.push(id);
+      if (d !== undefined && d.body.state !== "finished") out.push({ attemptId: id, state: d.body.state });
     }
     return out;
   }

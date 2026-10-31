@@ -25,7 +25,7 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
     dispatch: {
-      timer: new ManualTimer(), manual: true, clock: () => new Date(now).toISOString(),
+      timer: new ManualTimer(), manual: true, quietHosts: { maxGapMs: 1_000_000 * HOUR }, clock: () => new Date(now).toISOString(),
       // A lenient lease: a silent worker's attempt is not abandoned by the dispatcher's own lease rule (60 s by default) before the quiet-host pass looks at it.
       dispatcher: { leaseMs: 1000 * HOUR },
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
@@ -55,7 +55,7 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
 
     // The setting: defaults 12 hours and on; owner only; validated; replay-safe; race-safe; null clears.
     const g0 = (await call(boot.token, "host.quiet.get", {})).result.item;
-    assert.deepEqual([g0.revision, g0.graceHours, g0.autoMove, g0.default, g0.effective], [0, null, null, { graceHours: 12, autoMove: true }, { graceHours: 12, autoMove: true }]);
+    assert.deepEqual([g0.revision, g0.graceHours, g0.autoMove, g0.default, g0.effective], [0, null, null, { graceHours: 12, autoMove: true, recoverMinutes: 10, noticeHours: 6 }, { graceHours: 12, autoMove: true, recoverMinutes: 10, noticeHours: 6 }]);
     assert.equal((await call(ann, "host.quiet.get", {})).error?.code, "forbidden");
     assert.equal((await call(ann, "host.quiet.change", { graceHours: 2 }, "q0")).error?.code, "forbidden");
     assert.equal((await call(ann, "host.move-work", { hostId: "host:pc" }, "q0m")).error?.code, "forbidden");
@@ -64,11 +64,11 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     assert.ok(set.ok, JSON.stringify(set));
     assert.equal((await call(boot.token, "host.quiet.change", { graceHours: 24, autoMove: false }, "q1")).result.revision, set.result.revision);
     assert.equal((await call(boot.token, "host.quiet.change", { graceHours: 2, expectedRevision: 0 }, "q2")).error?.code, "stale_revision");
-    assert.deepEqual((await call(boot.token, "host.quiet.get", {})).result.item.effective, { graceHours: 24, autoMove: false });
+    assert.deepEqual((await call(boot.token, "host.quiet.get", {})).result.item.effective, { graceHours: 24, autoMove: false, recoverMinutes: 10, noticeHours: 6 });
     const keep = await call(boot.token, "host.quiet.change", { autoMove: true, expectedRevision: set.result.revision }, "q3");
-    assert.deepEqual((await call(boot.token, "host.quiet.get", {})).result.item.effective, { graceHours: 24, autoMove: true }, "a figure not named keeps its value");
+    assert.deepEqual((await call(boot.token, "host.quiet.get", {})).result.item.effective, { graceHours: 24, autoMove: true, recoverMinutes: 10, noticeHours: 6 }, "a figure not named keeps its value");
     assert.ok((await call(boot.token, "host.quiet.change", { graceHours: null, expectedRevision: keep.result.revision }, "q4")).ok);
-    assert.deepEqual((await call(boot.token, "host.quiet.get", {})).result.item.effective, { graceHours: 12, autoMove: true }, "null clears to the default");
+    assert.deepEqual((await call(boot.token, "host.quiet.get", {})).result.item.effective, { graceHours: 12, autoMove: true, recoverMinutes: 10, noticeHours: 6 }, "null clears to the default");
 
     // Chat: the setting is shown first and applies on the owner's word; the move applies at once only when the owner's words say it and name the host.
     const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
@@ -85,6 +85,10 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     const vague = "that laptop is annoying";
     const notSaid = await turn("m4", vague, [{ kind: "command", op: "host.move-work", args: { hostId: "host:laptop" }, evidence: vague, basis: "owner" }]);
     assert.notEqual(notSaid[0]!.status, "applied", "the owner's words neither say the move nor name the host: nothing is done");
+    for (const [i, weak] of ["Take a look at host:laptop", "Don't move the work off host:laptop"].entries()) {
+      const r = await turn(`mw${i}`, weak, [{ kind: "command", op: "host.move-work", args: { hostId: "host:laptop" }, evidence: weak, basis: "owner" }]);
+      assert.equal(r[0]!.status, "proposed", `weak wording is shown first: ${weak}`);
+    }
     assert.ok((await call(boot.token, "host.quiet.change", { graceHours: 12 }, "q5")).ok);
 
     // Work on pc; the tick's quiet-host pass warns once, waits the grace period, then re-places it on laptop.
@@ -126,7 +130,7 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     assert.equal(await where(), first, "automatic moves are off");
     assert.ok((await call(boot.token, "host.quiet.change", { autoMove: true }, "q7")).ok);
     await c.dispatch.dispatcher.tick();
-    assert.equal(await where(), other, "on again, past the grace period: re-placed on the other host");
+    assert.equal(await where(), other, "on again, past the grace period of a warning that named the timer: re-placed on the other host");
     assert.equal((await c.dispatch.remote.placement(rob, attempt))!.relocations, 1);
 
     // The owner's move, in chat and through the API (nothing left on that host now).
@@ -154,7 +158,9 @@ test("without remote hosts the move is unavailable and the setting still works; 
     const real = c.storage.getAggregate.bind(c.storage);
     c.storage.getAggregate = async (ref) => { const a = await real(ref); return ref.kind === "quiet-host-settings" && a !== undefined ? { ...a, body: { graceHours: 99999 } } as never : a; };
     const emitted = async () => (await c.storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((a) => a.type === "notification.emit").length;
-    assert.deepEqual((await call("host.quiet.get", {})).result.item.effective, { graceHours: 12, autoMove: false }, "fails closed: no automatic move");
+    assert.deepEqual((await call("host.quiet.get", {})).result.item.effective, { graceHours: 12, autoMove: false, recoverMinutes: 10, noticeHours: 6 }, "fails closed: no automatic move");
+    assert.equal((await call("host.quiet.get", {})).result.item.damaged, true);
+    assert.equal((await call("host.quiet.change", { graceHours: 3 }, "u3x")).error?.code, "invalid_command", "automatic moves must be restated");
     await call("host.quiet.get", {});
     assert.equal(await emitted(), 1, "one notification per damaged revision");
     c.storage.getAggregate = real;

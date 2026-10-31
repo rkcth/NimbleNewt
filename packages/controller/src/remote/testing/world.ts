@@ -28,6 +28,8 @@ export class RemoteTestHost implements WorkerHost {
   inputs: (order: WorkOrder) => readonly string[] = () => [];
   /** When set, the host does not answer a request for a checkpoint (a partition). */
   silent = false;
+  /** When set, a request for a checkpoint never returns (a host that is unreachable and does not even refuse). */
+  hang = false;
   /** How the worker answers a request for a checkpoint: it sends one itself, over the wire, as a real worker does. Set when the host connects. */
   respond: ((attemptId: string, placement: number) => Promise<void>) | undefined;
   constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly resources = { cpus: 1, memoryMb: 1024 }) {}
@@ -46,6 +48,7 @@ export class RemoteTestHandle implements WorkerHandle {
   constructor(private readonly host: RemoteTestHost, private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number) {}
   run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }
   async checkpoint(): Promise<JsonObject> {
+    if (this.host.hang) await new Promise<never>(() => undefined);
     if (this.host.silent) throw new Error("the worker did not answer");
     await this.remote.control(this.by, this.attemptId, { kind: "checkpoint" });
     await this.host.respond?.(this.attemptId, this.placement);
@@ -87,7 +90,7 @@ export interface RemoteWorld extends DispatchWorld {
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
@@ -97,10 +100,10 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const workerIds = (): string[] => workers.map((x) => x.hostId);
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
-    dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r) => holder.dispatcher.quiesce(by, id, r), release: (by, id) => holder.dispatcher.release(by, id) },
+    dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id) },
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
     ...(o.placement === null ? {} : { placementPolicy: o.placement ?? (async () => ({ dataHosts: workerIds() })) }),
-  }, { ...w.options, ...(o.protocol === undefined ? {} : { protocol: o.protocol }), ...(o.fileBytes === undefined ? {} : { fileBytes: o.fileBytes }) });
+  }, { ...w.options, ...(o.protocol === undefined ? {} : { protocol: o.protocol }), ...(o.fileBytes === undefined ? {} : { fileBytes: o.fileBytes }), ...(o.settleMs === undefined ? {} : { settleMs: o.settleMs }) });
   const transports: WorkerTransport[] = [];
   const listen = async (options: Partial<WorkerTransportOptions> = {}): Promise<WorkerTransport> => { const t = await WorkerTransport.listen({ remote, principals: w.principals, ...o.transport, ...options }); transports.push(t); return t; };
   const transport = await listen();

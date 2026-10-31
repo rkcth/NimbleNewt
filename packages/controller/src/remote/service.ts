@@ -148,6 +148,14 @@ export function capabilityReasons(host: string, status: HostStatus | undefined, 
   return out;
 }
 
+/** The promise's result, or an `unavailable` refusal when it takes longer than `ms` (its late result is ignored). */
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new DomainError("unavailable", `no answer within ${ms} ms`)), ms);
+    promise.then((v) => { clearTimeout(timer); resolve(v); }, (e: unknown) => { clearTimeout(timer); reject(e); });
+  });
+}
+
 // ---- the service -----------------------------------------------------------------------------------------------------------------
 
 export interface RemoteDeps {
@@ -167,6 +175,8 @@ export interface RemoteOptions extends RunnerOptions {
   readonly protocol?: VersionRange;
   /** The largest file one fetch returns, in bytes. Default `REMOTE_LIMITS.fileBytes`. */
   readonly fileBytes?: number;
+  /** How long a move waits for the old host to settle its calls and send a checkpoint before it fences the host with the last stored one. Default 10 000 ms: a host that does not answer (a partition) must not hold up the pass that moves its work. */
+  readonly settleMs?: number;
 }
 
 export interface Placed { readonly placement: number; readonly state: PlacementState }
@@ -203,6 +213,7 @@ export class RemoteWorkerService {
   readonly #deps: RemoteDeps;
   readonly #protocol: VersionRange;
   readonly #fileBytes: number;
+  readonly #settleMs: number;
   readonly #offers = new Map<string, { readonly hostId: string; readonly placement: number; readonly order: WorkOrder }>();
   readonly #waiters = new Map<string, Set<(result: StoredResult) => void>>();
   /** The one open offers poll of each host (card H07): a new poll ends the earlier one, an offer or a new session ends it at once. */
@@ -212,7 +223,8 @@ export class RemoteWorkerService {
   readonly #byPlatform = new Map<string, Set<string>>();
   readonly #platformOf = new Map<string, string>();
 
-  private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number) {
+  private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number, settleMs: number) {
+    this.#settleMs = settleMs;
     this.#runner = runner;
     this.#deps = deps;
     this.#protocol = protocol;
@@ -223,7 +235,9 @@ export class RemoteWorkerService {
     if (deps.principal.kind !== "service" || deps.principal.id !== DISPATCHER_PRINCIPAL || deps.principal.taskScope !== undefined) throw new DomainError("invalid_command", "principal: the remote service acts as the dispatcher's service principal", { field: "principal" });
     const fileBytes = options.fileBytes ?? REMOTE_LIMITS.fileBytes;
     if (!Number.isSafeInteger(fileBytes) || fileBytes < 1 || fileBytes > REMOTE_LIMITS.fileBytes) invalid("fileBytes", `must be a whole number from 1 to ${REMOTE_LIMITS.fileBytes}`);
-    return new RemoteWorkerService(new CommandRunner(storage, epoch, options), deps, options.protocol === undefined ? WORKER_PROTOCOL : checkRange(options.protocol, "protocol"), fileBytes);
+    const settleMs = options.settleMs ?? 10_000;
+    if (!Number.isSafeInteger(settleMs) || settleMs < 1 || settleMs > 600_000) invalid("settleMs", "must be a whole number of milliseconds from 1 to 600000");
+    return new RemoteWorkerService(new CommandRunner(storage, epoch, options), deps, options.protocol === undefined ? WORKER_PROTOCOL : checkRange(options.protocol, "protocol"), fileBytes, settleMs);
   }
 
   /** The versions this controller speaks. */
@@ -951,10 +965,10 @@ export class RemoteWorkerService {
     if (!finishing) {
       if (first.hostId === to) throw new DomainError("invalid_command", `attempt ${attemptId} is already on ${to}`, { field: "toHostId" });
       const dispatch = await this.#deps.dispatch.get(by, attemptId);
-      if (dispatch === undefined || dispatch.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is not live under the dispatcher`);
+      if (dispatch === undefined || dispatch.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is not live under the dispatcher`, { field: "attemptId" });
       // An attempt that parked on a host that has since gone away has an ended placement and a dispatcher record in `parked`: it can be moved too, from the checkpoint it parked with.
       endedParked = !LIVE.has(first.state) && dispatch.state === "parked";
-      if (!LIVE.has(first.state) && !endedParked) throw new DomainError("invalid_transition", `the placement of attempt ${attemptId} is ${first.state}; only a live or parked attempt moves`);
+      if (!LIVE.has(first.state) && !endedParked) throw new DomainError("invalid_transition", `the placement of attempt ${attemptId} is ${first.state}; only a live or parked attempt moves`, { field: "attemptId" });
       const reasons = await this.#judge(first, to);
       if (reasons.length > 0) throw new DomainError("invalid_transition", `attempt ${attemptId} cannot move to ${to}: ${reasons.join("; ")}`, { field: "toHostId" });
       // What is stored must verify before the old host is disturbed at all.
@@ -963,7 +977,8 @@ export class RemoteWorkerService {
         let fresh: JsonObject | undefined;
         if (!endedParked) {
           // The old host is asked for a checkpoint with the calls settled. One that does not answer (a partition) is fenced all the same, with the last checkpoint it sent.
-          try { frozen = true; fresh = (await this.#deps.dispatch.quiesce(by, attemptId, "relocation")).checkpoint; } catch { fresh = undefined; }
+          // Bounded twice: the settle gives up on a call that does not stop (`strictMs`), and nothing the old host does or does not answer holds the move longer than `settleMs`.
+          try { frozen = true; fresh = (await within(this.#deps.dispatch.quiesce(by, attemptId, "relocation", { strictMs: this.#settleMs }), this.#settleMs)).checkpoint; } catch { fresh = undefined; }
         }
         let cur = await read();
         if (fresh !== undefined) {

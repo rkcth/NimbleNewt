@@ -142,7 +142,7 @@ Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `graceHours` and `autoMove` (the owner's, or null), `default` and `effective` (each `{ graceHours, autoMove }`).
+Result: `{ item }`: `revision`, `graceHours`, `autoMove`, `recoverMinutes` and `noticeHours` (the owner's, or null), `damaged` (the stored setting is damaged: automatic moves are off until `autoMove` is stated), `default` and `effective` (each `{ graceHours, autoMove, recoverMinutes, noticeHours }`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1557,12 +1557,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `host.quiet.change`
 
-The owner sets what happens when a host stops reporting while it holds work (owner only). `graceHours` is how long the owner has to answer the warning before the work is re-placed from its last checkpoint on another allowed host (a whole number from 1 to 720; default 12). `autoMove` false means the work is never moved by itself (the owner can still move it with host.move-work); true turns it on. `null` clears a figure to its default; a figure not named keeps its value. It counts from the next pass.
+The owner sets what happens when a host stops reporting while it holds work (owner only). `graceHours` is how long the owner has to answer the warning before the work is re-placed from its last checkpoint on another allowed host (a whole number from 1 to 720; default 12). `autoMove` false means the work is never moved by itself (the owner can still move it with host.move-work); true turns it on. `recoverMinutes` is how long a host must report without a gap before its quiet episode is over (1 to 1440; default 10), so a host that drops out and reports again is one quiet host, not many. `noticeHours` is the least time between two notices about the same host (1 to 720; default 6). `null` clears a figure to its default; a figure not named keeps its value. When the stored setting is damaged, state `autoMove` (true or false) with the change: automatic moves stay off until you do. It counts from the next pass.
 
 Arguments:
 
 - `graceHours` (optional): 1 to 720, or null to clear
 - `autoMove` (optional): true, false, or null to clear
+- `recoverMinutes` (optional): 1 to 1440, or null to clear
+- `noticeHours` (optional): 1 to 720, or null to clear
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.

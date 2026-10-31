@@ -514,7 +514,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ quietHosts: { settings: quietHostSettings }, notifyAggregate, storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
+        dispatch = await composeDispatch({ quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
           // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
           const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });

@@ -6,4 +6,4 @@ export { RemoteWorkerHandle, RemoteWorkerHost, type RemoteWorkerHostOptions } fr
 export { HostPoller, type PollerOptions } from "./poller.js";
 export { PlacementSettingsService, dataHostsFor, type PlacementSettingsBody } from "./placement-settings.js";
 export { QUIET_HOST, QuietHostSettingsService, type QuietHostFigures, type QuietHostSettingsBody } from "./quiet-host-settings.js";
-export { DEFAULT_QUIET_AFTER_MS, QUIET_HOST_KIND, QUIET_HOST_LIMITS, QuietHostService, type MoveWorkResult, type QuietHostBody, type QuietHostDeps, type QuietHostNotice, type QuietHostOptions, type QuietHostPass } from "./quiet-hosts.js";
+export { DEFAULT_MAX_GAP_MS, DEFAULT_QUIET_AFTER_MS, QUIET_HOST_KIND, QUIET_HOST_LIMITS, QUIET_HOST_RETENTION_MS, QuietHostService, type MoveWorkResult, type QuietHostBody, type QuietHostDeps, type QuietHostNotice, type QuietHostOptions, type QuietHostPass } from "./quiet-hosts.js";

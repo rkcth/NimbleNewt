@@ -6,7 +6,7 @@ import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.j
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
-import { QuietHostService, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
+import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, type DecisionDeps } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
@@ -75,6 +75,8 @@ export interface RemoteStartOptions {
   readonly transport?: Omit<WorkerTransportOptions, "remote" | "principals">;
   readonly protocol?: RemoteOptions["protocol"];
   readonly fileBytes?: number;
+  /** How long a move waits for the old host to settle and send a checkpoint (see `RemoteOptions.settleMs`). */
+  readonly settleMs?: number;
   readonly relocationPolicy?: RemoteDeps["relocationPolicy"];
   /** Which hosts may hold local-only data, see the repository or be given the task credential (card H07). Default: local-only data is never placed on a remote host. */
   readonly placementPolicy?: RemoteDeps["placementPolicy"];
@@ -83,6 +85,8 @@ export interface RemoteStartOptions {
 }
 
 export interface DispatchStartOptions {
+  /** Timing of the quiet-host pass (default: a host is quiet after 5 minutes; a gap between passes beyond 10 minutes is read as a clock jump or a stall). */
+  readonly quietHosts?: Pick<QuietHostOptions, "quietAfterMs" | "maxGapMs">;
   /** Remote workers: a transport workers connect to, and hosts placed after the local ones. */
   readonly remote?: RemoteStartOptions;
   /** The worker hosts, local or remote, tried in order. None: attempts are admitted and checked but no worker starts (the loops still run). */
@@ -209,7 +213,7 @@ export interface ComposeInput {
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay" | "holdWithOwner">>; readonly reconciler: { runPass(): Promise<unknown> } };
   /** The owner's quiet-host figures (grace hours, automatic moves): given, the dispatcher's tick warns the owner about a host that stopped reporting and re-places its work as the figures say (needs remote hosts). */
-  readonly quietHosts?: { readonly settings: Pick<QuietHostSettingsService, "effective"> };
+  readonly quietHosts?: { readonly settings: Pick<QuietHostSettingsService, "effective">; /** The pass's own timing (tests, operators): see `QuietHostOptions`. */ readonly options?: Pick<QuietHostOptions, "quietAfterMs" | "maxGapMs"> };
   readonly onError?: (error: unknown) => void;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
   readonly leadMinutes?: () => Promise<number | undefined>;
@@ -429,18 +433,18 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       const d = (): DispatcherService => holder.dispatcher!;
       remote = RemoteWorkerService.withEpoch(storage, epoch, {
         principal, hosts, artifacts,
-        dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r) => d().quiesce(by, id, r), release: (by, id) => d().release(by, id) },
+        dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id) },
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
-      }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }) });
+      }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }), ...(i.options.remote.settleMs === undefined ? {} : { settleMs: i.options.remote.settleMs }) });
       for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
       if (i.quietHosts !== undefined) {
         const r = remote;
         quiet.service = QuietHostService.withEpoch(storage, epoch, {
-          principal, settings: i.quietHosts.settings, hosts, remote: r, liveAttempts: async () => { const out: { attemptId: string; state: string }[] = []; for (const id of await d().liveAttemptIds(principal)) { const x = await d().get(principal, id); if (x !== undefined) out.push({ attemptId: id, state: x.state }); } return out; },
+          principal, settings: i.quietHosts.settings, hosts, remote: r, liveAttempts: () => d().liveAttempts(principal), attemptState: async (id) => (await d().get(principal, id))?.state,
           // The notice is the owner's, once per episode: the command ID is stable, and the reference is the host's name (a record code, never free text).
           notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "host-record", id: n.hostId.slice("host:".length) }, detail: n.detail }); },
-        }, ro);
+        }, { ...ro, ...i.quietHosts.options });
       }
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
