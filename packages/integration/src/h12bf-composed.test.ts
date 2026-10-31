@@ -20,7 +20,7 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", 
 const skipOrFail = (t: { skip(why: string): void }, why: string): void => { if (required) assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the check cannot run: ${why}`); t.skip(why); };
 const AGENT = "agt-abcdefghijklmnopqrst";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const until = async (ok: () => boolean | Promise<boolean>, ms = 30_000, why = "timed out waiting"): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(why); await sleep(50); } };
+const until = async (ok: () => boolean | Promise<boolean>, ms = 30_000, why: string | (() => string) = "timed out waiting"): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(typeof why === "function" ? why() : why); await sleep(50); } };
 const read = (pid: string, file: string): string => { try { return readFileSync(`/proc/${pid}/${file}`, "utf8"); } catch { return ""; } };
 
 interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object }; readonly hold?: Promise<void> }
@@ -302,8 +302,11 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       const narrow = await dispatcher.changeRecipe(x.owner, attemptId, { kind: "narrow", recipe: { revision: "r-narrow", reach: [], limits: { memoryMb: 512, processes: 32 } } });
       assert.equal(narrow.restarted, true);
       await until(() => answer.seen.length >= 4, 30_000, "the turn did not go on after the narrowing");
-      await until(() => !mounts().includes("/inputs/a") && insideNow().length > 0, 20_000, "the narrowed recipe still has the mount");
-      assert.ok(insideNow().every((p) => !widePids.includes(p)));
+      // The old process is ended by the restart before the new one starts, but the check looks at the processes of the new launch only, and says what it saw when it fails (which process, which mounts).
+      const fresh = (): string[] => insideNow().filter((p) => !widePids.includes(p));
+      const seenNow = (): string => `new ${JSON.stringify(fresh().map((p) => [p, mountPoints(p).filter((m) => m.startsWith("/inputs"))]))}; all ${JSON.stringify(insideNow().map((p) => [p, read(p, "cmdline").replace(/\0/g, " ").slice(0, 120)]))}; started with ${JSON.stringify(records.at(-1)?.limits ?? [])}`;
+      await until(() => fresh().length > 0 && fresh().every((p) => !mountPoints(p).includes("/inputs/a")), 20_000, () => `the narrowed recipe still has the mount: ${seenNow()}`);
+      await until(() => insideNow().every((p) => !widePids.includes(p)), 20_000, () => `the widened process is still running: ${seenNow()}`);
       assert.deepEqual((records.at(-1)?.limits ?? []).map((l) => [l.limit, l.value]).sort(), [["memoryMb", 512], ["processes", 32]], "the narrowed limits are the ones the new process was started with");
       assert.match(requestText(answer, 3), /You can now read \/inputs\/a\./, "what the agent was told is still in its conversation");
       assert.match(requestText(answer, 3), /Order seeds/);

@@ -207,11 +207,16 @@ test("a secret file is looked at before it is opened: a link, a named pipe, a di
   try {
     const real = join(d, "real"); writeFileSync(real, "hello secret words", { mode: 0o600 });
     assert.equal(await readSecretFile(real), "hello secret words");
-    const link = join(d, "link"); symlinkSync(real, link);
-    await assert.rejects(readSecretFile(link), (e: unknown) => e instanceof SecretFileRefused && /not a regular file/.test(e.message));
+    const link = join(d, "link");
+    let linked = true;
+    try { symlinkSync(real, link); } catch { linked = false; } // creating a link needs a privilege on Windows
+    if (linked) await assert.rejects(readSecretFile(link), (e: unknown) => e instanceof SecretFileRefused && /not a regular file/.test(e.message));
     await assert.rejects(readSecretFile(d), /not a regular file/);
-    const fifo = join(d, "fifo"); execFileSync("mkfifo", [fifo]);
-    await assert.rejects(readSecretFile(fifo), /not a regular file/); // returns at once: it never blocks on the pipe
+    const fifo = join(d, "fifo");
+    if (process.platform !== "win32") { // Windows has no named pipes in the file system
+      execFileSync("mkfifo", [fifo]);
+      await assert.rejects(readSecretFile(fifo), /not a regular file/); // returns at once: it never blocks on the pipe
+    }
     const big = join(d, "big"); writeFileSync(big, "x".repeat(5000), { mode: 0o600 });
     await assert.rejects(readSecretFile(big), /too large/);
     await assert.rejects(readSecretFile(join(d, "missing")), (e: unknown) => e instanceof SecretFileRefused && !e.message.includes(d));

@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { SNAPSHOT_TABLES, canonicalJson } from "../storage/index.js";
 import { MAX_JSON_BYTES, UnlockFailed, hasherFor, parseKeyring, readPlain, type BackupCipher, type BackupKey } from "./crypto.js";
 import { ARTIFACT_FOLDER, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
@@ -103,6 +103,6 @@ export const blobFile = (e: BlobIndexLine, sealed: boolean): string | undefined 
 
 export async function readAll(file: string, cipher: BackupCipher | undefined): Promise<Buffer> {
   const parts: Buffer[] = [];
-  for await (const c of readPlain(file, cipher, cipher === undefined ? file : file.slice(file.lastIndexOf("/") + 1))) parts.push(c);
+  for await (const c of readPlain(file, cipher, cipher === undefined ? file : basename(file))) parts.push(c);
   return Buffer.concat(parts);
 }

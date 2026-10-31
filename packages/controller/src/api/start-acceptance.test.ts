@@ -123,7 +123,7 @@ test("a missing or changed artifact voids the review, rejected history is kept, 
 
     // The bytes change under the review.
     const find = (dir: string): string[] => readdirSync(dir, { withFileTypes: true, recursive: true }).filter((e) => e.isFile() && /^[0-9a-f]{64}$/.test(e.name)).map((e) => join(e.parentPath, e.name));
-    const blob = find(join(w.d, "blobs")).find((f) => f.includes("/blobs/blobs/"))!;
+    const blob = find(join(w.d, "blobs")).find((f) => f.replace(/\\/g, "/").includes("/blobs/blobs/"))!;
     chmodSync(blob, 0o600); writeFileSync(blob, "tampered");
     const bad = await call(rev.token, "deliverable.accept", { id, version: 1 }, "ac1");
     assert.equal(bad.error.code, "integrity", JSON.stringify(bad));

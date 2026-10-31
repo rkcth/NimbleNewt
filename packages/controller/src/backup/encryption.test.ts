@@ -12,6 +12,8 @@ import { runBackupCli } from "./cli.js";
 const AT = "2026-10-29T10:00:00.000Z";
 const PASS = "correct horse battery staple";
 const FAST = { N: 2 ** 16, r: 8, p: 1 } as const; // the floor, to keep the tests quick
+/** Group/other permission bits exist (not on Windows, where a file has no mode to refuse on). */
+const POSIX_MODES = process.platform !== "win32";
 const tmp = (): string => mkdtempSync(join(tmpdir(), "nn-enc-"));
 const SECRET_TITLE = "the-secret-title-café-7731";
 
@@ -152,9 +154,13 @@ test("the proof reads the secret from a host file, is rate limited, one at a tim
     writeFileSync(pf, "wrong wrong wrong wrong\n");
     await assert.rejects(enc.verify("passcode"), (e: unknown) => e instanceof ProofRefused && e.code === "failed" && !e.message.includes("wrong"));
     assert.equal(enc.status().lastProof?.ok, false);
-    t += 11_000; chmodSync(pf, 0o644);
-    await assert.rejects(enc.verify("passcode"), (e: unknown) => e instanceof ProofRefused && /mode to 600/.test(e.message));
-    t += 11_000; chmodSync(pf, 0o600); writeFileSync(pf, `${PASS}\n`);
+    t += 11_000;
+    if (POSIX_MODES) { // Windows has no group/other mode bits to refuse on
+      chmodSync(pf, 0o644);
+      await assert.rejects(enc.verify("passcode"), (e: unknown) => e instanceof ProofRefused && /mode to 600/.test(e.message));
+      t += 11_000;
+    }
+    chmodSync(pf, 0o600); writeFileSync(pf, `${PASS}\n`);
     const concurrent = await Promise.allSettled([enc.verify("passcode"), enc.verify("passcode")]);
     assert.equal(concurrent.filter((r) => r.status === "fulfilled").length, 1, "two at once: one runs");
     const shown = JSON.stringify(enc.status());
@@ -174,12 +180,12 @@ test("the command line sets encryption up from files, proves both ways in, and r
     const keyringFile = join(d, "keyring.json"); const recoveryOut = join(d, "recovery.json");
     assert.equal(await run("encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", recoveryOut), 0, out.join("\n"));
     assert.ok(!out.join("\n").includes(PASS) && !out.join("\n").includes(JSON.parse(readFileSync(recoveryOut, "utf8")).recoveryKey));
-    assert.equal(statSync(recoveryOut).mode & 0o077, 0);
+    if (POSIX_MODES) assert.equal(statSync(recoveryOut).mode & 0o077, 0);
     assert.equal(await run("encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", recoveryOut), 1, "does not overwrite");
     const weak = join(d, "weak"); writeFileSync(weak, "short\n", { mode: 0o600 });
     assert.equal(await run("encryption-setup", join(d, "k2.json"), "--passcode-file", weak, "--recovery-out", join(d, "r2.json")), 1);
     const loose = join(d, "loose"); writeFileSync(loose, `${PASS}\n`, { mode: 0o644 });
-    assert.equal(await run("encryption-setup", join(d, "k3.json"), "--passcode-file", loose, "--recovery-out", join(d, "r3.json")), 1, "a passcode file others can read");
+    if (POSIX_MODES) assert.equal(await run("encryption-setup", join(d, "k3.json"), "--passcode-file", loose, "--recovery-out", join(d, "r3.json")), 1, "a passcode file others can read");
     const keyring = JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring;
     assert.equal((keyring.wrappers.length), 2);
     const root = join(d, "backups");
