@@ -15,6 +15,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
+import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
 import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
@@ -85,7 +86,7 @@ export interface PlacementBody {
   readonly outputs: readonly string[];
   readonly checkpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
-  readonly contract?: { readonly digest: string; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[] }; readonly refused?: readonly string[] };
+  readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[] }; readonly refused?: readonly string[] };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -562,8 +563,10 @@ export class RemoteWorkerService {
     const inputs = [...new Set(command.inputs ?? [])];
     if (inputs.length > REMOTE_LIMITS.artifacts) invalid("inputs", `at most ${REMOTE_LIMITS.artifacts} artifacts`);
     const requirements = checkRequirements(command.requirements);
-    const sealed = order.contract === undefined ? undefined : checkContract(order);
-    const contract: PlacementBody["contract"] = sealed === undefined ? undefined : { digest: sealed.digest, bestEffort: sealed.bestEffort, ...(sealed.limits === undefined ? {} : { limits: { ...sealed.limits } as JsonObject }), requires: [...sealed.requires] };
+    // A remote placement is refused without a sealed contract: the gate on tool calls cannot be skipped by leaving the contract out.
+    if (order.contract === undefined) throw new DomainError("invalid_command", `attempt ${attemptId} has no dispatch contract; a remote placement must carry one`, { field: "order.contract" });
+    const sealed = checkContract(order);
+    const contract: PlacementBody["contract"] = { digest: sealed.digest, recipe: { revision: order.recipe.revision, reach: [...order.recipe.reach], ...(order.recipe.limits === undefined ? {} : { limits: { ...order.recipe.limits } as JsonObject }) }, bestEffort: sealed.bestEffort, ...(sealed.limits === undefined ? {} : { limits: { ...sealed.limits } as JsonObject }), requires: [...sealed.requires] };
     // The dispatcher's own record decides whether this is the attempt's host: a placement cannot contradict it.
     const dispatch = await this.#deps.dispatch.get(by, attemptId);
     if (dispatch === undefined || dispatch.state !== "running" || dispatch.hostId !== hostId || dispatch.generation !== order.generation || dispatch.taskId !== order.taskId || dispatch.agentId !== order.agentId) {
@@ -592,7 +595,7 @@ export class RemoteWorkerService {
       }
       let next: PlacementBody;
       if (current === undefined) {
-        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [], ...(contract === undefined ? {} : { contract }) };
+        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [], contract };
       } else {
         const b = current.body;
         if (b.hostId !== hostId) throw new DomainError("invalid_transition", `attempt ${attemptId} is placed on ${b.hostId}; it moves to ${hostId} only through relocate`, { field: "hostId" });
@@ -600,7 +603,7 @@ export class RemoteWorkerService {
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
         const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, ...rest } = b; void _s; void _a; void _r; void _c;
-        next = { ...rest, ...(contract === undefined ? {} : { contract }), placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
+        next = { ...rest, contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
       const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
@@ -751,7 +754,23 @@ export class RemoteWorkerService {
       // The caller's placement is checked in the same commit as the message: a move that landed meanwhile cannot take an old handle's message.
       if (placement !== undefined && current.body.placement !== placement) throw new DomainError("fenced", `attempt ${attemptId} is held under placement ${current.body.placement}, not ${placement}`);
       const seq = current.body.controlSeq + 1;
-      return { next: { ...current.body, controlSeq: seq, control: [...current.body.control, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
+      // A restart that changes what the sandbox reaches or the limits it runs under is a new launch: the confirmation is cleared and the digest is recomputed for the new recipe, so the worker must confirm
+      // again before another call is decided (card H12a). A restart into the same recipe changes nothing.
+      let contract = current.body.contract;
+      if (msg.kind === "restart" && contract !== undefined) {
+        const was = contract.recipe;
+        const reach = [...new Set(msg.recipe.reach)].sort();
+        const same = was !== undefined && canonicalJson({ reach: [...new Set(was.reach)].sort(), limits: (was.limits ?? null) as JsonObject | null } as unknown as JsonObject) === canonicalJson({ reach, limits: (msg.recipe.limits ?? null) as JsonObject | null } as unknown as JsonObject);
+        if (!same) {
+          for (const [name, value] of Object.entries(msg.recipe.limits ?? {})) {
+            const owner = (contract.limits as Record<string, number> | undefined)?.[name];
+            if (owner !== undefined && value > owner) throw new DomainError("invalid_command", `the restart raises ${name} to ${value}, above the owner's limit ${owner}`, { field: "recipe.limits" });
+          }
+          const { launched: _l, ...rest } = contract; void _l;
+          contract = { ...rest, digest: restartDigest(contract.digest, msg.recipe), recipe: { revision: msg.recipe.revision, reach: [...msg.recipe.reach], ...(msg.recipe.limits === undefined ? {} : { limits: { ...msg.recipe.limits } as JsonObject }) } };
+        }
+      }
+      return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...current.body.control, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
     }, "control");
     return done.body.controlSeq;
   }
@@ -1092,8 +1111,17 @@ export class RemoteWorkerService {
     return b;
   }
 
-  async #gateway(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<ToolGateway> {
+  /**
+   * A worker that has not confirmed the dispatch contract of this placement does nothing the attempt counts: no call is judged, recorded or run, no usage is booked, no checkpoint is kept, and a heartbeat
+   * does not extend the lease (so a worker that never confirms is ended by the lease, and cannot complete a turn) (card H12a).
+   */
+  #needsConfirmation(b: PlacementBody, what: string): void {
+    if (b.contract !== undefined && b.contract.launched === undefined) throw new DomainError("invalid_transition", `attempt ${b.attemptId}: the worker has not confirmed the dispatch contract; confirm it (launched) or refuse the order before ${what}`, { field: "contract" });
+  }
+
+  async #gateway(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, what?: string): Promise<ToolGateway> {
     const b = await this.#running(host, sessionId, attemptId, placement);
+    if (what !== undefined) this.#needsConfirmation(b, what);
     return this.#deps.dispatch.gateway(b.attemptId);
   }
 
@@ -1101,24 +1129,23 @@ export class RemoteWorkerService {
   async begin(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, request: ToolCallRequest): Promise<Awaited<ReturnType<ToolGateway["begin"]>>> {
     if (request === null || typeof request !== "object" || Array.isArray(request)) invalid("request", "must be a tool call request");
     const b = await this.#running(host, sessionId, attemptId, placement);
-    // A worker that has not confirmed the dispatch contract of this placement decides nothing: no call is judged, recorded or run for it (card H12a).
-    if (b.contract !== undefined && b.contract.launched === undefined) throw new DomainError("invalid_transition", `attempt ${b.attemptId}: the worker has not confirmed the dispatch contract; confirm it (launched) or refuse the order before any tool call`, { field: "contract" });
+    this.#needsConfirmation(b, "any tool call");
     return (await this.#deps.dispatch.gateway(b.attemptId)).begin(request);
   }
 
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {
     if (typeof operationId !== "string") invalid("operationId", "must be an operation ID");
-    return (await this.#gateway(host, sessionId, attemptId, placement)).report(operationId, outcome);
+    return (await this.#gateway(host, sessionId, attemptId, placement, "any report")).report(operationId, outcome);
   }
 
   async usage(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, usage: TurnUsage, requestKey?: string): Promise<void> {
     if (usage === null || typeof usage !== "object" || Array.isArray(usage)) invalid("usage", "must be an object");
-    await (await this.#gateway(host, sessionId, attemptId, placement)).usage(usage, requestKey);
+    await (await this.#gateway(host, sessionId, attemptId, placement, "any usage")).usage(usage, requestKey);
   }
 
   /** Extends the attempt's lease. A worker in a partition that cannot send this loses the attempt when the lease ends. */
   async attemptHeartbeat(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<{ until: string }> {
-    return (await this.#gateway(host, sessionId, attemptId, placement)).heartbeat();
+    return (await this.#gateway(host, sessionId, attemptId, placement, "any heartbeat")).heartbeat();
   }
 
   async acknowledgeDecisions(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<void> {
@@ -1159,13 +1186,20 @@ export class RemoteWorkerService {
       await this.#end(b, host, reasons);
       return { confirmed: false, reasons };
     }
-    await record("started");
-    await this.#changePlacement(b.attemptId, async (current) => {
-      const x = current?.body;
-      if (x === undefined || x.hostId !== host.id || x.placement !== b.placement || x.state !== "accepted" || x.contract?.digest !== c.digest) throw new DomainError("fenced", `the placement of attempt ${b.attemptId} changed`);
-      if (x.contract.launched !== undefined) return undefined;
-      return { next: { ...x, contract: { ...x.contract, launched: { at: this.#runner.now(), sessionId: x.sessionId ?? "", enforcement: reported } } } };
-    }, "launched", { actor: host.id });
+    // The launch is recorded for the owner only after the confirmation is on the placement (a confirmation that is fenced meanwhile is recorded as refused, not as started).
+    let done: { readonly body: PlacementBody; readonly previous: PlacementBody | undefined };
+    try {
+      done = await this.#changePlacement(b.attemptId, async (current) => {
+        const x = current?.body;
+        if (x === undefined || x.hostId !== host.id || x.placement !== b.placement || x.state !== "accepted" || x.contract?.digest !== c.digest) throw new DomainError("fenced", `the placement of attempt ${b.attemptId} changed`);
+        if (x.contract.launched !== undefined) return undefined;
+        return { next: { ...x, contract: { ...x.contract, launched: { at: this.#runner.now(), sessionId: x.sessionId ?? "", enforcement: reported } } } };
+      }, "launched", { actor: host.id });
+    } catch (error) {
+      if (isDomainError(error, "fenced")) await record("refused", "the placement changed before the confirmation could be kept");
+      throw error;
+    }
+    if (done.previous?.contract?.launched === undefined) await record("started");
     return { confirmed: true };
   }
 
@@ -1173,10 +1207,13 @@ export class RemoteWorkerService {
   async refuseOrder(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, command: { readonly digest: unknown; readonly reasons: unknown }): Promise<void> {
     const b = await this.#running(host, sessionId, attemptId, placement, ["accepted", "completed"]);
     if (b.contract === undefined) throw new DomainError("invalid_command", `attempt ${b.attemptId} was placed with no dispatch contract`, { field: "contract" });
-    if (typeof command.digest !== "string" || command.digest !== b.contract.digest) throw new DomainError("fenced", `the contract digest is not the one placement ${b.placement} of attempt ${b.attemptId} was given`, { field: "digest" });
+    // A worker that saw another order than the controller sealed (a tampered one) can only refuse it with a digest that does not match: the placement number already fenced stale messages, so this refusal
+    // ends the attempt as failed all the same, and says why, rather than leaving the run accepted.
+    const mismatch = typeof command.digest !== "string" || command.digest !== b.contract.digest;
     const given: unknown = command.reasons;
     if (!Array.isArray(given) || given.length === 0 || given.length > 10) return invalid("reasons", "must be a short list of reasons");
     const reasons = (given as unknown[]).map((r, i) => redactText(text(r, `reasons[${i}]`, { min: 1, max: 300 })).slice(0, 300));
+    if (mismatch) reasons.unshift("the order the worker saw does not match the contract the controller sealed (digest)");
     // A confirmed contract cannot be refused afterwards: the worker already ran under it.
     if (b.contract.launched !== undefined) throw new DomainError("invalid_transition", `attempt ${b.attemptId} already confirmed its contract`, { field: "contract" });
     if (b.state === "completed") return;
@@ -1204,6 +1241,8 @@ export class RemoteWorkerService {
     onlyKnown(command, ["commandId", "result"]);
     checkCommandId(command.commandId);
     const result = checkResult(command.result);
+    // A completed turn needs a confirmed contract; a failed or cancelled one (the worker giving up) does not.
+    if (b.state !== "completed" && result.status === "completed") this.#needsConfirmation(b, "completing a turn");
     // The answer to a result that was recorded but whose reply was lost: the same result again is the same answer.
     if (b.state === "completed") {
       if (canonicalJson(b.result as unknown as JsonObject) === canonicalJson(result as unknown as JsonObject)) return b.result!;
@@ -1234,6 +1273,7 @@ export class RemoteWorkerService {
    */
   async putCheckpoint(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, command: NoActor & { sequence: number; checkpoint: JsonObject }): Promise<{ sequence: number; artifactId: string; digest: string }> {
     const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any checkpoint");
     onlyKnown(command, ["commandId", "sequence", "checkpoint"]);
     checkCommandId(command.commandId);
     if (typeof command.sequence !== "number" || !Number.isSafeInteger(command.sequence) || command.sequence < 1) invalid("sequence", "must be a whole number of at least 1");

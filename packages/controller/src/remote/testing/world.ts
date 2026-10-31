@@ -93,6 +93,8 @@ export interface RemoteWorld extends DispatchWorld {
   /** The mode the remote service re-accepts by (card H09b); change `mode` in a test. */
   readonly reaccept: { mode: "auto" | "owner" };
   /** The owner notices the remote service raised (card H09b), and the patience it holds a waiting lease for (`undefined`: off). */
+  /** The owner's launch records the service was asked to keep (card H12a). */
+  readonly launches: { attemptId: string; outcome: string; reason?: string }[];
   readonly notices: { commandId: string; attemptId: string; hostId: string; sessionId: string; detail: string }[];
   readonly patience: { ms: number | undefined };
   done(): Promise<void>;
@@ -108,12 +110,14 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const workerIds = (): string[] => workers.map((x) => x.hostId);
   const reaccept: { mode: "auto" | "owner" } = { mode: o.reaccept ?? "auto" };
   const notices: RemoteWorld["notices"] = [];
+  const launches: RemoteWorld["launches"] = [];
   const patience: RemoteWorld["patience"] = { ms: 24 * 3600_000 };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id) },
     reaccept: async () => reaccept.mode,
     patienceMs: async () => patience.ms,
+    recordLaunch: async (r) => { launches.push({ attemptId: r.attemptId, outcome: r.outcome, ...(r.reason === undefined ? {} : { reason: r.reason }) }); },
     notify: async (n) => { if (!notices.some((x) => x.commandId === n.commandId)) notices.push(n); },
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
     ...(o.placement === null ? {} : { placementPolicy: o.placement ?? (async () => ({ dataHosts: workerIds() })) }),
@@ -123,7 +127,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport, reaccept, notices, patience,
+    remote, artifacts, blobs, transport, reaccept, notices, launches, patience,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
-import type { ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
-import { contractProblems, enforcementFor, type WorkerAbilities } from "./contract-wire.js";
+import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
+import { contractProblems, enforcementFor, restartDigest, type WorkerAbilities } from "./contract-wire.js";
 import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
@@ -254,6 +254,16 @@ export class RemoteAttempt implements ToolGateway {
       return { ok: false, reasons: problems };
     }
     const answer = await this.#post("launched", { digest, enforcement: enforcementFor(order.contract, abilities) as unknown as Json }, key) as { confirmed: boolean; reasons?: string[] };
+    return answer.confirmed ? { ok: true } : { ok: false, reasons: answer.reasons ?? ["the controller did not accept the confirmation"] };
+  }
+
+  /**
+   * After a `restart` control message that changed the recipe the controller cleared the confirmation: this confirms the new launch (the digest bound to the new recipe, the figures the sandbox really
+   * enforces now). Until it is accepted the controller decides no further call. `currentDigest` is the digest the worker confirmed before.
+   */
+  async confirmRestart(currentDigest: string, restart: { readonly recipe: RecipeSummary }, contract: DispatchContract, abilities: WorkerAbilities, key?: string): Promise<{ readonly ok: true } | { readonly ok: false; readonly reasons: readonly string[] }> {
+    const digest = restartDigest(currentDigest, restart.recipe);
+    const answer = await this.#post("launched", { digest, enforcement: enforcementFor(contract, abilities) as unknown as Json }, key) as { confirmed: boolean; reasons?: string[] };
     return answer.confirmed ? { ok: true } : { ok: false, reasons: answer.reasons ?? ["the controller did not accept the confirmation"] };
   }
 

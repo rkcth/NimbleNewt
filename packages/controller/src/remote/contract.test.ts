@@ -3,6 +3,7 @@ import { after, test } from "node:test";
 import type { WorkOrder } from "../dispatch/ports.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { checkContract, contractDigest, contractProblems, sealContract, type WorkerAbilities } from "./contract.js";
+import { restartDigest } from "./contract-wire.js";
 import { FULL_ABILITIES, READ, local, remoteSuite, wireRefuses } from "./testing/suite.js";
 
 after(stopServer);
@@ -170,4 +171,106 @@ for (const backend of backends) {
     assert.deepEqual(await next.honorContract(offer.order, FULL_ABILITIES, c.clock.now()), { ok: true });
     assert.equal((await next.call(READ("c2"), local("two"))).state, "confirmed");
   }, { policy: async () => ({ dataHosts: ["host:r1", "host:r2"] }) });
+
+  suite("until the worker confirms the contract nothing counts: no usage, no checkpoint, no heartbeat, no completed turn (a worker that never confirms cannot finish a turn)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    await wireRefuses("invalid_transition", () => attempt.usage({ turnSeq: 1, costMicros: 5 }), 409, (e) => assert.match(e.message, /confirm/));
+    await wireRefuses("invalid_transition", () => attempt.putCheckpoint(1, { turn: 1 }), 409);
+    await wireRefuses("invalid_transition", () => attempt.heartbeat(), 409);
+    await wireRefuses("invalid_transition", () => attempt.complete({ status: "completed", text: "done" }), 409, (e) => assert.match(e.message, /completing a turn/));
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.state, "accepted");
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.checkpoint, undefined);
+    // After the confirmation the same messages are taken.
+    assert.deepEqual(await attempt.honorContract(order, FULL_ABILITIES, c.clock.now()), { ok: true });
+    await attempt.usage({ turnSeq: 1, costMicros: 5 });
+    await attempt.heartbeat();
+    await attempt.putCheckpoint(1, { turn: 1 });
+    assert.equal((await attempt.complete({ status: "completed", text: "done" })).status, "completed");
+  });
+
+  suite("a worker that gives up before confirming may still end the run as failed (that is not a turn)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    assert.equal((await attempt.complete({ status: "failed", error: "could not start" })).status, "failed");
+    await c.current.idle();
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.state, "completed");
+  });
+
+  suite("limits rest on the worker's attestation, bounded by per-call checks, lease and expiry: the controller cannot measure them, so a confirmation that claims full enforcement is believed", async (c) => {
+    const r1 = await c.host("r1");
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512, processes: 40 }, bestEffort: false });
+    const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    // Nothing here checks a cgroup or an rlimit: a worker that says "full" is recorded as having said it, with its host named.
+    assert.deepEqual(await attempt.honorContract(order, FULL_ABILITIES, c.clock.now()), { ok: true });
+    const stored = (await c.remote.placement(c.owner, attemptId))!;
+    assert.ok(stored.contract!.launched!.enforcement.every((e) => e.enforced === "full"));
+    assert.deepEqual(c.launches.filter((l) => l.attemptId === attemptId).map((l) => l.outcome), ["started"]);
+    // What still binds it is the controller's own checking of every call and the lease; an expired attempt is fenced.
+    assert.equal((await attempt.call(READ("c1"), local("ok"))).state, "confirmed");
+  });
+
+  suite("a remote placement without a contract is refused: the gate cannot be skipped by leaving the contract out", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, order } = await c.started(r1);
+    const { contract: _c, ...bare } = order; void _c;
+    await assert.rejects(c.remote.place(c.owner, { hostId: r1.id, order: bare as typeof order, requirements: { data: "local-only" } }), (e: unknown) => (e as { code?: string }).code === "invalid_command" && /no dispatch contract/.test((e as Error).message));
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.placement, 1, "nothing was placed again");
+  });
+
+  suite("a restart that changes the reach or the limits needs a new confirmation; the same recipe does not", async (c) => {
+    const r1 = await c.host("r1");
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512 }, bestEffort: false });
+    const { attemptId, order, attempt, placement } = await c.started(r1);
+    const first = order.contract!.digest;
+    assert.equal((await attempt.call(READ("c1"), local("one"))).state, "confirmed");
+    const restart = (recipe: { revision: string; reach: string[]; limits?: Record<string, number> }) => c.remote.control(c.owner, attemptId, { kind: "restart", recipe, checkpoint: { turn: 1 } }, placement);
+    // The same reach and limits: nothing to confirm again.
+    await restart({ revision: "r-2", reach: [...order.recipe.reach], ...(order.recipe.limits === undefined ? {} : { limits: { ...order.recipe.limits } }) });
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.contract!.digest, first);
+    assert.equal((await attempt.call(READ("c2"), local("two"))).state, "confirmed");
+    // A wider reach: the confirmation is cleared, the digest is that of the new recipe, no call until the worker confirms it.
+    const wider = { revision: "r-3", reach: [...order.recipe.reach, "write-file"] };
+    await restart(wider);
+    const after = (await c.remote.placement(c.owner, attemptId))!.contract!;
+    assert.equal(after.launched, undefined);
+    assert.equal(after.digest, restartDigest(first, wider));
+    await wireRefuses("invalid_transition", () => attempt.begin(READ("c3")), 409, (e) => assert.match(e.message, /confirm/));
+    // The old digest is not a confirmation of the new launch.
+    await wireRefuses("fenced", () => r1.client.send("POST", `/worker/attempts/${attemptId}/launched`, { body: { placement, digest: first, enforcement: [{ limit: "memoryMb", value: 512, enforced: "full" }] }, session: true }), 409);
+    assert.deepEqual(await attempt.confirmRestart(first, { recipe: wider }, order.contract!, FULL_ABILITIES), { ok: true });
+    assert.equal((await attempt.call(READ("c3"), local("three"))).state, "confirmed");
+    // Dropping the limits is a change too; raising a limit above the owner's is refused outright.
+    await restart({ revision: "r-4", reach: wider.reach, limits: { memoryMb: 256 } });
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.contract!.launched, undefined);
+    await assert.rejects(restart({ revision: "r-5", reach: wider.reach, limits: { memoryMb: 4096 } }), /above the owner's limit/);
+  });
+
+  suite("a worker that sees a tampered order refuses it: the refusal ends the attempt as failed, also when the digest it names is not the controller's", async (c) => {
+    const r1 = await c.host("r1");
+    for (const [name, tamper] of [["route", (o: WorkOrder) => ({ ...o, route: "other/model" })], ["digest", (o: WorkOrder) => ({ ...o, contract: { ...o.contract!, digest: "f".repeat(64) } })]] as const) {
+      const { attemptId, order, attempt } = await c.started(r1, `Order seeds ${name}`, { unconfirmed: true, agent: `ag${name}` });
+      const answer = await attempt.honorContract(tamper(order), FULL_ABILITIES, c.clock.now());
+      assert.equal(answer.ok, false, name);
+      assert.match((answer as unknown as { reasons: string[] }).reasons.join(), /digest/);
+      await c.current.idle();
+      const dispatch = (await c.current.get(c.owner, attemptId))!;
+      assert.equal(dispatch.state, "finished", name);
+      assert.equal(dispatch.outcome!.status, "failed", name);
+      const stored = (await c.remote.placement(c.owner, attemptId))!;
+      assert.equal(stored.state, "completed", name);
+      if (name === "digest") assert.match(stored.contract!.refused!.join(), /does not match the contract the controller sealed/);
+      assert.equal(stored.contract!.launched, undefined);
+      assert.deepEqual(c.launches.filter((l) => l.attemptId === attemptId).map((l) => l.outcome), ["refused"]);
+    }
+  });
+
+  suite("the launch record says started once, after the confirmation is on the placement; the same confirmation again records nothing more", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    assert.equal(c.launches.length, 0);
+    await attempt.honorContract(order, FULL_ABILITIES, c.clock.now());
+    await attempt.honorContract(order, FULL_ABILITIES, c.clock.now());
+    assert.deepEqual(c.launches.filter((l) => l.attemptId === attemptId).map((l) => l.outcome), ["started"]);
+  });
 }

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { RemoteWorkerClient, WorkerRequestError } from "../remote/index.js";
+import { FULL_ABILITIES } from "../remote/testing/suite.js";
 import { AGENT, CAPS, world } from "./testing/remote-world.js";
 
 
@@ -59,6 +60,7 @@ test("moving an attempt to another host: the policy and the integrity of what tr
     const offer = (await from.client.offers())[0]!;
     const attempt = from.client.attempt(t.attemptId, offer.placement);
     await attempt.accept();
+    await attempt.honorContract(offer.order, FULL_ABILITIES);
     await attempt.putCheckpoint(1, { turn: 1, said: "ordered" });
     const move = (key: string) => w.c.dispatch!.remote!.relocate(w.rob, { commandId: key, attemptId: t.attemptId, toHostId: to.id, reason: "the host is being retired" });
     const refuses = async (code: string, key: string, message?: RegExp): Promise<void> => {
@@ -94,7 +96,9 @@ test("moving an attempt to another host: the policy and the integrity of what tr
     assert.equal(again.placement, moved.placement);
     assert.deepEqual(again.order.resumeFrom, (await w.c.dispatch!.remote!.latestCheckpoint(w.rob, t.attemptId))!.checkpoint, "the new host restarts from the checkpoint the old one sent");
     assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered" });
-    await to.client.attempt(t.attemptId, again.placement).accept();
+    const arrived = to.client.attempt(t.attemptId, again.placement);
+    await arrived.accept();
+    await arrived.honorContract(again.order, FULL_ABILITIES);
     // Repeating the command after the new host took the attempt up is answered, not done again.
     assert.equal((await move("mv-ok")).to, to.id);
     assert.equal((await w.c.dispatch!.remote!.placement(w.rob, t.attemptId))!.relocations, 1, "one move, however often it was asked for");
@@ -116,6 +120,7 @@ test("a move whose checkpoint has no captured continuation does not wait on a re
     const offer = (await from.client.offers())[0]!;
     const attempt = from.client.attempt(t.attemptId, offer.placement);
     await attempt.accept();
+    await attempt.honorContract(offer.order, FULL_ABILITIES);
     await attempt.putCheckpoint(1, { turn: 1, said: "ordered" });
     assert.equal(await w.c.services.resumes.hasContinuation(w.rob, t.taskId), false, "nothing was captured for the task");
     const moved = await w.c.dispatch!.remote!.relocate(w.rob, { commandId: "mv-nocont", attemptId: t.attemptId, toHostId: to.id, reason: "retiring" });
@@ -148,6 +153,7 @@ test("the native store of an agent has one owner host: another task of the agent
     const offer = (await mine.client.offers())[0]!;
     const run = mine.client.attempt(first.attemptId, offer.placement);
     await run.accept();
+    await run.honorContract(offer.order, FULL_ABILITIES);
     await run.complete({ status: "completed" });
     await w.c.dispatch!.dispatcher.idle?.();
     const go = await w.tick();
@@ -162,6 +168,7 @@ test("the native store of an agent has one owner host: another task of the agent
     const secondOffer = (await mine.client.offers())[0]!;
     const second2 = mine.client.attempt(second.attemptId, secondOffer.placement);
     await second2.accept();
+    await second2.honorContract(secondOffer.order, FULL_ABILITIES);
     await second2.complete({ status: "completed" });
     await w.c.dispatch!.dispatcher.idle();
     await w.c.dispatch!.remote!.moveStore(w.rob, { commandId: "ms-3", agentId: `agent:${AGENT}`, toHostId: other.id });

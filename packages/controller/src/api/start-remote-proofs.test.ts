@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { SESSION_HEADER, PROTOCOL_HEADER, WorkerRequestError } from "../remote/index.js";
+import { FULL_ABILITIES } from "../remote/testing/suite.js";
 import { rawRequest } from "../remote/testing/world.js";
 import { AGENT, CAPS, world } from "./testing/remote-world.js";
 
@@ -23,8 +24,10 @@ test("the owner's stop reaches a remote worker through its own poll and ends the
     const r1 = await w.host("r1");
     const first = await w.task("Order seeds");
     assert.deepEqual((await w.tick()).started, [first.attemptId]);
-    const attempt = r1.client.attempt(first.attemptId, (await r1.client.offers())[0]!.placement);
+    const firstOffer = (await r1.client.offers())[0]!;
+    const attempt = r1.client.attempt(first.attemptId, firstOffer.placement);
     await attempt.accept();
+    await attempt.honorContract(firstOffer.order, FULL_ABILITIES);
     // A stop first asks the worker for a checkpoint: the request arrives through the worker's own poll, and the stop finishes when the worker answers it.
     const stopping = w.c.dispatch!.dispatcher.stop(w.rob, first.attemptId, { reason: "the owner stopped the work" });
     const outcome = stopping.then(() => "stopped" as const, (e: unknown) => e);
@@ -45,8 +48,10 @@ test("the owner's stop reaches a remote worker through its own poll and ends the
     // An emergency stop does not wait for the worker at all.
     const second = await w.task("Water the beans");
     assert.deepEqual((await w.tick()).started, [second.attemptId]);
-    const next = r1.client.attempt(second.attemptId, (await r1.client.offers())[0]!.placement);
+    const secondOffer = (await r1.client.offers())[0]!;
+    const next = r1.client.attempt(second.attemptId, secondOffer.placement);
     await next.accept();
+    await next.honorContract(secondOffer.order, FULL_ABILITIES);
     await w.c.dispatch!.dispatcher.stop(w.rob, second.attemptId, { reason: "stop now", emergency: true });
     assert.equal((await w.c.dispatch!.remote!.placement(w.rob, second.attemptId))!.state, "ended");
     await assert.rejects(() => next.pollControl(0), fenced);
@@ -69,6 +74,7 @@ test("a new host's checkpoint never answers an old handle's request in the dispa
     const offer = (await from.client.offers())[0]!;
     const old = from.client.attempt(t.attemptId, offer.placement);
     await old.accept();
+    await old.honorContract(offer.order, FULL_ABILITIES);
     await old.putCheckpoint(1, { turn: 1 });
     // The owner moves the attempt: the old host is asked for a checkpoint and stays silent. A while later the dispatcher's own stop asks it too, so the stop's wait ends after the move has been made.
     const moving = w.c.dispatch!.remote!.relocate(w.rob, { commandId: "mv", attemptId: t.attemptId, toHostId: to.id, reason: "r2 is being retired" }).then(() => "moved" as const, (e: unknown) => e);
@@ -80,6 +86,7 @@ test("a new host's checkpoint never answers an old handle's request in the dispa
     const again = (await to.client.offers())[0]!;
     const fresh = to.client.attempt(t.attemptId, again.placement);
     await fresh.accept();
+    await fresh.honorContract(again.order, FULL_ABILITIES);
     await fresh.putCheckpoint(7, { turn: 7, on: "the new host" });
     const result = await outcome;
     assert.ok(result instanceof DomainError && result.code === "fenced", `the old handle's wait was fenced, not answered: ${String(result)}`);
@@ -142,8 +149,10 @@ test("a move to a host of another platform, without the workspace binding or out
     assert.deepEqual(started.started, [t.attemptId], JSON.stringify(started.skipped));
     const at = (await w.c.dispatch!.remote!.placement(w.rob, t.attemptId))!.hostId;
     const source = [from, arm, bare, peer].find((h) => h.id === at)!;
-    const attempt = source.client.attempt(t.attemptId, (await source.client.offers())[0]!.placement);
+    const sourceOffer = (await source.client.offers())[0]!;
+    const attempt = source.client.attempt(t.attemptId, sourceOffer.placement);
     await attempt.accept();
+    await attempt.honorContract(sourceOffer.order, FULL_ABILITIES);
     await attempt.putCheckpoint(1, { turn: 1 });
     const move = (to: { id: string }, key: string) => w.c.dispatch!.remote!.relocate(w.rob, { commandId: key, attemptId: t.attemptId, toHostId: to.id, reason: "balance" });
     const refusal = async (to: { id: string }, text: RegExp, key: string): Promise<void> => {

@@ -76,3 +76,11 @@ export interface ContractEnforcement { readonly limit: ContractLimitName; readon
 export function enforcementFor(contract: DispatchContract, abilities: WorkerAbilities): ContractEnforcement[] {
   return Object.entries(contract.limits ?? {}).filter(([, v]) => v !== undefined).map(([k, v]) => ({ limit: k as ContractLimitName, value: v as number, enforced: abilities.enforces[k as ContractLimitName] ?? "none" }));
 }
+
+/**
+ * The digest a worker confirms after a `restart` that changed the recipe (reach or limits): the digest it held, bound to the new recipe. Both sides compute it the same way, so the confirmation names
+ * exactly the recipe the worker is about to run. It is a binding, not authentication (see the notes on the transport).
+ */
+export function restartDigest(previous: string, recipe: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: object }): string {
+  return createHash("sha256").update(stable({ previous, recipe: { revision: recipe.revision, reach: recipe.reach, limits: recipe.limits ?? null } })).digest("hex");
+}

@@ -290,8 +290,10 @@ for (const backend of backends) {
     // The placement itself is the backstop: asked to place the agent on r2 it refuses.
     await refuses("invalid_command", () => c.remote.place(c.dispatcherPrincipal, { hostId: r2.id, order: { ...r1.worker.starts[0]!, agentId: "agent:ann" }, requirements: { data: "cloud-allowed" } }));
     const done = (await r1.client.offers())[0]!;
-    await r1.client.attempt(second.attemptId!, done.placement).accept();
-    await r1.client.attempt(second.attemptId!, done.placement).complete({ status: "completed" });
+    const secondRun = r1.client.attempt(second.attemptId!, done.placement);
+    await secondRun.accept();
+    await secondRun.honorContract(done.order, FULL_ABILITIES, c.clock.now());
+    await secondRun.complete({ status: "completed" });
     await c.current.idle();
     // Only the owner moves a store, only to a connected and fresh host, and a repeat is the same move.
     const ann1 = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:ann")).token);

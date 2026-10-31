@@ -8,6 +8,7 @@ import { AdmissionService } from "../admission/service.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
 import { RemoteWorkerClient } from "../remote/index.js";
+import { FULL_ABILITIES } from "../remote/testing/suite.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -135,7 +136,7 @@ test("work.end then the agent's turn completes: the attempt records the agent's 
     const two = await attemptFor(c, owner, project, 2);
     await c.dispatch!.dispatcher.tick();
     const offers = await client.offers();
-    const play = async (a: { attempt: string }) => { const offer = offers.find((o) => o.order.attemptId === a.attempt)!; const att = client.attempt(a.attempt, offer.placement); await att.accept(); return att; };
+    const play = async (a: { attempt: string }) => { const offer = offers.find((o) => o.order.attemptId === a.attempt)!; const att = client.attempt(a.attempt, offer.placement); await att.accept(); await att.honorContract(offer.order, FULL_ABILITIES); return att; };
     const finished = async (id: string) => { for (let n = 0; n < 200 && (await state(id)).state !== "finished"; n++) await new Promise((r) => setTimeout(r, 25)); };
     const first = await play(one);
     const second = await play(two);
@@ -210,6 +211,7 @@ test("work.end blocked while the task is paused, then the turn completes: the at
     const offer = offers.find((o) => o.order.attemptId === one.attempt)!;
     const att = client.attempt(one.attempt, offer.placement);
     await att.accept();
+    await att.honorContract(offer.order, FULL_ABILITIES);
     assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "blocked", note: "no seeds" }, "e1")).ok);
     await c.services.pauses.pause(owner, { commandId: "pz", scope: { kind: "task", id: one.task }, reason: "plain pause" });
     await att.complete({ status: "completed", text: "stopping" });

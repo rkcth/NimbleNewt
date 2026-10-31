@@ -36,6 +36,10 @@ test("the worker client holds a URL and a credential and nothing else: it import
   const imports = [...source.matchAll(/^import (?:type )?[^;]*? fr[o]m "([^"]+)";/gm)].map((m) => m[1]);
   // Node's network modules, the protocol constants and the dispatch contract's types are everything it reaches.
   assert.deepEqual(imports.filter((i) => !i!.startsWith("node:http") && !i!.startsWith("node:https") && i !== "node:crypto").sort(), ["../dispatch/ports.js", "./contract-wire.js", "./protocol.js"]);
+  // The files a worker also carries are as narrow: the contract's worker half reaches nothing but node:crypto and the contract types; the protocol constants only the error type, the storage JSON type and the dispatch types.
+  const importsOf = (file: string): string[] => [...readFileSync(fileURLToPath(new URL(`../../src/remote/${file}`, import.meta.url)), "utf8").matchAll(/^import (?:type )?[^;]*? fr[o]m "([^"]+)";/gm)].map((m) => m[1]!).sort();
+  assert.deepEqual(importsOf("contract-wire.ts"), ["../dispatch/ports.js", "node:crypto"]);
+  assert.deepEqual(importsOf("protocol.ts"), ["../dispatch/ports.js", "../domain/errors.js", "../storage/types.js"]);
   assert.doesNotMatch(source, /\b(?:readFile|writeFile|createReadStream|openSync|sqlite|postgres|Storage)\b/);
   const client = new RemoteWorkerClient({ url: "http://127.0.0.1:1", token: "t".repeat(30), workerVersion: "w" });
   assert.deepEqual(Object.keys(client), []);

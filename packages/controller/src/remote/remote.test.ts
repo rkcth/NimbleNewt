@@ -229,6 +229,7 @@ for (const backend of backends) {
     assert.equal((await c.remote.placement(c.owner, attemptId))!.history.at(-1)!.reason, "placed again");
     const next = stale.attempt(attemptId, offered.placement);
     assert.equal((await next.accept()).placement, placement + 1);
+    await next.honorContract(offered.order, FULL_ABILITIES, c.clock.now());
     // The run the dispatcher was waiting for is the one that was fenced: its attempt ends (the dispatcher starts a new run through its own path), so the new number does not reach the gateway.
     await c.current.idle();
     assert.equal((await c.current.get(c.owner, attemptId))!.state, "finished");
