@@ -359,3 +359,31 @@ test("a restart keeps the settings, the quota and the reserve; a missing reserve
     assert.equal((await c.api.handle(boot.token, { v: 1, op: "retention.settings.get", args: {} } as never) as Reply).result.item.effective.derivedDays, 60);
   } finally { await c.close(); clean(d); }
 });
+
+test("recorded model replies (generation runs) are kept by default; with generationRunDays set the runner removes the old ones that are over, never one still streaming or holding a call that could be admitted", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-ret-gen-"));
+  const { c, boot, call, project, put } = await world(d);
+  try {
+    const run = (state: string, calls: object[] = []) => ({ taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project, owner: "svc:dispatcher", number: 1, contextRevision: 1, state, text: "hello", chunks: 1, toolCalls: calls, late: [], lateCount: 0, startedAt: "2020-01-01T00:00:00.000Z", sensitive: true });
+    const ids = { done: "grun-aaaaaaaaaaaaaaaaaaaa-0000000001", live: "grun-aaaaaaaaaaaaaaaaaaaa-0000000002", callable: "grun-aaaaaaaaaaaaaaaaaaaa-0000000003" };
+    await put("generation-run", ids.done, run("failed"));
+    await put("generation-run", ids.live, run("streaming"));
+    await put("generation-run", ids.callable, run("finished", [{ id: "c1", name: "t", args: "{}", state: "complete" }]));
+    const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+    const realGet = c.storage.getAggregate.bind(c.storage); const realList = c.storage.listAggregates.bind(c.storage);
+    const back = (a: any) => (a?.kind === "generation-run" ? { ...a, updatedAt: old } : a);
+    c.storage.getAggregate = async (ref) => back(await realGet(ref));
+    c.storage.listAggregates = (async (k: string, o: any) => (await realList(k, o)).map(back)) as never;
+    const has = async (id: string) => (await c.storage.getAggregate({ kind: "generation-run", id })) !== undefined;
+    assert.equal((await call(boot.token, "retention.settings.get", {})).result.item.effective.generationRunDays, null, "off by default: everything is kept");
+    const idle = (await call(boot.token, "retention.run", {}, "g0")).result;
+    assert.equal(idle.candidates.length, 0);
+    assert.ok((await call(boot.token, "retention.settings.set", { generationRunDays: 30 }, "g1")).ok);
+    const preview = (await call(boot.token, "retention.run", {}, "g2")).result;
+    assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id), [ids.done]);
+    assert.ok((await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "g3")).ok);
+    assert.equal(await has(ids.done), false, "the old failed run is removed");
+    assert.equal(await has(ids.live), true, "a run still streaming is kept");
+    assert.equal(await has(ids.callable), true, "a run with a call that could still be admitted is kept");
+  } finally { await c.close(); clean(d); }
+});

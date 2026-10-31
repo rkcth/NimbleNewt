@@ -240,6 +240,18 @@ export class RetentionService {
       candidates.sort((a, b) => (a.kind === b.kind ? (a.id < b.id ? -1 : 1) : a.kind < b.kind ? -1 : 1));
       if (candidates.length > limit) { candidates.length = limit; partial = true; }
     }
+    if (values.generationRunDays !== null) {
+      // Recorded model replies (K06 retention of card L05b): only runs that are over, and that hold no call that could still be admitted.
+      const cutoff = now - values.generationRunDays * DAY;
+      const complete = await scan(this.#runner, "generation-run", (a) => {
+        if (Date.parse(a.updatedAt) >= cutoff) return;
+        const run = a.body as { state?: unknown; toolCalls?: { state?: unknown }[]; projectId?: unknown };
+        if (run.state === "streaming" || run.state === "held" || (run.toolCalls ?? []).some((c) => c.state === "complete" || c.state === "held" || c.state === "admitted")) return;
+        candidates.push({ kind: "generation-run", id: a.id, revision: a.revision, projectId: typeof run.projectId === "string" ? run.projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+      });
+      if (!complete) partial = true;
+      if (candidates.length > limit) { candidates.length = limit; partial = true; }
+    }
     const keepVersions = values.catalogVersionsKept;
     let versions: { items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean } | undefined;
     const versionsRetained: { name: string; version: string; reasons: string[] }[] = [];
@@ -263,7 +275,7 @@ export class RetentionService {
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -280,7 +292,7 @@ export class RetentionService {
       for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
         const why = material.why(c.kind, c.id);
         if (why !== undefined) { if (retained.length < 200) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
-        const done = await this.#removeOne(by, c, values.derivedDays!);
+        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -377,7 +389,7 @@ export class RetentionService {
           const arc = await this.#runner.get("retention-archive", archiveIdOf(c.id));
           const changes: Change[] = [{ type: "delete", ref, expectedRevision: fresh.revision }];
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;

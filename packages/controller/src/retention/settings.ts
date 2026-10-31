@@ -13,6 +13,8 @@ const REF = { kind: "retention-settings", id: "main" } as const;
 export interface RetentionValues {
   /** Derived summaries (summary records, meeting summaries, stand-up briefs) older than this many days are removed by the runner. `null`: never. */
   readonly derivedDays: number | null;
+  /** Recorded model replies (generation runs: their text and tool arguments may hold personal or confidential data) that ended, failed or were interrupted are removed this many days after their last change. `null`: keep them (default). A run still streaming, or holding a call that could still be admitted, is never removed. */
+  readonly generationRunDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;
   /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). Recorded here; the deletion itself needs adapter support (card K06c). */
@@ -41,7 +43,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -49,6 +51,7 @@ type Kind = "days" | "flag" | "bytes" | "percent" | "count";
 interface Spec { readonly kind: Kind; readonly min: number; readonly max: number; readonly nullable: boolean }
 export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   derivedDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  generationRunDays: { kind: "days", min: 1, max: 3650, nullable: true },
   autoRun: { kind: "flag", min: 0, max: 1, nullable: false },
   thinkingDays: { kind: "days", min: 1, max: 365, nullable: false },
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },

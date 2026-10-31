@@ -46,3 +46,24 @@ test("an id the generation service would refuse is replaced by a safe one", () =
   const events = run(enc.encode(data({ choices: [{ delta: { tool_calls: [{ index: 3, id: "has spaces and ☃", function: { name: "t", arguments: "{}" } }] } }] })), 100);
   assert.equal((events[0] as { id: string }).id, "call-3");
 });
+
+test("null elements in a reply do not throw: tool_calls [null], content [null], choices [null]", () => {
+  const sseOf = (o: unknown): Uint8Array => enc.encode(data(o));
+  assert.doesNotThrow(() => run(sseOf({ choices: [{ delta: { tool_calls: [null] } }] }), 1000));
+  assert.doesNotThrow(() => run(sseOf({ choices: [null] }), 1000));
+  assert.doesNotThrow(() => run(sseOf({ type: "content_block_start", index: 0, content_block: null }), 1000));
+  assert.doesNotThrow(() => run(enc.encode(JSON.stringify({ choices: [{ message: { tool_calls: [null], content: "x" } }] })), 1000));
+  assert.doesNotThrow(() => run(enc.encode(JSON.stringify({ content: [null, { type: "text", text: "x" }] })), 1000));
+  assert.equal(run(enc.encode(JSON.stringify({ content: [null, { type: "text", text: "x" }] })), 1000).some((e) => e.kind === "text"), true);
+});
+
+test("an event's data may span several lines; a comment line shows a stream; only the first choice is recorded; a line over 1 MB is noted", () => {
+  const spread = enc.encode(`data: {"choices":[{"delta":\ndata: {"content":"hi"}}]}\n\n`);
+  assert.deepEqual(run(spread, 1000).filter((e) => e.kind === "text"), [{ kind: "text", text: "hi" }]);
+  const d = new ModelStreamDecoder();
+  d.push(enc.encode(": keep-alive\n\n"));
+  assert.equal(d.streaming, true);
+  assert.deepEqual(run(enc.encode(data({ choices: [{ index: 1, delta: { content: "second" } }, { index: 0, delta: { content: "first" } }] })), 1000).filter((e) => e.kind !== "end"), [{ kind: "note", text: "choice 1 of the reply is not recorded (only the first choice is)" }, { kind: "text", text: "first" }]);
+  const long = enc.encode(`data: ${"x".repeat(1024 * 1024 + 10)}`);
+  assert.ok(run(long, 200_000).some((e) => e.kind === "note" && /longer than 1 MB/.test(e.text)));
+});

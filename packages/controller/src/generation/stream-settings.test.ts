@@ -19,10 +19,11 @@ test("the model stream settings: both on by default, owner-only, changed by the 
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
-    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 0, record: true, cut: true });
+    const base = { record: true, cut: true, onStoreFailure: "closed", failClosed: true, storeTimeoutMs: 20_000, batchMs: 250, batchChars: 2000, heldBufferBytes: 16 * 1024 * 1024 };
+    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 0, ...base });
     const off = await call("generation.stream.change", { disable: ["cut"], expectedRevision: 0 }, "s1");
     assert.ok(off.ok, JSON.stringify(off));
-    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 1, record: true, cut: false });
+    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 1, ...base, cut: false });
     // A change made against an old reading is refused, not applied.
     const stale = await call("generation.stream.change", { disable: ["record"], expectedRevision: 0 }, "s2");
     assert.equal(stale.ok, false);
@@ -36,7 +37,14 @@ test("the model stream settings: both on by default, owner-only, changed by the 
     assert.equal((await call("generation.stream.get", {})).result.item.cut, false, "nothing changed while it waits for the owner");
     const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
-    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 2, record: true, cut: true });
+    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 2, ...base });
+    // The fail mode and the limits are settable too, and every limit can be turned off (0).
+    assert.ok((await call("generation.stream.change", { disable: ["failClosed"], set: { storeTimeoutMs: 0, heldBufferBytes: 1000, batchMs: 5 } }, "s6")).ok);
+    assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 3, ...base, onStoreFailure: "open", failClosed: false, storeTimeoutMs: 0, heldBufferBytes: 1000, batchMs: 5 });
+    assert.equal((await call("generation.stream.change", { set: { nope: 1 } }, "s7")).ok, false);
+    assert.equal((await call("generation.stream.change", { set: { batchMs: -1 } }, "s8")).ok, false);
+    assert.ok((await call("generation.stream.change", { enable: ["failClosed"] }, "s9")).ok);
+    assert.equal((await call("generation.stream.get", {})).result.item.onStoreFailure, "closed");
     // A non-owner may not read or change it.
     await c.services.principals.enroll(await c.services.principals.authenticate(boot.token), { commandId: "e-ann", kind: "agent", name: "ann", grants: [] });
     const ann = await c.services.principals.authenticate((await c.services.principals.issueCredential(await c.services.principals.authenticate(boot.token), "agent:ann")).token);

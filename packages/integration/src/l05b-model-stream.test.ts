@@ -196,6 +196,7 @@ describe("the model stream feeds revision-bound generation with the real worker 
       assert.equal(next.contextRevision, 2);
       assert.equal(next.text, "Plant the beans");
       assert.equal(requestText(answer, answer.seen.length - 1).includes("TOMATOES"), false, "the late answer is not in anything the model was later shown");
+      assert.match(requestText(answer, answer.seen.length - 1), /use beans, not tomatoes/, "the request that was accepted under the new revision carries the correction");
       await x.c.dispatch!.dispatcher.idle();
     } finally { first.open(); answer.server.closeAllConnections(); answer.server.close(); await x.close(); }
   });

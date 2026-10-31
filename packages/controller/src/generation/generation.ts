@@ -35,9 +35,9 @@ export interface GateBody {
   readonly corrections: number;
 }
 
-export type RunState = "streaming" | "finished" | "held" | "interrupted";
+export type RunState = "streaming" | "finished" | "held" | "interrupted" | "failed";
 /** `partial`: arguments still arriving. `complete`: arguments final, valid and not yet admitted. `held`: complete, but its generation finished under a hold. `admitted`: an effect intent was recorded (S05). `dropped`: never executable (incomplete or malformed). `withdrawn`: complete, but its generation was interrupted before it was admitted (or the effect had not started). */
-export type CallState = "partial" | "complete" | "held" | "admitted" | "dropped" | "withdrawn";
+export type CallState = "partial" | "complete" | "held" | "admitted" | "dropped" | "withdrawn" | "unused";
 
 export interface ToolCall {
   readonly id: string;
@@ -84,15 +84,20 @@ export interface RunBody {
   readonly lateCount: number;
   readonly startedAt: string;
   readonly finishedAt?: string;
+  /** Always true: the text and tool arguments of a model reply may hold personal or confidential data (PII). Read narrowly (see `view`) and removed by the retention rule `generationRunDays`. */
+  readonly sensitive?: true;
+  /** Why a failed generation failed (the reply broke off or the call failed). */
+  readonly failure?: string;
 }
 
 export interface BeginRun extends NoActor { readonly taskId: string; readonly contextRevision: number; readonly fence?: Fence }
-export interface RecordChunk extends NoActor {
+export interface RecordPiece { readonly text?: string; readonly toolCall?: { readonly id: string; readonly name?: string; readonly argumentsDelta?: string; readonly done?: boolean } }
+export interface RecordChunk extends NoActor, RecordPiece {
   readonly runId: string;
   readonly seq: number;
-  readonly text?: string;
-  readonly toolCall?: { readonly id: string; readonly name?: string; readonly argumentsDelta?: string; readonly done?: boolean };
 }
+/** Several pieces in one commit, numbered from `seq`. */
+export interface RecordMany extends NoActor { readonly runId: string; readonly seq: number; readonly pieces: readonly RecordPiece[] }
 
 export type RefusalReason = "held" | "paused" | "decision" | "interrupted" | "stale" | "streaming" | "incomplete" | "admitted";
 /** A refusal that says why in a form a program can act on (the command itself was well formed). */
@@ -106,7 +111,7 @@ export class GenerationRefused extends DomainError {
 export interface RunView { readonly run: View<RunBody>; /** True while this is still the task's current generation at the current context revision and it has not been interrupted (a hold does not change it). */ readonly current: boolean }
 export interface GateView { readonly gate: View<GateBody> }
 
-export const GENERATION_LIMITS = { text: 64 * 1024, delta: 8 * 1024, args: 16 * 1024, toolCalls: 32, late: 50, preview: 200, reason: 500, callId: 80, kind: 40, target: 500 } as const;
+export const GENERATION_LIMITS = { batch: 64, text: 64 * 1024, delta: 8 * 1024, args: 16 * 1024, toolCalls: 32, late: 50, preview: 200, reason: 500, callId: 80, kind: 40, target: 500 } as const;
 const RUN_ID = /^grun-[a-z2-7]{20}-\d{10}$/;
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
@@ -124,6 +129,9 @@ const clean = (body: object): JsonObject => Object.fromEntries(Object.entries(bo
 
 export interface GenerationServiceOptions extends RunnerOptions {
   /** Test seam: runs between reading the gate for an effect start and committing the claim, to stage a pause landing in that window. */
+  /** Who counts as a reviewer in a project (as for the activity record). With `reviewAssignments`, a reviewer reads only the generations of the task(s) it was asked to review. Absent: no reviewer reads a generation. */
+  readonly roles?: (principalId: string, scope: { projectId: string; taskId: string }, by: Principal) => Promise<readonly string[]>;
+  readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
   readonly testHooks?: { readonly afterGuardRead?: () => Promise<void>; /** Between reading the pause gates and committing, in `begin` and `admitEffect`. */ readonly afterPauseRead?: () => Promise<void>; /** Between reading the owner's decisions (card C08) and committing, in `begin`, `admitEffect` and `execute`. */ readonly afterDecisionRead?: () => Promise<void> };
 }
 
@@ -152,6 +160,7 @@ export class GenerationService {
   readonly #pauses: PauseGuard | undefined;
   readonly #decisions: DecisionGuard | undefined;
   readonly #hooks: GenerationServiceOptions["testHooks"];
+  readonly #readers: Pick<GenerationServiceOptions, "roles" | "reviewAssignments">;
 
   private constructor(runner: CommandRunner, deps: { assignments?: AssignmentService; effects?: EffectService; pauses?: PauseGuard; decisions?: DecisionGuard }, options: GenerationServiceOptions) {
     this.#runner = runner;
@@ -160,6 +169,7 @@ export class GenerationService {
     this.#pauses = deps.pauses;
     this.#decisions = deps.decisions;
     this.#hooks = options.testHooks;
+    this.#readers = { ...(options.roles === undefined ? {} : { roles: options.roles }), ...(options.reviewAssignments === undefined ? {} : { reviewAssignments: options.reviewAssignments }) };
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { assignments?: AssignmentService; effects?: EffectService; pauses?: PauseGuard; decisions?: DecisionGuard } = {}, options: GenerationServiceOptions = {}): GenerationService {
@@ -191,7 +201,7 @@ export class GenerationService {
           const settle: { effectId: string; outcome: "failed"; evidence: JsonObject }[] = [];
           if (gate.body.current !== undefined) {
             const previous = await this.#runner.get("generation-run", runIdOf(taskId, gate.body.current));
-            if (previous !== undefined && (previous.body as unknown as RunBody).state !== "interrupted") {
+            if (previous !== undefined && (previous.body as unknown as RunBody).state !== "interrupted" && (previous.body as unknown as RunBody).state !== "failed") {
               // Cutting another principal's generation (which withdraws its calls and effects) takes authority: the installation owner, assignment.manage, or a valid fence.
               const mine = (previous.body as unknown as RunBody).owner === principal.id;
               if (!mine && principal.kind !== "owner" && fence === undefined && !allows(principal, "assignment.manage", task.projectId, { resource: { kind: "task", id: taskId } })) throw new DomainError("forbidden", `${(previous.body as unknown as RunBody).owner} has a generation running on task ${taskId}; ${principal.id} may not supersede it`);
@@ -205,7 +215,7 @@ export class GenerationService {
           const ref: AggregateRef = { kind: "generation-run", id };
           const run: RunBody = {
             taskId, projectId: task.projectId, owner: principal.id, number, contextRevision: bound, ...(fence === undefined ? {} : { fence }),
-            state: "streaming", text: "", chunks: 0, toolCalls: [], late: [], lateCount: 0, startedAt: at,
+            state: "streaming", text: "", chunks: 0, toolCalls: [], late: [], lateCount: 0, startedAt: at, sensitive: true,
           };
           changes.push(this.#write(gate.ref, gate.revision, { ...gate.body, runs: number, current: number }), { type: "create", ref, body: clean(run) }, ...paused, ...(guard?.changes ?? []));
           return { ref, creates: true, changes: mergeChanges(changes), detail: { taskId, number, contextRevision: bound }, ...(settle.length === 0 ? {} : { settle }) };
@@ -221,57 +231,76 @@ export class GenerationService {
    */
   async record(principal: Principal, command: RecordChunk): Promise<{ applied: boolean; late: boolean; replayed: boolean }> {
     onlyKnown(command, ["commandId", "runId", "seq", "text", "toolCall"]);
-    const seq = whole(command.seq, "seq");
     if ((command.text === undefined) === (command.toolCall === undefined)) invalid("text", "give exactly one of text and toolCall");
-    let delta: { id: string; name?: string; argumentsDelta: string; done: boolean } | undefined;
-    if (command.text !== undefined) {
-      if (typeof command.text !== "string" || command.text.length === 0 || command.text.length > GENERATION_LIMITS.delta) invalid("text", `must be 1 to ${GENERATION_LIMITS.delta} characters`);
-    } else {
-      const t = command.toolCall as unknown;
-      if (t === null || typeof t !== "object" || Array.isArray(t)) invalid("toolCall", "must be an object");
-      onlyKnown(t as object, ["id", "name", "argumentsDelta", "done"]);
-      const c = t as { id?: unknown; name?: unknown; argumentsDelta?: string; done?: unknown };
-      if (typeof c.id !== "string" || !CALL_ID.test(c.id)) invalid("toolCall.id", "must be 1 to 80 letters, digits or . _ : -");
-      if (c.name !== undefined && (typeof c.name !== "string" || !CALL_ID.test(c.name))) invalid("toolCall.name", "must be 1 to 80 letters, digits or . _ : -");
-      if (c.argumentsDelta !== undefined && (typeof c.argumentsDelta !== "string" || c.argumentsDelta.length > GENERATION_LIMITS.delta)) invalid("toolCall.argumentsDelta", `must be a string of at most ${GENERATION_LIMITS.delta} characters`);
-      if (c.done !== undefined && typeof c.done !== "boolean") invalid("toolCall.done", "must be true or false");
-      if ((c.argumentsDelta === undefined || c.argumentsDelta.length === 0) && c.done !== true && c.name === undefined) invalid("toolCall", "carries nothing");
-      delta = { id: c.id as string, ...(c.name === undefined ? {} : { name: c.name as string }), argumentsDelta: c.argumentsDelta ?? "", done: c.done === true };
+    return this.recordMany(principal, { commandId: command.commandId, runId: command.runId, seq: command.seq, pieces: [{ ...(command.text === undefined ? {} : { text: command.text }), ...(command.toolCall === undefined ? {} : { toolCall: command.toolCall }) }] });
+  }
+
+  #shape(piece: unknown): { text?: string; delta?: { id: string; name?: string; argumentsDelta: string; done: boolean } } {
+    if (piece === null || typeof piece !== "object" || Array.isArray(piece)) invalid("pieces", "each piece must be an object");
+    onlyKnown(piece as object, ["text", "toolCall"]);
+    const p = piece as RecordPiece;
+    if ((p.text === undefined) === (p.toolCall === undefined)) invalid("text", "give exactly one of text and toolCall");
+    if (p.text !== undefined) {
+      if (typeof p.text !== "string" || p.text.length === 0 || p.text.length > GENERATION_LIMITS.delta) invalid("text", `must be 1 to ${GENERATION_LIMITS.delta} characters`);
+      return { text: p.text };
     }
+    const t = p.toolCall as unknown;
+    if (t === null || typeof t !== "object" || Array.isArray(t)) invalid("toolCall", "must be an object");
+    onlyKnown(t as object, ["id", "name", "argumentsDelta", "done"]);
+    const c = t as { id?: unknown; name?: unknown; argumentsDelta?: string; done?: unknown };
+    if (typeof c.id !== "string" || !CALL_ID.test(c.id)) invalid("toolCall.id", "must be 1 to 80 letters, digits or . _ : -");
+    if (c.name !== undefined && (typeof c.name !== "string" || !CALL_ID.test(c.name))) invalid("toolCall.name", "must be 1 to 80 letters, digits or . _ : -");
+    if (c.argumentsDelta !== undefined && (typeof c.argumentsDelta !== "string" || c.argumentsDelta.length > GENERATION_LIMITS.delta)) invalid("toolCall.argumentsDelta", `must be a string of at most ${GENERATION_LIMITS.delta} characters`);
+    if (c.done !== undefined && typeof c.done !== "boolean") invalid("toolCall.done", "must be true or false");
+    if ((c.argumentsDelta === undefined || c.argumentsDelta.length === 0) && c.done !== true && c.name === undefined) invalid("toolCall", "carries nothing");
+    return { delta: { id: c.id as string, ...(c.name === undefined ? {} : { name: c.name as string }), argumentsDelta: c.argumentsDelta ?? "", done: c.done === true } };
+  }
+
+  /**
+   * Adds several pieces in one commit (card L05b review): the stream of a long reply is recorded in batches, so the run's body is rewritten once per batch and not once per network piece. The pieces are numbered from `seq` and
+   * applied in order, all or none; a generation that was interrupted records each as late. At most `GENERATION_LIMITS.batch` pieces.
+   */
+  async recordMany(principal: Principal, command: RecordMany): Promise<{ applied: boolean; late: boolean; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "runId", "seq", "pieces"]);
+    const seq = whole(command.seq, "seq");
+    if (!Array.isArray(command.pieces) || command.pieces.length === 0 || command.pieces.length > GENERATION_LIMITS.batch) invalid("pieces", `must be a list of 1 to ${GENERATION_LIMITS.batch} pieces`);
+    const shaped = command.pieces.map((p) => this.#shape(p));
     const found = await this.#mine(principal, command.runId, "attempt.work");
     const scoped = scopedCommandId(principal.id, command.commandId);
     return this.#retrying(async () => {
       let outcome: { applied: boolean; late: boolean } = { applied: false, late: false };
       const result = await this.#runner.command("generation.record", { commandId: scoped, actor: principal.id }, async () => ({
-        payload: { runId: found.id, seq, ...(command.text === undefined ? {} : { text: command.text }), ...(delta === undefined ? {} : { toolCall: delta as unknown as JsonObject }) },
+        payload: { runId: found.id, seq, pieces: command.pieces as unknown as JsonObject[] },
         build: async () => {
           const current = await this.#load(found.id);
-          const run = current.body;
+          let run = current.body;
           const at = this.#runner.now();
           const ref: AggregateRef = { kind: "generation-run", id: found.id };
           if (run.state === "interrupted") {
             // Late: recorded, never applied.
-            const raw = command.text ?? `${delta!.id}:${delta!.name ?? ""}:${delta!.argumentsDelta}:${delta!.done}`;
-            const entry: LateResult = {
-              kind: command.text === undefined ? "tool_call" : "text", seq, bytes: raw.length, digest: digestOf(raw),
-              ...(command.text === undefined ? { toolCallId: delta!.id } : { preview: redactText(command.text).slice(0, GENERATION_LIMITS.preview) }), at,
-            };
+            shaped.forEach((s, i) => {
+              const raw = s.text ?? `${s.delta!.id}:${s.delta!.name ?? ""}:${s.delta!.argumentsDelta}:${s.delta!.done}`;
+              const entry: LateResult = {
+                kind: s.text === undefined ? "tool_call" : "text", seq: seq + i, bytes: raw.length, digest: digestOf(raw),
+                ...(s.text === undefined ? { toolCallId: s.delta!.id } : { preview: redactText(s.text).slice(0, GENERATION_LIMITS.preview) }), at,
+              };
+              run = this.#withLate(run, entry);
+            });
             outcome = { applied: false, late: true };
-            return { ref, creates: false, changes: [this.#write(ref, current.revision, this.#withLate(run, entry))], detail: { late: true, seq } };
+            return { ref, creates: false, changes: [this.#write(ref, current.revision, run)], detail: { late: true, seq, pieces: shaped.length } };
           }
           if (run.state !== "streaming") throw new GenerationRefused(run.state === "held" ? "held" : "stale", `generation ${found.id} is ${run.state}; it takes no more chunks`);
           if (seq !== run.chunks + 1) invalid("seq", `the next chunk is ${run.chunks + 1}, not ${seq}`);
-          let next: RunBody;
-          if (command.text !== undefined) {
-            const joined = run.text + command.text;
-            if (joined.length > GENERATION_LIMITS.text) invalid("text", `a generation holds at most ${GENERATION_LIMITS.text} characters of text`);
-            if (redactText(command.text) !== command.text || redactText(joined.slice(-2048)) !== joined.slice(-2048)) invalid("text", "looks like a credential or key; those are not recorded");
-            next = { ...run, text: joined, chunks: seq };
-          } else {
-            next = { ...run, toolCalls: this.#extend(run.toolCalls, delta!), chunks: seq };
+          for (const [i, s] of shaped.entries()) {
+            if (s.text !== undefined) {
+              const joined = run.text + s.text;
+              if (joined.length > GENERATION_LIMITS.text) invalid("text", `a generation holds at most ${GENERATION_LIMITS.text} characters of text`);
+              if (redactText(s.text) !== s.text || redactText(joined.slice(-2048)) !== joined.slice(-2048)) invalid("text", "looks like a credential or key; those are not recorded");
+              run = { ...run, text: joined, chunks: seq + i };
+            } else run = { ...run, toolCalls: this.#extend(run.toolCalls, s.delta!), chunks: seq + i };
           }
           outcome = { applied: true, late: false };
-          return { ref, creates: false, changes: [this.#write(ref, current.revision, next)], detail: { seq } };
+          return { ref, creates: false, changes: [this.#write(ref, current.revision, run)], detail: { seq, pieces: shaped.length } };
         },
       }));
       // A replay reports what the first application did.
@@ -281,13 +310,14 @@ export class GenerationService {
   }
 
   /** Ends the stream. Tool calls still being streamed are dropped for good. Under a finish-and-hold the generation becomes `held`. If it was interrupted, the completion is recorded as late and nothing changes. */
-  async complete(principal: Principal, command: NoActor & { runId: string }): Promise<{ state: RunState; late: boolean; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "runId"]);
+  async complete(principal: Principal, command: NoActor & { runId: string; failed?: string }): Promise<{ state: RunState; late: boolean; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "runId", "failed"]);
+    const failed = command.failed === undefined ? undefined : plain(command.failed, "failed", GENERATION_LIMITS.reason);
     const found = await this.#mine(principal, command.runId, "attempt.work");
     const scoped = scopedCommandId(principal.id, command.commandId);
     return this.#retrying(async () => {
       const result = await this.#runner.command("generation.complete", { commandId: scoped, actor: principal.id }, async () => ({
-        payload: { runId: found.id },
+        payload: { runId: found.id, ...(failed === undefined ? {} : { failed }) },
         build: async () => {
           const current = await this.#load(found.id);
           const run = current.body;
@@ -299,8 +329,9 @@ export class GenerationService {
           if (run.state !== "streaming") throw new GenerationRefused(run.state === "held" ? "held" : "stale", `generation ${found.id} is already ${run.state}`);
           const gate = await this.#gate(run.taskId, run.projectId);
           const held = gate.body.hold !== undefined;
-          const toolCalls = run.toolCalls.map((c): ToolCall => (c.state === "partial" ? { ...c, state: "dropped", reason: "the stream ended before its arguments were complete" } : held && c.state === "complete" ? { ...c, state: "held" } : c));
-          const next: RunBody = { ...run, state: held ? "held" : "finished", toolCalls, finishedAt: at };
+          // A reply that broke off is discarded as a whole: a call that had completed before the break is not used either.
+          const toolCalls = run.toolCalls.map((c): ToolCall => (c.state === "partial" ? { ...c, state: "dropped", reason: "the stream ended before its arguments were complete" } : failed !== undefined && (c.state === "complete" || c.state === "held") ? { ...c, state: "unused", reason: "the reply failed before it ended; it was discarded" } : held && c.state === "complete" ? { ...c, state: "held" } : c));
+          const next: RunBody = { ...run, state: failed !== undefined ? "failed" : held ? "held" : "finished", toolCalls, finishedAt: at, ...(failed === undefined ? {} : { failure: failed }) };
           return { ref, creates: false, changes: [this.#write(ref, current.revision, next), { type: "check", ref: gate.ref, expectedRevision: gate.revision }], detail: { state: next.state } };
         },
       }));
@@ -341,7 +372,7 @@ export class GenerationService {
           const run = runId === undefined ? undefined : await this.#runner.get("generation-run", runId);
           if (run !== undefined) {
             const body = run.body as unknown as RunBody;
-            if (mode === "cancel" && body.state !== "interrupted") {
+            if (mode === "cancel" && body.state !== "interrupted" && body.state !== "failed") {
               const cut = await this.#cut(run, { kind: "cancelled", by: principal.id, reason, at }, at);
               changes.push(...cut.changes);
               settle.push(...cut.settle);
@@ -407,7 +438,7 @@ export class GenerationService {
           const settle: { effectId: string; outcome: "failed"; evidence: JsonObject }[] = [];
           if (gate.body.current !== undefined) {
             const run = await this.#runner.get("generation-run", runIdOf(taskId, gate.body.current));
-            if (run !== undefined && (run.body as unknown as RunBody).state !== "interrupted") {
+            if (run !== undefined && (run.body as unknown as RunBody).state !== "interrupted" && (run.body as unknown as RunBody).state !== "failed") {
               const cut = await this.#cut(run, { kind: "corrected", by: principal.id, reason, at }, at);
               changes.push(...cut.changes);
               settle.push(...cut.settle);
@@ -550,7 +581,7 @@ export class GenerationService {
     const found = typeof runId === "string" && RUN_ID.test(runId) ? await this.#runner.get("generation-run", runId) : undefined;
     if (found === undefined) return undefined;
     const run = found.body as unknown as RunBody;
-    if (!this.#mayRead(viewer, run)) return undefined;
+    if (!(await this.#mayRead(viewer, run))) return undefined;
     const gate = (await this.#runner.get("generation-gate", gateIdOf(run.taskId)))?.body as unknown as GateBody | undefined;
     return { run: view<RunBody>(found), current: gate !== undefined && run.state !== "interrupted" && gate.current === run.number && gate.contextRevision === run.contextRevision };
   }
@@ -561,17 +592,29 @@ export class GenerationService {
     const found = await this.#runner.get("generation-gate", gateIdOf(id));
     if (found === undefined) return undefined;
     const g = found.body as unknown as GateBody;
-    if (!this.#mayRead(viewer, { projectId: g.projectId, taskId: g.taskId, owner: "" })) return undefined;
+    if (!(await this.#mayRead(viewer, { projectId: g.projectId, taskId: g.taskId, owner: "" }))) return undefined;
     return { gate: view<GateBody>(found) };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
 
-  #mayRead(viewer: Principal, run: { projectId: string; taskId: string; owner: string }): boolean {
+  /**
+   * Who reads a generation: the installation owner, the dispatcher that streams it, the principal that streams it, the agent the task is assigned to, and a reviewer asked to review this task. The text may hold personal or confidential data,
+   * so a holder of `assignment.read` alone does not read it. The gate (revision, hold; no model text) is read by anyone with `assignment.read`.
+   */
+  async #mayRead(viewer: Principal, run: { projectId: string; taskId: string; owner: string }): Promise<boolean> {
     if (viewer.kind === "owner" || (isDispatcher(viewer) && (run.owner === "" || run.owner === viewer.id))) return true;
     if (!inTaskScope(viewer, run.projectId)) return false;
     const resource = { resource: { kind: "task", id: run.taskId } } as const;
-    return viewer.id === run.owner ? allows(viewer, "attempt.work", run.projectId, resource) : allows(viewer, "assignment.read", run.projectId, resource);
+    if (run.owner === "") return allows(viewer, "assignment.read", run.projectId, resource);
+    if (viewer.id === run.owner) return allows(viewer, "attempt.work", run.projectId, resource);
+    if (!allows(viewer, "assignment.read", run.projectId, resource)) return false;
+    const assigned = await this.#assignments?.getAssignment(run.taskId);
+    if (assigned?.owner?.id === viewer.id) return true;
+    if (this.#readers.roles === undefined || this.#readers.reviewAssignments === undefined) return false;
+    const roles = await this.#readers.roles(viewer.id, { projectId: run.projectId, taskId: run.taskId }, viewer);
+    if (!roles.includes("reviewer")) return false;
+    return (await this.#readers.reviewAssignments(viewer.id, run.taskId)).length > 0;
   }
 
   /** Refuses (reason `paused`) if any pause gate (L01) on the task's chain is paused; otherwise the revision checks of those gates, to commit with the caller's change. Without a pause service there is nothing to check. */
@@ -656,7 +699,9 @@ export class GenerationService {
     call = { ...call, args };
     if (d.done) {
       let parsed: unknown;
-      try { parsed = JSON.parse(args); } catch { parsed = undefined; }
+      // A call that takes no arguments streams none (Anthropic: an empty partial_json): that is `{}`.
+      if (args.trim() === "") call = { ...call, args: "{}" };
+      try { parsed = JSON.parse(args.trim() === "" ? "{}" : args); } catch { parsed = undefined; }
       call = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
         ? { ...call, state: "complete", argsDigest: sha256(canonicalJson(parsed as JsonObject)) }
         : { ...call, state: "dropped", reason: "the arguments are not a JSON object" };

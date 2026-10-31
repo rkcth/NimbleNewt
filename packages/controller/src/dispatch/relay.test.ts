@@ -167,7 +167,8 @@ test("the monitor is told when a call starts, when its first bytes arrive, at a 
   assert.deepEqual(await watch(() => new Response("no", { status: 500 })), ["started:true", "finished:false:-:-:-"]);
   // A reply the reader leaves part way is told as failed, once.
   const cancelled = await watch(() => sse(["data: a\n\n", "data: b\n\n", "data: c\n\n"]), "chat/completions", { cancelAfter: 1 });
-  assert.deepEqual(cancelled, ["started:true", "first", "finished:false:-:-:-"]);
+  // A reply cancelled part way still reports what was received (an estimate from the bytes), so spend and speed count it.
+  assert.deepEqual(cancelled, ["started:true", "first", "finished:false:-:-:3"]);
   // A token-count probe is not a model call.
   assert.deepEqual(await watch(() => new Response("{\"input_tokens\":5}", { status: 200 }), "messages/count_tokens"), []);
   // A monitor that throws leaves the call alone.

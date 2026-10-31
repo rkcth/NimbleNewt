@@ -424,10 +424,13 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         started: ({ requestChars }) => {
           const requestId = `${order.attemptId}:${++calls}`;
           send({ type: "request_started", requestId, promptTokens: tokensOf(requestChars), route: order.route, ...(expectedShare === undefined ? {} : { cachedShare: expectedShare }) });
+          let seenOutput = false; let tokens = 0;
           return {
-            firstOutput: () => { send({ type: "first_output", requestId }); },
+            firstOutput: () => { seenOutput = true; send({ type: "first_output", requestId }); },
             // A rough count: the bytes of the stream over the same characters per token. The provider's own count arrives with the end of the call.
-            progress: (bytes) => { send({ type: "output_progress", requestId, tokens: tokensOf(bytes) }); },
+            progress: (bytes) => { tokens = tokensOf(bytes); send({ type: "output_progress", requestId, tokens }); },
+            // The relay is waiting on the controller's own store, not on the model: a repeat of the last count keeps the stall clock from blaming the model for that wait (it is bounded by the store timeout).
+            waiting: (on) => { if (on && seenOutput) send({ type: "output_progress", requestId, tokens }); },
             finished: (call) => { if (call.ok && call.inputTokens !== undefined && call.inputTokens > 0 && call.cachedTokens !== undefined) expectedShare = Math.min(1, Math.max(0, call.cachedTokens / call.inputTokens)); send({ type: "request_finished", requestId, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
           };
         },

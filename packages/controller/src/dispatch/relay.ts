@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { redactText } from "../security/redact.js";
 import type { PiCachePolicy } from "../inference-cache/index.js";
 import { ModelStreamDecoder, ModelStreamRefused, type ModelStreamCall, type ModelStreamTap } from "./model-stream.js";
@@ -42,6 +43,8 @@ export interface RelayMonitor {
 export interface CallMonitor {
   /** The first output of the reply arrived (not a keep-alive comment or a ping). */
   firstOutput(): void;
+  /** The relay is waiting on the controller's own store (true) or no longer is (false): time spent there is not the model's. */
+  waiting?(on: boolean): void;
   /** At most once in `progressMs` while the reply streams: the bytes of reply received so far. */
   progress(bytes: number): void;
   /** The call ended: with `ok` false it failed, was refused or was cancelled. The counts are what the provider reported, when it did: `inputTokens` is everything the model read, `cachedTokens` the part of it served from a cache. */
@@ -138,13 +141,26 @@ export class ModelRelay {
         // The generation begins before the call is sent: a task that is held starts no generation (the call is refused), and the revision it is bound to is the one in force now.
         let feed: ModelStreamCall | undefined;
         if (attempt.stream !== undefined && rest !== "messages/count_tokens") {
-          try { feed = await attempt.stream.started({ requestChars: body?.length ?? 0 }); } catch (error) {
+          try { feed = await attempt.stream.started({ requestChars: body?.length ?? 0, requestDigest: createHash("sha256").update(request.body ?? new Uint8Array()).digest("hex") }); } catch (error) {
             if (error instanceof ModelStreamRefused) refuse(redactText(error.message).slice(0, 300));
             this.#options.onError?.(route, redactText(error instanceof Error ? error.message : String(error)).slice(0, 300));
           }
         }
+        if (feed?.amend !== undefined) {
+          // The request was built before the owner's correction: it goes out with the correction as its last message (both wire formats carry a `messages` list), or not at all.
+          try {
+            const json = JSON.parse(Buffer.from(body ?? new Uint8Array()).toString("utf8")) as { messages?: unknown[] };
+            if (!Array.isArray(json.messages)) throw new Error("no messages");
+            json.messages.push({ role: "user", content: feed.amend });
+            body = Buffer.from(JSON.stringify(json), "utf8");
+          } catch {
+            await feed.ended({ ok: false }).catch(() => undefined);
+            refuse("the request was built before the owner's correction and cannot carry it; it is not sent");
+          }
+        }
         let call: CallMonitor | undefined;
         if (monitor !== undefined) { try { call = monitor.started({ requestChars: body?.length ?? 0 }); } catch { /* the call is not affected */ } }
+        if (feed !== undefined && call !== undefined) { const c = call; feed.onWait = (on) => tell(() => c.waiting?.(on)); }
         let response: Response;
         try {
           response = await wrapped(target, { method: request.method, headers, ...(body === undefined || request.method === "GET" ? {} : { body: Buffer.from(body) }), signal: request.signal, redirect: "error" });
@@ -164,7 +180,7 @@ export class ModelRelay {
         response.headers.forEach((value, name) => { if (KEEP.has(name.toLowerCase())) out.push([name, value]); });
         const watching = call !== undefined && response.ok && response.body !== null;
         const recording = feed;
-        const held = (body: AsyncIterable<Uint8Array> | null): AsyncIterable<Uint8Array> | null => (body === null || recording === undefined ? body : feeding(body, recording));
+        const held = (body: AsyncIterable<Uint8Array> | null): AsyncIterable<Uint8Array> | null => (body === null || recording === undefined ? body : feeding(body, recording, /event-stream/i.test(response.headers.get("content-type") ?? "")));
         if (!watch && !watching) return { status: response.status, statusText: response.statusText, headers: out, body: held(response.body === null ? null : (response.body as unknown as AsyncIterable<Uint8Array>)) };
         const hooks: ReplyHooks = {
           ...(watch ? { inputTokens: (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } } } : {}),
@@ -181,28 +197,54 @@ export class ModelRelay {
  * fails with the reason, and the worker's call fails with it, so the worker never acts on a response that came too late. A reply that is not streamed is read whole before any of it is passed on. The recording is awaited, which is the
  * back-pressure of this card: a slow store slows the reply, and nothing that was not recorded as applied reaches the worker.
  */
-async function* feeding(body: AsyncIterable<Uint8Array>, feed: ModelStreamCall): AsyncGenerator<Uint8Array> {
-  const decoder = new ModelStreamDecoder();
+async function* feeding(body: AsyncIterable<Uint8Array>, feed: ModelStreamCall, sse: boolean): AsyncGenerator<Uint8Array> {
+  const decoder = new ModelStreamDecoder({ sse });
   const held: Uint8Array[] = [];
+  let heldBytes = 0;
+  const cap = feed.heldBufferBytes ?? 0;
+  // `passing`: the reply is passed on as it is and not decoded any more (the decoder gave up, or the reply is too big to hold while it cannot be told from a whole one).
+  let passing = false;
   let ok = false;
   const check = async (events: ReturnType<ModelStreamDecoder["push"]>): Promise<void> => {
     if (events.length === 0) return;
     const result = await feed.events(events);
     if (result.held !== undefined) throw new Error(`the model reply was held back: ${result.held}`);
   };
+  /** The decoder never changes the bytes; if it throws on something unexpected, the reply goes on unrecorded and says so. */
+  const decode = async (read: () => ReturnType<ModelStreamDecoder["push"]>): Promise<void> => {
+    let events: ReturnType<ModelStreamDecoder["push"]> | undefined;
+    try { events = read(); } catch (error) {
+      passing = true;
+      events = [{ kind: "note", text: `the stream decoder gave up (${error instanceof Error ? error.message.slice(0, 80) : "error"}); the rest of this reply is not recorded` }];
+    }
+    await check(events);
+  };
   try {
     for await (const piece of body) {
-      await check(decoder.push(piece));
+      if (passing) { yield piece; continue; }
+      await decode(() => decoder.push(piece));
+      if (passing) { for (const h of held.splice(0)) yield h; yield piece; continue; }
       // A reply that is not a stream is held until it has been read whole and recorded.
-      if (!decoder.streaming) { held.push(piece); continue; }
+      if (!decoder.streaming) {
+        held.push(piece); heldBytes += piece.length;
+        if (cap > 0 && heldBytes > cap) {
+          passing = true;
+          await check([{ kind: "note", text: `the reply is larger than ${cap} bytes before it could be told from a stream; it is passed on and not recorded` }]);
+          for (const h of held.splice(0)) yield h;
+        }
+        continue;
+      }
       for (const h of held.splice(0)) yield h;
+      heldBytes = 0;
       yield piece;
     }
-    await check(decoder.finish());
+    if (!passing) await decode(() => decoder.finish());
     ok = true;
     for (const h of held.splice(0)) yield h;
   } finally {
-    await feed.ended({ ok }).catch(() => undefined);
+    // A reply that is cancelled or fails does not wait for the store: the cancel is not held up by it.
+    if (ok) await feed.ended({ ok }).catch(() => undefined);
+    else void feed.ended({ ok }).catch(() => undefined);
   }
 }
 
@@ -241,7 +283,7 @@ async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks): A
     ended = true;
   } finally {
     // Cancelled or failed part way: the monitor is told it did not end well.
-    if (!ended) hooks.monitor?.finished({ ok: false });
+    if (!ended) hooks.monitor?.finished({ ok: false, ...(bytes > 0 ? { outputTokens: Math.ceil(bytes / 4) } : {}) });
   }
   const text = `${Buffer.concat(head).toString("utf8")}\u0001${tail.toString("utf8")}`;
   const most = (name: string): number => { let best = 0; for (const m of text.matchAll(new RegExp(`"${name}"\\s*:\\s*(\\d{1,9})(?=[,}\\s])`, "g"))) best = Math.max(best, Number(m[1])); return best; };

@@ -100,7 +100,9 @@ for (const backend of backends) {
     await refusedFor("stale", () => text(gen, ann, run, 5, "more"));
     // Readers: the streamer, the owner and an assignment reader; others see nothing.
     assert.ok(await gen.view(owner, run));
-    assert.ok(await gen.view(mgr, run));
+    // The text of a reply may hold personal data: a holder of assignment.read alone does not read it (the gate, without text, stays readable).
+    assert.equal(await gen.view(mgr, run), undefined);
+    assert.ok(await gen.gate(mgr, task));
     assert.equal(await gen.view(ben, run), undefined);
     assert.equal((await gen.view(owner, "grun-aaaaaaaaaaaaaaaaaaaa-0000000001")), undefined);
     await refuses("forbidden", () => text(gen, ben, run, 5, "x"));
@@ -490,7 +492,7 @@ for (const backend of backends) {
     const mine = await begin(gen, ann, task);
     void again;
     const taken = await gen.begin(mgr, { commandId: cid("b"), taskId: task, contextRevision: 1 });
-    assert.equal((await gen.view(mgr, mine))!.run.interrupted?.kind, "superseded");
+    assert.equal((await gen.view(owner, mine))!.run.interrupted?.kind, "superseded");
     const o = await gen.begin(owner, { commandId: cid("b"), taskId: task, contextRevision: 1 });
     assert.equal(o.number, taken.number + 1);
   });
