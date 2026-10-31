@@ -338,8 +338,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const escalationLadder = EscalationLadderService.withEpoch(storage, epoch);
     // The recovery action ladder (card V02c): its effects are bound below, once the services they use are built.
     const recoveryLadder = RecoveryLadderService.withEpoch(storage, epoch);
-    let recoveryRun: RecoveryEffects["run"] | undefined;
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), recoveryPolicy: () => recoveryLadder.policy(), recoveryEffects: { run: (action, ctx) => (recoveryRun ?? (() => { throw new DomainError("unavailable", "recovery steps are not available yet"); }))(action, ctx) }, ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
+    let recoveryRun: RecoveryEffects | undefined;
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), recoveryPolicy: () => recoveryLadder.policy(), recoveryEffects: { run: (action, ctx) => (recoveryRun ?? (() => { throw new DomainError("unavailable", "recovery steps are not available yet"); })()).run(action, ctx), unavailable: (action, ctx) => (recoveryRun?.unavailable?.(action, ctx) ?? Promise.resolve(undefined)) }, ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
@@ -523,26 +523,40 @@ export async function startController(options: StartOptions): Promise<Controller
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
     // How long an attempt may run and how many attempts are admitted: off unless the owner (or a start-up option) turns them on.
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
-    recoveryRun = async (action, ctx) => {
-      // The existing services do the work as the caller, so their own rights checks apply; each is keyed by the step (`ctx.key`), so a repeat of the step does it once.
-      const asg = await assignments.getAssignment(ctx.taskId);
-      const holder = asg?.state === "assigned" && asg.owner?.kind === "agent" ? asg.owner.id : undefined;
-      const agentOf = (): string => holder === undefined ? ((): never => { throw new DomainError("invalid_transition", "the task has no agent working on it"); })() : holder;
-      const scope = { kind: "agent" as const, id: `agent:${agentOf()}` };
-      if (action === "nudge" || action === "rebrief") {
-        await messages.noticeFromController({ commandId: ctx.key, taskId: ctx.taskId, to: `agent:${agentOf()}`, purpose: action === "nudge" ? "A nudge from your supervisor" : "A new brief from your supervisor", text: ctx.text });
-        return {};
-      }
-      if (action === "pause") { await pauses.pause(ctx.by, { commandId: ctx.key, scope, reason: ctx.text }); return {}; }
-      if (action === "stop") { await stops.request(ctx.by, { commandId: ctx.key, scope, mode: "stop", reason: ctx.text }); return {}; }
-      // Reassign: the meeting path's rules (moved at once; rights the new holder lacks are warned about), after checking the caller may manage the assignment.
-      if (!(ctx.by.kind === "owner" || allows(ctx.by, "assignment.manage", ctx.projectId, { resource: { kind: "task", id: ctx.taskId } }))) throw new DomainError("forbidden", `${ctx.by.id} may not reassign the task`);
-      const to = ctx.to!;
-      await reassignApplier.apply({ commandId: ctx.key, actor: ctx.by.id, target: { kind: "task", id: ctx.taskId }, expectedRevision: 0, patch: { toAgent: to, from: holder === undefined ? null : `agent:${holder}`, ...(asg === undefined ? {} : { generation: asg.generation, revision: asg.revision }) } as never, agreedBy: ctx.by.id } as never);
-      const target = await principals.get(to);
-      const eff = target === undefined || target.state !== "active" ? undefined : await grants.effective({ id: target.id, kind: target.kind, name: target.name, grants: target.grants }, new Date().toISOString());
-      const missing = eff === undefined ? ["task.read", "attempt.work"] : ["attempt.work", "task.read"].filter((x) => !allows(eff as never, x, ctx.projectId, { resource: { kind: "task", id: ctx.taskId } }));
-      return missing.length === 0 ? {} : { warnings: [`${to} lacks ${missing.join(" and ")} for this task; the work waits until the owner grants it`] };
+    recoveryRun = {
+      // The existing services do the work as the caller, so their own rights checks apply; each is keyed by the step (`ctx.key`, made from concern, rung and episode), so a repeat of the step does it once.
+      // The agent is the one the concern is about (pinned when it was opened), and pause and stop act on the concern's task, not on the agent's other work.
+      run: async (action, ctx) => {
+        const asg = await assignments.getAssignment(ctx.taskId);
+        const holder = asg?.state === "assigned" && asg.owner?.kind === "agent" ? asg.owner.id : undefined;
+        const agent = ctx.agent ?? holder;
+        const scope = { kind: "task" as const, id: ctx.taskId };
+        if (action === "nudge" || action === "rebrief") {
+          if (agent === undefined) throw new DomainError("invalid_transition", "the task has no agent working on it");
+          await messages.noticeFromController({ commandId: ctx.key, taskId: ctx.taskId, to: `agent:${agent}`, purpose: action === "nudge" ? "A nudge from your supervisor" : "A new brief from your supervisor", text: ctx.text });
+          return {};
+        }
+        if (action === "pause") { await pauses.pause(ctx.by, { commandId: ctx.key, scope, reason: ctx.text }); return {}; }
+        if (action === "stop") { await stops.request(ctx.by, { commandId: ctx.key, scope, mode: "stop", reason: ctx.text }); return {}; }
+        // Reassign: the caller was found fit to decide the concern and the ladder allows the rung, so no further right is asked of them. A task with a running attempt moves by a prepared hand-off (the attempt is suspended first and the package collected),
+        // which finishes when the hand-off is completed; otherwise the meeting path's rules apply (moved at once; rights the new holder lacks are warned about).
+        const to = ctx.to!;
+        if (asg !== undefined && asg.activeAttemptId !== undefined) {
+          await handoffs.prepare(ctx.by, { commandId: ctx.key, taskId: ctx.taskId, to: { kind: "agent", id: to.slice("agent:".length) }, reason: ctx.text });
+          return { warnings: [`${to} takes the task by a hand-off: the running attempt is being suspended and the task moves when the hand-off is completed`] };
+        }
+        await reassignApplier.apply({ commandId: ctx.key, actor: ctx.by.id, target: { kind: "task", id: ctx.taskId }, expectedRevision: 0, patch: { toAgent: to, from: holder === undefined ? null : `agent:${holder}`, via: "recovery", ...(asg === undefined ? {} : { generation: asg.generation, revision: asg.revision }) } as never, agreedBy: ctx.by.id } as never);
+        const target = await principals.get(to);
+        const eff = target === undefined || target.state !== "active" ? undefined : await grants.effective({ id: target.id, kind: target.kind, name: target.name, grants: target.grants }, new Date().toISOString());
+        const missing = eff === undefined ? ["task.read", "attempt.work"] : ["attempt.work", "task.read"].filter((x) => !allows(eff as never, x, ctx.projectId, { resource: { kind: "task", id: ctx.taskId } }));
+        return missing.length === 0 ? {} : { warnings: [`${to} lacks ${missing.join(" and ")} for this task; the work waits until the owner grants it`] };
+      },
+      // Whether the actor can take the rung at all; a rung they cannot take is passed on the ladder, with the reason.
+      unavailable: async (action, ctx) => {
+        if (action === "nudge" || action === "rebrief") return ctx.agent === undefined && (await assignments.getAssignment(ctx.taskId))?.owner?.kind !== "agent" ? "the task has no agent working on it" : undefined;
+        if (action === "reassign") return undefined;
+        try { await pauses.authorizeControl(ctx.by, { kind: "task", id: ctx.taskId }); return undefined; } catch (error) { return error instanceof DomainError ? `${ctx.by.id} may not ${action} the task: ${error.message}`.slice(0, 200) : undefined; }
+      },
     };
     const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;

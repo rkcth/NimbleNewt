@@ -1559,6 +1559,7 @@ Arguments:
 - `levels` (optional): for example `[["nudge"], ["nudge", "reassign"]]`
 - `owner` (optional): for example `["stop"]`
 - `enabled` (optional): true or false
+- `minGapMinutes` (optional): the least minutes between two recovery steps by agents on one concern; 0 or null for none (the default)
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
@@ -1591,7 +1592,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `recovery.step`
 
-Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `pause` or `stop` the agent, or `hand-to-owner`. Allowed for the concern's holder and holders of `assignment.manage` (not the task's own owner), only the next rung the installation allows at the concern's level.
+Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `pause` or `stop` the agent, or `hand-to-owner`. Allowed for the supervisor it was routed to, its current holder and holders of `assignment.manage` (not the task's own owner nor the agent it is about). What an agent may take is the installation's list for the ACTOR's own level; the step is the lowest allowed rung above the last one, except that a rung the actor cannot take, or that is refused on a precondition, is passed and recorded as skipped with the reason. Pause and stop act on the concern's task. A step is recorded as pending first and finished after its effect, so a retry does it once; a repeat of a finished command is answered as recorded.
 
 Arguments:
 
