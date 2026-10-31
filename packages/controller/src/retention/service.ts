@@ -255,10 +255,14 @@ export class RetentionService {
     if (values.contextRouteDays !== null) {
       // Route-change records of the context (card C07f): the archive of cut text and the decisions of a route move (not a first-call admission, which calibration reads).
       const cutoff = now - values.contextRouteDays * DAY;
+      // The archive of a task that is not done or cancelled is still cited by the prompts built for it, so it is held (like the other material a resumable task needs).
+      const material = await RetainedMaterial.build(this.#runner.storage);
       for (const kind of ["ctx-route-archive", "ctx-admission"]) {
         const complete = await scan(this.#runner, kind, (a) => {
           if (Date.parse(a.updatedAt) >= cutoff) return;
           if (kind === "ctx-admission" && (a.body as { type?: unknown }).type !== "route-change") return;
+          const why = material.why(kind, a.id);
+          if (why !== undefined) { if (retained.length < 200) retained.push({ kind, id: a.id, reasons: why }); return; }
           const projectId = (a.body as { projectId?: unknown }).projectId;
           candidates.push({ kind, id: a.id, revision: a.revision, projectId: typeof projectId === "string" ? projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
         });

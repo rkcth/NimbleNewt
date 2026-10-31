@@ -393,6 +393,9 @@ test("route-change records (cut text and decisions) are kept by default; with co
   const { c, boot, call, project, put } = await world(d);
   try {
     await put("ctx-route-archive", "ctx-aaaaaaaaaaaaaaaaaaaa", { taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project, itemId: "r1", kind: "report", digest: "sha256:x", text: "cut text" });
+    // The cut text of a task that can still run is cited by its prompts and is held; the rule removes it once the task is over (or gone).
+    const live = (await c.services.projects.createTask({ commandId: "live-task", actor: "owner:rob", projectId: project, title: "still going" })).id;
+    await put("ctx-route-archive", "ctx-bbbbbbbbbbbbbbbbbbbb", { taskId: live, projectId: project, itemId: "r2", kind: "report", digest: "sha256:y", text: "cut text of a live task" });
     await put("ctx-admission", "adm-aaaaaaaaaaaaaaaaaaaa", { type: "route-change", taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project });
     await put("ctx-admission", "adm-bbbbbbbbbbbbbbbbbbbb", { type: "first-call", taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project });
     const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
@@ -408,6 +411,7 @@ test("route-change records (cut text and decisions) are kept by default; with co
     assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id).sort(), ["adm-aaaaaaaaaaaaaaaaaaaa", "ctx-aaaaaaaaaaaaaaaaaaaa"]);
     assert.ok((await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "x3")).ok);
     assert.equal(await has("ctx-route-archive", "ctx-aaaaaaaaaaaaaaaaaaaa"), false);
+    assert.equal(await has("ctx-route-archive", "ctx-bbbbbbbbbbbbbbbbbbbb"), true, "the archive of a live task is kept, however old");
     assert.equal(await has("ctx-admission", "adm-aaaaaaaaaaaaaaaaaaaa"), false);
     assert.equal(await has("ctx-admission", "adm-bbbbbbbbbbbbbbbbbbbb"), true, "a first-call admission is kept");
     assert.ok((await call(boot.token, "retention.settings.set", { contextRouteDays: null }, "x4")).ok, "off again");

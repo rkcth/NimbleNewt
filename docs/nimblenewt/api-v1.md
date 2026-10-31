@@ -244,7 +244,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.get`
 
-The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window and refuses to start it if what must stay whole does not fit) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas). Shows the entries, the defaults and what applies now.
+The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window and refuses to start it if what must stay whole does not fit) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Shows the entries, the defaults and what applies now.
 
 Arguments:
 

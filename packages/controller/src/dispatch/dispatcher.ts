@@ -1123,8 +1123,13 @@ export class DispatcherService {
       if (previous !== undefined && previous === chosen.route) {
         if (this.#deps.routeKept !== undefined && this.#routeOk.get(attemptId) !== "kept") { try { await this.#deps.routeKept({ taskId }); this.#remember(attemptId, "kept"); } catch (error) { this.#options.onError?.(error); } }
       } else if (previous !== undefined) {
-        const cacheKey = `${previous}>${chosen.route}@${key}`;
+        // The cache also carries the decisions record and the owner's route settings, so a new decision or goal, or a toggled check or floor, is asked again.
+        const decisionsRev = (await this.#runner.get("decision-context", task.projectId))?.revision ?? 0;
+        const settingsRev = (await this.#runner.get("ctx-route-settings", "main"))?.revision ?? 0;
+        const cacheKey = `${previous}>${chosen.route}@${key}@d${decisionsRev}@s${settingsRev}`;
         if (this.#routeOk.get(attemptId) !== cacheKey) {
+          // Whatever was remembered for this attempt (a "kept" from an earlier tick on the old route) is no longer true: a refusal or an error below must not leave it standing.
+          this.#routeOk.delete(attemptId);
           let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
           try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
           if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));

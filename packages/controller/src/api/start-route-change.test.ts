@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { contextRouteKey } from "../context/index.js";
 import { BlockerService } from "../domain/index.js";
+import { derivedId } from "../domain/ids.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
@@ -35,6 +37,8 @@ test("a task that moves to a route too small for its fixed part is refused with 
     await c.services.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: "agt-abcdefghijklmnopqrst" }, harness: "pi" });
     // The task last ran on the big route.
     await c.storage.applyOperation({ operationId: "op-placed", epoch: c.epoch, actor: rob.id, correlationId: "op-placed", at: new Date().toISOString(), changes: [{ type: "create", ref: { kind: "task-placement", id: taskId }, body: { hostId: "host:pc", route: "big/one" } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    // The small route was measured before (its window was larger then): a prompt and tools that do not fit 8,192 tokens. A route nobody measured is never refused on a guess.
+    await c.storage.applyOperation({ operationId: "op-fixed", epoch: c.epoch, actor: rob.id, correlationId: "op-fixed", at: new Date().toISOString(), changes: [{ type: "create", ref: { kind: "ctx-route-fixed", id: derivedId("ctx", `route\0${contextRouteKey("tiny/one")}\0pi\0fixed`) }, body: { route: contextRouteKey("tiny/one"), harness: "pi", samples: [{ systemPromptChars: 15_000, toolSchemaChars: 9_000, attemptId: "old" }] } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
     const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
     const blockers = BlockerService.withEpoch(c.storage, c.epoch);
     const subject = { kind: "task", id: taskId } as const;
@@ -57,6 +61,14 @@ test("a task that moves to a route too small for its fixed part is refused with 
     await c.dispatch!.dispatcher.tick();
     assert.equal(await blockers.openFor("context_overflow", subject), undefined, "the stale context blocker was closed");
 
+    // The owner follows the advice and raises the small route's window while the refusal is still open: the route is rebuilt, fits, and the refusal does not hold the first call.
+    current = "tiny/one";
+    await c.dispatch!.dispatcher.tick();
+    assert.ok(await blockers.openFor("context_overflow", subject), "refused again");
+    const routing = (await c.services.routing.get())!;
+    await c.services.routing.setTable(rob, { commandId: "tbl2", expectedRevision: routing.revision, table: { ...table, routes: { ...table.routes, "tiny/one": { contextTokens: 200_000, capabilities: ["tools"] } } } } as never);
+    await c.dispatch!.dispatcher.tick();
+    assert.equal(await blockers.openFor("context_overflow", subject), undefined, "the refusal of the old window was closed when the raised window fits");
     // The owner turns the check off in chat terms (the operation): the move is no longer asked.
     assert.ok((await call(boot.token, "context.route.change", { disable: ["check"] }, "rc1")).ok);
     assert.equal((await call(boot.token, "context.route.get", {})).result.item.effective.check, false);

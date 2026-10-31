@@ -373,7 +373,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     };
   };
   // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
-  const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, { ...ro, ...(i.contextRouteSettings === undefined ? {} : { routeSettings: i.contextRouteSettings }) });
+  const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, { ...ro, ...(i.contextRouteSettings === undefined ? {} : { routeSettings: i.contextRouteSettings }), ...(i.onError === undefined ? {} : { onError: i.onError }) });
   if (i.options.local !== undefined) {
     const limits = checkLocalWorkerLimits(i.options.local.limits);
     const guards = controllerGuards({
@@ -520,6 +520,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         if (window === undefined) return { ok: true };
         const record = await decisions.context(principal, { projectId: c.projectId, taskId: c.taskId });
         const moved = await context.routeMoved(principal, { taskId: c.taskId, attemptId: c.attemptId, route: c.route, ...(c.harness === undefined ? {} : { harness: c.harness }), window, items: record === undefined ? [] : startupItems(record) });
+        // A route nobody has measured is not refused on a guess: the owner is told (a notice, once per attempt and route), and the first call on it is checked with its real size.
+        const unmeasuredId = createHash("sha256").update(`${c.attemptId}\0${c.route}`).digest("hex").slice(0, 24);
+        if (moved.rebuilt && moved.warning !== undefined) await notifications.emitFromController({ commandId: `ctx-unmeasured:${unmeasuredId}`, kind: "maintenance", level: "notice", ref: { kind: "route-move", id: unmeasuredId }, detail: moved.warning, projectId: c.projectId }).catch((error: unknown) => i.onError?.(error));
         return moved.rebuilt ? { ok: true } : { ok: false, reason: `${moved.reason ?? "the context does not fit the new route"} (moved from ${c.previousRoute} to ${c.route}; choose a route with a larger window, reduce the task contract, supersede decisions or reassign the task)` };
       },
       routeKept: async (k) => { await context.routeKept(principal, { taskId: k.taskId }); },
