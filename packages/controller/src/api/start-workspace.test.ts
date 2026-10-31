@@ -42,7 +42,7 @@ test("integration, refresh, release and quarantine are requested through the sta
     // Rights: no grant, no answer; a task credential never; an unknown operation is invalid.
     assert.equal((await call(plain, "workspace.request", { operation: "refresh", taskId: task, reason: "x" }, "w3")).error?.code, "not_found");
     assert.equal((await call(plain, "workspace.get", { requestId: done.result.id })).error?.code, "not_found");
-    assert.equal((await call(boss, "workspace.request", { operation: "landing", taskId: task, reason: "x" }, "w4")).error?.code, "invalid_command");
+    assert.equal((await call(boss, "workspace.request", { operation: "deploy", taskId: task, reason: "x" }, "w4")).error?.code, "invalid_command");
     assert.equal(calls.length, 2, "only the two allowed requests reached the host");
     const grant = await c.api.handle(boot.token, { v: 1, op: "workspace.request", commandId: "w5", args: { operation: "integration", taskId: task, reason: "ready" } } as never) as { ok: boolean; result?: any };
     assert.equal(grant.result.state, "done", "the owner may always ask");
