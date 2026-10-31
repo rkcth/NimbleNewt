@@ -172,3 +172,33 @@ test("what a resumable task or a replay needs is retained; a finished task's mat
   assert.deepEqual([...m.tasks.keys()], ["task-live"]);
   void unguarded;
 });
+
+test("route-change archives are read only when asked, and a huge archive never makes the other rules treat everything as held (card C07f)", async () => {
+  const reads: string[] = [];
+  const total = 100_500;
+  const fake = {
+    async listAggregates(kind: string, o: { afterId?: string; limit?: number }): Promise<never[]> {
+      reads.push(kind);
+      const limit = o.limit ?? 500;
+      const mk = (id: string, body: unknown) => ({ kind, id, revision: 1, updatedAt: "2026-10-30T10:00:00.000Z", body }) as never;
+      if (kind === "task") return o.afterId === undefined ? [mk("task-live", { projectId: "p", state: "in_progress" })] as never[] : [];
+      if (kind === "desk-record") return o.afterId === undefined ? [mk("dsk-live", { taskId: "task-live" })] as never[] : [];
+      if (kind === "ctx-route-archive") {
+        const start = o.afterId === undefined ? 0 : Number(o.afterId.slice(4)) + 1;
+        return Array.from({ length: Math.max(0, Math.min(limit, total - start)) }, (_v, i) => mk(`arc-${String(start + i).padStart(7, "0")}`, { taskId: "none" })) as never[];
+      }
+      return [];
+    },
+  };
+  const plain = await RetainedMaterial.build(fake as never);
+  assert.equal(plain.complete, true);
+  assert.ok(!reads.includes("ctx-route-archive"), "the archives are not read for the other rules");
+  assert.ok(plain.why("desk-record", "dsk-live"));
+  assert.equal(plain.why("desk-record", "dsk-free"), undefined, "other rules still free what no task needs");
+  assert.ok(plain.why("ctx-route-archive", "arc-0000001"), "an archive nobody scanned is held, not freed");
+  const withArchive = await RetainedMaterial.build(fake as never, { routeArchive: true });
+  assert.ok(reads.includes("ctx-route-archive"));
+  assert.equal(withArchive.complete, true, "the archive scan hitting its limit does not clear the general flag");
+  assert.equal(withArchive.why("desk-record", "dsk-free"), undefined);
+  assert.ok(withArchive.why("ctx-route-archive", "arc-0000001"), "an unfinished archive scan holds archives");
+});

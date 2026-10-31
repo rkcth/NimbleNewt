@@ -35,6 +35,8 @@ export interface AdmissionBody {
   readonly admit: boolean;
   readonly startupTokens: number; readonly estimatedTokens: number; readonly rawEstimatedTokens: number; readonly workingTokens: number; readonly basis: string;
   readonly calibrationRatio?: number;
+  /** The route's own name, kept when the key is a cut one, so records written under an older key of that name are found. */
+  readonly routeName?: string;
   readonly reasons: readonly string[];
   /** Set by `confirmUsage`: what the provider reported for the call that was sent. */
   readonly reported?: { readonly inputTokens: number; readonly charsPerToken: number; readonly overStartupLimit: boolean; readonly ratio: number };
@@ -71,14 +73,24 @@ export const contextRouteKey = (route: string): string => {
   const safe = `${ROUTE_KEY_PREFIX}${encodeRoute(route)}`;
   return safe.length <= 80 ? safe : `${safe.slice(0, 61)}~h${sha256(route).slice(0, 16)}`;
 };
-/** The names this route was kept under before the key was always prefixed (the form of the previous release, and the older one that turned every other character into `:`), for reading records written then. Empty when the key is a cut one. */
-const legacyRouteKeys = (routeKey: string): string[] => {
+/**
+ * The names a route was kept under before the key was always prefixed, for reading records written then: the form of the previous release (an `r` before a name that began oddly; a name past 80 characters cut to 63 and a digest of the whole)
+ * and the older one that turned every other character into `:` and cut at 80. Taken from the route's own name. A key that cannot be told from another name's is left out: the older form maps `a/b` and `a:b` to the same key (read only when
+ * nothing was replaced and nothing cut), and an `r`-prefixed one is the key of a name that really begins with `r`.
+ */
+const legacyKeysOfName = (name: string, current: string): string[] => {
+  const encoded = encodeRoute(name);
+  const previousSafe = /^[A-Za-z0-9]/.test(encoded) ? encoded : `r${encoded}`;
+  const previous = previousSafe.length <= 80 ? previousSafe : `${previousSafe.slice(0, 63)}~${sha256(name).slice(0, 16)}`;
+  const oldest = /[^A-Za-z0-9._:-]/.test(name) || name.length > 80 ? undefined : name;
+  return [...new Set([previous, ...(oldest === undefined ? [] : [oldest])])].filter((k) => k !== current && /^[A-Za-z0-9]/.test(k));
+};
+/** The same from the key alone, which is the name itself unless the key is a cut one (then the name is needed). */
+const legacyRouteKeys = (routeKey: string, name?: string): string[] => {
+  if (name !== undefined) return legacyKeysOfName(name, routeKey);
   if (!routeKey.startsWith(ROUTE_KEY_PREFIX) || routeKey.includes("~h")) return [];
-  const encoded = routeKey.slice(ROUTE_KEY_PREFIX.length);
-  const previous = /^[A-Za-z0-9]/.test(encoded) ? encoded : `r${encoded}`;
-  const raw = encoded.replace(/~([0-9a-f]{4})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16)));
-  const oldest = raw.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80);
-  return [...new Set([previous, oldest])].filter((k) => k.length <= 80 && k !== routeKey);
+  const original = routeKey.slice(ROUTE_KEY_PREFIX.length).replace(/~([0-9a-f]{4})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16)));
+  return legacyKeysOfName(original, routeKey);
 };
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
@@ -171,8 +183,8 @@ export class ContextEnforcementService {
     return r.id;
   }
   /** The calibration of a task on a route; a record written under the name the route had before the key was always prefixed is found too. */
-  async #calibrationOf(taskId: string, route: string): Promise<CalibrationBody | undefined> {
-    for (const name of [route, ...legacyRouteKeys(route)]) {
+  async #calibrationOf(taskId: string, route: string, routeName?: string): Promise<CalibrationBody | undefined> {
+    for (const name of [route, ...legacyRouteKeys(route, routeName)]) {
       const found = (await this.#runner.get("ctx-calibration", derivedId("ctx", `${taskId}\0${name}\0calibration`)))?.body as unknown as CalibrationBody | undefined;
       if (found !== undefined) return found;
     }
@@ -189,11 +201,13 @@ export class ContextEnforcementService {
    * Decides whether the first call of an attempt may be sent. Repeating it (same task, attempt and round) answers with the recorded decision; a refusal has opened a blocker (unless the caller said it will `retry` after making the call smaller). While a `context_overflow`
    * blocker is open on the task nothing is admitted. If an earlier confirmed call on the same route (`route`, default one per window) was larger than estimated, the estimate is scaled by that ratio.
    */
-  async admit(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; window: number; route?: string; harness?: string; call: FirstCall; retry?: boolean }): Promise<FirstCallDecision & { id: string; blockerId?: string; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "window", "route", "harness", "call", "retry"]);
+  async admit(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; window: number; route?: string; routeName?: string; harness?: string; call: FirstCall; retry?: boolean }): Promise<FirstCallDecision & { id: string; blockerId?: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "window", "route", "routeName", "harness", "call", "retry"]);
     if (command.retry !== undefined && typeof command.retry !== "boolean") return invalid("retry", "must be true or false");
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const r = round(command.round); const w = window(command.window);
     const route = command.route === undefined ? `window-${w}` : key("route", command.route);
+    // The route's own name, when the caller has it, finds the records a cut key lost the name of; it must be the name the key was made from.
+    const routeName = command.routeName === undefined ? undefined : typeof command.routeName === "string" && command.routeName.length <= 500 && contextRouteKey(command.routeName) === route ? command.routeName : invalid("routeName", "must be the name the route key was made from");
     const projectId = (await this.#dispatch(principal, taskId))!;
     const budget = this.#budgetOf("window", w);
     onlyKnown(command.call, ["systemPromptChars", "toolSchemaChars", "startupTokens", "replyReserveTokens", "likelyToolOutputTokens", "reportedInputTokens"]);
@@ -202,7 +216,7 @@ export class ContextEnforcementService {
     const ref: AggregateRef = { kind: "ctx-admission", id };
     let raw: FirstCallDecision;
     try { raw = admitFirstCall(call, budget); } catch (error) { if (error instanceof RangeError) return invalid("call", error.message); throw error; }
-    const calibration = await this.#calibrationOf(taskId, route);
+    const calibration = await this.#calibrationOf(taskId, route, routeName);
     const ratio = call.reportedInputTokens === undefined ? Math.max(1, calibration?.ratio ?? 1) : 1;
     const scaled: FirstCall = ratio === 1 ? call : { ...call, systemPromptChars: Math.ceil(call.systemPromptChars * ratio), toolSchemaChars: Math.ceil(call.toolSchemaChars * ratio), startupTokens: Math.ceil(call.startupTokens * ratio) };
     let decision = admitFirstCall(scaled, budget);
@@ -210,14 +224,14 @@ export class ContextEnforcementService {
     // Nothing new is admitted while the task is blocked for context overflow (an earlier decision of this very call is still answered as recorded).
     const open = await this.#blockers.openFor("context_overflow", { kind: "task", id: taskId });
     if (open !== undefined && (await this.#runner.get(ref.kind, id)) === undefined) decision = { ...decision, admit: false, reasons: [`a context_overflow blocker is open on this task (${open.id}); it must be resolved first`, ...decision.reasons] };
-    const body: AdmissionBody = { type: "first-call", taskId, projectId, attemptId, round: r, window: w, route, admit: decision.admit, startupTokens: decision.startupTokens, estimatedTokens: decision.estimatedTokens, rawEstimatedTokens: raw.estimatedTokens, workingTokens: decision.workingTokens, basis: decision.basis, reasons: decision.reasons, ...(ratio > 1 ? { calibrationRatio: ratio } : {}), decidedBy: principal.id };
+    const body: AdmissionBody = { type: "first-call", taskId, projectId, attemptId, round: r, window: w, route, admit: decision.admit, startupTokens: decision.startupTokens, estimatedTokens: decision.estimatedTokens, rawEstimatedTokens: raw.estimatedTokens, workingTokens: decision.workingTokens, basis: decision.basis, reasons: decision.reasons, ...(routeName === undefined || routeName === route ? {} : { routeName }), ...(ratio > 1 ? { calibrationRatio: ratio } : {}), decidedBy: principal.id };
     const run = await this.#runner.command("context.admit", { commandId: `ctx-adm-${id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId, attemptId, round: r, window: w, route, call: call as unknown as JsonObject },
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { admit: decision.admit } }),
     }));
     const recorded = view<AdmissionBody>((await this.#runner.get(ref.kind, id))!);
-    // The route's measured fixed part is kept only from a call that was admitted, and never fails the admission (card C07f).
-    if (recorded.admit) await this.#recordFixed(principal, { route, harness: command.harness, attemptId, admissionId: id, call });
+    // The route's measured fixed part is kept from every first call that was sized, refused ones too (a refusal is a real measurement of the prompt and the tool schemas, and a route whose first call overflows must still become measured), and never fails the admission (card C07f).
+    await this.#recordFixed(principal, { route, harness: command.harness, attemptId, admissionId: id, call });
     // `retry`: the caller will make the call smaller (compact the stored conversation) and ask again as the next round; that round, if refused, is the one that opens the blocker.
     const blockerId = recorded.admit || command.retry === true ? undefined : await this.#block(principal, taskId, `The first call of attempt ${attemptId} was not sent: ${recorded.reasons.join("; ")}.`);
     return { admit: recorded.admit, startupTokens: recorded.startupTokens, estimatedTokens: recorded.estimatedTokens, basis: recorded.basis as FirstCallDecision["basis"], workingTokens: recorded.workingTokens, limits: { startup: budget.startupTokens, working: budget.workingTokens }, reasons: recorded.reasons, id, ...(blockerId === undefined ? {} : { blockerId }), replayed: run.replayed };
@@ -246,7 +260,7 @@ export class ContextEnforcementService {
         const ref: AggregateRef = { kind: "ctx-admission", id };
         const calRef: AggregateRef = { kind: "ctx-calibration", id: derivedId("ctx", `${taskId}\0${body.route}\0calibration`) };
         const cal = await this.#runner.get(calRef.kind, calRef.id);
-        const earlier = cal === undefined ? await this.#calibrationOf(taskId, body.route) : (cal.body as unknown as CalibrationBody);
+        const earlier = cal === undefined ? await this.#calibrationOf(taskId, body.route, body.routeName) : (cal.body as unknown as CalibrationBody);
         const calBody: CalibrationBody = { taskId, route: body.route, ratio: earlier === undefined ? ratio : Math.max(ratio, Math.round(earlier.ratio * 80) / 100), charsPerToken: cpt, reportedTokens: command.reportedInputTokens, attemptId };
         return {
           ref, creates: false,
@@ -260,10 +274,11 @@ export class ContextEnforcementService {
   }
 
   /**
-   * Keeps what an admitted first call measured of its route's fixed part, beside the decision and not in it: a failure or a lost race never costs the admission. Kept per route and harness (a prompt differs between harnesses),
+   * Keeps what a first call measured of its route's fixed part, beside the decision and not in it: a failure or a lost race never costs the admission. Kept per route and harness (a prompt differs between harnesses),
    * the latest few measurements, the largest counting; a repeat of the same admission is the same command.
    */
   async #recordFixed(principal: Principal, m: { route: string; harness: string | undefined; attemptId: string; admissionId: string; call: FirstCall }): Promise<void> {
+    if (m.call.systemPromptChars + m.call.toolSchemaChars <= 0) return;
     try {
       const harness = m.harness === undefined ? "any" : key("harness", m.harness);
       const ref: AggregateRef = { kind: "ctx-route-fixed", id: derivedId("ctx", `route\0${m.route}\0${harness}\0fixed`) };
@@ -302,20 +317,22 @@ export class ContextEnforcementService {
     try { this.#onError(error); } catch { /* the reporter must not fail the call */ }
   }
 
-  /** The fixed part of a route, by the route's own name (the cleaning is done here, once) (with a harness; without one, the figure kept for no harness) as the latest admitted first calls measured it, in characters and, at this window, in tokens; `undefined` when none has been measured. */
+  /** The fixed part of a route, by the route's own name (the cleaning is done here, once) (with a harness; without one, the figure kept for no harness) as the latest first calls measured it, in characters and, at this window, in tokens; `undefined` when none has been measured. */
   async fixedPartOf(route: string, window: number, harness?: string): Promise<{ readonly systemPromptChars: number; readonly toolSchemaChars: number; readonly tokens: number } | undefined> {
     const h = harness === undefined ? "any" : key("harness", harness);
     const found = await this.#runner.get("ctx-route-fixed", derivedId("ctx", `route\0${key("route", contextRouteKey(route))}\0${h}\0fixed`));
     if (found === undefined) return undefined;
     const samples = (found.body as unknown as RouteFixedBody).samples;
     if (!Array.isArray(samples) || samples.length === 0) return undefined;
-    // The median of the recent measurements (the lower one of an even count), as one of them whole so the parts stay consistent: one outlier, such as a task with a very large tool set, does not decide the figure for the other tasks.
-    const sorted = [...samples].sort((a, b) => a.systemPromptChars + a.toolSchemaChars - (b.systemPromptChars + b.toolSchemaChars));
-    const mid = sorted[Math.ceil(sorted.length / 2) - 1]!;
+    // The median of the recent measurements (the upper one of an even count, so the figure errs toward the larger prompt; a sample of no size is no measurement and is ignored), as one of them whole so the parts stay consistent: one outlier, such as a task with a very large tool set, does not decide the figure for the other tasks.
+    const sized = samples.filter((x) => x.systemPromptChars + x.toolSchemaChars > 0);
+    if (sized.length === 0) return undefined;
+    const sorted = [...sized].sort((a, b) => a.systemPromptChars + a.toolSchemaChars - (b.systemPromptChars + b.toolSchemaChars));
+    const mid = sorted[Math.floor(sorted.length / 2)]!;
     return { systemPromptChars: mid.systemPromptChars, toolSchemaChars: mid.toolSchemaChars, tokens: tokensOf(mid.systemPromptChars + mid.toolSchemaChars, this.budget(window)) };
   }
 
-  /** The recent measurements kept for a route and harness (newest first), as admitted first calls reported them. */
+  /** The recent measurements kept for a route and harness (newest first), as first calls reported them. */
   async fixedSamplesOf(route: string, harness?: string): Promise<readonly { systemPromptChars: number; toolSchemaChars: number }[]> {
     const h = harness === undefined ? "any" : key("harness", harness);
     const found = await this.#runner.get("ctx-route-fixed", derivedId("ctx", `route\0${key("route", contextRouteKey(route))}\0${h}\0fixed`));
@@ -371,8 +388,10 @@ export class ContextEnforcementService {
       review = reviewRouteChange(command.items, budget, fixedTokens);
       // A route nobody has measured is not refused on a guess: the floor sizes the cut, and when even that leaves no room for the essentials the view is built without it and the first call, with the real figure, decides (a warning, not a blocker).
       if (review.kind === "blocked" && command.fixedBasis === "unmeasured" && fixedTokens > 0) {
-        const bare = reviewRouteChange(command.items, budget, 0);
-        if (bare.kind === "rebuilt") { review = bare; warning = `route ${route} has not been measured yet and its assumed fixed part (${fixedTokens} tokens) does not fit the ${w}-token window beside the essential constraints; the context was built without it and the first call on the route will be checked with its real size`; fixedTokens = 0; }
+        // The room the essentials leave is what the fixed part may take: the optional items are cut to the rest, not given the whole startup budget.
+        const left = Math.max(0, Math.min(fixedTokens, budget.startupTokens - review.startup.tokens));
+        const bare = reviewRouteChange(command.items, budget, left);
+        if (bare.kind === "rebuilt") { review = bare; warning = `route ${route} has not been measured yet and its assumed fixed part (${fixedTokens} tokens) does not fit the ${w}-token window beside the essential constraints; the context was built with ${left} tokens set aside for it and the first call on the route will be checked with its real size`; fixedTokens = left; }
       }
     } catch (error) { if (error instanceof RangeError) return invalid("fixedTokens", error.message); throw error; }
     // The decision is named by everything it was made from (route, window, fixed part, items): the same attempt asked again with another route or window is a new decision, never the old command ID with a different payload.
@@ -423,10 +442,11 @@ export class ContextEnforcementService {
   static #routeBlockRef = (taskId: string): AggregateRef => ({ kind: "ctx-route-block", id: derivedId("ctx", `${taskId}\0routeblock`) });
   /** Opens the task's `context_overflow` blocker for a refused move and marks it as this mechanism's; one that was already open (an admission refusal, or this one on an earlier tick) is returned and left as it is. */
   async #openRouteBlock(principal: Principal, taskId: string, summary: string): Promise<string> {
-    const before = await this.#blockers.openFor("context_overflow", { kind: "task", id: taskId });
     const id = await this.#block(principal, taskId, summary);
-    if (before === undefined) {
-      const ref = ContextEnforcementService.#routeBlockRef(taskId);
+    // Marked by what the blocker is, read after it was opened or found, not by a look taken before: a blocker an admission refusal opened meanwhile is not this mechanism's, and one this mechanism opened on an earlier tick whose mark was lost is marked now.
+    const blocker = await this.#blockers.getBlocker(id);
+    const ref = ContextEnforcementService.#routeBlockRef(taskId);
+    if (blocker !== undefined && blocker.summary.startsWith(ROUTE_BLOCK) && ((await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string } | undefined)?.blockerId !== id) {
       await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}`, actor: principal.id }, async () => ({
         payload: { taskId, blockerId: id },
         build: async () => {

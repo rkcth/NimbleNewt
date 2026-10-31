@@ -53,7 +53,7 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
       async admit(order, call, round, retry, launch) {
         const window = binding.window(order);
         if (window === undefined) return { admit: true, reasons: [] };
-        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: contextRouteKey(order.route), ...(order.harness === undefined ? {} : { harness: order.harness }), call, ...(retry === true ? { retry: true } : {}) });
+        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: contextRouteKey(order.route), ...(order.route.length <= 500 ? { routeName: order.route } : {}), ...(order.harness === undefined ? {} : { harness: order.harness }), call, ...(retry === true ? { retry: true } : {}) });
         if (decision.admit) rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
         return { admit: decision.admit, reasons: decision.reasons };
       },

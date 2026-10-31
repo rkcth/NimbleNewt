@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 import { BlockerService, DomainError, EffectService, ProjectService, type DomainErrorCode } from "../domain/index.js";
 import { derivedId } from "../domain/ids.js";
@@ -17,6 +18,7 @@ const cid = (label: string): string => `${label}-${n++}`;
 const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check?: (error: DomainError) => void): Promise<void> => {
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); check?.(error); return true; });
 };
+const encodeRoute = (route: string): string => route.replace(/[^A-Za-z0-9._:-]/g, (c) => `~${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 const hangs: Summariser = { route: "local", summarise: () => new Promise<string>(() => undefined) };
 const writes = (route: string, out: string, calls?: { n: number }): Summariser => ({ route, summarise: async () => { if (calls) calls.n++; return out; } });
 const WINDOW = 131_072;
@@ -26,7 +28,7 @@ const summary = (r: CompactionOutcome): Extract<CompactionOutcome, { kind: "summ
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; host: Principal; ann: Principal; ben: Principal; eve: Principal; a: string; t: string; t2: string;
-    enf: ContextEnforcementService; reopen(retrieval?: RetrievalService): ContextEnforcementService; retrieval: RetrievalService; blockers: BlockerService; effects: EffectService;
+    enf: ContextEnforcementService; reopen(retrieval?: RetrievalService): ContextEnforcementService; withBlockers(b: BlockerService): ContextEnforcementService; retrieval: RetrievalService; blockers: BlockerService; effects: EffectService;
     note(by: Principal, title: string, body: string, visibility?: "shared" | "private"): Promise<SourceRef>;
     setup(task?: string): Promise<void>;
     /** Writes a record the way an earlier release did (for the migration tests). */
@@ -52,7 +54,7 @@ for (const backend of backends) {
         const retrieval = RetrievalService.withEpoch(world.storage, projects.epoch, desks, histories, options);
         const blockers = BlockerService.withEpoch(world.storage, projects.epoch, options);
         const effects = EffectService.withEpoch(world.storage, projects.epoch, undefined, options);
-        const make = (r: RetrievalService = retrieval) => ContextEnforcementService.withEpoch(world.storage, projects.epoch, { blockers, retrieval: r }, { ...options, ...enforcement });
+        const make = (r: RetrievalService = retrieval, bl: BlockerService = blockers) => ContextEnforcementService.withEpoch(world.storage, projects.epoch, { blockers: bl, retrieval: r }, { ...options, ...enforcement });
         const rights = (p: string): Grant[] => [{ action: "desk.write", project: p }, { action: "desk.read", project: p }, { action: "attempt.work", project: p }];
         const ann = await agent("ann", rights(a));
         const ben = await agent("ben", [{ action: "desk.read", project: a }, { action: "attempt.work", project: a }]);
@@ -66,7 +68,7 @@ for (const backend of backends) {
           const ref = { kind, id };
           await new CommandRunner(world.storage, projects.epoch, options).command("test.plant", { commandId: cid("plant"), actor: "owner:rob" }, async () => ({ payload: {}, build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: rec as never }], detail: {} }) }));
         };
-        await body({ owner, host, ann, ben, eve, a, t, t2, enf, reopen: make, retrieval, blockers, effects, note, setup, plant });
+        await body({ owner, host, ann, ben, eve, a, t, t2, enf, reopen: (r) => make(r), withBlockers: (b) => make(retrieval, b), retrieval, blockers, effects, note, setup, plant });
       } finally { await world.close(); }
     });
   const compactCmd = (task: string, k: string, sources: SourceRef[], extra: Record<string, unknown> = {}) => ({ taskId: task, attemptId: "att-1", key: k, compressorId: "pi-before-compact", title: `summary ${k}`, material: MATERIAL, sources, ...extra });
@@ -276,9 +278,16 @@ for (const backend of backends) {
 
   suite("a refused admission leaves the route's figure alone; the figure is per route and harness, the median of the latest few (finding 3)", async ({ enf, owner, t, t2 }) => {
     const route = contextRouteKey("local/fig");
-    const refused = await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 8_192, route, harness: "pi", call: { systemPromptChars: 400_000, toolSchemaChars: 400_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    // A refused first call is a real measurement too: the route becomes measured, so the next move to it is checked with the real size and not the floor (third review, finding 2).
+    const refused = await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 8_192, route: contextRouteKey("local/refused"), harness: "pi", call: { systemPromptChars: 400_000, toolSchemaChars: 400_000, startupTokens: 500, replyReserveTokens: 1_000 } });
     assert.equal(refused.admit, false);
-    assert.equal(await enf.fixedPartOf("local/fig", 65_536, "pi"), undefined, "a refused call writes nothing");
+    const figure = await enf.fixedPartOf("local/refused", 65_536, "pi");
+    assert.deepEqual([figure?.systemPromptChars, figure?.toolSchemaChars], [400_000, 400_000]);
+    const moved = await enf.routeMoved(owner, { taskId: t2, attemptId: "att-9", route: "local/refused", harness: "pi", window: 8_192, items: goalOnly });
+    assert.deepEqual([moved.measured, moved.rebuilt, moved.warning === undefined], [true, false, true], "the move to a route whose first call overflowed is refused on the real size, not admitted on a floor");
+    // A call that measured nothing (no prompt, no tools) is no measurement.
+    await enf.admit(owner, { taskId: t2, attemptId: "att-0", window: 65_536, route: contextRouteKey("local/empty"), call: { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: 500, replyReserveTokens: 1_000 } });
+    assert.equal(await enf.fixedPartOf("local/empty", 65_536), undefined);
     const sized = (chars: number) => ({ systemPromptChars: chars, toolSchemaChars: 5_000, startupTokens: 500, replyReserveTokens: 1_000 });
     await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route, harness: "pi", call: sized(20_000) });
     assert.equal((await enf.fixedPartOf("local/fig", 65_536, "pi"))?.systemPromptChars, 20_000);
@@ -290,6 +299,51 @@ for (const backend of backends) {
     await enf.admit(owner, { taskId: t2, attemptId: "att-6", window: 65_536, route, harness: "pi", call: sized(30_000) });
     assert.equal((await enf.fixedSamplesOf("local/fig", "pi")).length, 5, "at most five are kept");
     assert.equal((await enf.fixedPartOf("local/fig", 65_536, "pi"))?.systemPromptChars, 8_000);
+  });
+
+  suite("the median of an even number of measurements is the upper middle one, and a zero-size sample is ignored (third review, finding 5)", async ({ enf, owner, t, t2 }) => {
+    const sized = (chars: number) => ({ systemPromptChars: chars, toolSchemaChars: 5_000, startupTokens: 500, replyReserveTokens: 1_000 });
+    const route = contextRouteKey("local/even");
+    await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 65_536, route, call: sized(10_000) });
+    await enf.admit(owner, { taskId: t2, attemptId: "att-2", window: 65_536, route, call: sized(20_000) });
+    assert.equal((await enf.fixedPartOf("local/even", 65_536))?.systemPromptChars, 20_000, "two samples: the larger middle, not the smaller");
+    await enf.admit(owner, { taskId: t, attemptId: "att-3", window: 65_536, route, call: sized(30_000) });
+    await enf.admit(owner, { taskId: t2, attemptId: "att-4", window: 65_536, route, call: sized(40_000) });
+    assert.equal((await enf.fixedPartOf("local/even", 65_536))?.systemPromptChars, 30_000, "four samples 10, 20, 30, 40: the upper middle");
+  });
+
+  suite("an unmeasured route that cannot hold its floor beside the essentials is built with the room the essentials leave, not the whole startup budget (third review, finding 3)", async ({ enf, owner, t }) => {
+    const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at2(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at2(1) }];
+    for (let i = 0; i < 10; i++) items.push({ id: `r${i}`, kind: "report", text: `${"w".repeat(399)}${i}`, at: at2(i + 2) });
+    const moved = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/fresh", window: 8_192, items });
+    assert.deepEqual([moved.measured, moved.rebuilt], [false, true]);
+    assert.match(moved.warning!, /has not been measured yet/);
+    assert.equal(moved.startup.cuts.length, 4, "the four optional items are cut to the room that is left");
+    const record = await enf.routeArchive(owner, { taskId: t, digest: moved.startup.cuts[0]!.digest });
+    assert.ok(record, "and archived");
+    assert.ok(moved.startup.tokens <= 2_048 - 1_000, "what is recorded as the startup is the real cut");
+  });
+
+  suite("a blocker an admission refusal opened meanwhile is never marked as the route change's; a route blocker whose mark was lost or stale is marked on the next refusal and closed when the move fits (third review, finding 4)", async ({ enf, owner, blockers, withBlockers, t, t2, plant }) => {
+    const call = { systemPromptChars: 90_000, toolSchemaChars: 90_000, startupTokens: 9_000, replyReserveTokens: 1_000 };
+    const adm = await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 8_192, call });
+    assert.ok(adm.blockerId);
+    // The route-change code looks, finds nothing (the admission's blocker was opened a moment after), and then finds the blocker when it opens its own: it must not take it over.
+    let lie = true;
+    const blind = new Proxy(blockers, { get: (target, k) => { const v = Reflect.get(target, k, target); if (k === "openFor") return async (...a: unknown[]) => { if (lie) { lie = false; return undefined; } return (v as (...x: unknown[]) => unknown).apply(target, a); }; return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(target) : v; } });
+    const racing = withBlockers(blind);
+    const refused = await racing.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "tiny/one", window: 4_096, items: manyItems() });
+    assert.equal(refused.blockerId, adm.blockerId);
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t }), {}, "the admission blocker was not marked");
+    assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t }))?.id, adm.blockerId);
+    // A route blocker whose mark does not name it (an earlier mark that was never replaced): the next refusal marks it, and a move that fits closes it.
+    const open = await blockers.openBlocker({ commandId: cid("ob"), actor: owner.id, type: "context_overflow", subject: { kind: "task", id: t2 }, summary: "[route change] Attempt att-0 cannot move to the route", resolver: "owner" });
+    await plant("ctx-route-block", derivedId("ctx", `${t2}\0routeblock`), { taskId: t2, blockerId: "blk-0000000000000000000000" });
+    const again = await enf.routeMoved(owner, { taskId: t2, attemptId: "att-1", route: "tiny/one", window: 4_096, items: manyItems() });
+    assert.equal(again.blockerId, open.id);
+    const fits = await enf.routeMoved(owner, { taskId: t2, attemptId: "att-2", route: "big/one", window: 131_072, items: manyItems() });
+    assert.equal(fits.rebuilt, true);
+    assert.equal(await blockers.openFor("context_overflow", { kind: "task", id: t2 }), undefined, "closed: the route blocker was marked");
   });
 
   const goalOnly: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at2(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at2(1) }];
@@ -386,7 +440,18 @@ for (const backend of backends) {
     await plant("ctx-calibration", derivedId("ctx", `${t}\0local~002fsmall\0calibration`), { taskId: t, route: "local~002fsmall", ratio: 3, charsPerToken: 1, reportedTokens: 1, attemptId: "old" });
     await plant("ctx-calibration", derivedId("ctx", `${t2}\0local:small\0calibration`), { taskId: t2, route: "local:small", ratio: 3, charsPerToken: 1, reportedTokens: 1, attemptId: "old" });
     const call = { systemPromptChars: 3_000, toolSchemaChars: 3_000, startupTokens: 1_000, replyReserveTokens: 100 };
-    for (const task of [t, t2]) assert.equal((await enf.admit(owner, { taskId: task, attemptId: "att-1", window: 131_072, route: K, call })).startupTokens, 9_000, "scaled by the old calibration");
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 131_072, route: K, call })).startupTokens, 9_000, "scaled by the previous release's calibration");
+    // The oldest form turned every other character into a colon, so local/small and local:small shared one key: it is not read for a name it cannot be told to belong to (third review, finding 6).
+    assert.equal((await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 131_072, route: K, call })).startupTokens, 3_000, "not scaled by another name's calibration");
+    await plant("ctx-calibration", derivedId("ctx", `${t2}\0a:b\0calibration`), { taskId: t2, route: "a:b", ratio: 3, charsPerToken: 1, reportedTokens: 1, attemptId: "old" });
+    assert.equal((await enf.admit(owner, { taskId: t2, attemptId: "att-2", window: 131_072, route: contextRouteKey("a/b"), routeName: "a/b", call })).startupTokens, 3_000, "a/b does not read the calibration of a:b");
+    assert.equal((await enf.admit(owner, { taskId: t2, attemptId: "att-3", window: 131_072, route: contextRouteKey("a:b"), routeName: "a:b", call })).startupTokens, 9_000, "a:b does");
+    // A name past 80 characters was cut with a digest of the whole name before; the key alone cannot say which name it was, so the caller's name finds it.
+    const longName = `provider/${"m".repeat(100)}`;
+    const oldCut = `${`r${longName}`.slice(0, 0)}${encodeRoute(longName).slice(0, 63)}~${createHash("sha256").update(longName).digest("hex").slice(0, 16)}`;
+    await plant("ctx-calibration", derivedId("ctx", `${t}\0${oldCut}\0calibration`), { taskId: t, route: oldCut, ratio: 2, charsPerToken: 1, reportedTokens: 1, attemptId: "old" });
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-4", window: 131_072, route: contextRouteKey(longName), routeName: longName, call })).startupTokens, 6_000, "found through the name");
+    await refuses("invalid_command", () => enf.admit(owner, { taskId: t, attemptId: "att-5", window: 131_072, route: contextRouteKey(longName), routeName: "other", call }));
     // A route with a leading odd character was prefixed with 'r' before.
     const L = contextRouteKey("/lead");
     await plant("ctx-calibration", derivedId("ctx", `${t}\0r~002flead\0calibration`), { taskId: t, route: "r~002flead", ratio: 2, charsPerToken: 1, reportedTokens: 1, attemptId: "old" });

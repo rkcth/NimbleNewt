@@ -15,6 +15,9 @@ const TERMINAL = new Set(["done", "cancelled"]);
 export class RetainedMaterial {
   readonly #reasons = new Map<string, string[]>();
   #complete = true;
+  /** Whether the live-task archive scan (route-change cut text) ran and finished; it never clears `complete`, which the other rules rely on. */
+  #archiveScanned = false;
+  #archiveComplete = true;
   /** The resumable tasks found (ID to project). */
   readonly tasks = new Map<string, string>();
 
@@ -24,20 +27,22 @@ export class RetainedMaterial {
   /** Why the record must stay, or `undefined` when no resumable task or replay needs it. An incomplete scan answers for every record. */
   why(kind: string, id: string): string[] | undefined {
     if (!this.#complete) return ["the check of what resumable tasks need did not finish, so nothing is treated as free to delete"];
+    if (kind === "ctx-route-archive" && (!this.#archiveScanned || !this.#archiveComplete)) return ["the check of which route-change archives a resumable task cites did not run or did not finish, so they are held"];
     return this.#reasons.get(`${kind}:${id}`);
   }
   get size(): number { return this.#reasons.size; }
 
-  static async build(storage: Pick<ControllerStorage, "listAggregates">): Promise<RetainedMaterial> {
+  /** `routeArchive`: also read the archives of cut route-change text (only the context-route-days rule asks about them; the scan is the largest, so the other rules skip it). */
+  static async build(storage: Pick<ControllerStorage, "listAggregates">, options: { routeArchive?: boolean } = {}): Promise<RetainedMaterial> {
     const out = new RetainedMaterial();
-    const scan = async (kind: string, each: (a: Aggregate) => void): Promise<void> => {
+    const scan = async (kind: string, each: (a: Aggregate) => void, onLimit: () => void = () => { out.#complete = false; }): Promise<void> => {
       let after: string | undefined; let seen = 0;
       for (;;) {
         const page: Aggregate[] = await storage.listAggregates(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
         for (const a of page) each(a);
         seen += page.length;
         if (page.length < 500) return;
-        if (seen >= REFERENCE_SCAN_LIMIT) { out.#complete = false; return; }
+        if (seen >= REFERENCE_SCAN_LIMIT) { onLimit(); return; }
         after = page[page.length - 1]!.id;
       }
     };
@@ -52,7 +57,10 @@ export class RetainedMaterial {
       else if (r.kind === "owner-decision" && typeof r.id === "string") out.#add("decision", r.id, reason);
     };
     // The cut text of a route change (card C07f) is cited by digest in the startup context of a task that can still run, so it stays while the task is live (it expires with the rule once the task is done or cancelled).
-    await scan("ctx-route-archive", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) out.#add("ctx-route-archive", a.id, `the cut text of a route change for task ${b.taskId}, which is not done or cancelled`); });
+    if (options.routeArchive === true) {
+      out.#archiveScanned = true;
+      await scan("ctx-route-archive", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) out.#add("ctx-route-archive", a.id, `the cut text of a route change for task ${b.taskId}, which is not done or cancelled`); }, () => { out.#archiveComplete = false; });
+    }
     const liveDesk = new Map<string, string>();
     await scan("desk-record", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) { liveDesk.set(a.id, b.taskId); out.#add("desk-record", a.id, `written for task ${b.taskId}, which can still resume`); } });
     // A summary has no task of its own on older records: it belongs to a resumable task when it names one, or when it was built from that task's desk records (its sources).

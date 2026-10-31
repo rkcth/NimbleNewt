@@ -187,7 +187,7 @@ export class RetentionService {
   async check(by: Principal, ref: { kind: string; id: string }): Promise<{ kind: string; id: string; retained: boolean; reasons: string[] }> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not ask what is retained`);
     if (typeof ref.kind !== "string" || typeof ref.id !== "string") invalid("ref", "needs a kind and an id");
-    const material = await RetainedMaterial.build(this.#runner.storage);
+    const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: ref.kind === "ctx-route-archive" });
     const reasons = material.why(ref.kind, ref.id) ?? [];
     return { kind: ref.kind, id: ref.id, retained: reasons.length > 0, reasons };
   }
@@ -256,7 +256,7 @@ export class RetentionService {
       // Route-change records of the context (card C07f): the archive of cut text and the decisions of a route move (not a first-call admission, which calibration reads).
       const cutoff = now - values.contextRouteDays * DAY;
       // The archive of a task that is not done or cancelled is still cited by the prompts built for it, so it is held (like the other material a resumable task needs).
-      const material = await RetainedMaterial.build(this.#runner.storage);
+      const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: true });
       for (const kind of ["ctx-route-archive", "ctx-admission"]) {
         const complete = await scan(this.#runner, kind, (a) => {
           if (Date.parse(a.updatedAt) >= cutoff) return;
@@ -306,7 +306,7 @@ export class RetentionService {
     // A hold can appear while the run is going (a task resumes, a checkpoint cites a summary): the holds are read again before every batch, and a candidate held now is kept and shown as retained.
     for (let i = 0; i < candidates.length; i += REMOVE_BATCH) {
       await this.#deps.beforeBatch?.(i / REMOVE_BATCH);
-      const material = await RetainedMaterial.build(this.#runner.storage);
+      const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: candidates.slice(i, i + REMOVE_BATCH).some((c) => c.kind === "ctx-route-archive") });
       for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
         const why = material.why(c.kind, c.id);
         if (why !== undefined) { if (retained.length < 200) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
@@ -527,7 +527,7 @@ export class RetentionService {
       // A hold that appeared since the last batch (a task resumed, a checkpoint cited the record) stops the removals here; what was removed stays removed and is on the record.
       await this.#deps.beforeBatch?.(i / BATCH);
       if (i > 0) {
-        const material = await RetainedMaterial.build(this.#runner.storage);
+        const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: batch.some((w) => w.kind === "ctx-route-archive") });
         const nowHeld = batch.flatMap((w) => { const why = material.why(w.kind, w.id); return why === undefined ? [] : [{ kind: w.kind, id: w.id, reasons: why }]; });
         if (nowHeld.length > 0) return retain(nowHeld);
       }

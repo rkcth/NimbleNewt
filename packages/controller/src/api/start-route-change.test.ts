@@ -14,7 +14,7 @@ import { startController } from "./index.js";
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const provider = { enabled: true, paid: false, location: "local" as const };
-const table = { providers: { big: provider, tiny: provider }, routes: { "big/one": { contextTokens: 200_000, capabilities: ["tools"] }, "tiny/one": { contextTokens: 8_192, capabilities: ["tools"] } }, profiles: { main: ["big/one", "tiny/one"] }, roles: { coordinator: "main", "safety-supervisor": "main" } };
+const table = { providers: { big: provider, tiny: provider }, routes: { "big/one": { contextTokens: 200_000, capabilities: ["tools"] }, "tiny/one": { contextTokens: 8_192, capabilities: ["tools"] }, "tiny/fresh": { contextTokens: 8_192, capabilities: ["tools"] } }, profiles: { main: ["big/one", "tiny/one", "tiny/fresh"] }, roles: { coordinator: "main", "safety-supervisor": "main" } };
 
 // Card C07f, through the real composition: the dispatcher's route-change hook reaches the context service, a refusal is shown with its remedies, a task back on its route has the refusal closed, and the owner's setting turns the check off.
 test("a task that moves to a route too small for its fixed part is refused with the ways out, the stale refusal is closed when it returns to its route, and the check can be turned off in the settings", async () => {
@@ -74,5 +74,13 @@ test("a task that moves to a route too small for its fixed part is refused with 
     assert.equal((await call(boot.token, "context.route.get", {})).result.item.effective.check, false);
     assert.ok((await call(boot.token, "context.route.change", { enable: ["check"], set: { floorChars: 9_000 } }, "rc2")).ok);
     assert.equal((await call(boot.token, "context.route.get", {})).result.item.effective.floorChars, 9_000);
+
+    // A route nobody measured whose assumed fixed part does not fit is not refused: the owner gets a notice, once per attempt and route (finding 7 of the third review).
+    const notices = async (): Promise<string[]> => (await c.storage.listAggregates("notification-item", { limit: 500 })).map((x) => JSON.stringify(x.body)).filter((t) => t.includes("has not been measured yet"));
+    assert.equal((await notices()).length, 0);
+    current = "tiny/fresh";
+    await c.dispatch!.dispatcher.tick();
+    assert.equal(await blockers.openFor("context_overflow", subject), undefined, "an unmeasured route is not refused on a guess");
+    assert.equal((await notices()).length, 1, "the owner is told that the route was not measured");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });
