@@ -301,6 +301,21 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
   const workers: WorkerHost[] = [...(i.options.workers ?? [])];
+  const holder: { dispatcher?: DispatcherService } = {};
+  // An attempt with no time limit has no expiry to keep its per-attempt entries until: they are kept while the dispatcher still has the attempt unfinished, and dropped once it has ended (checked at most every ten minutes).
+  const unlimited = (): { readonly forget: (map: Map<string, unknown>, now: number) => void } => {
+    let checked = 0;
+    return {
+      forget: (map, now) => {
+        if (now - checked < 600_000) return;
+        checked = now;
+        for (const [id, entry] of map) {
+          if ((entry as { until: number }).until !== Infinity) continue;
+          void holder.dispatcher?.get(principal, id).then((d) => { if (d === undefined || d.state === "finished") map.delete(id); }, () => undefined);
+        }
+      },
+    };
+  };
   // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
   const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, ro);
   if (i.options.local !== undefined) {
@@ -318,15 +333,17 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       const policies = new CachePolicies({ ...o, principal, markers: MarkerService.withEpoch(storage, epoch, ro), ...(i.onError === undefined ? {} : { onError: i.onError }) });
       // One policy per attempt: its slot, its pin bookkeeping and its figures belong to the attempt, so the relay and the host must share it. An entry is kept until the attempt's own expiry (it cannot run past it) and dropped then, never earlier.
       const made = new Map<string, { readonly cache: Promise<AttemptCache>; readonly until: number }>();
+      const forgetEnded = unlimited();
       const now = i.options.clock === undefined ? Date.now : (): number => Date.parse(i.options.clock!());
       cache = {
         forOrder: (order) => {
           for (const [id, entry] of made) if (entry.until < now()) made.delete(id);
+          forgetEnded.forget(made, now());
           let found = made.get(order.attemptId);
           if (found === undefined) {
             const pin = o.pinMarker?.(order);
             const cache = policies.forAttempt({ projectId: order.projectId, route: order.route }, pin === undefined ? {} : { pinMarker: pin });
-            found = { cache, until: (order.expiresAt === undefined ? now() + 24 * 3_600_000 : Date.parse(order.expiresAt)) + 60_000 };
+            found = { cache, until: order.expiresAt === undefined ? Infinity : Date.parse(order.expiresAt) + 60_000 };
             made.set(order.attemptId, found);
             cache.catch(() => made.delete(order.attemptId));
           }
@@ -371,12 +388,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     };
     // One relay per attempt, kept until the attempt\'s own expiry.
     const relays = new Map<string, { readonly relay: AttemptRelay; readonly until: number }>();
+    const relayEnded = unlimited();
     const attemptRelay = (order: WorkOrder, relay: ModelRelay, options: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] } = {}): AttemptRelay => {
       const clock = i.options.clock === undefined ? Date.now : (): number => Date.parse(i.options.clock!());
       for (const [id, entry] of relays) if (entry.until < clock()) relays.delete(id);
+      relayEnded.forget(relays, clock());
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: (Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) : clock() + 24 * 60 * 60_000) + 60_000 };
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
         relays.set(order.attemptId, found);
       }
       return found.relay;
@@ -389,7 +408,6 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     // Remote workers: the dispatcher is built with a way to ask who owns an agent's native store, and the remote service is built on the dispatcher afterwards.
     let remote: RemoteWorkerService | undefined;
     let blobs: FileBlobStore | undefined;
-    const holder: { dispatcher?: DispatcherService } = {};
     if (i.options.remote !== undefined) {
       blobs = await FileBlobStore.open({ directory: i.options.remote.blobDirectory });
       const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, { ...ro, onPublished: async (e) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: `artv:${e.artifactId}`, taskId: e.taskId, kind: "artifact-version", summary: `Recorded artifact ${e.name} (${e.files} file${e.files === 1 ? "" : "s"}).`, manifest: { refs: [{ kind: "artifact", id: e.artifactId }] } } as never); } });

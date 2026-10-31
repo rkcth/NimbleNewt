@@ -8,6 +8,7 @@ import { DomainError } from "../domain/errors.js";
 import { REMOTE_LIMITS } from "./protocol.js";
 import { READ, local, refuses, remoteSuite, wireRefuses } from "./testing/suite.js";
 import { REMOTE_CAPS } from "./testing/world.js";
+import { RemoteWorkerHost } from "./host.js";
 
 after(stopServer);
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -356,5 +357,15 @@ for (const backend of backends) {
     await c.remote.end(c.owner, attemptId, "over");
     await refuses("fenced", () => c.remote.control(c.owner, attemptId, { kind: "checkpoint" }));
     await wireRefuses("fenced", () => attempt.pollControl(), 409);
+  });
+
+  suite("a remote host lets go of an attempt's placement with no handle for it (a controller that restarted since the worker was placed), so the agent's store is not held for ever", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId } = await c.started(r1);
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, attemptId))!.state, "accepted");
+    const host = new RemoteWorkerHost(r1.id, c.remote, c.dispatcherPrincipal, { resources: { cpus: 1, memoryMb: 1 }, requirements: () => ({}) as never });
+    await host.release(attemptId, "the attempt ended while no handle was held");
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, attemptId))!.state, "ended");
+    await host.release(attemptId, "again"); // nothing held: nothing happens
   });
 }

@@ -70,7 +70,7 @@ export interface WorkerHandle {
 }
 
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
-export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt: string }
+export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
 
 export interface WorkerHost {
   /** The host principal (`host:<name>`) this worker runs on: its place is asked of admission under this name. */
@@ -78,6 +78,8 @@ export interface WorkerHost {
   /** What one attempt asks of the host, for admission (H03). */
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   start(order: WorkOrder): Promise<WorkerHandle>;
+  /** Ends whatever this host still holds for an attempt that ended while this process had no handle for it (the controller restarted since the worker was placed). Without it a placement that outlived its controller would hold the agent's store for ever. Nothing held: nothing happens. */
+  release?(attemptId: string, reason: string): Promise<void>;
   /**
    * Why this host would refuse the attempt (policy, capabilities, connection), asked before a place is requested so that the dispatcher can pass over a host that would refuse and pick the next one. Empty: it would take it. A host
    * that does not say leaves it out and is judged only when the worker starts (card H07e).

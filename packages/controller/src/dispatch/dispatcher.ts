@@ -141,6 +141,8 @@ export interface DispatcherDeps {
 }
 
 /** The dispatcher's own limits; a figure that is absent is not limited. */
+const DEFAULT_COMPUTE_RESERVE_MS = 4 * 3_600_000;
+
 export interface DispatcherLimitFigures { readonly attemptMs?: number; readonly maxAttempts?: number }
 
 export interface AttemptDispatcherOptions extends RunnerOptions {
@@ -163,6 +165,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly limits?: () => Promise<DispatcherLimitFigures>;
   /** The longest an attempt may run for this task according to configuration (`time.maxMinutes`, minutes); `undefined` when none is set. Read on every claim. */
   readonly configuredMinutes?: (taskId: string) => Promise<number | undefined>;
+  /** The compute an attempt holds back when nothing limits its time (no attempt time, no contract `maxMinutes`), in milliseconds. Default four hours. A hold is only as much as is still free. */
+  readonly computeReserveMs?: number;
   /** After this many ticks in a row in which an attempt pinned to a host could not start because that host was unavailable, a blocker names the owner (who can move it). Default 5. */
   readonly pinnedStaleTicks?: number;
   /** How long the end hook (the agent's ending) may take before the attempt ends with the dispatcher's own outcome and the hook's delay is reported through `onError`. Default 30 seconds. */
@@ -296,7 +300,9 @@ export class DispatcherService {
     for (const id of live) {
       const d = await this.#load(id);
       if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
-      const expired = d.body.expiresAt !== undefined && d.body.expiresAt <= at;
+      // An attempt that started without a time limit is held to the owner's attempt time from its start once that is switched on (provisional: the owner's figure only, not the configuration's or the contract's).
+      const cap = d.body.expiresAt === undefined && d.body.state === "running" ? await this.#capNow() : undefined;
+      const expired = d.body.expiresAt !== undefined ? d.body.expiresAt <= at : cap !== undefined && Date.parse(d.body.claimedAt) + cap <= Date.parse(at);
       if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
         const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: !expired });
         lost.push(id);
@@ -924,7 +930,8 @@ export class DispatcherService {
         pinned ??= store.hostId;
       }
     }
-    const probe: HostProbe = { attemptId, taskId, projectId: task.projectId, agentId, generation: (await this.#load(attemptId))?.body.generation ?? 0, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), route: chosen.route, expiresAt: (await this.#load(attemptId))?.body.expiresAt ?? this.#runner.now() };
+    const expiresAt = (await this.#load(attemptId))?.body.expiresAt;
+    const probe: HostProbe = { attemptId, taskId, projectId: task.projectId, agentId, generation: (await this.#load(attemptId))?.body.generation ?? 0, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), route: chosen.route, ...(expiresAt === undefined ? {} : { expiresAt }) };
     const hostPick = await this.#pickHost(chosen.harness, pinned, probe);
     if (hostPick.kind !== "ok") {
       if (hostPick.blocked) return block("host", "dispatch_blocked", hostPick.reason);
@@ -1012,6 +1019,9 @@ export class DispatcherService {
     return { ...(this.#options.attemptMs === undefined ? {} : { attemptMs: this.#options.attemptMs }), ...(this.#options.maxAttempts === undefined ? {} : { maxAttempts: this.#options.maxAttempts }) };
   }
 
+  /** The owner's attempt time as it is now; `undefined` when none is set or the setting cannot be read (the scan then leaves the attempt alone and looks again next tick). */
+  async #capNow(): Promise<number | undefined> { try { return (await this.#figures()).attemptMs; } catch { return undefined; } }
+
   /** How long an attempt of this task may run: the smallest of what is set (owner's figure, configuration, contract); `undefined` when nothing limits it. */
   async #attemptLimitMs(taskId: string, contractMinutes: number | undefined): Promise<number | undefined> {
     const configured = this.#options.configuredMinutes === undefined ? undefined : await this.#options.configuredMinutes(taskId);
@@ -1084,8 +1094,8 @@ export class DispatcherService {
       if (report === undefined) return undefined; // the task has no budget: nothing is held
       const contract = await this.#contractOf(d.body.taskId);
       // Only a dimension that has a limit is held (a limit of 0 states none), and no more than is still available: the contract's time, the attempt's own expiry and the allowance agree on the smallest.
-      // The attempt's own limit as it was set at the claim (none: the whole free allowance is held), cut by the contract's time.
-      const own = d.body.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, Date.parse(d.body.expiresAt) - Date.parse(d.body.claimedAt));
+      // The attempt's own limit as it was set at the claim (none: a bounded slice of `computeReserveMs`, so one attempt does not hold the task's whole free compute and a lost worker does not turn it all uncertain), cut by the contract's time.
+      const own = d.body.expiresAt === undefined ? (this.#options.computeReserveMs ?? DEFAULT_COMPUTE_RESERVE_MS) : Math.max(0, Date.parse(d.body.expiresAt) - Date.parse(d.body.claimedAt));
       const ms = Math.min(own, contract.maxMinutes === undefined ? Number.MAX_SAFE_INTEGER : contract.maxMinutes * 60_000);
       const wantCost = this.#options.reserveCostMicros ?? 0;
       const cost = report.limit.costMicros > 0 && wantCost > 0 ? Math.min(wantCost, report.available.costMicros) : 0;
@@ -1330,9 +1340,13 @@ export class DispatcherService {
     if (d === undefined || d.body.state === "finished") return {};
     const live = this.#live.get(attemptId);
     if (live !== undefined) await live.handle.stop().catch(() => undefined);
+    // No handle in this process (the controller restarted since the worker was placed): the host that holds the attempt is told to let go, or a remote placement would stay live for ever and keep the agent's store busy.
+    else await this.#deps.workers.find((w) => w.hostId === d.body.hostId)?.release?.(attemptId, summary.slice(0, 280)).catch(() => undefined);
     await this.#path.settle(attemptId, true).catch(() => undefined);
     await this.#path.cancelParked(attemptId).catch(() => undefined);
     const b = (await this.#load(attemptId))!.body;
+    // The owner's figures are read before anything is finished: an unreadable setting throws here, the attempt stays unfinished and the end is tried again, so the replacement is never lost.
+    const figures = options.readmit ? await this.#figures() : undefined;
     await this.#settleReservation(b, options.lost === true);
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
     // The attempt is finished in the assignment only if it is still the active one; a superseded attempt was ended by whoever transferred the task.
@@ -1352,7 +1366,7 @@ export class DispatcherService {
       const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:failed:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${attemptId} failed (${summary.slice(0, 300)}); the task is as it was and no further attempt starts by itself.`, resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
     }
-    return options.readmit ? this.#readmit(b) : {};
+    return figures !== undefined ? this.#readmit(b, figures) : {};
   }
 
   /** Settles the attempt's hold to what it used, or holds it as uncertain when the worker was lost (its last calls are not known). Settling is by command ID derived from the attempt, so an end done again settles once. */
@@ -1398,7 +1412,7 @@ export class DispatcherService {
   }
 
   /** After a lost attempt the dispatcher admits the next one itself, up to the attempts the contract (or the dispatcher's own limit) allows; beyond that a blocker names the owner. */
-  async #readmit(b: DispatchBody): Promise<{ readmitted?: string }> {
+  async #readmit(b: DispatchBody, figures: DispatcherLimitFigures): Promise<{ readmitted?: string }> {
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
     if (assignment === undefined || assignment.state !== "assigned" || assignment.generation !== b.generation || assignment.activeAttemptId !== undefined || assignment.owner === undefined) return {};
     // A call of the ended attempt whose outcome is not known could be repeated by a new attempt (it would ask for the same effect under new IDs): no replacement is admitted until a person has settled what happened.
@@ -1409,7 +1423,9 @@ export class DispatcherService {
       return {};
     }
     const contract = await this.#contractOf(b.taskId);
-    const allowed = contract.maxAttempts ?? (await this.#figures()).maxAttempts;
+    // The smaller of the owner's cap and the contract's (a contract cannot lift the owner's cap).
+    const caps = [contract.maxAttempts, figures.maxAttempts].filter((x): x is number => x !== undefined);
+    const allowed = caps.length === 0 ? undefined : Math.min(...caps);
     if (allowed !== undefined && assignment.attempts >= allowed) {
       const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:attempts:${b.taskId}:${assignment.attempts}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `${assignment.attempts} attempts were made and the task allows ${allowed}; no further attempt starts by itself.`, resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);

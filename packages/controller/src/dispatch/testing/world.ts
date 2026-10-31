@@ -51,6 +51,9 @@ export class ScriptedWorker implements WorkerHost {
   readonly starts: WorkOrder[] = [];
   readonly handles: ScriptedHandle[] = [];
   failToStart: Error | undefined;
+  /** Attempts the dispatcher asked this host to let go of with no handle in hand (a restarted controller). */
+  readonly released: { attemptId: string; reason: string }[] = [];
+  async release(attemptId: string, reason: string): Promise<void> { this.released.push({ attemptId, reason }); }
   constructor(readonly hostId: string, public script: WorkerScript, readonly resources = { cpus: 1, memoryMb: 1024 }, private readonly version = "worker-1.0.0") {}
   async start(order: WorkOrder): Promise<WorkerHandle> {
     if (this.failToStart !== undefined) throw this.failToStart;
