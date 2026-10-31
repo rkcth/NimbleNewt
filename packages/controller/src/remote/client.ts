@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
-import { contractProblems, enforcementFor, restartDigest, type WorkerAbilities } from "./contract-wire.js";
+import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
 import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
@@ -265,6 +265,22 @@ export class RemoteAttempt implements ToolGateway {
     const digest = restartDigest(currentDigest, restart.recipe);
     const answer = await this.#post("launched", { digest, enforcement: enforcementFor(contract, abilities) as unknown as Json }, key) as { confirmed: boolean; reasons?: string[] };
     return answer.confirmed ? { ok: true } : { ok: false, reasons: answer.reasons ?? ["the controller did not accept the confirmation"] };
+  }
+
+  /**
+   * The worker's loop calls this with the control messages it just read: every `restart` that changes what the sandbox reaches or the limits it runs under is confirmed again (`confirmRestart`), in order, and the digest and
+   * recipe it now holds are returned for the next call. A restart into the same recipe asks for nothing. Stops at the first confirmation the controller refuses (then the attempt is over) and says why.
+   */
+  async confirmRestarts(messages: readonly SequencedControl[], held: { readonly digest: string; readonly recipe: RecipeSummary }, contract: DispatchContract, abilities: WorkerAbilities): Promise<{ readonly digest: string; readonly recipe: RecipeSummary; readonly refused?: readonly string[] }> {
+    let { digest, recipe } = held;
+    for (const msg of messages) {
+      if (msg.kind !== "restart" || !recipeChanged(recipe, msg.recipe)) continue;
+      const answer = await this.confirmRestart(digest, { recipe: msg.recipe }, contract, abilities, `restart-${msg.seq}`);
+      if (!answer.ok) return { digest, recipe, refused: answer.reasons };
+      digest = restartDigest(digest, msg.recipe);
+      recipe = msg.recipe;
+    }
+    return { digest, recipe };
   }
 
   /** The turn is over. */

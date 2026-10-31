@@ -162,6 +162,8 @@ export const AGREED_GRANTABLE_ACTIONS: readonly string[] = [
 ];
 /** Granted by a decision only for exactly one task (a `resource` of kind task): the grant then covers that task and no other. A project-wide request for these stays refused. */
 export const AGREED_GRANTABLE_ON_ONE_TASK: readonly string[] = ["task.update", "task.transition"];
+/** Granted by a decision only for exactly one service resource (a `resource` of kind service, `<service>/<resource>`): the grant then covers that one resource and no other (card P03 review). */
+export const AGREED_GRANTABLE_ON_ONE_SERVICE: readonly string[] = ["effect.perform"];
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -249,16 +251,22 @@ export class GrantService {
     const action = command.action;
     if (typeof action !== "string") invalid("action", "must be an action name");
     const resource = checkResource(command.resource);
-    if (resource !== undefined && resource.kind !== "task") invalid("resource", "an agreed grant may be narrowed to one task and nothing else");
-    if (resource !== undefined && typeof command.commandId === "string") {
+    if (resource !== undefined && resource.kind !== "task" && resource.kind !== "service") invalid("resource", "an agreed grant may be narrowed to one task or one service resource and nothing else");
+    if (resource?.kind === "service") {
+      if (!AGREED_GRANTABLE_ON_ONE_SERVICE.includes(command.action as string)) invalid("action", `${String(command.action)} cannot be granted on a service resource by a decision`);
+      if (!/^[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._-]{1,80}$/.test(resource.id)) invalid("resource", "a service resource is named <service>/<resource>");
+    } else if (AGREED_GRANTABLE_ON_ONE_SERVICE.includes(command.action as string)) invalid("resource", `${String(command.action)} can be granted by a decision only for one service resource: name it as the resource`);
+    if (resource?.kind === "task" && typeof command.commandId === "string") {
       // The named task must be a task of the grant's project: a grant for one project naming another project's task would be inert, but the service should not depend on the applier to say so.
       const task = await this.#runner.get("task", resource.id).catch(() => undefined);
       if (task === undefined || (task.body as { projectId?: unknown }).projectId !== command.project) invalid("resource", "must be a task of the grant's project");
     }
-    if (AGREED_GRANTABLE_ON_ONE_TASK.includes(action)) {
+    if (AGREED_GRANTABLE_ON_ONE_SERVICE.includes(action)) {
+      if (resource === undefined) invalid("action", `${action} can be granted by a decision only for one service resource`);
+    } else if (AGREED_GRANTABLE_ON_ONE_TASK.includes(action)) {
       if (resource === undefined) invalid("action", `${action} can be granted by a decision only for one task: name the task as the resource`);
     } else if (resource !== undefined && !AGREED_GRANTABLE_ACTIONS.includes(action)) invalid("action", `${action} cannot be granted by a decision`);
-    if (!AGREED_GRANTABLE_ACTIONS.includes(action) && !AGREED_GRANTABLE_ON_ONE_TASK.includes(action)) invalid("action", `${action} cannot be granted by a decision: it needs the owner (a decision may grant only ordinary working actions)`);
+    if (!AGREED_GRANTABLE_ACTIONS.includes(action) && !AGREED_GRANTABLE_ON_ONE_TASK.includes(action) && !AGREED_GRANTABLE_ON_ONE_SERVICE.includes(action)) invalid("action", `${action} cannot be granted by a decision: it needs the owner (a decision may grant only ordinary working actions)`);
     // A replay of a grant that was already made returns that result first: the time and standing checks below depend on the clock and could fail it after a crash.
     let made = false;
     if (typeof command.commandId === "string") {
@@ -537,7 +545,8 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
   const scope = principal.taskScope;
   // A task credential keeps only the grants of its task's project, for that task or the whole project, and narrows a grant for every project to this one.
   const kept = scope === undefined ? grants : grants
-    .filter((g) => (g.project === "*" || g.project === scope.projectId) && (g.resource === undefined || (g.resource.kind === "task" && g.resource.id === scope.taskId)))
+    // A grant for one service resource (`<service>/<resource>`) is the agent's own right and stays on its task credential: the use site asks for the exact resource, so only that one resource is reached (card P03 review).
+    .filter((g) => (g.project === "*" || g.project === scope.projectId) && (g.resource === undefined || (g.resource.kind === "task" && g.resource.id === scope.taskId) || g.resource.kind === "service" || (g.resource.kind === "project" && g.resource.id === scope.projectId)))
     .map((g) => ({ ...g, project: scope.projectId }));
   return { ...principal, grants: kept, restrictions, asOf: now };
 }

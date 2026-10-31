@@ -18,10 +18,10 @@ export interface ServiceTarget {
   affects(ref: ServiceRef, action: ServiceAction): Promise<readonly ServiceRef[]>;
   /** Resources that sit next to this one (the rest of its service and what depends on it) and must be left as they were: the collateral check compares their versions before and after. */
   neighbours(ref: ServiceRef): Promise<readonly ServiceRef[]>;
-  /** Applies the action once per `key`: asking again with the same key changes nothing. Throws `EffectRejected` when the target refuses; any other error means the answer was lost. */
-  apply(key: string, ref: ServiceRef, action: ServiceAction): Promise<void>;
+  /** Applies the action once per `key`: asking again with the same key changes nothing. `context` is what the bridge wants back with `applied(key)` (the neighbours' versions at the moment of applying, so a settlement after a restart compares against those and not against the earlier intent). Throws `EffectRejected` when the target refuses; any other error means the answer was lost. */
+  apply(key: string, ref: ServiceRef, action: ServiceAction, context?: JsonObject): Promise<void>;
   /** Whether a key was applied (the target can be asked, so a lost answer is settled by asking, never by doing it again). */
-  applied(key: string): Promise<boolean>;
+  applied(key: string): Promise<boolean | { readonly applied: boolean; readonly context?: JsonObject }>;
   /** What is wrong with the resource after the action, or `undefined` when it is as the action says it should be. `before` is the observation taken before the action. */
   verify(ref: ServiceRef, action: ServiceAction, before: Observation, after: Observation): string | undefined;
 }

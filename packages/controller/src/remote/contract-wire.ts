@@ -84,3 +84,10 @@ export function enforcementFor(contract: DispatchContract, abilities: WorkerAbil
 export function restartDigest(previous: string, recipe: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: object }): string {
   return createHash("sha256").update(stable({ previous, recipe: { revision: recipe.revision, reach: recipe.reach, limits: recipe.limits ?? null } })).digest("hex");
 }
+
+/** Whether a restart's recipe differs from the one the worker runs under in what the contract binds (the reach and the limits): only then does the controller clear the confirmation and ask for a new one. */
+export function recipeChanged(was: { readonly reach: readonly string[]; readonly limits?: object } | undefined, next: { readonly reach: readonly string[]; readonly limits?: object }): boolean {
+  if (was === undefined) return true;
+  const form = (r: { readonly reach: readonly string[]; readonly limits?: object }): string => stable({ reach: [...new Set(r.reach)].sort(), limits: r.limits ?? null });
+  return form(was) !== form(next);
+}

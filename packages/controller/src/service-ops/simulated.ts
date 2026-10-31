@@ -35,7 +35,7 @@ export interface SimulatedFaults {
  */
 export class SimulatedServices implements ServiceTarget {
   readonly #cells = new Map<string, Cell>();
-  readonly #keys = new Map<string, true>();
+  readonly #keys = new Map<string, true | JsonObject>();
   readonly faults: SimulatedFaults = {};
   /** Every apply that reached the target, in order (the tests assert on what a refused call did not do). */
   readonly calls: { key: string; ref: string; action: string; applied: boolean }[] = [];
@@ -79,7 +79,7 @@ export class SimulatedServices implements ServiceTarget {
     return out;
   }
 
-  async apply(key: string, ref: ServiceRef, action: ServiceAction): Promise<void> {
+  async apply(key: string, ref: ServiceRef, action: ServiceAction, context?: JsonObject): Promise<void> {
     const cell = this.#cells.get(refKey(ref));
     if (cell === undefined) throw new EffectRejected(`${refKey(ref)} does not exist`);
     if (this.#keys.has(key)) { this.calls.push({ key, ref: refKey(ref), action: action.type, applied: false }); return; }
@@ -106,12 +106,12 @@ export class SimulatedServices implements ServiceTarget {
       const l = this.#cells.get(refKey(leak));
       if (l !== undefined) { l.state = { ...l.state, touched: true }; l.version += 1; }
     }
-    this.#keys.set(key, true);
+    this.#keys.set(key, context ?? true);
     this.calls.push({ key, ref: refKey(ref), action: action.type, applied: true });
     if (this.faults.loseNextAnswer === true) { delete this.faults.loseNextAnswer; throw new Error("the connection dropped before the answer arrived"); }
   }
 
-  async applied(key: string): Promise<boolean> { return this.#keys.has(key); }
+  async applied(key: string): Promise<boolean | { readonly applied: boolean; readonly context?: JsonObject }> { const got = this.#keys.get(key); return got === undefined ? false : got === true ? true : { applied: true, context: got }; }
 
   verify(ref: ServiceRef, action: ServiceAction, before: Observation, after: Observation): string | undefined {
     if (action.type === "set") {

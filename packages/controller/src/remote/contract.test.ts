@@ -172,18 +172,27 @@ for (const backend of backends) {
     assert.equal((await next.call(READ("c2"), local("two"))).state, "confirmed");
   }, { policy: async () => ({ dataHosts: ["host:r1", "host:r2"] }) });
 
-  suite("until the worker confirms the contract nothing counts: no usage, no checkpoint, no heartbeat, no completed turn (a worker that never confirms cannot finish a turn)", async (c) => {
+  suite("until the worker confirms the contract nothing is decided or kept: no checkpoint, no artifact, no completed turn; usage is booked, and heartbeats are accepted only for a bounded window", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
-    await wireRefuses("invalid_transition", () => attempt.usage({ turnSeq: 1, costMicros: 5 }), 409, (e) => assert.match(e.message, /confirm/));
     await wireRefuses("invalid_transition", () => attempt.putCheckpoint(1, { turn: 1 }), 409);
-    await wireRefuses("invalid_transition", () => attempt.heartbeat(), 409);
+    await wireRefuses("invalid_transition", () => attempt.publish("out", [{ path: "a.txt", content: new TextEncoder().encode("x") }]), 409, (e) => assert.match(e.message, /publishing an artifact/));
     await wireRefuses("invalid_transition", () => attempt.complete({ status: "completed", text: "done" }), 409, (e) => assert.match(e.message, /completing a turn/));
     assert.equal((await c.remote.placement(c.owner, attemptId))!.state, "accepted");
     assert.equal((await c.remote.placement(c.owner, attemptId))!.checkpoint, undefined);
+    // Usage before the confirmation is booked (the money was spent), and it is not a confirmation.
+    await attempt.usage({ turnSeq: 1, costMicros: 5 });
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.contract!.launched, undefined);
+    // A slow sandbox start: heartbeats are accepted inside the window, refused after it.
+    await attempt.heartbeat();
+    c.clock.advance(30_000);
+    await attempt.heartbeat();
+    c.clock.advance(31_000);
+    await wireRefuses("invalid_transition", () => attempt.heartbeat(), 409, (e) => assert.match(e.message, /confirmation window/));
+    c.confirmWindow.ms = 10 * 60_000;
+    await attempt.heartbeat();
     // After the confirmation the same messages are taken.
     assert.deepEqual(await attempt.honorContract(order, FULL_ABILITIES, c.clock.now()), { ok: true });
-    await attempt.usage({ turnSeq: 1, costMicros: 5 });
     await attempt.heartbeat();
     await attempt.putCheckpoint(1, { turn: 1 });
     assert.equal((await attempt.complete({ status: "completed", text: "done" })).status, "completed");
@@ -270,6 +279,46 @@ for (const backend of backends) {
     const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
     assert.equal(c.launches.length, 0);
     await attempt.honorContract(order, FULL_ABILITIES, c.clock.now());
+    await attempt.honorContract(order, FULL_ABILITIES, c.clock.now());
+    assert.deepEqual(c.launches.filter((l) => l.attemptId === attemptId).map((l) => l.outcome), ["started"]);
+  });
+
+  suite("after a restart that changed the recipe the heartbeat is still accepted for the window (the attempt is not lost while it reconfirms), and the worker flow confirms the restart itself", async (c) => {
+    const r1 = await c.host("r1");
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512 }, bestEffort: false });
+    const { attemptId, order, attempt, placement } = await c.started(r1);
+    const wider = { revision: "r-3", reach: [...order.recipe.reach, "write-file"] };
+    await c.remote.control(c.owner, attemptId, { kind: "restart", recipe: wider, checkpoint: { turn: 1 } }, placement);
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.contract!.launched, undefined);
+    await attempt.heartbeat();
+    c.clock.advance(61_000);
+    await wireRefuses("invalid_transition", () => attempt.heartbeat(), 409);
+    // The worker's loop reads the control messages and confirms the restart through the client helper.
+    const msgs = await attempt.pollControl(0);
+    const held = { digest: order.contract!.digest, recipe: order.recipe };
+    const done = await attempt.confirmRestarts(msgs, held, order.contract!, FULL_ABILITIES);
+    assert.equal(done.refused, undefined);
+    assert.equal(done.digest, restartDigest(held.digest, wider));
+    await attempt.heartbeat();
+    assert.equal((await attempt.call(READ("c9"), local("nine"))).state, "confirmed");
+  });
+
+  suite("a restart that drops a limit the attempt ran under is refused; one that keeps or tightens it is taken", async (c) => {
+    const r1 = await c.host("r1");
+    r1.worker.seal = (o) => sealContract({ ...o, recipe: { ...o.recipe, limits: { memoryMb: 512 } } }, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512 }, bestEffort: false });
+    const { attemptId, order, placement } = await c.started(r1);
+    const restart = (recipe: { revision: string; reach: string[]; limits?: Record<string, number> }) => c.remote.control(c.owner, attemptId, { kind: "restart", recipe, checkpoint: { turn: 1 } }, placement);
+    await assert.rejects(restart({ revision: "r-2", reach: [...order.recipe.reach, "write-file"] }), /drops the limit memoryMb/);
+    await restart({ revision: "r-3", reach: [...order.recipe.reach, "write-file"], limits: { memoryMb: 256 } });
+  });
+
+  suite("a confirmation kept but whose launch record failed is finished by the worker's retry; the record is written once", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    c.failLaunchRecords.count = 1;
+    await assert.rejects(attempt.honorContract(order, FULL_ABILITIES, c.clock.now()));
+    assert.equal(c.launches.filter((l) => l.attemptId === attemptId).length, 0);
+    assert.deepEqual(await attempt.honorContract(order, FULL_ABILITIES, c.clock.now()), { ok: true });
     await attempt.honorContract(order, FULL_ABILITIES, c.clock.now());
     assert.deepEqual(c.launches.filter((l) => l.attemptId === attemptId).map((l) => l.outcome), ["started"]);
   });

@@ -17,6 +17,8 @@ export interface ReconnectSettingsBody {
   readonly reaccept?: ReacceptMode;
   /** How many hours an attempt that waits for the owner's decision keeps its lease; `"off"`: the lease is not extended. Absent: the default (24 hours). */
   readonly patienceHours?: number | "off";
+  /** How many minutes a worker's heartbeats are accepted while its dispatch contract is not confirmed (a slow sandbox start, or a restart that changed the recipe). Absent: the attempt lease. */
+  readonly confirmWindowMinutes?: number;
   readonly updatedBy: string;
   readonly updatedAt: string;
 }
@@ -36,29 +38,31 @@ export class ReconnectSettingsService {
     return new ReconnectSettingsService(new CommandRunner(storage, epoch, options));
   }
 
-  async get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: ReacceptMode | null; readonly profile: string; readonly effective: ReacceptMode; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }> {
+  async get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: ReacceptMode | null; readonly profile: string; readonly effective: ReacceptMode; readonly patienceHours: number | "off"; readonly patienceChosen: boolean; readonly confirmWindowMinutes: number | null }> {
     if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read the reconnect setting`);
     const found = await this.#runner.get(REF.kind, REF.id);
     const own = this.#own(found?.body);
-    return { revision: found?.revision ?? 0, reaccept: own ?? null, profile: await this.#profile(), effective: await this.effective(), patienceHours: this.#patience(found?.body) ?? DEFAULT_PATIENCE_HOURS, patienceChosen: this.#patience(found?.body) !== undefined };
+    return { revision: found?.revision ?? 0, reaccept: own ?? null, profile: await this.#profile(), effective: await this.effective(), patienceHours: this.#patience(found?.body) ?? DEFAULT_PATIENCE_HOURS, patienceChosen: this.#patience(found?.body) !== undefined, confirmWindowMinutes: this.#window(found?.body) ?? null };
   }
 
   /**
    * Chooses `auto` (enable automatic re-accept) or `owner` (disable it: the owner decides each), or clears the choice with null so the profile decides. `patienceHours` is how long an attempt that waits for the owner keeps its lease
    * (a positive number of hours, `"off"` for no extension, or null for the default of 24 hours). A field left out keeps its value; at least one must be given.
    */
-  async set(owner: Principal, command: NoActor & { reaccept?: unknown; patienceHours?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+  async set(owner: Principal, command: NoActor & { reaccept?: unknown; patienceHours?: unknown; confirmWindowMinutes?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not change the reconnect setting`);
-    const unknown = Object.keys(command).filter((k) => !["commandId", "reaccept", "patienceHours", "expectedRevision"].includes(k));
+    const unknown = Object.keys(command).filter((k) => !["commandId", "reaccept", "patienceHours", "confirmWindowMinutes", "expectedRevision"].includes(k));
     if (unknown.length > 0) throw new DomainError("invalid_command", `${unknown[0]}: is not a field of this command`, { field: unknown[0]! });
-    if (command.reaccept === undefined && command.patienceHours === undefined) throw new DomainError("invalid_command", "reaccept or patienceHours: give at least one", { field: "reaccept" });
+    if (command.reaccept === undefined && command.patienceHours === undefined && command.confirmWindowMinutes === undefined) throw new DomainError("invalid_command", "reaccept or patienceHours: give at least one", { field: "reaccept" });
     if (command.reaccept !== undefined && command.reaccept !== null && !(typeof command.reaccept === "string" && MODES.includes(command.reaccept))) throw new DomainError("invalid_command", "reaccept: must be auto, owner, or null to clear", { field: "reaccept" });
+    const cw = command.confirmWindowMinutes;
+    if (cw !== undefined && cw !== null && !(typeof cw === "number" && Number.isInteger(cw) && cw >= 1 && cw <= 1440)) throw new DomainError("invalid_command", "confirmWindowMinutes: must be a whole number of minutes from 1 to 1440, or null for the attempt lease", { field: "confirmWindowMinutes" });
     const p = command.patienceHours;
     if (p !== undefined && p !== null && p !== "off" && !(typeof p === "number" && Number.isFinite(p) && p > 0 && p <= MAX_PATIENCE_HOURS)) throw new DomainError("invalid_command", `patienceHours: must be a number of hours above 0 and up to ${MAX_PATIENCE_HOURS}, "off", or null for the default`, { field: "patienceHours" });
     if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number", { field: "expectedRevision" });
     const value = command.reaccept as ReacceptMode | null | undefined;
     const result = await this.#runner.command("reconnect.settings.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { reaccept: value ?? null, ...(value === undefined ? { keepReaccept: true } : {}), patienceHours: (p ?? null) as never, ...(p === undefined ? { keepPatience: true } : {}), expectedRevision: command.expectedRevision ?? null },
+      payload: { reaccept: value ?? null, ...(value === undefined ? { keepReaccept: true } : {}), patienceHours: (p ?? null) as never, ...(p === undefined ? { keepPatience: true } : {}), confirmWindowMinutes: (cw ?? null) as never, ...(cw === undefined ? { keepConfirmWindow: true } : {}), expectedRevision: command.expectedRevision ?? null },
       build: async () => {
         const current = await this.#runner.get(REF.kind, REF.id);
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the reconnect setting is at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
@@ -66,9 +70,10 @@ export class ReconnectSettingsService {
         const keptPatience = this.#patience(current?.body);
         const mode = value === undefined ? keptMode : (value ?? undefined);
         const patience = p === undefined ? keptPatience : (p ?? undefined);
-        const next: ReconnectSettingsBody = { ...(mode === undefined ? {} : { reaccept: mode }), ...(patience === undefined ? {} : { patienceHours: patience }), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const window = cw === undefined ? this.#window(current?.body) : (cw ?? undefined);
+        const next: ReconnectSettingsBody = { ...(mode === undefined ? {} : { reaccept: mode }), ...(patience === undefined ? {} : { patienceHours: patience }), ...(window === undefined ? {} : { confirmWindowMinutes: window as number }), updatedBy: owner.id, updatedAt: this.#runner.now() };
         const change = current === undefined ? { type: "create" as const, ref: REF, body: next as unknown as JsonObject } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body: next as unknown as JsonObject };
-        return { ref: REF, creates: current === undefined, changes: [change], detail: { reaccept: mode ?? null, patienceHours: patience ?? null } };
+        return { ref: REF, creates: current === undefined, changes: [change], detail: { reaccept: mode ?? null, patienceHours: patience ?? null, confirmWindowMinutes: window ?? null } };
       },
     }));
     return { revision: result.revision };
@@ -80,6 +85,16 @@ export class ReconnectSettingsService {
     try { own = this.#patience((await this.#runner.get(REF.kind, REF.id))?.body); } catch { own = undefined; }
     const hours = own ?? DEFAULT_PATIENCE_HOURS;
     return hours === "off" ? undefined : hours * 3600_000;
+  }
+
+  /** The window in ms in which a worker's heartbeats are accepted before its contract is confirmed; `undefined`: the attempt lease decides. */
+  async confirmWindowMs(): Promise<number | undefined> {
+    try { const m = this.#window((await this.#runner.get(REF.kind, REF.id))?.body); return m === undefined ? undefined : m * 60_000; } catch { return undefined; }
+  }
+  #window(body: unknown): number | undefined {
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return undefined;
+    const v = (body as ReconnectSettingsBody).confirmWindowMinutes;
+    return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 1440 ? v : undefined;
   }
 
   #patience(body: unknown): number | "off" | undefined {

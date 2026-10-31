@@ -236,3 +236,48 @@ test("P03 sentence 3: a scoped repair cannot affect a collateral service: refuse
     assert.equal(draft.error.code, "invalid_command", "an outcome naming no real operation is refused");
   } finally { await none.done(); }
 });
+
+test("P03 review: a per-resource service grant survives on the agent's task credential, so the scoping works through the real credential path, and a decision may agree such a grant (card P03)", async () => {
+  const sim = layout();
+  const w = await world("p03-cred", sim);
+  try {
+    const { call, task, project, s, rob } = w;
+    const db = { service: "billing", resource: "db" };
+    const ann = await w.hire("Ann", ["author"], project, [svc("billing", "db")]);
+    await w.owns(task, ann.id, "cred");
+    const cred = (await s.taskCredentials.issue(rob, { commandId: "tc-ann", taskId: task, agentId: ann.id })).token;
+    const effective = await s.taskCredentials.authenticate(cred);
+    assert.ok(effective.grants.some((g) => g.action === "effect.perform" && g.resource?.kind === "service" && g.resource.id === "billing/db"), "the resource grant is on the task credential");
+    // The database alone: allowed. Its dependent API and everything else: no right, though the same credential holds the db one.
+    const ok = await call(cred, "service.operate", { taskId: task, ...db, action: { type: "set", params: { fields: { size: 12 } } } }, "c1");
+    assert.equal(ok.result?.status, "confirmed", JSON.stringify(ok));
+    assert.equal((await call(cred, "service.operate", { taskId: task, service: "billing", resource: "api", action: { type: "restart" } }, "c2")).error.code, "forbidden");
+    assert.equal((await call(cred, "service.observe", { taskId: task, service: "shop", resource: "cart" })).error.code, "forbidden");
+    assert.equal((await call(cred, "service.observe", { taskId: task, ...db })).ok, true);
+
+    // A decision may agree such a grant, for one service resource and nothing else.
+    const bob = await w.hire("Bob", ["author"], project);
+    const agreed = { grantee: bob.id, project, basis: "agreed in the meeting", expiresAt: new Date(Date.now() + 3600_000).toISOString(), decisionId: "dec-1", agreedBy: "owner:rob" };
+    const made = await s.grants.grantAgreed(rob, { commandId: "ag-1", action: "effect.perform", resource: { kind: "service", id: "billing/api" }, ...agreed } as never);
+    assert.ok(made.id);
+    await assert.rejects(s.grants.grantAgreed(rob, { commandId: "ag-2", action: "effect.perform", ...agreed } as never), /one service resource/);
+    await assert.rejects(s.grants.grantAgreed(rob, { commandId: "ag-3", action: "effect.perform", resource: { kind: "task", id: task }, ...agreed } as never), /service resource/);
+    await assert.rejects(s.grants.grantAgreed(rob, { commandId: "ag-4", action: "task.read", resource: { kind: "service", id: "billing/api" }, ...agreed } as never), /cannot be granted on a service resource/);
+  } finally { await w.done(); }
+});
+
+test("P03 review: settling an operation whose answer was lost compares the neighbours with their versions when it was applied, not with the older intent (card P03)", async () => {
+  const sim = layout();
+  const db = { service: "billing", resource: "db" };
+  const cache = { service: "billing", resource: "cache" };
+  const stale: Record<string, number> = {};
+  for (const n of await sim.neighbours(db)) if (!(n.service === db.service && n.resource === db.resource)) stale[`${n.service}/${n.resource}`] = sim.versionOf(n)!;
+  // Someone else changes a neighbour after the intent was recorded and before the operation was applied.
+  await sim.apply("someone-else", cache, { type: "set", params: { fields: { x: 1 } } });
+  const bridge = operationBridge(sim);
+  const request = { effectId: "eff-bbbbbbbbbbbbbbbbbbbb", key: "k-lost", kind: "service-op", target: "service:billing/db", input: { ...db, action: { type: "set", params: { fields: { size: 11 } } }, allowed: [db], before: (await sim.observe(db))!, baseline: stale } as never };
+  sim.faults.loseNextAnswer = true;
+  await assert.rejects(() => bridge.execute(request));
+  const settled = await bridge.reconcile!(request);
+  assert.equal(settled.state, "applied", JSON.stringify(settled));
+});

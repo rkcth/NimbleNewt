@@ -97,6 +97,9 @@ export interface RemoteWorld extends DispatchWorld {
   readonly launches: { attemptId: string; outcome: string; reason?: string }[];
   readonly notices: { commandId: string; attemptId: string; hostId: string; sessionId: string; detail: string }[];
   readonly patience: { ms: number | undefined };
+  /** How many of the next launch records fail, and the window heartbeats are accepted in before the confirmation (`undefined`: the attempt lease). */
+  readonly failLaunchRecords: { count: number };
+  readonly confirmWindow: { ms: number | undefined };
   done(): Promise<void>;
 }
 
@@ -112,12 +115,15 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const notices: RemoteWorld["notices"] = [];
   const launches: RemoteWorld["launches"] = [];
   const patience: RemoteWorld["patience"] = { ms: 24 * 3600_000 };
+  const failLaunchRecords = { count: 0 };
+  const confirmWindow: { ms: number | undefined } = { ms: undefined };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id) },
     reaccept: async () => reaccept.mode,
     patienceMs: async () => patience.ms,
-    recordLaunch: async (r) => { launches.push({ attemptId: r.attemptId, outcome: r.outcome, ...(r.reason === undefined ? {} : { reason: r.reason }) }); },
+    confirmWindowMs: async () => confirmWindow.ms,
+    recordLaunch: async (r) => { if (failLaunchRecords.count > 0) { failLaunchRecords.count--; throw new Error("the record could not be kept"); } launches.push({ attemptId: r.attemptId, outcome: r.outcome, ...(r.reason === undefined ? {} : { reason: r.reason }) }); },
     notify: async (n) => { if (!notices.some((x) => x.commandId === n.commandId)) notices.push(n); },
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
     ...(o.placement === null ? {} : { placementPolicy: o.placement ?? (async () => ({ dataHosts: workerIds() })) }),
@@ -127,7 +133,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport, reaccept, notices, launches, patience,
+    remote, artifacts, blobs, transport, reaccept, notices, launches, patience, failLaunchRecords, confirmWindow,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },

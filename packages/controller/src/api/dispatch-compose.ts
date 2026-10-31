@@ -86,6 +86,7 @@ export interface RemoteStartOptions {
   readonly reaccept?: RemoteDeps["reaccept"];
   /** How long an attempt that waits for the owner keeps its lease (card H09b); the controller supplies the owner's setting when absent. */
   readonly patienceMs?: RemoteDeps["patienceMs"];
+  readonly confirmWindowMs?: RemoteDeps["confirmWindowMs"];
   /** The remote hosts attempts may be placed on, with what each attempt asks of them and what it needs. */
   readonly hosts: readonly ({ readonly hostId: string } & RemoteWorkerHostOptions)[];
 }
@@ -478,6 +479,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
         ...(i.options.remote.reaccept === undefined ? {} : { reaccept: i.options.remote.reaccept }),
         ...(i.options.remote.patienceMs === undefined ? {} : { patienceMs: i.options.remote.patienceMs }),
+        ...(i.options.remote.confirmWindowMs === undefined ? {} : { confirmWindowMs: i.options.remote.confirmWindowMs }),
         // A reconnected worker that waits for the owner is a Needs-you notice (the notice kind is "maintenance"; the owner may change its level like any kind's).
         notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "reconnect", id: n.attemptId }, detail: n.detail }); },
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }), ...(i.options.remote.settleMs === undefined ? {} : { settleMs: i.options.remote.settleMs }) });

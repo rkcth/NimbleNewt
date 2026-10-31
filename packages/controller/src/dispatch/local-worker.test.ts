@@ -174,6 +174,25 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 
+  test(`${backend.name}: more than eight sandboxes of one attempt never drop one that still holds a process (card L02d review)`, async () => {
+    const held: Record<string, { ref: string }[]> = {};
+    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary) => { held[recipe.revision] ??= []; return { revision: recipe.revision, close: async () => undefined, work: async () => ({ processes: (held[recipe.revision] ?? []).map((p) => ({ ref: p.ref, kind: "process" as const, state: "running" as const })) }) }; } };
+    const turn: { release?: () => void } = {};
+    const { store, w, local, d } = await setup({ sandbox, runtime: () => ({ run: () => new Promise((resolve) => { turn.release = () => resolve({ status: "completed", text: "x" }); }), checkpoint: async () => ({ kept: true }), close: async () => undefined }) });
+    try {
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { attemptId } = await w.task("t", ann);
+      await d.tick();
+      const first = Object.keys(held)[0]!;
+      held[first]!.push({ ref: "pid-first" });
+      for (let i = 1; i <= 10; i++) { await d.changeRecipe(w.owner, attemptId!, { kind: "narrow", recipe: { revision: `r-n${i}`, reach: [] } }); await local.localWork([attemptId!]); }
+      const all = await local.localWork([attemptId!]);
+      assert.ok(all.processes.some((p) => p.ref === "pid-first"), "the oldest sandbox still holds a process and is still asked about");
+      turn.release?.();
+      await d.idle();
+    } finally { await store.close(); }
+  });
+
   test(`${backend.name}: a remote worker keeps the same contract: the order and every result cross as plain JSON, and the split begin/report form records the same operations`, async () => {
     const store = await backend.open();
     try {

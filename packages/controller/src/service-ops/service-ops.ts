@@ -96,14 +96,17 @@ export function operationBridge(target: ServiceTarget): EffectBridge {
       if (before === undefined) throw new EffectRejected(`${refKey(i.ref)} does not exist; nothing was changed`);
       const guarded = (await target.neighbours(i.ref)).filter((n) => !i.allowed.some((a) => same(a, n)));
       const baseline = await versionsOf(target, guarded);
-      await target.apply(req.key, i.ref, i.action);
+      await target.apply(req.key, i.ref, i.action, { baseline: baseline as unknown as JsonObject });
       const result = await finish(req, { before, baseline });
       if ((result as JsonObject)["verified"] !== true) throw new Error(`the change to ${refKey(i.ref)} could not be verified: ${String(((result as Reconciliation).evidence ?? {})["reason"])}`);
       return result as JsonObject;
     },
     async reconcile(req): Promise<Reconciliation> {
-      if (!(await target.applied(req.key))) return { state: "not_applied" };
-      const result = await finish(req, undefined);
+      const was = await target.applied(req.key);
+      if (was === false || (typeof was === "object" && !was.applied)) return { state: "not_applied" };
+      // The neighbours are compared with the versions at the moment of applying when the target kept them (the intent's baseline is older: someone else may have changed a neighbour in between).
+      const kept = typeof was === "object" ? was.context?.["baseline"] : undefined;
+      const result = await finish(req, kept === undefined || kept === null || typeof kept !== "object" ? undefined : { before: parseInput(req.input).before, baseline: kept as unknown as Versions });
       if ((result as JsonObject)["verified"] === true) return { state: "applied", evidence: result as JsonObject };
       return result as Reconciliation;
     },

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ArtifactService } from "../artifacts/index.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
+import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import type { ToolCallRequest, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -86,7 +87,7 @@ export interface PlacementBody {
   readonly outputs: readonly string[];
   readonly checkpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
-  readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[] }; readonly refused?: readonly string[] };
+  readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[]; /** The confirmation is kept but the owner's launch record is still to be written (a retry of the confirmation writes it). */ readonly recordPending?: true }; /** When the contract was last cleared for a new confirmation (a restart with a changed recipe): heartbeats are accepted for a bounded window from then. */ readonly reconfirmSince?: string; readonly refused?: readonly string[] };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -219,6 +220,8 @@ export interface RemoteDeps {
   readonly reaccept?: () => Promise<"auto" | "owner">;
   /** How long the controller keeps the lease of an attempt that waits for the owner's decision alive, in ms, from the moment the waiting was recorded; `undefined`: it does not (off). Absent: 24 hours. */
   readonly patienceMs?: () => Promise<number | undefined>;
+  /** How long, in ms, a worker's heartbeats are accepted before it has confirmed its dispatch contract (a slow sandbox start; after a restart with a changed recipe). Absent or undefined: the attempt lease. */
+  readonly confirmWindowMs?: () => Promise<number | undefined>;
   /** Tells the owner an attempt waits for a decision (a Needs-you notice). Called whenever a worker is seen waiting; the notice ID makes a repeat one notice. A failure is ignored: the next poll calls again. */
   readonly notify?: (notice: ReconnectNotice) => Promise<void>;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
@@ -762,12 +765,14 @@ export class RemoteWorkerService {
         const reach = [...new Set(msg.recipe.reach)].sort();
         const same = was !== undefined && canonicalJson({ reach: [...new Set(was.reach)].sort(), limits: (was.limits ?? null) as JsonObject | null } as unknown as JsonObject) === canonicalJson({ reach, limits: (msg.recipe.limits ?? null) as JsonObject | null } as unknown as JsonObject);
         if (!same) {
+          // Limits can stay or tighten: a restart that drops a limit the attempt ran under is refused.
+          for (const name of Object.keys(was?.limits ?? {})) if ((msg.recipe.limits as Record<string, number> | undefined)?.[name] === undefined) throw new DomainError("invalid_command", `the restart drops the limit ${name}; limits can stay or tighten, not go`, { field: "recipe.limits" });
           for (const [name, value] of Object.entries(msg.recipe.limits ?? {})) {
             const owner = (contract.limits as Record<string, number> | undefined)?.[name];
             if (owner !== undefined && value > owner) throw new DomainError("invalid_command", `the restart raises ${name} to ${value}, above the owner's limit ${owner}`, { field: "recipe.limits" });
           }
           const { launched: _l, ...rest } = contract; void _l;
-          contract = { ...rest, digest: restartDigest(contract.digest, msg.recipe), recipe: { revision: msg.recipe.revision, reach: [...msg.recipe.reach], ...(msg.recipe.limits === undefined ? {} : { limits: { ...msg.recipe.limits } as JsonObject }) } };
+          contract = { ...rest, reconfirmSince: this.#runner.now(), digest: restartDigest(contract.digest, msg.recipe), recipe: { revision: msg.recipe.revision, reach: [...msg.recipe.reach], ...(msg.recipe.limits === undefined ? {} : { limits: { ...msg.recipe.limits } as JsonObject }) } };
         }
       }
       return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...current.body.control, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
@@ -1119,6 +1124,17 @@ export class RemoteWorkerService {
     if (b.contract !== undefined && b.contract.launched === undefined) throw new DomainError("invalid_transition", `attempt ${b.attemptId}: the worker has not confirmed the dispatch contract; confirm it (launched) or refuse the order before ${what}`, { field: "contract" });
   }
 
+  /**
+   * A heartbeat is accepted before the confirmation for a bounded window (the owner's `confirmWindowMinutes`, default the attempt lease) counted from the acceptance, or from the restart that cleared the confirmation, so a slow sandbox
+   * start or a restart is not ended while it prepares. After the window the heartbeat is refused and the lease runs out.
+   */
+  async #heartbeatAllowed(b: PlacementBody): Promise<void> {
+    if (b.contract === undefined || b.contract.launched !== undefined) return;
+    const since = Date.parse(b.contract.reconfirmSince ?? b.acceptedAt ?? b.offeredAt);
+    const window = (await this.#deps.confirmWindowMs?.().catch(() => undefined)) ?? DISPATCH_LIMITS.leaseMs;
+    if (!Number.isFinite(since) || Date.parse(this.#runner.now()) - since >= window) this.#needsConfirmation(b, "any heartbeat after the confirmation window");
+  }
+
   async #gateway(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, what?: string): Promise<ToolGateway> {
     const b = await this.#running(host, sessionId, attemptId, placement);
     if (what !== undefined) this.#needsConfirmation(b, what);
@@ -1140,12 +1156,15 @@ export class RemoteWorkerService {
 
   async usage(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, usage: TurnUsage, requestKey?: string): Promise<void> {
     if (usage === null || typeof usage !== "object" || Array.isArray(usage)) invalid("usage", "must be an object");
-    await (await this.#gateway(host, sessionId, attemptId, placement, "any usage")).usage(usage, requestKey);
+    // Usage is booked before the confirmation too (the spend happened and the budget must see it); it does not count as a confirmation of anything.
+    await (await this.#gateway(host, sessionId, attemptId, placement)).usage(usage, requestKey);
   }
 
   /** Extends the attempt's lease. A worker in a partition that cannot send this loses the attempt when the lease ends. */
   async attemptHeartbeat(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<{ until: string }> {
-    return (await this.#gateway(host, sessionId, attemptId, placement, "any heartbeat")).heartbeat();
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    await this.#heartbeatAllowed(b);
+    return this.#deps.dispatch.gateway(b.attemptId).heartbeat();
   }
 
   async acknowledgeDecisions(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<void> {
@@ -1164,7 +1183,11 @@ export class RemoteWorkerService {
     if (typeof command.digest !== "string" || command.digest !== c.digest) throw new DomainError("fenced", `the contract digest is not the one placement ${b.placement} of attempt ${b.attemptId} was given`, { field: "digest" });
     const reported = checkEnforcement(command.enforcement);
     if (c.launched !== undefined) {
-      if (canonicalJson(c.launched.enforcement as unknown as JsonObject) === canonicalJson(reported as unknown as JsonObject)) return { confirmed: true };
+      if (canonicalJson(c.launched.enforcement as unknown as JsonObject) === canonicalJson(reported as unknown as JsonObject)) {
+        // A confirmation that was kept but whose launch record failed is finished by this retry.
+        if (c.launched.recordPending === true) await this.#writeLaunchRecord(b, host, "started");
+        return { confirmed: true };
+      }
       throw new DomainError("fenced", `attempt ${b.attemptId} already confirmed its contract with other figures`);
     }
     const limits = (c.limits ?? {}) as Record<string, number>;
@@ -1177,10 +1200,7 @@ export class RemoteWorkerService {
     }
     for (const e of reported) if (!Object.hasOwn(limits, e.limit)) reasons.push(`the confirmation names the limit ${e.limit}, which the contract does not set`);
     const wallTimeMs = limits["wallTimeMs"] ?? 0;
-    const record = (outcome: "started" | "refused", why?: string): Promise<void> | undefined => this.#deps.recordLaunch?.({
-      attemptId: b.attemptId, agentId: b.agentId, outcome, requested: limits as JsonObject, bestEffort: c.bestEffort, enforcement: reported.map((e) => ({ limit: e.limit, value: e.value, enforced: e.enforced, by: host.id, detail: e.detail ?? "" })), wallTimeMs,
-      ...(outcome === "refused" ? { failed: reported.filter((e) => e.enforced !== "full").map((e) => ({ limit: e.limit, enforced: e.enforced === "partial" ? "partial" as const : "none" as const, detail: e.detail ?? "" })), reason: why ?? "" } : {}),
-    });
+    const record = (outcome: "started" | "refused", why?: string): Promise<void> | undefined => this.#recordFor(b, host, reported, outcome, why);
     if (reasons.length > 0) {
       await record("refused", reasons.join("; ").slice(0, 300));
       await this.#end(b, host, reasons);
@@ -1193,14 +1213,37 @@ export class RemoteWorkerService {
         const x = current?.body;
         if (x === undefined || x.hostId !== host.id || x.placement !== b.placement || x.state !== "accepted" || x.contract?.digest !== c.digest) throw new DomainError("fenced", `the placement of attempt ${b.attemptId} changed`);
         if (x.contract.launched !== undefined) return undefined;
-        return { next: { ...x, contract: { ...x.contract, launched: { at: this.#runner.now(), sessionId: x.sessionId ?? "", enforcement: reported } } } };
+        return { next: { ...x, contract: { ...x.contract, launched: { at: this.#runner.now(), sessionId: x.sessionId ?? "", enforcement: reported, recordPending: true as const } } } };
       }, "launched", { actor: host.id });
     } catch (error) {
       if (isDomainError(error, "fenced")) await record("refused", "the placement changed before the confirmation could be kept");
       throw error;
     }
-    if (done.previous?.contract?.launched === undefined) await record("started");
+    if (done.previous?.contract?.launched === undefined) await this.#writeLaunchRecord(b, host, "started", record);
     return { confirmed: true };
+  }
+
+  #recordFor(b: PlacementBody, host: Principal, reported: readonly ContractEnforcement[], outcome: "started" | "refused", why?: string): Promise<void> | undefined {
+    const c = b.contract!;
+    const limits = (c.limits ?? {}) as Record<string, number>;
+    const wallTimeMs = limits["wallTimeMs"] ?? 0;
+    return this.#deps.recordLaunch?.({
+      attemptId: b.attemptId, agentId: b.agentId, outcome, requested: limits as JsonObject, bestEffort: c.bestEffort, enforcement: reported.map((e) => ({ limit: e.limit, value: e.value, enforced: e.enforced, by: host.id, detail: e.detail ?? "" })), wallTimeMs,
+      ...(outcome === "refused" ? { failed: reported.filter((e) => e.enforced !== "full").map((e) => ({ limit: e.limit, enforced: e.enforced === "partial" ? "partial" as const : "none" as const, detail: e.detail ?? "" })), reason: why ?? "" } : {}),
+    });
+  }
+
+  /** Writes the owner's launch record for a kept confirmation, then clears the pending mark (a failure leaves the mark so the worker's retry writes the record). */
+  async #writeLaunchRecord(b: PlacementBody, host: Principal, outcome: "started", record?: (o: "started" | "refused", why?: string) => Promise<void> | undefined): Promise<void> {
+    const fresh = (await this.#runner.get(PLACEMENT_KIND, b.attemptId))?.body as unknown as PlacementBody | undefined;
+    const reported = (fresh?.contract?.launched?.enforcement ?? b.contract?.launched?.enforcement ?? []) as readonly ContractEnforcement[];
+    await (record === undefined ? this.#recordFor(fresh ?? b, host, reported, outcome) : record(outcome));
+    await this.#changePlacement(b.attemptId, async (current) => {
+      const x = current?.body;
+      if (x === undefined || x.contract?.launched === undefined || x.contract.launched.recordPending !== true || x.contract.digest !== b.contract?.digest) return undefined;
+      const { recordPending: _r, ...launched } = x.contract.launched; void _r;
+      return { next: { ...x, contract: { ...x.contract, launched } } };
+    }, "launched-recorded", { actor: host.id });
   }
 
   /** The worker cannot honour the contract it was given: the order is refused with its reasons, the run ends failed and the dispatcher ends the attempt without starting another (card H12a). */
@@ -1357,6 +1400,7 @@ export class RemoteWorkerService {
   /** The worker publishes files as an artifact of the placement's own project and task, created by the host. It joins the placement's outputs (and so travels with it if the attempt is moved). */
   async publishArtifact(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, command: NoActor & { name: string; files: readonly { path: string; content: Uint8Array }[] }): Promise<{ artifactId: string }> {
     const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "publishing an artifact");
     onlyKnown(command, ["commandId", "name", "files"]);
     checkCommandId(command.commandId);
     if (b.outputs.length >= REMOTE_LIMITS.artifacts) throw new DomainError("unavailable", `attempt ${b.attemptId} has published ${REMOTE_LIMITS.artifacts} artifacts, the most it may`);
