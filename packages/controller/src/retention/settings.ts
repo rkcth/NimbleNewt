@@ -26,6 +26,12 @@ export interface RetentionValues {
   readonly backupWeekly: number;
   /** How many of the snapshots taken before a restore (kind pre-restore) are kept, newest first. `null`: keep them all (the default). */
   readonly preRestoreKept: number | null;
+  /** Snapshots taken before a restore older than this many days are removed by the nightly run (the newest backup is always kept). `null`: no age limit (the default). They never take the place of a scheduled daily or weekly backup. */
+  readonly preRestoreMaxAgeDays: number | null;
+  /** How many minutes another start waits for the data directory lock's refresh before calling it stale when it cannot look for the holder's process (another host name, e.g. a container). `null`: never by age. Takes effect on the holder's next refresh. */
+  readonly dataLockStaleMinutes: number | null;
+  /** A restore is refused (ask for a new preview) when more than this many recorded changes were made between the preview and the apply. `null`: not checked. 0: any growth refuses. Provisional default 20. */
+  readonly restoreChangeMargin: number | null;
   /** How many minutes the owner's approval of a restore (the token of its preview) stays good. `null`: it does not expire. */
   readonly restoreConfirmMinutes: number | null;
   /** Resolved incidents are soft-archived after this many days, and removed this many days after being archived. `null`: never. */
@@ -49,7 +55,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, contextRouteDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 20, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -64,6 +70,9 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },
   backupWeekly: { kind: "count", min: 0, max: 520, nullable: false },
   preRestoreKept: { kind: "count", min: 1, max: 1000, nullable: true },
+  preRestoreMaxAgeDays: { kind: "days", min: 1, max: 3650, nullable: true },
+  dataLockStaleMinutes: { kind: "count", min: 1, max: 10080, nullable: true },
+  restoreChangeMargin: { kind: "count", min: 0, max: 1_000_000, nullable: true },
   restoreConfirmMinutes: { kind: "count", min: 1, max: 10080, nullable: true },
   incidentArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
   incidentPurgeDays: { kind: "days", min: 30, max: 3650, nullable: true },

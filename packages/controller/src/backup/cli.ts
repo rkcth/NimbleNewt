@@ -13,6 +13,7 @@ import { readManifest } from "./verify.js";
 import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup } from "./restore.js";
 import { verifyBackup } from "./verify.js";
+import { acquireDataLocks, type DataLock, type LockEnv } from "./data-lock.js";
 
 const USAGE = [
   "usage:",
@@ -43,7 +44,7 @@ function options(rest: readonly string[], known: readonly string[]): Map<string,
  * The owner's command-line entry for backups (card K01f): list what is in a backups folder, verify one, and restore one into a new, empty database on a new machine from the backup alone. Prints with `print` and returns the exit code:
  * 0 done, 1 refused or failed, 2 not understood. It opens only what it is told to, and never the database a controller is running on.
  */
-export async function runBackupCli(argv: readonly string[], print: (line: string) => void): Promise<number> {
+export async function runBackupCli(argv: readonly string[], print: (line: string) => void, lockEnv?: LockEnv): Promise<number> {
   const [command, folder, ...rest] = argv;
   if (command === undefined || folder === undefined || !["list", "verify", "restore", "encryption-setup"].includes(command)) { print(USAGE); return 2; }
   try {
@@ -83,7 +84,14 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
     // What the backup needs to be opened is settled before the new database is touched: a refusal leaves nothing behind.
     const unlocked = await unlockFrom(folder, opts);
     if (unlocked.requireEncrypted === true && (await readManifest(folder)).manifest?.encryption === undefined) throw new RestoreRefused("the backup cannot be restored: the backup is not encrypted, and encryption is required");
+    // A restore to files writes into folders a controller may own: the folders' data directory locks are taken (a live holder refuses it), and let go of at the end.
+    let held: DataLock | undefined;
+    const lockDirs = [...(opts.get("sqlite") === undefined ? [] : [dirname(resolve(opts.get("sqlite")!))]), ...(opts.get("pi-state") === undefined ? [] : [dirname(resolve(opts.get("pi-state")!))])];
+    if (lockDirs.length > 0) {
+      try { held = await acquireDataLocks(lockDirs, lockEnv); } catch (error) { throw new RestoreRefused(`the restore was not started: ${error instanceof Error ? error.message : "the folder is in use by a controller"}`); }
+    }
     let storage: ControllerStorage & { close(): Promise<void> };
+    try {
     if (opts.get("sqlite") !== undefined) storage = await SqliteStorage.open({ path: opts.get("sqlite")! });
     else storage = await PostgresStorage.open({ connectionString: opts.get("postgres")!, ...(opts.get("schema") === undefined ? {} : { schema: opts.get("schema")! }) });
     try {
@@ -98,6 +106,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (done.deliveriesToResend > 0) print(`${done.deliveriesToResend} messages had not been delivered when the backup was taken; they will be sent again`);
       return 0;
     } finally { await storage.close(); }
+    } finally { await held?.release(); }
   } catch (error) {
     // Only messages written for the operator are shown; a parser's or the system's own words may quote a secret file's content or a path, so any other failure gets fixed text.
     print(error instanceof RestoreRefused || error instanceof UnlockFailed || error instanceof SecretFileRefused ? error.message : error instanceof SyntaxError ? "failed: a file is not in the expected format" : `failed: ${error instanceof Error && /^(ENOENT|EEXIST|EACCES|EISDIR|ENOTDIR|EPERM)/.test(String((error as NodeJS.ErrnoException).code ?? "")) ? `the file system said ${(error as NodeJS.ErrnoException).code}` : "the command could not be completed"}`);

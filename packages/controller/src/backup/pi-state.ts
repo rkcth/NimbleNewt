@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, rm, type FileHandle } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { lstat, mkdir, open, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { hasherFor, openSink, readPlain, type BackupCipher } from "./crypto.js";
 import { PI_FOLDER, PI_INDEX, SEALED_SUFFIX, type BackupPiState, type PiIndexLine } from "./format.js";
 
@@ -75,12 +75,13 @@ type Copied = { kind: "ok"; size: number; sha256: string } | { kind: "vanished" 
  * copy it is tried again; if it still changes the file is reported as inconsistent and left out (never recorded as a shorter copy of itself).
  */
 /** Tests only: called after the bytes of an attempt were copied and before the file is checked again (so a test can shorten or replace the file at that moment). */
-export interface CopyHooks { afterCopy?(path: string, attempt: number): Promise<void> }
+export interface CopyHooks { afterCopy?(path: string, attempt: number): Promise<void>; /** Called after the file was listed and before it is opened (a test swaps a folder for a link here). */ beforeOpen?(path: string): Promise<void> }
 
-async function copyOne(hooks: CopyHooks | undefined, path: string, rel: string, jsonl: boolean, sinkFor: () => Promise<{ write(b: Buffer): Promise<void>; finish(): Promise<void>; abort(): Promise<void> }>, hash: () => { update(b: Buffer): unknown; digest(f: "hex"): string }): Promise<Copied> {
+async function copyOne(hooks: CopyHooks | undefined, root: string, path: string, rel: string, jsonl: boolean, sinkFor: () => Promise<{ write(b: Buffer): Promise<void>; finish(): Promise<void>; abort(): Promise<void> }>, hash: () => { update(b: Buffer): unknown; digest(f: "hex"): string }): Promise<Copied> {
   let lastWhy = "changed while it was copied";
   for (let attempt = 0; attempt < COPY_TRIES; attempt++) {
     let h: FileHandle;
+    await hooks?.beforeOpen?.(path);
     try { h = await open(path, constants.O_RDONLY | O_NOFOLLOW); } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return { kind: "vanished" };
@@ -89,6 +90,13 @@ async function copyOne(hooks: CopyHooks | undefined, path: string, rel: string, 
     try {
       const before = await h.stat();
       if (!before.isFile()) return { kind: "problem", why: "is not a plain file and was skipped" };
+      // O_NOFOLLOW covers only the last name: a folder on the way swapped for a link since the listing would lead out of the store. The file that was opened must be the one at its real path inside the store's real root.
+      const real = await realpath(path).catch(() => undefined);
+      const rootReal = await realpath(root).catch(() => undefined);
+      const realInfo = real === undefined ? undefined : await lstat(real).catch(() => undefined);
+      if (real === undefined || rootReal === undefined || realInfo === undefined) return { kind: "vanished" };
+      const rel2 = relative(rootReal, real);
+      if (rel2 === "" || rel2.startsWith("..") || isAbsolute(rel2) || (before.ino !== 0 && (realInfo.ino !== before.ino || realInfo.dev !== before.dev))) return { kind: "problem", why: "is reached through a link that leads out of the store and was not copied" };
       if (before.nlink > 1) return { kind: "problem", why: "has more than one hard link and was skipped (it may be the same file as something outside the store)" };
       const size = jsonl ? await completeLength(h, before.size) : before.size;
       if (size < 0) { lastWhy = "became shorter while it was copied"; continue; }
@@ -145,7 +153,7 @@ export async function copyPiState(source: PiStateSource, staging: string, cipher
     for await (const f of walk(store.dir, store.dir, { n: 0 }, problems, store.id)) {
       const stored = `f-${count}${cipher === undefined ? "" : SEALED_SUFFIX}`;
       let writeFailure: unknown;
-      const done = await copyOne(hooks, f.path, f.rel, f.rel.endsWith(".jsonl"),
+      const done = await copyOne(hooks, store.dir, f.path, f.rel, f.rel.endsWith(".jsonl"),
         () => rm(join(folder, stored), { force: true }).then(() => openSink(join(folder, stored), cipher, `${PI_FOLDER}/${stored}`)).then((s) => ({
           write: (b: Buffer) => s.write(b).catch((error: unknown) => { writeFailure = error; throw error; }),
           finish: () => s.finish(), abort: () => s.abort(),

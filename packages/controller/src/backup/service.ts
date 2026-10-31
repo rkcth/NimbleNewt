@@ -139,7 +139,7 @@ export class BackupService {
   /** The names of the backups the rule would delete under these counts (default: those in force). Nothing is deleted. */
   async preview(retention?: Retention): Promise<string[]> {
     const all = await listBackups(this.#options.root);
-    const kept = chooseKept(all, retention ?? await this.#counts());
+    const kept = chooseKept(all, retention ?? await this.#counts(), this.#now());
     return all.filter((b) => !kept.has(b.path)).map((b) => b.manifest.name);
   }
 

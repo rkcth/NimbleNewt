@@ -36,8 +36,8 @@ const NOT_STORED = { indexes: "none exist: search reads the live records with th
 export interface BackupPort {
   list(): Promise<readonly { readonly path: string; readonly at: string; readonly trusted: boolean; readonly manifest: { readonly name: string; readonly kind: string } }[]>;
   /** What the rule would delete (`preview`) or deletes now, under the given counts. */
-  preview(retention: { daily: number; weekly: number; preRestoreKept?: number | null }): Promise<string[]>;
-  prune(retention: { daily: number; weekly: number; preRestoreKept?: number | null }): Promise<string[]>;
+  preview(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
+  prune(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
 }
 export interface IncidentPort {
   archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string }): Promise<number>;
@@ -101,7 +101,7 @@ export interface RunReport {
   readonly partial: boolean;
   /** Present on a preview: pass it back as `confirm` to run exactly what was shown. */
   readonly digest?: string;
-  readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number; preRestoreKept?: number | null } };
+  readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null } };
   readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number };
   /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set): what it would drop (or dropped), and the versions kept because a resumable task used them. */
   readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
@@ -284,7 +284,7 @@ export class RetentionService {
       revoked = { items: found.items.filter((r) => material.why("desk-record", r.recordId) === undefined), partial: found.partial };
       if (revoked.partial) partial = true;
     }
-    const counts = { daily: values.backupDaily, weekly: values.backupWeekly, preRestoreKept: values.preRestoreKept };
+    const counts = { daily: values.backupDaily, weekly: values.backupWeekly, preRestoreKept: values.preRestoreKept, preRestoreMaxAgeDays: values.preRestoreMaxAgeDays };
     const backupsPort = this.#deps.backups;
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });

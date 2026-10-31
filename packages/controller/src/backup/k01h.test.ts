@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { MemoryStorage, SqliteStorage } from "../storage/index.js";
 import { BackupEncryption, BackupService, MaintenanceBarrier, RestoreRefused, StagedRestore, applyPendingRestore, createBackup, createKeyring, restoreBackup, validRel, verifyBackup, type PiStateSource } from "./index.js";
+import { applyAndCrashAfter } from "./k01h-crash.js";
 
 const AT = "2026-10-31T10:00:00.000Z";
 const FAST = { N: 2 ** 16, r: 8, p: 1 } as const;
@@ -201,8 +202,9 @@ test("an interrupted swap is finished by the next start, and a marker for anothe
     // Crash after the conversation folders were swapped but before the database was: run the swap by hand for the folders, then start.
     const marker = JSON.parse(readFileSync(join(r.data, "pending-restore.json"), "utf8"));
     await assert.rejects(applyPendingRestore(r.data, join(r.d, "other.sqlite"), undefined, { piFinal: r.piFinal }), /not for this database/);
-    const { renameSync } = await import("node:fs");
-    for (const p of marker.pi) { renameSync(p.target, `${p.target}.before-restore-${marker.stamp}`); renameSync(p.staged, p.target); }
+    // A real crash: a child process dies right after the conversation folders were moved (two moves), leaving the journal.
+    assert.equal(applyAndCrashAfter(r.data, r.sqlite, join(r.d, "live"), 2), 3);
+    assert.equal(existsSync(join(r.data, "restore-journal.json")), true);
     assert.equal(await applyPendingRestore(r.data, r.sqlite, undefined, { piFinal: r.piFinal }), r.made.manifest.name);
     const back = await SqliteStorage.open({ path: r.sqlite });
     try { assert.equal(await back.getAggregate({ kind: "task", id: "task-late" }), undefined); } finally { await back.close(); }
