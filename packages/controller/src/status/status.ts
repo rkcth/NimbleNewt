@@ -490,7 +490,7 @@ export class StatusService {
     const task = cite("task", taskId);
     const describe = (s: ReplayStep): string => [
       `Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`,
-      `(${s.outcome === "not-recorded" ? REPLAY_LABELS.notRecorded : s.outcome}${s.lane === "main" ? "" : `, branch ${shown(s.lane)}`}${s.authority === "superseded" ? `, replaced by step ${(s.supersededBy ?? []).join(", ")}: ${REPLAY_LABELS.superseded}` : ""}${s.content.state === "stored" && s.content.redactions > 0 ? `, ${s.content.redactions} redaction${s.content.redactions === 1 ? "" : "s"}` : ""}${s.content.state === "missing" ? `, content missing: ${shown(s.content.reason)}` : ""}${s.corrections > 0 ? `, ${s.corrections} correction${s.corrections === 1 ? "" : "s"}` : ""})`,
+      `(${s.outcome === "not-recorded" ? REPLAY_LABELS.notRecorded : `${s.outcome}${s.outcomeNote === undefined ? "" : `, ${s.outcomeNote}`}`}${s.lane === "main" ? "" : `, branch ${shown(s.lane)}${s.laneNote === undefined ? "" : ` (${s.laneNote})`}`}${s.authority === "superseded" ? `, replaced by step ${(s.supersededBy ?? []).join(", ")}: ${REPLAY_LABELS.superseded}` : ""}${s.content.state === "stored" && (s.content.redactions ?? 0) > 0 ? `, ${s.content.redactions} redaction${s.content.redactions === 1 ? "" : "s"}` : ""}${s.content.state === "missing" ? `, content missing: ${shown(s.content.reason)}` : ""}${s.corrections > 0 ? `, ${s.corrections} correction${s.corrections === 1 ? "" : "s"}` : ""})`,
     ].join(" ");
     try {
       if (request.seq !== undefined) {
@@ -501,15 +501,15 @@ export class StatusService {
         for (const e of d.explanations.contemporaneous.items) lines.push(line(`${REPLAY_LABELS.contemporaneous} ${shown(e.by)} chose ${shown(e.choice)}. Uncertain: ${shown(e.uncertainty)}`, task));
         for (const e of d.explanations.retrospective.items) lines.push(line(`${REPLAY_LABELS.retrospective} ${shown(e.choice)}`, task));
         lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${shown(l.kind)} ${shown(l.id ?? "")}${l.version === undefined ? "" : ` @${shown(l.version)}`} (${l.relation})` : `${l.relation}: ${shown(l.note ?? "")}`)).join("; ")}.` : led.note, task));
-        if (d.thinking !== undefined) lines.push(line(d.thinking.state === "removed-by-retention" ? d.thinking.label : "The model's thinking is kept collapsed; ask to expand it. It is model output, not an explanation.", task));
+        if (d.thinking !== undefined) lines.push(line(d.thinking.state === "removed-by-retention" || d.thinking.state === "unavailable" ? d.thinking.label : "The model's thinking is kept collapsed; ask to expand it. It is model output, not an explanation.", task));
         return { observedAt: this.#runner.now(), lines };
       }
       const v = await replay.open(by, taskId, { ...(request.from === undefined ? {} : { from: request.from }), limit: request.limit ?? 10, ...(request.lane === undefined ? {} : { lane: request.lane }), ...(request.agent === undefined ? {} : { actor: request.agent }) });
       const sm = v.summary;
-      const lines: Line[] = [line(`${sm.total} step${sm.total === 1 ? "" : "s"}${sm.scanLimited ? " (the first ones; the record is longer)" : ""}; ${sm.lanes.length} line${sm.lanes.length === 1 ? "" : "s"} of work; ${sm.unavailable.length} unavailable; ${sm.superseded} replaced; ${sm.stepsWithoutManifest} without a recorded context.`, task)];
+      const lines: Line[] = [line(`${sm.total} step${sm.total === 1 ? "" : "s"}${sm.scanLimited ? ` (steps ${sm.range.first} to ${sm.range.last} of ${sm.range.of}; the record is longer)` : ""}; ${sm.lanes.length} line${sm.lanes.length === 1 ? "" : "s"} of work; ${sm.unavailable.length} unavailable; ${sm.superseded} replaced; ${sm.stepsWithoutManifest} without a recorded context.`, task)];
       for (const e of v.entries) lines.push("unavailable" in e ? line(`Step ${e.seq} is no longer available: ${shown(e.unavailable)}.`, task) : line(describe(e), task));
       if (v.note !== undefined) lines.push(line(v.note, task));
-      if (v.next !== undefined) lines.push(line(`More steps follow; continue from step ${v.next + 1}.`, task));
+      if (v.next !== undefined) lines.push(line(`More steps follow; continue from step ${v.next}.`, task));
       return { observedAt: this.#runner.now(), lines };
     } catch (error) {
       if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;

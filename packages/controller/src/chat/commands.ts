@@ -50,6 +50,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Which recovery actions may be taken on a stuck agent (pausing, stopping, giving its task away) is authority over work: shown first in every profile (provisional, card V02c). Turning the steps off only narrows; on widens.
   "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level", mode: "propose" },
   "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
+  "replay.limits.set": { verb: "Change how much of a task's record one replay reads", mode: "apply" },
+  "replay.limits.enable": { verb: "Bound how much of a task's record one replay reads", mode: "apply" },
+  "replay.limits.disable": { verb: "Remove the bounds on how much of a task's record one replay reads", mode: "apply" },
   "recovery.ladder.disable": { verb: "Stop supervisors taking recovery steps on a stuck agent", mode: "apply" },
   "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
   // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).

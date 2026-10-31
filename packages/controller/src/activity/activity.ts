@@ -94,10 +94,25 @@ const refuseThinking = (c: object): void => { for (const w of forbiddenWords) if
  * uncertainty, as statements to a person and never as the model's thinking. An explanation asked for later is a separate, explicit operation, labelled retrospective, built only from what the records
  * hold, and says so when they cannot explain. History is never rewritten: a correction is appended with who and when; ranges that were archived, deleted or are otherwise gone stay in the list, marked unavailable.
  */
+export interface ActivityOptions extends RunnerOptions {
+  /** The roles a principal holds in a project (as for submissions). Absent: no one is judged to be a reviewer. */
+  readonly roles?: (principalId: string, scope: { projectId: string; taskId: string }, by: Principal) => Promise<readonly string[]>;
+  /**
+   * The submissions this principal has been asked to review in this task (the same source as the submissions' read rule, card Q01c). OWNER DECISION: a reviewer reads ONLY the task(s) it has been asked to review,
+   * never the role's others. Absent: nobody is assigned, so a reviewer reads nothing.
+   */
+  readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
+  /**
+   * Whether a host principal owns (or owned) an attempt of the task. A host is infrastructure that carries out attempts for the controller across projects and already records their steps, so without this port it keeps reading
+   * the tasks it works; with it, a host reads only tasks it holds an attempt of.
+   */
+  readonly hostOwnsAttempt?: (hostId: string, taskId: string) => Promise<boolean>;
+}
 export class ActivityService {
   readonly #runner: CommandRunner;
-  private constructor(runner: CommandRunner) { this.#runner = runner; }
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): ActivityService { return new ActivityService(new CommandRunner(storage, epoch, options)); }
+  readonly #options: ActivityOptions;
+  private constructor(runner: CommandRunner, options: ActivityOptions) { this.#runner = runner; this.#options = options; }
+  static withEpoch(storage: ControllerStorage, epoch: number, options: ActivityOptions = {}): ActivityService { return new ActivityService(new CommandRunner(storage, epoch, options), options); }
 
   /** Appends a step. The writer is the owner, a host or service, or an agent with `history.append` (or working the task). */
   async record(by: Principal, command: NoActor & { taskId: string; kind: ActivityKind; summary: string; manifest?: { refs: readonly unknown[]; summaryId?: string } | { missing: true; reason: string }; payload?: { text: string; sensitive?: boolean } | { missing: true; reason: string }; outcome?: StepOutcome; branch?: string; supersedes?: number }): Promise<{ id: string; seq: number; replayed: boolean }> {
@@ -113,6 +128,15 @@ export class ActivityService {
     if (command.outcome !== undefined && !STEP_OUTCOMES.includes(command.outcome)) invalid("outcome", `must be one of ${STEP_OUTCOMES.join(", ")}`);
     const branch = command.branch === undefined ? undefined : typeof command.branch === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(command.branch) ? command.branch : invalid("branch", "must be a plain name of up to 80 characters");
     if (command.supersedes !== undefined && (!Number.isSafeInteger(command.supersedes) || command.supersedes < 1)) invalid("supersedes", "must be the number of an earlier step");
+    // A step may only replace one of the same line of work, and only the one who wrote it (or the owner or a service) may say it is replaced: an agent cannot retire the owner's instruction by claiming to supersede it.
+    if (command.supersedes !== undefined) {
+      const target = await this.#stepView(taskId, command.supersedes).catch((error: unknown) => { if (error instanceof DomainError && error.code === "not_found") return invalid("supersedes", "must be the number of an earlier step of this task"); throw error; });
+      if (target.step === undefined) invalid("supersedes", "that step is unavailable");
+      else {
+        if (!(by.kind === "owner" || by.kind === "service" || target.step.actor === by.id)) throw new DomainError("forbidden", `${by.id} may not supersede step ${command.supersedes}: only the one who wrote it, the owner or a service may`);
+        if ((target.step.branch ?? "main") !== (branch ?? "main")) throw new DomainError("forbidden", `step ${command.supersedes} is on line ${target.step.branch ?? "main"}; a step replaces only a step of its own line`);
+      }
+    }
     const cmd = scopedCommandId(by.id, command.commandId);
     const stepIdAt = (seq: number): string => derivedId("act", `${taskId}\0${seq}`);
     const payloadIdAt = (seq: number): string => derivedId("apl", `${taskId}\0${seq}`);
@@ -181,7 +205,7 @@ export class ActivityService {
     onlyKnown(command, ["commandId", "taskId", "seq"]);
     const taskId = checkTaskId(command.taskId);
     const task = await this.#task(taskId);
-    this.#mayRead(by, task.projectId, taskId);
+    await this.#mayRead(by, task.projectId, taskId);
     const { step, gone } = await this.#stepView(taskId, command.seq);
     const earlier = await this.#explanationsFor(taskId, command.seq);
     let body: ExplanationBody;
@@ -244,7 +268,7 @@ export class ActivityService {
   async steps(by: Principal, taskId: string, page: { after?: number; limit?: number; tail?: boolean } = {}): Promise<{ steps: (ActivityStepView)[]; next?: number }> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
-    this.#mayRead(by, task.projectId, tid);
+    await this.#mayRead(by, task.projectId, tid);
     const head = (await this.#runner.get(KIND_OF.head, tid))?.body as unknown as HeadBody | undefined;
     if (head === undefined) return { steps: [] };
     const limit = Math.min(Math.max(1, page.limit ?? 50), ACTIVITY_LIMITS.page);
@@ -301,18 +325,18 @@ export class ActivityService {
     return { steps: found.slice(0, limit), gaps: gaps.slice(0, limit), scanned, truncated };
   }
 
-  /** The stored content of a step. Sensitive content needs the owner or a history grant; ordinary content is also open to those working the task. */
+  /** The stored content of a step. Sensitive content needs the owner, a service or a `history.sensitive.read` grant; ordinary content is also open to those who may read the task's steps. */
   async payload(by: Principal, taskId: string, seq: number): Promise<{ text: string; redactions: number } | undefined> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
-    this.#mayRead(by, task.projectId, tid);
+    await this.#mayRead(by, task.projectId, tid);
     const { step, gone } = await this.#stepView(tid, seq);
     if (gone !== undefined) throw new DomainError("not_found", `the content of step ${seq} is unavailable: ${gone}`);
     if (step!.payload.state !== "stored") return undefined;
     const p = (await this.#runner.get(KIND_OF.payload, step!.payload.id))?.body as unknown as PayloadBody | undefined;
     if (p === undefined) return undefined;
-    const may = by.kind === "owner" || by.kind === "service" || allows(by, "history.read", task.projectId) || (!p.sensitive && (by.kind === "host" || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: tid } })));
-    if (!may) throw new DomainError("not_found", "no such content, or none you may read");
+    // Sensitive content (tool inputs and results, message text) needs the owner, a service or an explicit `history.sensitive.read` grant; a project-wide `history.read` (which several roles carry) reads the ordinary content only.
+    if (!this.#contentRule(by, task.projectId, tid, p.sensitive)) throw new DomainError("not_found", "no such content, or none you may read");
     return { text: p.text, redactions: p.redactions };
   }
 
@@ -320,7 +344,7 @@ export class ActivityService {
   async explanations(by: Principal, taskId: string, seq?: number): Promise<ExplanationBody[]> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
-    this.#mayRead(by, task.projectId, tid);
+    await this.#mayRead(by, task.projectId, tid);
     if (seq === undefined) { const keep: ExplanationBody[] = []; for (const e of await this.#allExplanations(tid)) if (e.seq === undefined || (await this.#stepView(tid, e.seq)).gone === undefined) keep.push(e); return keep; }
     return (await this.#stepView(tid, seq)).gone !== undefined ? [] : this.#explanationsFor(tid, seq);
   }
@@ -333,7 +357,7 @@ export class ActivityService {
     if (seq !== undefined) { const all = await this.explanations(by, taskId, seq); return { items: all.slice(after, after + limit), ...(after + limit < all.length ? { next: after + limit } : {}) }; }
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
-    this.#mayRead(by, task.projectId, tid);
+    await this.#mayRead(by, task.projectId, tid);
     const index = await this.#indexOf(tid);
     const ids = [...index.explanations, ...(index.later ?? [])];
     const items: ExplanationBody[] = [];
@@ -349,7 +373,7 @@ export class ActivityService {
   async corrections(by: Principal, taskId: string, seq: number): Promise<CorrectionBody[]> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
-    this.#mayRead(by, task.projectId, tid);
+    await this.#mayRead(by, task.projectId, tid);
     return (await this.#stepView(tid, seq)).gone !== undefined ? [] : this.#corrections(tid, seq);
   }
 
@@ -360,8 +384,32 @@ export class ActivityService {
     if (task === undefined) throw new DomainError("not_found", "no such task");
     return task;
   }
-  #mayRead(by: Principal, projectId: string, taskId: string): void {
-    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.read", projectId) || allows(by, "attempt.work", projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("not_found", "no such task");
+  #contentRule(by: Principal, projectId: string, taskId: string, sensitive: boolean): boolean {
+    return by.kind === "owner" || by.kind === "service" || allows(by, "history.sensitive.read", projectId, { resource: { kind: "task", id: taskId } }) || (!sensitive && (by.kind === "host" || allows(by, "history.read", projectId) || allows(by, "attempt.work", projectId, { resource: { kind: "task", id: taskId } })));
+  }
+  /** Whether this reader may read stored content of the given sensitivity on a task it may read at all (so a view shows its size and redaction count only to those who may read the text). */
+  async contentReadable(by: Principal, taskId: string, sensitive: boolean): Promise<boolean> {
+    const tid = checkTaskId(taskId);
+    const task = await this.#task(tid);
+    await this.#mayRead(by, task.projectId, tid);
+    return this.#contentRule(by, task.projectId, tid, sensitive);
+  }
+
+  /**
+   * Who reads a task's steps: the owner and services; a worker on the task; a host (only a task it holds an attempt of, when that is known); and an agent with the project's `history.read`. A principal that holds the REVIEWER role reads only
+   * the task(s) it has been asked to review (OWNER DECISION, as for submissions), whatever `history.read` its role bundle carries; a director, who signs off for the project, keeps the project-wide read. Anyone else reads as "no such task".
+   */
+  async #mayRead(by: Principal, projectId: string, taskId: string): Promise<void> {
+    const hidden = (): never => { throw new DomainError("not_found", "no such task"); };
+    if (by.kind === "owner" || by.kind === "service") return;
+    if (by.kind === "host") { if (this.#options.hostOwnsAttempt === undefined || await this.#options.hostOwnsAttempt(by.id, taskId)) return; return hidden(); }
+    if (allows(by, "attempt.work", projectId, { resource: { kind: "task", id: taskId } })) return;
+    if (!allows(by, "history.read", projectId)) return hidden();
+    if (this.#options.roles === undefined) return;
+    const roles = await this.#options.roles(by.id, { projectId, taskId }, by);
+    if (!roles.includes("reviewer") || roles.includes("director")) return;
+    const named = this.#options.reviewAssignments === undefined ? [] : await this.#options.reviewAssignments(by.id, taskId);
+    if (named.length === 0) hidden();
   }
   async #step(taskId: string, seq: number) {
     if (!Number.isSafeInteger(seq) || seq < 1) invalid("seq", "must be a step number");

@@ -421,8 +421,16 @@ export class ChatService {
         if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff") && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
         if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff") && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
-          const matches = await this.#tasksByTitle(token, currentFocus.projectId, request["taskTitle"]);
-          if (matches.length !== 1) { push({ i, kind: "refused", code: matches.length === 0 ? "not_found" : "invalid_command", message: matches.length === 0 ? `no task called "${request["taskTitle"].slice(0, 80)}" in that project` : `more than one task is called "${request["taskTitle"].slice(0, 80)}"; use its ID` }); continue; }
+          const wanted = request["taskTitle"];
+          const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
+          // One exact match decides. Several, or only partial matches, are listed and the owner is asked; nothing is read until the owner says which.
+          const candidates = exact.length > 0 ? exact : partial;
+          if (candidates.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no task called "${wanted.slice(0, 80)}" in that project` }); continue; }
+          if (exact.length !== 1) {
+            push({ i, kind: "asked", question: exact.length > 1 ? `More than one task is called "${wanted.slice(0, 80)}". Which one?` : `No task is called "${wanted.slice(0, 80)}", but ${candidates.length === 1 ? "one task fits" : "these tasks fit"}. Which one do you mean?`, options: candidates.slice(0, CHAT_LIMITS.options).map((m) => `${m.id}: ${m.title.slice(0, 80)} (${m.state})`) });
+            continue;
+          }
+          const matches = exact;
           request["taskId"] = matches[0]!.id;
           delete request["taskTitle"];
         }
@@ -1038,6 +1046,20 @@ export class ChatService {
 
   async #askProject(): Promise<Resolved> {
     return { ok: false, kind: "ask", question: "Which project do you mean? There is none in focus.", options: [] };
+  }
+
+  /** The project's tasks whose title is exactly the words (case ignored), and those that only contain them. */
+  async #taskCandidates(token: string, projectId: string, title: string): Promise<{ exact: { id: string; title: string; state: string }[]; partial: { id: string; title: string; state: string }[] }> {
+    const wanted = title.trim().toLowerCase();
+    const exact: { id: string; title: string; state: string }[] = []; const partial: { id: string; title: string; state: string }[] = [];
+    if (wanted.length === 0) return { exact, partial };
+    for (const t of await this.#listAll(token, "task.list", { projectId })) {
+      const name = String(t["title"] ?? "");
+      const item = { id: t["id"] as string, title: name, state: t["state"] as string };
+      const lower = name.trim().toLowerCase();
+      if (lower === wanted) exact.push(item); else if (lower.includes(wanted)) partial.push(item);
+    }
+    return { exact, partial };
   }
 
   async #tasksByTitle(token: string, projectId: string, title: string): Promise<{ id: string; state: string }[]> {

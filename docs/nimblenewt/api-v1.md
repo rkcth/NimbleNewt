@@ -466,7 +466,7 @@ Arguments:
 - `kind` (optional): only this kind of step
 - `withContent` (optional): true to include stored content you may read
 
-Result: `{ taskId, projectId, summary, entries: [step | { seq, unavailable }], next?, note? }`. A step: `{ seq, at, actor, kind, summary, lane, outcome (proposed, dispatched, confirmed, uncertain or not-recorded), versionsThen, authority (current or superseded), supersedes?, supersededBy?, content, corrections, previousInLane?, nextInLane?, links }`.
+Result: `{ taskId, projectId, summary, entries: [step | { seq, unavailable }], next?, note? }`. `summary.range` says which step numbers were read, out of how many; `next` is the NEXT step to show (pass it as `from`). A step: `{ seq, at, actor, kind, summary, lane, laneStatus (main, controller, verified or unverified; an unverified line has `laneNote`), outcome (proposed, dispatched, confirmed, uncertain or not-recorded), outcomeNote? (for example `reported by agent`: the outcome is the recorder's claim, not checked by the controller), versionsThen, authority (current or superseded), supersedes?, supersededBy?, content (size and redaction count only for a reader who may read the text), corrections, previousInLane?, nextInLane?, links }`.
 
 #### `activity.replay.step`
 
@@ -489,7 +489,7 @@ Arguments:
 - `taskId`: the task
 - `seq`: the step number
 
-Result: `{ seq, links: [{ relation, kind?, id?, version?, seq?, note? }], grounded, note }`.
+Result: `{ seq, links: [{ relation, kind?, id?, version?, seq?, note? }], grounded, note, scanLimited? }`; a step on a side line also links the owner's instructions on the main line.
 
 #### `activity.replay.search`
 
@@ -501,7 +501,7 @@ Arguments:
 - `query`: the words
 - `limit` (optional): 1 to 50, default 20
 
-Result: `{ matches: [step], scanLimited }`.
+Result: `{ matches: [step], scanLimited, range: { first, last, of } }`.
 
 #### `activity.replay.export`
 
@@ -511,7 +511,19 @@ Arguments:
 
 - `taskId`: the task
 
-Result: `{ format, exportedAt, taskId, projectId, summary, entries, explanations, content, thinking }`.
+Result: `{ format, exportedAt, taskId, projectId, summary, entries, truncated: { entries, explanations }, explanations: { contemporaneous: { label, items }, retrospective: { label, items } }, content, thinking }`; `truncated` says a read bound cut it short (see `replay.limits.get`).
+
+#### `replay.limits.get`
+
+How much of a task's record one replay reads (owner only): whether the bounds are on, the figures and the defaults. The bounds are generous by default and can be turned off.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `enabled`, `values` (`scan` steps, `exportPages` and `stepPages` of 100 explanations) and `defaults`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `activity.payload`
 
@@ -901,7 +913,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `meetings` (a project's planned meetings with their rosters: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`) and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `meetings` (a project's planned meetings with their rosters: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task) and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2613,7 +2625,47 @@ Arguments:
 - `limit` (optional): blocks per page
 - `commandId`: required
 
-Result: `{ collapsed, state: stored | removed-by-retention, label, blocks?, next?, lookId? }`.
+Result: `{ collapsed, state: stored | removed-by-retention | unavailable, label, blocks?, next?, lookId? }`; `unavailable` means this controller runs without the thinking store or the retention marker (not wired), which is not the same as there being none.
+
+#### `replay.limits.set`
+
+The owner sets how much of a task's record one replay reads (owner only): `scan` (steps in one view), `exportPages` and `stepPages` (pages of 100 explanations); a figure of null goes back to the default; `enabled` turns every bound on or off. Fields left out stay. A replay that stopped at a bound says so.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `scan` (optional): whole number or null
+- `exportPages` (optional): whole number or null
+- `stepPages` (optional): whole number or null
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `replay.limits.enable`
+
+The owner turns the replay read bounds on (owner only). This is the default.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `replay.limits.disable`
+
+The owner turns every replay read bound off (owner only): a replay then reads the whole record of a task.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `activity.explain`
 

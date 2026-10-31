@@ -30,6 +30,7 @@ for (const backend of backends) {
       const worker = await make("ann", [{ action: "attempt.work", project }]);
       const auditor = await make("aud", [{ action: "history.read", project }]);
       const stranger = await make("zed", [{ action: "task.read", project }]);
+      const deep = await make("dee", [{ action: "history.read", project }, { action: "history.sensitive.read", project }]);
       const svc = ActivityService.withEpoch(world.storage, projects.epoch, options);
 
       // Steps are numbered in order, each with its exact manifest; a repeat is the same step.
@@ -120,7 +121,8 @@ for (const backend of backends) {
       assert.deepEqual((await svc.steps(auditor, task, { limit: 2 })).next, 2);
 
       // Sensitive content is under access control and redacted.
-      assert.doesNotMatch((await svc.payload(auditor, task, 2))!.text, /sk-live/);
+      assert.doesNotMatch((await svc.payload(deep, task, 2))!.text, /sk-live/);
+      await refuses("not_found", () => svc.payload(auditor, task, 2)); // a project-wide history.read (several roles carry it) reads ordinary content only
       await refuses("not_found", () => svc.payload(worker, task, 2));
       await refuses("not_found", () => svc.payload(stranger, task, 2));
       const open = await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "approval", summary: "approved the push", payload: { text: "approved by rob", sensitive: false } });

@@ -83,7 +83,20 @@ for (const backend of backends) {
       };
       assert.equal((await ask("What happened on Build the login?", "Build the login")).status, "answered");
       assert.deepEqual(asked, [{ kind: "activity", taskId: build }]);
-      assert.equal((await ask("What happened on Twice?", "Twice")).status, "refused");
+      // A title that fits two tasks lists them and asks; nothing is read until the owner says which.
+      const twice = await ask("What happened on Twice?", "Twice");
+      assert.equal(twice.status, "asked");
+      assert.equal(twice.options!.length, 2);
+      assert.ok(twice.options!.every((o) => /^task-[a-z2-7]+: Twice \(/.test(o)), twice.options!.join("|"));
+      // Words that only part of a title fits list the candidates as well (the same for the replay view); no guess is made.
+      const partial = await ask("What happened on the login?", "login");
+      assert.equal(partial.status, "asked");
+      assert.deepEqual(partial.options!.map((o) => o.split(":")[0]), [build]);
+      script["Replay Twice"] = [{ kind: "status", request: { kind: "replay", taskTitle: "Twice" }, evidence: "Replay Twice", basis: "owner" }];
+      const replayed = (await chat.submit(w.ownerToken, { messageId: cid("m"), text: "Replay Twice" })).outcomes[0]!;
+      assert.equal(replayed.status, "asked");
+      assert.equal(replayed.options!.length, 2);
+      assert.equal(asked.length, 1, "nothing was read for an ambiguous title");
       assert.equal((await ask("What happened on Nothing?", "Nothing")).status, "refused");
     } finally { await w.close(); }
   });

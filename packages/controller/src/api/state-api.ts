@@ -56,6 +56,7 @@ import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { ReplayService } from "../activity/replay.js";
+import type { ReplayLimitsService } from "../activity/replay-limits.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { ResumeSettingsService } from "../continuation/resume-settings.js";
@@ -172,6 +173,7 @@ export interface StateApiDeps {
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
+  readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
@@ -319,6 +321,7 @@ export class StateApi {
         ...(this.#deps.deliverables === undefined ? {} : { deliverables: this.#deps.deliverables }),
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
         ...(this.#deps.replay === undefined ? {} : { replay: this.#deps.replay }),
+        ...(this.#deps.replayLimits === undefined ? {} : { replayLimits: this.#deps.replayLimits }),
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
         ...(this.#deps.handoffs === undefined ? {} : { handoffs: this.#deps.handoffs }),
         ...(this.#deps.cutover === undefined ? {} : { cutover: this.#deps.cutover }),

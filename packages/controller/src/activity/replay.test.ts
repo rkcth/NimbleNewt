@@ -18,13 +18,14 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>): Prom
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, (error as Error).message); return true; });
 };
 
-/** The storage with every write counted: a replay must make none (no effect, no delivery, no timer, no record). */
+/** The storage with every call that is not a plain read counted: a replay must make none (no write, claim, epoch, retry, timer or delivery). A mutator added to the storage later counts too. */
+const READS = new Set(["currentEpoch", "getOperation", "getAggregate", "listAggregates", "listAudit", "getDelivery", "getEffect", "getTimer", "snapshot"]);
 const counting = (storage: ControllerStorage): { storage: ControllerStorage; writes: () => number } => {
   let writes = 0;
   const proxy = new Proxy(storage, { get(target, key) {
     const value = (target as never)[key] as unknown;
-    if (key === "applyOperation") return (...args: unknown[]) => { writes++; return (value as (...a: unknown[]) => unknown).apply(target, args); };
-    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    if (typeof value !== "function") return value;
+    return (...args: unknown[]) => { if (typeof key === "string" && !READS.has(key)) writes++; return (value as (...a: unknown[]) => unknown).apply(target, args); };
   } });
   return { storage: proxy, writes: () => writes };
 };
@@ -44,6 +45,7 @@ for (const backend of backends) {
       const worker = await make("ann", [{ action: "attempt.work", project }]);
       const auditor = await make("aud", [{ action: "history.read", project }]);
       const stranger = await make("zed", [{ action: "task.read", project }]);
+      const deep = await make("dee", [{ action: "history.read", project }, { action: "history.sensitive.read", project }]);
       const svc = ActivityService.withEpoch(world.storage, projects.epoch, options);
       const rec = (by: Parameters<typeof svc.record>[0], c: Omit<Parameters<typeof svc.record>[1], "commandId" | "taskId">, t = task) => svc.record(by, { commandId: cid("r"), taskId: t, ...c } as never);
 
@@ -102,13 +104,17 @@ for (const backend of backends) {
       assert.equal(bySeq(11).authority, "current");
       assert.equal(bySeq(11).supersedes, 10);
       // Redactions are marked; gaps stay listed; corrections are counted.
-      assert.equal((bySeq(5).content as { redactions: number }).redactions >= 1, true);
+      assert.deepEqual(bySeq(5).content, { state: "stored", sensitive: true }, "size and redaction count of sensitive content are not shown to a reader who may not read it");
+      const deepSteps = (await replay.open(deep, task)).entries;
+      assert.equal(((deepSteps.find((e) => e.seq === 5) as { content: { redactions: number } }).content).redactions >= 1, true);
+      assert.equal((await replay.open(deep, task)).summary.redactedSteps >= 1, true);
+      assert.equal(view.summary.redactedSteps, 0, "nor how many steps hide a redaction");
       assert.deepEqual(view.entries.find((e) => e.seq === 13), { seq: 13, unavailable: "archived by retention" });
       assert.equal(bySeq(6).corrections, 1);
       // Windows page with `next`.
       const page = await replay.open(auditor, task, { limit: 5 });
       assert.deepEqual(page.entries.map((e) => e.seq), [1, 2, 3, 4, 5]);
-      assert.equal(page.next, 5);
+      assert.equal(page.next, 6, "next is the next step to show");
       assert.deepEqual((await replay.open(auditor, task, { from: 6, limit: 50 })).entries.map((e) => e.seq), [6, 7, 8, 9, 10, 11, 12, 13]);
 
       // One step in full: explanations at the time and afterwards are apart and labelled.
@@ -145,13 +151,16 @@ for (const backend of backends) {
       assert.equal(exported.entries.length, 13);
       assert.equal(exported.content, "not included");
       assert.equal(exported.thinking, "not included");
-      assert.equal(exported.explanations.retrospective.length, 1);
+      assert.equal(exported.explanations.retrospective.items.length, 1);
       assert.ok(!JSON.stringify(exported).includes("private content") && !JSON.stringify(exported).includes("sk-live") && !JSON.stringify(exported).includes("please wait"));
       assert.ok(!JSON.stringify(exported).includes("another project"), "no other project's records");
 
       // Content: only on request, only with the right; refused content reads as "not readable", not as empty; secrets stay redacted.
-      const withText = await replay.step(auditor, task, 12, { withContent: true });
+      const withText = await replay.step(deep, task, 12, { withContent: true });
       assert.equal((withText.step.content as { text?: string }).text, "private content");
+      const auditorText = await replay.step(auditor, task, 12, { withContent: true });
+      assert.equal((auditorText.step.content as { readable?: boolean }).readable, false, "a project-wide history.read does not read sensitive content");
+      assert.equal((auditorText.step.content as { text?: string }).text, undefined);
       const asWorker = await replay.step(worker, task, 12, { withContent: true });
       assert.equal((asWorker.step.content as { readable?: boolean }).readable, false, "a worker may not read sensitive content");
       assert.equal((asWorker.step.content as { text?: string }).text, undefined);
