@@ -4,7 +4,8 @@ import { allows } from "../security/access.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
-import { BackupService, createBackup } from "../backup/index.js";
+import { BackupEncryption, BackupService, createBackup, type Keyring } from "../backup/index.js";
+import { readFile } from "node:fs/promises";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
 import { shareableCite } from "../meetings/shareable.js";
@@ -165,7 +166,9 @@ export interface StartOptions {
   readonly scratchHost?: { readonly remove: NonNullable<ScratchPorts["order"]> };
   readonly cleanupDefault?: ScratchMode;
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
-  readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date };
+  readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date;
+    /** Encrypted backups (card K01b). Off unless given. `keyringFile` is made on the host by `backup encryption-setup`; the passcode and recovery files are the out-of-band files the owner points the proof at (never the chat). If the keyring cannot be read the controller does not start: it never falls back to plain backups. */
+    readonly encryption?: { readonly keyringFile: string; readonly passcodeFile?: string; readonly recoveryFile?: string } };
   /**
    * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
    * The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed in. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
@@ -262,10 +265,15 @@ export async function startController(options: StartOptions): Promise<Controller
   }
   for (const line of check.output) print(line);
 
+  let backupEncryption: BackupEncryption | undefined;
+  if (options.backup?.encryption !== undefined) {
+    const e = options.backup.encryption;
+    try { backupEncryption = new BackupEncryption({ keyring: JSON.parse(await readFile(e.keyringFile, "utf8")) as Keyring, ...(e.passcodeFile === undefined ? {} : { passcodeFile: e.passcodeFile }), ...(e.recoveryFile === undefined ? {} : { recoveryFile: e.recoveryFile }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }) }); } catch { throw new Error("backups are set to be encrypted but the keyring file cannot be read or is not valid; no backup is made without it"); }
+  }
   let storage: ControllerStorage;
   // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
   const beforeUpgrade: BeforeUpgrade | undefined = options.backup === undefined ? undefined : async (notice) => {
-    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
+    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }) });
     print(`The database is being upgraded from schema ${notice.from} to ${notice.to}; a backup of it as it was is in ${options.backup!.directory}.`);
   };
   if (options.storage.kind === "postgres") {
@@ -510,7 +518,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Forwarding goes through the policy-edit service, which exists only when chat is configured and after the API (it uses the API).
     let policyEditsLive: PolicyEditService | undefined;
     const policyForward = { forward: async (by: Principal, request: { commandId: string; threadId: string; seq: number }) => { if (policyEditsLive === undefined) throw new DomainError("unavailable", "forwarding owner messages needs chat to be configured"); return policyEditsLive.forward(by, request); } };
-    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }) });
+    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }) });
     const improvements = ImprovementService.withEpoch(storage, epoch, { meetings });
     // Which of the event sources the owner has turned off (card H13f); the list is the host's, or the built-in one.
     const eventSourceList = options.eventSources ?? defaultEventSources(projects);
@@ -519,8 +527,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
     // How long an attempt may run and how many attempts are admitted: off unless the owner (or a start-up option) turns them on.
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
-    const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
-    let chat: ChatService | undefined;
+    const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
       const o = options.chat;

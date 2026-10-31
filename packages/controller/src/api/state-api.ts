@@ -39,7 +39,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
-import type { BackupService } from "../backup/index.js";
+import type { BackupEncryption, BackupService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
@@ -159,6 +159,7 @@ export interface StateApiDeps {
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
+  readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
 
@@ -267,6 +268,7 @@ export class StateApi {
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
         ...(this.#deps.policyForward === undefined ? {} : { policyForward: this.#deps.policyForward }),
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
+        ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),

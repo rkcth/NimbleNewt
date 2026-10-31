@@ -23,7 +23,7 @@ import type { IncidentService, ProjectPlanService, ProjectResourceService, Respo
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
-import type { BackupService } from "../backup/index.js";
+import { ProofRefused, type BackupEncryption, type BackupService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
@@ -137,6 +137,7 @@ export interface Context {
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
+  readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
 
@@ -670,6 +671,10 @@ export const OPERATIONS: readonly Operation[] = [
   improvementOp("list", "query", "The open proposals of a project, a page at a time.", "open", ["projectId", "afterId", "limit"], "`{ item: { items, next? } }`."),
   { name: "backup.now", kind: "command", summary: "Owner only: takes a consistent backup of the controller database now (a backup already running is the answer).", args: { commandId: "required" }, result: "`{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.",
     run: async (c, a, id) => { only(a, []); const commandId = need(id); ownerOnly(c, "take a backup"); const made = await (c.backups ?? unavailable("backups")).backUpFor(commandId); return asJson({ item: backupItem(made.manifest) }); } },
+  { name: "backup.encryption.status", kind: "query", summary: "Owner only: whether backups are encrypted (off unless the host set it up), the key ID, how many unlock methods the key has by kind, and the last proof. It never holds a passcode, a recovery key or any key material. Encryption is switched on and off on the host, because it needs the passcode and recovery file, which never travel through chat.", args: {}, result: "`{ item: { enabled, scope, keyId, createdAt, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.",
+    run: async (c, a) => { only(a, []); ownerOnly(c, "read the backup encryption status"); return asJson({ item: c.backupEncryption === undefined ? { enabled: false } : c.backupEncryption.status() }); } },
+  { name: "backup.encryption.verify", kind: "command", summary: "Owner only: proves that a passcode or the recovery file still opens the backup key. The secret is NOT an argument: the owner puts it in the file the host was told about (mode 600), and this reads it for the moment of the proof; it says only ok or that it failed. One proof at a time, at most one every 10 seconds. The server sees the passcode at that moment and drops the unwrapped key at once.", args: { method: "`passcode` or `recovery`" }, result: "`{ ok, method, at }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["method"]); need(id); ownerOnly(c, "prove a backup unlock method"); const enc = c.backupEncryption ?? unavailable("backup encryption"); try { return asJson({ ...(await enc.verify(a["method"] as never)) }); } catch (error) { if (error instanceof ProofRefused) throw new DomainError(error.code === "failed" || error.code === "rate_limited" ? "invalid_command" : "unavailable", error.message); throw error; } } },
   { name: "backup.list", kind: "query", summary: "Owner only: the complete backups, newest first, and whether the last one failed.", args: {}, result: "`{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows }], status }`.",
     run: async (c, a) => { only(a, []); ownerOnly(c, "list backups"); const backups = c.backups ?? unavailable("backups"); return asJson({ items: (await backups.list()).map((b) => backupItem(b.manifest)), status: await backups.status() }); } },
   messageOp("send", "command", "Sends a message (or a reply) about a task. Information and advice wait for the agent's next check-in; a request or blocking message is kept for it; only an urgent one with the right can interrupt.", "send", ["taskId", "to", "class", "purpose", "text", "expectsReply", "deadline", "escalateTo", "replyTo", "correlationId", "coalesceKey"], "`{ id, replayed, coalesced, effectiveClass, reach, woke }`."),

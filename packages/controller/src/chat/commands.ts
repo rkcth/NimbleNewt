@@ -60,6 +60,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
   // Whether the controller may remove an ended attempt's scratch workspace is a data-keeping decision: shown first in every profile (owner decision 2026-10-30; default after-handoff).
   "cleanup.settings.change": { verb: "Change whether an ended attempt's scratch workspace is removed", mode: "propose" },
+  // Proving a backup unlock method still works reads a secret file on the host and changes nothing but the record of the proof; it carries no secret in the chat (card K01b).
+  "backup.encryption.verify": { verb: "Check that a backup unlock method still works", mode: "apply" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },

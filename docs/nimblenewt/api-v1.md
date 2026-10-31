@@ -681,6 +681,16 @@ Arguments:
 
 Result: `{ item: { items, next? } }`.
 
+#### `backup.encryption.status`
+
+Owner only: whether backups are encrypted (off unless the host set it up), the key ID, how many unlock methods the key has by kind, and the last proof. It never holds a passcode, a recovery key or any key material. Encryption is switched on and off on the host, because it needs the passcode and recovery file, which never travel through chat.
+
+Arguments:
+
+- none
+
+Result: `{ item: { enabled, scope, keyId, createdAt, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+
 #### `backup.list`
 
 Owner only: the complete backups, newest first, and whether the last one failed.
@@ -2820,6 +2830,18 @@ Arguments:
 - `commandId`: required
 
 Result: `{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.
+
+#### `backup.encryption.verify`
+
+Owner only: proves that a passcode or the recovery file still opens the backup key. The secret is NOT an argument: the owner puts it in the file the host was told about (mode 600), and this reads it for the moment of the proof; it says only ok or that it failed. One proof at a time, at most one every 10 seconds. The server sees the passcode at that moment and drops the unwrapped key at once.
+
+Arguments:
+
+- `method`: `passcode` or `recovery`
+
+Result: `{ ok, method, at }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `message.send`
 
