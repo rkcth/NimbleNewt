@@ -930,7 +930,7 @@ Result: `{ item: { source, targets: [{ name, kind, direction }], authority?, jou
 
 #### `database.transfer.preview`
 
-Owner only: exactly what moving the controller database to a configured target would do: record counts per table, whether the source passes the checks (IDs, sequences, policy records, receipts, uncertain actions, timers, artifact and checkpoint references), whether the destination is empty, the right schema version and has room, and the `token` that confirms it. Changes nothing.
+Owner only: exactly what moving the controller database to a configured target would do: record counts per table, whether the source passes the checks (IDs, sequences, policy records, receipts, uncertain actions, timers, artifact and checkpoint references), whether the destination is empty, the right schema version and has room, and the `token` that confirms it. Changes nothing of the installation, but it OPENS the destination: a database that is new gets its empty tables created.
 
 Arguments:
 
@@ -3543,7 +3543,7 @@ Result: `{ item: { id, direction, to, rows, claimsReleased, uncertainEffects, re
 
 #### `database.transfer.rollback`
 
-Owner only: puts the previous database back as the only one a controller will start on. Allowed only while the new database has recorded nothing since the switch; otherwise records exist only there and the way back is a transfer in the other direction.
+Owner only, run on the controller that runs on the NEW database: fences it and puts the previous database back as the only one a controller will start on (then restart). Allowed only while the new database has recorded no work since its first start (its own start-up records do not count); otherwise records exist only there and the way back is a transfer in the other direction.
 
 Arguments:
 
