@@ -88,6 +88,18 @@ Result: `{ item }`: `revision`, `protected` (branch names, or prefixes such as `
 
 Completion: finished when accepted (`completed: true`).
 
+#### `escalation.ladder.get`
+
+How long a stall concern nobody decides waits at each level of the supervisor ladder before it climbs to the next supervisor, and finally to the owner (owner only).
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `hours` (the owner's hours for level 0, 1, 2 ..., empty when none are set) and `defaultHours` (24, used for a level the list does not name).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `workers.limits.get`
 
 What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).
@@ -1402,6 +1414,19 @@ Arguments:
 - `project`: the project ID
 - `protected` (optional): branch names or prefixes such as `release/*`
 - `landing` (optional): the landing branch, or null to clear it
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `escalation.ladder.set`
+
+The owner sets how long a stall concern waits undecided at each level of the supervisor ladder (owner only): a stuck agent's concern goes to its supervisor first and, undecided after the level's time, to that supervisor's supervisor, and so on up to the owner. `hours` lists whole hours from 1 to 720 (30 days) for level 0 (the first supervisor), level 1 and so on, at most 16 levels; a level the list does not name waits 24 hours. The list replaces the earlier one; an empty list clears it. It counts from the next pass; a wait already running uses the new figure for its level.
+
+Arguments:
+
+- `hours`: for example `[24, 48]`
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.

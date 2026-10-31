@@ -5,10 +5,12 @@ import type { AssignmentService } from "../domain/assignments.js";
 import { onlyKnown, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { WaitService } from "../domain/waits.js";
-import type { AgentBody } from "../agents/agents.js";
+import { AGENT_LIMITS, type AgentBody } from "../agents/agents.js";
+import { DEFAULT_LADDER_HOURS } from "./escalation-ladder.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type HostBody } from "../hosts/hosts.js";
 import { DEFAULT_CONTRACT, DIFFICULTIES, type ContractBody, type Difficulty } from "../planning/contracts.js";
 import { allows, allowsExactly } from "../security/access.js";
+import { effectiveOf } from "../security/grants.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -51,7 +53,17 @@ export interface ConcernBody {
   readonly escalatedAt?: string;
   /** When the owner's notice was sent; the loop offers it again until it is. */
   readonly notifiedAt?: string;
+  /** Who holds the concern after its last escalation (owner decision 2026-10-30, supervisor ladder): `agent:<ID>` of a supervisor up the chain, or `owner` at the top. Absent: it is still with the supervisor it was routed to. */
+  readonly escalatedTo?: string;
+  /** How many times it has climbed the supervisor ladder (0 or absent: none yet). */
+  readonly escalationLevel?: number;
+  /** The climbs so far, newest last and bounded: the level reached, who got it, when, and the supervisors passed over with the reason each was skipped. */
+  readonly escalationTrail?: readonly EscalationStep[];
 }
+
+export interface EscalationStep { readonly level: number; readonly to: string; readonly at: string; readonly skipped?: readonly { readonly id: string; readonly reason: string }[] }
+const TRAIL_KEEP = 20;
+const SKIPPED_KEEP = 10;
 
 export type StallEvent =
   /** `promptTokens` is the estimate made at the start (card V01b), `cachedShare` the share of it the cache adapter expects to be cached, `route` and `hostId` whose speed the request measures. */
@@ -83,8 +95,10 @@ export interface StallOptions extends RunnerOptions {
   readonly hostStaleAfterMs?: number;
   /** How long a dismissal silences a concern before a signal that is still bad reopens it. Provisional default 6 hours. */
   readonly dismissForMs?: number;
-  /** How long a suspected concern may wait for its supervisor's decision before the owner is told. Provisional default 30 minutes. */
+  /** How long a suspected concern waits at a level of the supervisor ladder before it climbs, when the owner's `escalation.ladder` setting names nothing for that level (the installation's value). Default 24 hours (the owner's decision, owner decision 2026-10-30, supervisor ladder). */
   readonly escalateAfterMs?: number;
+  /** The owner's per-level hours (the `escalation.ladder` setting), read at each pass; a throw stops that pass's escalation. */
+  readonly ladderHours?: () => Promise<readonly number[]>;
   /** Whether a pause gate (card L01) applies to the task. A paused task is assessed as `paused`: its silence is expected, and a concern already suspected is cleared. */
   readonly isPaused?: (taskId: string) => Promise<boolean>;
 }
@@ -256,6 +270,7 @@ export class StallService {
   readonly #hostStaleAfterMs: number;
   readonly #dismissForMs: number;
   readonly #escalateAfterMs: number;
+  readonly #ladderHours: (() => Promise<readonly number[]>) | undefined;
   readonly #isPaused: ((taskId: string) => Promise<boolean>) | undefined;
   readonly #declared: StallOptions["declaredSpeed"];
   readonly #defaultTps: number;
@@ -268,7 +283,9 @@ export class StallService {
     this.#thresholds = thresholdsFor(options);
     this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     this.#dismissForMs = options.dismissForMs ?? 6 * 3_600_000;
-    this.#escalateAfterMs = options.escalateAfterMs ?? 30 * 60_000;
+    this.#escalateAfterMs = options.escalateAfterMs ?? DEFAULT_LADDER_HOURS * 3_600_000;
+    this.#ladderHours = options.ladderHours;
+    if (!Number.isSafeInteger(this.#escalateAfterMs) || this.#escalateAfterMs < 1000) throw new DomainError("invalid_command", "escalateAfterMs: must be a whole number of at least 1000", { field: "escalateAfterMs" });
     this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
     this.#declared = options.declaredSpeed;
@@ -432,7 +449,7 @@ export class StallService {
             continue;
           }
           // Cleared, or a dismissal that has run out: it came back.
-          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, escalatedAt: _e, notifiedAt: _f, ...rest } = body;
+          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, escalatedAt: _e, notifiedAt: _f, escalatedTo: _g, escalationLevel: _h, escalationTrail: _i, ...rest } = body;
           await this.#write(by, id, found.revision, { ...rest, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, lastChangedAt: this.#runner.now(), reopened: body.reopened + 1 });
           counts.reopened++;
         } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
@@ -475,12 +492,12 @@ export class StallService {
   async decide(by: Principal, command: NoActor & { concernId: string; expectedRevision: number; decision: "confirm" | "dismiss"; reason: string }): Promise<{ id: string; revision: number; replayed: boolean }> {
     onlyKnown(command, ["commandId", "concernId", "expectedRevision", "decision", "reason"]);
     const found = await this.#concern(command.concernId);
-    if (found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId))) throw new DomainError("not_found", "no such concern");
+    if (found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId, found.escalatedTo))) throw new DomainError("not_found", "no such concern");
     if (command.decision !== "confirm" && command.decision !== "dismiss") invalid("decision", "must be confirm or dismiss");
     const reason = safe(command.reason, "reason", 500);
     if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) invalid("expectedRevision", "must be a whole number of at least 1");
     const assignment = await this.#assignments.getAssignment(found.taskId);
-    const supervisor = found.route.via === "supervisor" && `agent:${found.route.to.id}` === by.id;
+    const supervisor = (found.route.via === "supervisor" && `agent:${found.route.to.id}` === by.id) || found.escalatedTo === by.id;
     const manager = by.kind === "owner" || allows(by, "assignment.manage", found.projectId);
     if (!(by.kind === "owner" || (!isOwner(assignment?.owner, by.id) && (supervisor || manager)))) throw new DomainError("forbidden", `${by.id} may not decide on that concern`);
     const ref: AggregateRef = { kind: "stall-concern", id: found.id };
@@ -503,21 +520,70 @@ export class StallService {
   }
 
   /**
-   * Passes on to the owner a concern that has waited past `escalateAfterMs` suspected and undecided (card V02b): it stays routed to its supervisor, who can still decide, and is marked escalated. Returns the
-   * concerns escalated whose notice has not been recorded as sent, oldest first, so a notice that failed is offered again. Needs the same right as the scan.
+   * Climbs the supervisor ladder (card V02b and the owner decision of 2026-10-30). A suspected concern starts with the supervisor it is routed to. When it has gone undecided for the level's time (the owner's `escalation.ladder` hours for that
+   * level, else the installation's `escalateAfterMs`, default 24 hours), it passes to the supervisor of the current holder, and the level and the holder are recorded; a supervisor who is retired, cannot see the task,
+   * or is the task's own owner is passed over with the reason recorded, and a loop or an over-deep chain ends at the owner. With no supervisor left it goes to the owner, which is the top: it climbs no further.
+   * One step a concern a pass (the next waits its own level time), each keyed by concern and revision so a pass repeated after a crash is the same step. Returns the escalated concerns whose notice has not been
+   * recorded as sent, oldest first, so a notice that failed is offered again. Needs the same right as the scan.
    */
   async escalateUndecided(by: Principal, limit = 100): Promise<(ConcernBody & { id: string; revision: number })[]> {
     this.#mayScan(by);
-    const after = Date.parse(this.#runner.now()) - this.#escalateAfterMs;
+    // The owner's setting is read first and a failure to read it stops the pass: no escalation at a time nobody set.
+    const hours = (await this.#ladderHours?.()) ?? [];
     // One read of the concerns a tick (the marks written here are applied to this list), not two.
     const all = await this.#suspected(limit);
     for (const [i, c] of all.entries()) {
-      // A concern already routed to the owner has no supervisor to wait for.
-      if (c.escalatedAt !== undefined || c.route.via !== "supervisor" || Date.parse(c.lastChangedAt) > after) continue;
+      // A concern routed to the owner, or already with the owner, has no supervisor to wait for.
+      if (c.route.via !== "supervisor" || c.escalatedTo === "owner") continue;
+      const level = c.escalationLevel ?? 0;
+      const waitMs = hours[level] === undefined ? this.#escalateAfterMs : hours[level]! * 3_600_000;
+      if (Date.parse(this.#runner.now()) - Date.parse(c.escalatedAt ?? c.lastChangedAt) < waitMs) continue;
       const escalatedAt = this.#runner.now();
-      try { const w = await this.#write(by, c.id, c.revision, { ...c, escalatedAt }); all[i] = { ...c, escalatedAt, revision: w.revision }; } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
+      const next = await this.#nextHolder(c);
+      const { notifiedAt: _n, ...kept } = c;
+      const step: EscalationStep = { level: level + 1, to: next.to, at: escalatedAt, ...(next.skipped.length === 0 ? {} : { skipped: next.skipped.slice(0, SKIPPED_KEEP) }) };
+      const body: ConcernBody = { ...kept, escalatedAt, escalatedTo: next.to, escalationLevel: level + 1, escalationTrail: [...(c.escalationTrail ?? []), step].slice(-TRAIL_KEEP) };
+      try { const w = await this.#write(by, c.id, c.revision, body); all[i] = { ...body, id: c.id, revision: w.revision }; } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
     }
     return all.filter((c) => c.escalatedAt !== undefined && c.notifiedAt === undefined).sort((a, b) => (a.escalatedAt! < b.escalatedAt! ? -1 : 1));
+  }
+
+  /**
+   * The next holder above the concern's current one: walks up the reporting chain (each agent's supervisor), passing over, with the reason, any agent that is retired, has no live identity, cannot see the task
+   * (needs `task.read`, `assignment.read` or `assignment.manage` on it) or is the task's own owner. A repeat in the chain, a missing agent record or a chain past the limit ends at the owner, with the reason.
+   */
+  async #nextHolder(c: ConcernBody): Promise<{ to: string; skipped: { id: string; reason: string }[] }> {
+    const skipped: { id: string; reason: string }[] = [];
+    const skip = (id: string, reason: string): void => { skipped.push({ id, reason: reason.slice(0, 120) }); };
+    const assignment = await this.#assignments.getAssignment(c.taskId);
+    const holder = c.escalatedTo ?? `agent:${c.route.to.id}`;
+    const holderId = holder.startsWith("agent:") ? holder.slice(6) : holder;
+    const seen = new Set<string>([holderId]);
+    const bare = (id: string): string => (id.startsWith("agent:") ? id.slice(6) : id);
+    if (assignment?.owner !== undefined && assignment.owner.kind === "agent") seen.add(bare(assignment.owner.id));
+    let at = ((await this.#runner.get("agent", holderId))?.body as unknown as AgentBody | undefined)?.supervisorId;
+    for (let hops = 0; at !== undefined; hops++) {
+      if (hops >= AGENT_LIMITS.chain) { skip(at, "the reporting chain is too deep"); break; }
+      if (seen.has(at)) { skip(at, "the reporting chain loops back to an agent already tried"); break; }
+      seen.add(at);
+      const agent = (await this.#runner.get("agent", at))?.body as unknown as AgentBody | undefined;
+      if (agent === undefined) { skip(at, "has no agent record"); break; }
+      const reason = agent.state !== "active" ? "is retired" : isOwner(assignment?.owner, `agent:${at}`) ? "is the task's own owner" : await this.#cannotSee(at, c);
+      if (reason === undefined) return { to: `agent:${at}`, skipped };
+      skip(at, reason);
+      at = agent.supervisorId;
+    }
+    return { to: "owner", skipped };
+  }
+
+  /** Why the agent cannot take a concern on this task (no live identity, or no right to see the task); `undefined` when it can. */
+  async #cannotSee(agentId: string, c: ConcernBody): Promise<string | undefined> {
+    const stored = (await this.#runner.get("principal", `agent:${agentId}`))?.body as unknown as PrincipalBody | undefined;
+    if (stored === undefined || stored.state !== "active") return "has no active identity";
+    const now = this.#runner.now();
+    const principal = await effectiveOf(this.#runner, { id: `agent:${agentId}`, kind: "agent", name: stored.name, grants: stored.grants }, now);
+    const scope = { resource: { kind: "task", id: c.taskId }, now } as const;
+    return ["task.read", "assignment.read", "assignment.manage"].some((a) => allows(principal, a, c.projectId, scope)) ? undefined : "cannot see the task";
   }
 
   /** The suspected concerns, read as the controller (no per-reader filter: the caller is the owner or the recovery service), at most `limit`. */
@@ -545,7 +611,7 @@ export class StallService {
 
   async get(by: Principal, id: string): Promise<View<ConcernBody> | undefined> {
     const found = await this.#concern(id);
-    return found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId)) ? undefined : (found as unknown as View<ConcernBody>);
+    return found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId, found.escalatedTo)) ? undefined : (found as unknown as View<ConcernBody>);
   }
 
   /** Concerns of one state (default `suspected`), a page at a time, only those the caller may read. */
@@ -564,7 +630,7 @@ export class StallService {
         after = row.id;
         if (prefix !== undefined && !row.id.startsWith(prefix)) return { items };
         const body = row.body as unknown as ConcernBody;
-        if (body.state !== state || !(await this.#mayRead(by, body.projectId, body.taskId))) continue;
+        if (body.state !== state || !(await this.#mayRead(by, body.projectId, body.taskId, body.escalatedTo))) continue;
         items.push(view<ConcernBody>(row));
         if (items.length === limit) return { items, next: row.id };
       }
@@ -616,7 +682,9 @@ export class StallService {
   }
 
   /** Owner, the agent a concern is about, the supervisor it is routed to, and holders of `assignment.read` or `assignment.manage` in the project. */
-  async #mayRead(by: Principal, projectId: string, taskId: string): Promise<boolean> {
+  async #mayRead(by: Principal, projectId: string, taskId: string, escalatedTo?: string): Promise<boolean> {
+    // An escalated-to supervisor sees and decides the one concern only while it can still see the task (a right it lost since is not kept by the escalation).
+    if (escalatedTo !== undefined && escalatedTo === by.id && by.kind === "agent" && ["task.read", "assignment.read", "assignment.manage"].some((a) => allows(by, a, projectId, { resource: { kind: "task", id: taskId } }))) return true;
     const scope = { resource: { kind: "task", id: taskId } } as const;
     if (by.kind === "owner" || allows(by, "assignment.read", projectId, scope) || allows(by, "assignment.manage", projectId, scope)) return true;
     const assignment = await this.#assignments.getAssignment(taskId);

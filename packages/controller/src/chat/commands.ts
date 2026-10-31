@@ -41,6 +41,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Which event sources are watched decides what wakes agents and spends work (card H13f): shown first in every profile (provisional; see the notes).
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
   // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
+  // How long a stuck agent's concern waits at each supervisor before it climbs is an escalation policy (owner decision 2026-10-30, supervisor ladder): shown first in every profile (provisional).
+  "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.

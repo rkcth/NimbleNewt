@@ -11,7 +11,7 @@ import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApp
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
-import { StallService, type StallOptions } from "../health/index.js";
+import { EscalationLadderService, StallService, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
@@ -115,7 +115,7 @@ export interface StartOptions {
   /** How the host brings an agent its `availability` hook reports stopped or suspended up for one meeting (card M04f). Called only after the owner authorized that wake (`meeting.wake`), once per meeting and agent key, and must treat a repeated key as the same request. Absent: that authorization is refused. */
   readonly meetingWake?: { readonly recover: (request: HostWakeRequest) => Promise<void>; readonly timeoutMs?: number };
   /** Stall detection's thresholds, the margin and the speeds a route is read at before it has been measured (card V01b); the controller's own pause check is not replaceable. */
-  readonly stall?: Pick<StallOptions, "thresholds" | "declaredSpeed" | "defaultReadTokensPerSecond" | "readMarginPercent">;
+  readonly stall?: Pick<StallOptions, "thresholds" | "declaredSpeed" | "defaultReadTokensPerSecond" | "readMarginPercent" | "escalateAfterMs">;
   /**
    * Builds the attempt dispatcher and runs its loops (card H12c): the tick, the messages, attendance, stand-up, event and decision loops. Off unless given. The loops run only while this controller
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
@@ -306,7 +306,9 @@ export async function startController(options: StartOptions): Promise<Controller
       const entry = (await routing.get())?.routes[route];
       return entry?.readTokensPerSecond === undefined ? undefined : { readTokensPerSecond: entry.readTokensPerSecond };
     };
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
+    // How long an undecided concern waits at each level of the supervisor ladder: the owner's setting, else the installation's `stall.escalateAfterMs`, else 24 hours (owner decision 2026-10-30, supervisor ladder).
+    const escalationLadder = EscalationLadderService.withEpoch(storage, epoch);
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ladderHours: () => escalationLadder.hours(), declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
@@ -453,7 +455,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const eventSourceSettings = EventSourceSettingsService.withEpoch(storage, epoch, () => eventSourceList);
     // What one local agent may use: the owner's setting over the start-up figures (card H12k).
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
-    const api = new StateApi({ eventSourceSettings, workerLimits, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ eventSourceSettings, workerLimits, escalationLadder, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

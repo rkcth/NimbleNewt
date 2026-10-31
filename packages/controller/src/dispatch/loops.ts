@@ -177,7 +177,7 @@ export function reviewLoops(reviews: Pick<ReviewService, "sweep">, projects: () 
  * L01b: the reconciler's pass (repairs, inbox admission with the pause lookup, effect recovery, wait deadlines) and stall detection. The scan needs the dedicated `recovery.stall-scan` right; a dispatcher
  * without it is told once (`missing`) and the scan is skipped, so the tick does not fail every time.
  */
-export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "escalateUndecided" | "markEscalationNotified">>, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>, notifyEscalation?: (concern: { id: string; taskId: string; projectId: string; kind: string; detail: string; escalatedAt?: string }) => Promise<void>): DispatcherLoop[] {
+export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "escalateUndecided" | "markEscalationNotified">>, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>, notifyEscalation?: (concern: { id: string; taskId: string; projectId: string; kind: string; detail: string; escalatedAt?: string; escalatedTo?: string; escalationLevel?: number }) => Promise<void>): DispatcherLoop[] {
   let said = false;
   // The scan continues where the last tick stopped and wraps at the end, so every assignment is reached however many there are.
   let cursor: string | undefined;

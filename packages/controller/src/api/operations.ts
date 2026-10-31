@@ -32,6 +32,7 @@ import type { StandupService } from "../standups/standups.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
+import type { EscalationLadderService } from "../health/escalation-ladder.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
@@ -90,6 +91,7 @@ export interface Context {
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
+  readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
@@ -213,6 +215,7 @@ const eventSourceSettingsOf = (c: Context): NonNullable<Context["eventSourceSett
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
 
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
+const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
 const placementOf = (c: Context): NonNullable<Context["placement"]> => c.placement ?? unavailable("placement settings");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
@@ -348,6 +351,10 @@ export const OPERATIONS: readonly Operation[] = [
   { name: "project.branches.set", kind: "command", summary: "The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.", args: { project: "the project ID", "protected?": "branch names or prefixes such as `release/*`", "landing?": "the landing branch, or null to clear it", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["project", "protected", "landing", "expectedRevision"]); const { project, ...rest } = a as { project: string }; return asJson({ ...(await branchSettingsOf(c).set(c.principal, { commandId: need(id), projectId: project, ...rest } as never)) }); } },
 
+  { name: "escalation.ladder.get", kind: "query", summary: "How long a stall concern nobody decides waits at each level of the supervisor ladder before it climbs to the next supervisor, and finally to the owner (owner only).", args: {}, result: "`{ item }`: `revision`, `hours` (the owner's hours for level 0, 1, 2 ..., empty when none are set) and `defaultHours` (24, used for a level the list does not name).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await escalationLadderOf(c).get(c.principal) }); } },
+  { name: "escalation.ladder.set", kind: "command", summary: "The owner sets how long a stall concern waits undecided at each level of the supervisor ladder (owner only): a stuck agent's concern goes to its supervisor first and, undecided after the level's time, to that supervisor's supervisor, and so on up to the owner. `hours` lists whole hours from 1 to 720 (30 days) for level 0 (the first supervisor), level 1 and so on, at most 16 levels; a level the list does not name waits 24 hours. The list replaces the earlier one; an empty list clears it. It counts from the next pass; a wait already running uses the new figure for its level.", args: { hours: "for example `[24, 48]`", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["hours", "expectedRevision"]); return asJson({ ...(await escalationLadderOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "workers.limits.get", kind: "query", summary: "What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).", args: {}, result: "`{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; each has any of `cpus`, `memoryMb`, `diskMb`, `processes`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await workerLimitsOf(c).get(c.principal) }); } },
   { name: "workers.limits.set", kind: "command", summary: "The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216) and `processes` (1 to 100000), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.", args: { limits: "for example `{ \"memoryMb\": 4096, \"processes\": 256 }`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
