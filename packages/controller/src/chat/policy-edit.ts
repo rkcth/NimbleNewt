@@ -213,8 +213,12 @@ export function saysWords(words: RegExp, wording: string): boolean {
  * that is not a question, a musing or a negation of it ("don't move the work off host:r1", "never take the work off host:r1"). "Take a look at host:r1" is not an order; the move is then shown first.
  */
 export function ordersHostMove(wording: string, hostId: string): boolean {
-  const verb = "move|relocate|re-?place|reassign|transfer|shift|take|pull";
-  return saysWords(new RegExp(`\\b(?:${verb})\\b(?:\\s+[\\w'-]+){0,5}?\\s+(?:off|from|away\\s+from|out\\s+of)\\s+(?:the\\s+)?${esc(hostId)}(?![a-z0-9-])`, "i"), wording);
+  // "take" and "pull" are ordinary words ("take a backup from host:r1", "pull the logs from host:r1"): they order a move only when what is taken is the work itself (work, attempts, tasks, everything).
+  const verb = "move|relocate|re-?place|reassign|transfer|shift";
+  const prep = `(?:off|from|away\\s+from|out\\s+of)\\s+(?:the\\s+)?${esc(hostId)}(?![a-z0-9-])`;
+  const plain = `\\b(?:${verb})\\b(?:\\s+[\\w'-]+){0,5}?\\s+${prep}`;
+  const taking = `\\b(?:take|pull)\\b(?:\\s+[\\w'-]+){0,4}?\\s+(?:work|attempts?|tasks?|everything)\\b(?:\\s+[\\w'-]+){0,3}?\\s+${prep}`;
+  return saysWords(new RegExp(`(?:${plain}|${taking})`, "i"), wording);
 }
 const freedom = (profile: string): number => (profile === "strict" ? 0 : profile === "derived" ? 1 : 2);
 const refuseDraft = (change: PolicyEditChange, evidence: string, code: string, message: string, conditions: readonly string[] = [], wording = ""): PolicyEditPrepared => ({

@@ -26,7 +26,7 @@ test("the owner sets the scratch cleanup: after-handoff by default, owner only, 
     const get = async () => (await call(boot.token, "cleanup.settings.get", {})).result.item;
 
     const first = await get();
-    assert.deepEqual([first.revision, first.scratch, first.default, first.effective], [0, null, "after-handoff", { scratch: "after-handoff" }]);
+    assert.deepEqual([first.revision, first.scratch, first.default, first.effective], [0, null, "after-handoff", { scratch: "after-handoff", awaitStopHours: 24 }]);
     assert.equal((await call(ann, "cleanup.settings.get", {})).error?.code, "forbidden");
     assert.equal((await call(ann, "cleanup.settings.change", { disable: ["scratch"] }, "c0")).error?.code, "forbidden");
     for (const [i, args] of ([{}, { set: { scratch: "delete" } }, { set: { other: "keep" } }, { set: "keep" }, { enable: ["nope"] }, { disable: "scratch" }, { set: { scratch: "keep" }, enable: ["scratch"] }, { enable: ["scratch"], disable: ["scratch"] }, { extra: 1, disable: ["scratch"] }, { disable: ["scratch"], expectedRevision: -1 }] as Record<string, unknown>[]).entries()) {
@@ -36,7 +36,7 @@ test("the owner sets the scratch cleanup: after-handoff by default, owner only, 
 
     const off = await call(boot.token, "cleanup.settings.change", { disable: ["scratch"] }, "c1");
     assert.ok(off.ok, JSON.stringify(off));
-    assert.deepEqual([(await get()).scratch, (await get()).effective], ["keep", { scratch: "keep" }]);
+    assert.deepEqual([(await get()).scratch, (await get()).effective], ["keep", { scratch: "keep", awaitStopHours: 24 }]);
     assert.equal((await call(boot.token, "cleanup.settings.change", { disable: ["scratch"] }, "c1")).result.revision, off.result.revision, "same command ID is the same change");
     assert.equal((await call(boot.token, "cleanup.settings.change", { enable: ["scratch"], expectedRevision: 0 }, "c2")).error?.code, "stale_revision");
     assert.ok((await call(boot.token, "cleanup.settings.change", { enable: ["scratch"], expectedRevision: off.result.revision }, "c3")).ok);
@@ -46,6 +46,16 @@ test("the owner sets the scratch cleanup: after-handoff by default, owner only, 
     assert.ok((await call(boot.token, "cleanup.settings.change", { unset: ["scratch"] }, "c5")).ok);
     const back = await get();
     assert.deepEqual([back.scratch, back.effective.scratch], [null, "after-handoff"], "unset: the default applies again");
+    // The patience before somebody is told that scratch is kept because a worker never confirmed stopping: chat-settable, can be off, and a change to one setting keeps the other.
+    assert.ok((await call(boot.token, "cleanup.settings.change", { set: { scratch: "keep", awaitStopHours: 48 } }, "c6")).ok);
+    assert.deepEqual([(await get()).scratch, (await get()).awaitStopHours, (await get()).effective.awaitStopHours], ["keep", 48, 48]);
+    assert.ok((await call(boot.token, "cleanup.settings.change", { disable: ["awaitStopHours"] }, "c7")).ok);
+    assert.deepEqual([(await get()).scratch, (await get()).effective.awaitStopHours], ["keep", null], "off; the scratch entry is kept");
+    assert.ok((await call(boot.token, "cleanup.settings.change", { unset: ["awaitStopHours"] }, "c8")).ok);
+    assert.equal((await get()).effective.awaitStopHours, 24);
+    for (const [i, args] of ([{ set: { awaitStopHours: 0 } }, { set: { awaitStopHours: 1.5 } }, { set: { awaitStopHours: "soon" } }, { set: { awaitStopHours: 5 }, disable: ["awaitStopHours"] }] as Record<string, unknown>[]).entries()) {
+      assert.equal((await call(boot.token, "cleanup.settings.change", args, `cw${i}`)).error?.code, "invalid_command", JSON.stringify(args));
+    }
     assert.ok("cleanup.settings.change" in CHAT_OPS, "the chat can propose it");
     assert.equal(CHAT_OPS["cleanup.settings.change"]!.mode, "propose");
   } finally {

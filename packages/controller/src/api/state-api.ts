@@ -10,7 +10,7 @@ import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseService } from "../release/index.js";
 import type { SubmissionService } from "../submissions/index.js";
 import type { SwarmService } from "../swarm/index.js";
-import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -26,6 +26,8 @@ import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { EscalationLadderService } from "../health/escalation-ladder.js";
+import type { RecoveryLadderService } from "../health/recovery-ladder.js";
+import type { StallService } from "../health/stall.js";
 import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { SetupReadinessService } from "../setup/index.js";
@@ -124,10 +126,15 @@ export interface StateApiDeps {
   readonly setup?: Pick<SetupReadinessService, "check">;
   /** How long an undecided stall concern waits at each level of the supervisor ladder (owner decision 2026-10-30, supervisor ladder). */
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
+  /** Which recovery actions are allowed at which level (card V02c), and the recovery step itself. */
+  readonly recoveryLadder?: Pick<RecoveryLadderService, "get" | "set">;
+  readonly recoveryStep?: Pick<StallService, "recover">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
+  readonly coverage?: Pick<CoverageService, "report">;
+  readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
@@ -255,9 +262,13 @@ export class StateApi {
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
+        ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
+        ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.setup === undefined ? {} : { setup: this.#deps.setup }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),
+        ...(this.#deps.recoveryLadder === undefined ? {} : { recoveryLadder: this.#deps.recoveryLadder }),
+        ...(this.#deps.recoveryStep === undefined ? {} : { recoveryStep: this.#deps.recoveryStep }),
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
