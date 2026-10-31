@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **209 of 319 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **209 of 320 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -114,7 +114,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 20 of 22 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓▓░░░░` 66% | 12 of 18 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 63% | 12 of 19 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 63% | 31 of 49 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 7 of 8 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
@@ -328,7 +328,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓░░░░ 12 of 18</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓░░░░░ 12 of 19</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -350,6 +350,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [x] **U11b** · P34 · Notification levels, the Needs you view and escalation to Urgent by age _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
 - [ ] **U11c** · P35 · Finish notification levels: Urgent triggers, critical path, answering in place, digest rule _(needs U11b)_
+- [ ] **U09b** · P38 · Finish the replay: web view, producers, composed thinking and rerun _(needs U09, U07, K06c, P07, C09h)_
 
 </details>
 
@@ -601,7 +602,7 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 - [ ] **X01** · P38 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
 - [ ] **Y03** · P38 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
 - [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
-- [ ] **X03** · P44 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
+- [ ] **X03** · P44 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U09b, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
 - [ ] **X02** · P45 · Run policy, isolation and adversarial campaign _(needs A06, U04, H12n, H12p, P08, P10, P10b, A07f, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
 - [ ] **X04** · P46 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X05** · P46 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_

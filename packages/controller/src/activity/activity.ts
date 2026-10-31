@@ -14,6 +14,8 @@ export const ACTIVITY_KINDS = [
 ] as const;
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
 
+export const STEP_OUTCOMES = ["proposed", "dispatched", "confirmed", "uncertain"] as const;
+export type StepOutcome = (typeof STEP_OUTCOMES)[number];
 export interface ManifestRef { readonly kind: string; readonly id: string; readonly version?: string }
 /** The context actually supplied at a step: the references and versions, including which summary stood in for earlier history. `missing` says it was not recorded, so a reader never mistakes silence for "nothing". */
 export type StepManifest = { readonly missing: false; readonly refs: readonly ManifestRef[]; readonly summaryId?: string } | { readonly missing: true; readonly reason: string };
@@ -27,6 +29,12 @@ export interface ActivityStepBody {
   readonly actor: string;
   readonly at: string;
   readonly manifest: StepManifest;
+  /** Where the step stands (card U09): `proposed` (asked for), `dispatched` (sent, no answer yet), `confirmed` (the result came back) or `uncertain` (it may or may not have happened). Absent when the writer did not say; a reader then shows "not recorded", never "confirmed". */
+  readonly outcome?: StepOutcome;
+  /** The branch or side line of work the step belongs to; steps of different branches are concurrent, not a sequence. Absent: the main line. */
+  readonly branch?: string;
+  /** The earlier step of this task this one replaces (a decision taken back, a result redone). The earlier step stays and is shown as non-authoritative. */
+  readonly supersedes?: number;
   /** The sensitive part (tool inputs and results, message text) lives in its own record under access control; the step keeps only whether it is there. */
   readonly payload: { readonly state: "stored"; readonly id: string; readonly chars: number; readonly redactions: number; readonly sensitive: boolean } | { readonly state: "none" } | { readonly state: "missing"; readonly reason: string };
 }
@@ -92,9 +100,9 @@ export class ActivityService {
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): ActivityService { return new ActivityService(new CommandRunner(storage, epoch, options)); }
 
   /** Appends a step. The writer is the owner, a host or service, or an agent with `history.append` (or working the task). */
-  async record(by: Principal, command: NoActor & { taskId: string; kind: ActivityKind; summary: string; manifest?: { refs: readonly unknown[]; summaryId?: string } | { missing: true; reason: string }; payload?: { text: string; sensitive?: boolean } | { missing: true; reason: string } }): Promise<{ id: string; seq: number; replayed: boolean }> {
+  async record(by: Principal, command: NoActor & { taskId: string; kind: ActivityKind; summary: string; manifest?: { refs: readonly unknown[]; summaryId?: string } | { missing: true; reason: string }; payload?: { text: string; sensitive?: boolean } | { missing: true; reason: string }; outcome?: StepOutcome; branch?: string; supersedes?: number }): Promise<{ id: string; seq: number; replayed: boolean }> {
     refuseThinking(command);
-    onlyKnown(command, ["commandId", "taskId", "kind", "summary", "manifest", "payload"]);
+    onlyKnown(command, ["commandId", "taskId", "kind", "summary", "manifest", "payload", "outcome", "branch", "supersedes"]);
     const taskId = checkTaskId(command.taskId);
     const task = await this.#task(taskId);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId) || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not record activity for that task`);
@@ -102,6 +110,9 @@ export class ActivityService {
     // The whole text is redacted first and only then cut to what is kept, so a secret that straddles the cut is never left half-hidden.
     const summary = clipText(statement(command.summary, "summary", ACTIVITY_LIMITS.summaryInput), ACTIVITY_LIMITS.summary);
     const manifest = this.#manifest(command.manifest);
+    if (command.outcome !== undefined && !STEP_OUTCOMES.includes(command.outcome)) invalid("outcome", `must be one of ${STEP_OUTCOMES.join(", ")}`);
+    const branch = command.branch === undefined ? undefined : typeof command.branch === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(command.branch) ? command.branch : invalid("branch", "must be a plain name of up to 80 characters");
+    if (command.supersedes !== undefined && (!Number.isSafeInteger(command.supersedes) || command.supersedes < 1)) invalid("supersedes", "must be the number of an earlier step");
     const cmd = scopedCommandId(by.id, command.commandId);
     const stepIdAt = (seq: number): string => derivedId("act", `${taskId}\0${seq}`);
     const payloadIdAt = (seq: number): string => derivedId("apl", `${taskId}\0${seq}`);
@@ -123,14 +134,15 @@ export class ActivityService {
     }
     const headRef: AggregateRef = { kind: KIND_OF.head, id: taskId };
     const r = await this.#runner.command("activity.record", { commandId: cmd, actor: by.id }, async () => ({
-      payload: { taskId, kind: command.kind, summary, manifest: manifest as unknown as JsonObject, payload: payload as unknown as JsonObject },
+      payload: { taskId, kind: command.kind, summary, manifest: manifest as unknown as JsonObject, payload: payload as unknown as JsonObject, ...(command.outcome === undefined ? {} : { outcome: command.outcome }), ...(branch === undefined ? {} : { branch }), ...(command.supersedes === undefined ? {} : { supersedes: command.supersedes }) },
       build: async () => {
         const found = await this.#runner.get(headRef.kind, headRef.id);
         const head = found?.body as unknown as HeadBody | undefined;
         const seq = head?.next ?? 1;
         const ref: AggregateRef = { kind: KIND_OF.step, id: stepIdAt(seq) };
         const stored = payload.state === "stored" ? { ...payload, id: payloadIdAt(seq) } : payload;
-        const body: ActivityStepBody = { taskId, projectId: task.projectId, seq, kind: command.kind, summary, actor: by.id, at: this.#runner.now(), manifest, payload: stored };
+        if (command.supersedes !== undefined && command.supersedes >= seq) throw new DomainError("invalid_command", "supersedes: must be the number of an earlier step of this task", { field: "supersedes" });
+        const body: ActivityStepBody = { taskId, projectId: task.projectId, seq, kind: command.kind, summary, actor: by.id, at: this.#runner.now(), manifest, ...(command.outcome === undefined ? {} : { outcome: command.outcome }), ...(branch === undefined ? {} : { branch }), ...(command.supersedes === undefined ? {} : { supersedes: command.supersedes }), payload: stored };
         const next: HeadBody = { next: seq + 1, projectId: task.projectId, lastAt: this.#runner.now(), unavailable: head?.unavailable ?? [] };
         const changes: { type: "create" | "update"; ref: AggregateRef; body: JsonObject; expectedRevision?: number }[] = [{ type: "create", ref, body: clean(body) }];
         if (payloadBody !== undefined) changes.push({ type: "create", ref: { kind: KIND_OF.payload, id: payloadIdAt(seq) }, body: clean({ ...payloadBody, seq }) });

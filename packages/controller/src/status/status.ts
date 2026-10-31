@@ -17,6 +17,7 @@ import type { CallBody } from "../mcp/mcp.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
 import type { ActivityService, ExplanationBody } from "../activity/activity.js";
+import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
@@ -210,6 +211,7 @@ export type StatusRequest =
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
+  | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string }
@@ -237,6 +239,8 @@ export interface StatusDeps {
   readonly agenda?: { openAgenda(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; topic: string; question?: string; requestedOutcome?: string; urgency: string; intent: string; state: string; requestedBy: string; timeboxMinutes?: number }[]; next?: string } | undefined> };
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
   readonly activity?: Pick<ActivityService, "steps" | "explanations"> & Partial<Pick<ActivityService, "timeline">>;
+  /** Step-through replay of a task's activity (card U09). Read only. Absent: the view is not offered. */
+  readonly replay?: Pick<ReplayService, "open" | "step" | "led">;
   /** The reviews only the owner can decide (card U11b). Absent: they are not listed. */
   readonly reviews?: { ownerPending(owner: Principal, limit?: number): Promise<readonly { id: string; taskId: string; projectId: string; name: string; requestedAt: string }[]> };
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
@@ -348,6 +352,7 @@ export class StatusService {
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
+      case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -472,6 +477,44 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting on the agenda of this project.", cite("project", projectId)));
     else if (open.next !== undefined) lines.push(line("There are more topics than shown.", cite("project", projectId)));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * Replay of a task's activity in plain lines (card U09): without `seq` a summary and a window of steps; with `seq` that step in full with what led to it. Read only: nothing is run, sent, submitted or asked of a model.
+   * Where a step stood, the branch it is on, whether a later step replaced it, redactions and gaps are said in words; an agent's words are shown as such.
+   */
+  async replayLines(by: Principal, request: { taskId: string; seq?: number; from?: number; limit?: number; lane?: string; agent?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const replay = this.#deps.replay;
+    if (replay === undefined) return undefined;
+    const taskId = checkTaskId(request.taskId);
+    const task = cite("task", taskId);
+    const describe = (s: ReplayStep): string => [
+      `Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`,
+      `(${s.outcome === "not-recorded" ? REPLAY_LABELS.notRecorded : s.outcome}${s.lane === "main" ? "" : `, branch ${shown(s.lane)}`}${s.authority === "superseded" ? `, replaced by step ${(s.supersededBy ?? []).join(", ")}: ${REPLAY_LABELS.superseded}` : ""}${s.content.state === "stored" && s.content.redactions > 0 ? `, ${s.content.redactions} redaction${s.content.redactions === 1 ? "" : "s"}` : ""}${s.content.state === "missing" ? `, content missing: ${shown(s.content.reason)}` : ""}${s.corrections > 0 ? `, ${s.corrections} correction${s.corrections === 1 ? "" : "s"}` : ""})`,
+    ].join(" ");
+    try {
+      if (request.seq !== undefined) {
+        const d = await replay.step(by, taskId, request.seq);
+        const led = await replay.led(by, taskId, request.seq);
+        const lines: Line[] = [line(describe(d.step), task)];
+        lines.push(line(d.step.versionsThen.state === "recorded" ? `Context then: ${d.step.versionsThen.refs.length === 0 ? "none listed" : d.step.versionsThen.refs.map((r) => `${shown(r.kind)} ${shown(r.id)}${r.version === undefined ? "" : ` @${shown(r.version)}`}`).join(", ")}${d.step.versionsThen.summaryId === undefined ? "" : `; summary ${shown(d.step.versionsThen.summaryId)} stood in for earlier history`}.` : `Context then: not recorded (${shown(d.step.versionsThen.reason)}).`, task));
+        for (const e of d.explanations.contemporaneous.items) lines.push(line(`${REPLAY_LABELS.contemporaneous} ${shown(e.by)} chose ${shown(e.choice)}. Uncertain: ${shown(e.uncertainty)}`, task));
+        for (const e of d.explanations.retrospective.items) lines.push(line(`${REPLAY_LABELS.retrospective} ${shown(e.choice)}`, task));
+        lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${shown(l.kind)} ${shown(l.id ?? "")}${l.version === undefined ? "" : ` @${shown(l.version)}`} (${l.relation})` : `${l.relation}: ${shown(l.note ?? "")}`)).join("; ")}.` : led.note, task));
+        if (d.thinking !== undefined) lines.push(line(d.thinking.state === "removed-by-retention" ? d.thinking.label : "The model's thinking is kept collapsed; ask to expand it. It is model output, not an explanation.", task));
+        return { observedAt: this.#runner.now(), lines };
+      }
+      const v = await replay.open(by, taskId, { ...(request.from === undefined ? {} : { from: request.from }), limit: request.limit ?? 10, ...(request.lane === undefined ? {} : { lane: request.lane }), ...(request.agent === undefined ? {} : { actor: request.agent }) });
+      const sm = v.summary;
+      const lines: Line[] = [line(`${sm.total} step${sm.total === 1 ? "" : "s"}${sm.scanLimited ? " (the first ones; the record is longer)" : ""}; ${sm.lanes.length} line${sm.lanes.length === 1 ? "" : "s"} of work; ${sm.unavailable.length} unavailable; ${sm.superseded} replaced; ${sm.stepsWithoutManifest} without a recorded context.`, task)];
+      for (const e of v.entries) lines.push("unavailable" in e ? line(`Step ${e.seq} is no longer available: ${shown(e.unavailable)}.`, task) : line(describe(e), task));
+      if (v.note !== undefined) lines.push(line(v.note, task));
+      if (v.next !== undefined) lines.push(line(`More steps follow; continue from step ${v.next + 1}.`, task));
+      return { observedAt: this.#runner.now(), lines };
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
   }
 
   /** The explanations agents wrote for their choices on a task (or one step), the latest first: what was chosen, what else was considered and why not, the evidence and what is uncertain; a retrospective one says so and says when the records could not explain the step. */

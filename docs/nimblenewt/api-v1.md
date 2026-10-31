@@ -452,6 +452,67 @@ Arguments:
 
 Result: `{ steps: [{ taskId, seq, kind, summary, actor, at }], scanned, truncated }`.
 
+#### `activity.replay.open`
+
+Opens a task's replay: a summary first (steps by kind, outcome, branch line and actor; unavailable ranges; redacted, replaced and corrected steps), then a window of steps as they were recorded. Read only: nothing is run, sent, submitted or asked of a model.
+
+Arguments:
+
+- `taskId`: the task
+- `from` (optional): first step number of the window (default 1)
+- `limit` (optional): 1 to 50, default 20
+- `lane` (optional): only this branch line (`main` for the main line)
+- `actor` (optional): only this actor's steps
+- `kind` (optional): only this kind of step
+- `withContent` (optional): true to include stored content you may read
+
+Result: `{ taskId, projectId, summary, entries: [step | { seq, unavailable }], next?, note? }`. A step: `{ seq, at, actor, kind, summary, lane, outcome (proposed, dispatched, confirmed, uncertain or not-recorded), versionsThen, authority (current or superseded), supersedes?, supersededBy?, content, corrections, previousInLane?, nextInLane?, links }`.
+
+#### `activity.replay.step`
+
+One step of a replay in full: the step, the explanations written at the time and those asked for afterwards (apart, each labelled), and, for the owner, whether the model's thinking was removed by retention. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+- `withContent` (optional): true to include stored content you may read
+
+Result: `{ step, explanations: { contemporaneous: { label, items }, retrospective: { label, items } }, thinking? }`.
+
+#### `activity.replay.led`
+
+What evidence and instruction led to a step, as links: the context it was given, the evidence written at the time, the nearest earlier instructions, messages and approvals on its line, and what it replaces. Links, not reasons. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+
+Result: `{ seq, links: [{ relation, kind?, id?, version?, seq?, note? }], grounded, note }`.
+
+#### `activity.replay.search`
+
+Finds steps of a task whose summary contains some words. Stored content is not searched. Same checks as reading the steps. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `query`: the words
+- `limit` (optional): 1 to 50, default 20
+
+Result: `{ matches: [step], scanLimited }`.
+
+#### `activity.replay.export`
+
+The whole replay of a task as data to keep: every step, gaps marked, explanations by kind. Stored content and the model's thinking are never in it. Same checks as reading the steps. Read only.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ format, exportedAt, taskId, projectId, summary, entries, explanations, content, thinking }`.
+
 #### `activity.payload`
 
 The stored content of one step (redacted). Sensitive content needs the owner or a history grant.
@@ -2533,9 +2594,26 @@ Arguments:
 - `summary`: one line
 - `manifest` (optional): { refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }
 - `payload` (optional): { text, sensitive? } or { missing: true, reason }
+- `outcome` (optional): proposed, dispatched, confirmed or uncertain; leave out when not known
+- `branch` (optional): the branch line the step belongs to (leave out for the main line)
+- `supersedes` (optional): the number of an earlier step this one replaces
 - `commandId`: required
 
 Result: `{ id, seq, replayed }`.
+
+#### `activity.replay.thinking`
+
+Owner only: expands the model's thinking for a task. It is a recorded look with a reason, shown labelled as model output (not an explanation of any decision). After retention removed it, the answer says so.
+
+Arguments:
+
+- `taskId`: the task
+- `reason`: why you are looking
+- `after` (optional): { entryId, block } from the previous page
+- `limit` (optional): blocks per page
+- `commandId`: required
+
+Result: `{ collapsed, state: stored | removed-by-retention, label, blocks?, next?, lookId? }`.
 
 #### `activity.explain`
 
