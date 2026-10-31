@@ -6,7 +6,7 @@ import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.j
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
-import { RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
+import { QuietHostService, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, type DecisionDeps } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
@@ -143,6 +143,8 @@ export interface DispatchHandle {
   readonly closeWorkers: () => Promise<void>;
   /** The remote-worker service when `remote` was given: the owner's moves of attempts and stores, and the placement records (card H02c proves them through the composed controller). */
   readonly remote?: RemoteWorkerService;
+  /** The owner's "move the work off this host" and the quiet-host pass, when remote hosts and `quietHosts` were given. */
+  readonly quietHosts?: Pick<QuietHostService, "moveWork" | "episodes">;
   /** Where remote workers connect (present when `remote` was given). */
   readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
@@ -206,6 +208,8 @@ export interface ComposeInput {
   readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay" | "holdWithOwner">>; readonly reconciler: { runPass(): Promise<unknown> } };
+  /** The owner's quiet-host figures (grace hours, automatic moves): given, the dispatcher's tick warns the owner about a host that stopped reporting and re-places its work as the figures say (needs remote hosts). */
+  readonly quietHosts?: { readonly settings: Pick<QuietHostSettingsService, "effective"> };
   readonly onError?: (error: unknown) => void;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
   readonly leadMinutes?: () => Promise<number | undefined>;
@@ -277,7 +281,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision), waitingMessages: (by, agent) => messages.waitingAtStandup(by, agent), ownerItems: ownerInboxFor, ownerNotices: ownerNoticesFor, outcomes: agendaOutcomeSink({ followUp: (turnId, f) => followUps.add(turnId, f), inquiry: async (id) => { const q = (await storage.getAggregate({ kind: "inquiry", id }))?.body as unknown as { asker?: string; taskId?: string } | undefined; return q?.asker === undefined || q.taskId === undefined ? undefined : { asker: q.asker, taskId: q.taskId }; }, messages }) });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
+  const quiet: { service?: QuietHostService } = {};
   const loops: DispatcherLoop[] = [
+    { name: "hosts.quiet", run: async (by) => { await quiet.service?.sweep(by); } },
     { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
     ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches),
     // The event is already in the agent's inbox; waking it is making sure an attempt is there to read it: one running will at its next boundary, one waiting for a place will when it starts (card H13c).
@@ -428,6 +434,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }) });
       for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
+      if (i.quietHosts !== undefined) {
+        const r = remote;
+        quiet.service = QuietHostService.withEpoch(storage, epoch, {
+          principal, settings: i.quietHosts.settings, hosts, remote: r, liveAttempts: async () => { const out: { attemptId: string; state: string }[] = []; for (const id of await d().liveAttemptIds(principal)) { const x = await d().get(principal, id); if (x !== undefined) out.push({ attemptId: id, state: x.state }); } return out; },
+          // The notice is the owner's, once per episode: the command ID is stable, and the reference is the host's name (a record code, never free text).
+          notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "host-record", id: n.hostId.slice("host:".length) }, detail: n.detail }); },
+        }, ro);
+      }
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
@@ -452,7 +466,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     if (i.options.manual !== true) driver.start();
     return {
       dispatcher, driver, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
-      ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }),
+      ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }), ...(quiet.service === undefined ? {} : { quietHosts: quiet.service }),
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
       workspacePortOf: async (taskId) => {
         const capable = workers.filter((w) => w.workspace !== undefined);

@@ -134,6 +134,18 @@ Result: `{ item }`: `revision`, `maxRounds` (the owner's, or null), `default`, `
 
 Completion: finished when accepted (`completed: true`).
 
+#### `host.quiet.get`
+
+What happens when a host stops reporting while it holds work (owner only): the owner is warned first, and the work is re-placed after a grace period unless the owner turns that off. Shows the owner's figures, the defaults and the effective ones.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `graceHours` and `autoMove` (the owner's, or null), `default` and `effective` (each `{ graceHours, autoMove }`).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `workers.limits.get`
 
 What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).
@@ -1540,6 +1552,32 @@ Arguments:
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `host.quiet.change`
+
+The owner sets what happens when a host stops reporting while it holds work (owner only). `graceHours` is how long the owner has to answer the warning before the work is re-placed from its last checkpoint on another allowed host (a whole number from 1 to 720; default 12). `autoMove` false means the work is never moved by itself (the owner can still move it with host.move-work); true turns it on. `null` clears a figure to its default; a figure not named keeps its value. It counts from the next pass.
+
+Arguments:
+
+- `graceHours` (optional): 1 to 720, or null to clear
+- `autoMove` (optional): true, false, or null to clear
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `host.move-work`
+
+The owner moves the work off a host right away (owner only), whether or not the host is quiet and whatever the quiet-host setting says: each live attempt of the host is re-placed from its last checkpoint on another host the placement rules allow (the old host is fenced). Attempts no host can take stay where they are and are listed with the reason; at most 25 are moved per call (`more` says so). The command ID makes a repeat move nothing twice.
+
+Arguments:
+
+- `hostId`: the host, for example `host:build-1`
+
+Result: `{ hostId, moved: [{ attemptId, to }], skipped: [{ attemptId, reason }], more }`.
 
 Completion: finished when accepted (`completed: true`).
 

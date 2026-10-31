@@ -51,6 +51,8 @@ import type { ActivityService } from "../activity/activity.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { ResumeSettingsService } from "../continuation/resume-settings.js";
+import type { QuietHostService } from "../remote/quiet-hosts.js";
+import type { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
@@ -100,6 +102,9 @@ export interface Context {
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
+  readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
+  /** Absent when the controller runs without remote hosts. */
+  readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
@@ -235,6 +240,8 @@ const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> =>
 
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
 const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
+const quietHostSettingsOf = (c: Context): NonNullable<Context["quietHostSettings"]> => c.quietHostSettings ?? unavailable("the quiet-host setting");
+const quietHostsOf = (c: Context): NonNullable<Context["quietHosts"]> => c.quietHosts ?? unavailable("remote hosts");
 const resumeSettingsOf = (c: Context): NonNullable<Context["resumeSettings"]> => c.resumeSettings ?? unavailable("resume settings");
 const dispatchLimitsOf = (c: Context): NonNullable<Context["dispatchLimits"]> => c.dispatchLimits ?? unavailable("dispatcher limits");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
@@ -390,6 +397,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["maxRounds", "expectedRevision"]); return asJson({ ...(await resumeSettingsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "project.branches.change", kind: "command", summary: "The owner protects more branches of a project or takes named ones off the list, leaving the others as they are (owner only). This is the form the chat uses, so a request that waits to be accepted does only what it says. Taking off a branch from a project still on the default list writes the default out first, so the other default stays protected.", args: { project: "the project ID", "add?": "branch names or prefixes such as `release/*` to protect", "remove?": "branch names or prefixes to stop protecting", "landing?": "the landing branch, or null to clear it", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["project", "add", "remove", "landing", "expectedRevision"]); notFromTask(c, "change branch settings"); const { project, ...rest } = a as { project: string }; return asJson({ ...(await branchSettingsOf(c).change(c.principal, { commandId: need(id), projectId: project, ...rest } as never)) }); } },
+  { name: "host.quiet.get", kind: "query", summary: "What happens when a host stops reporting while it holds work (owner only): the owner is warned first, and the work is re-placed after a grace period unless the owner turns that off. Shows the owner's figures, the defaults and the effective ones.", args: {}, result: "`{ item }`: `revision`, `graceHours` and `autoMove` (the owner's, or null), `default` and `effective` (each `{ graceHours, autoMove }`).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await quietHostSettingsOf(c).get(c.principal) }); } },
+  { name: "host.quiet.change", kind: "command", summary: "The owner sets what happens when a host stops reporting while it holds work (owner only). `graceHours` is how long the owner has to answer the warning before the work is re-placed from its last checkpoint on another allowed host (a whole number from 1 to 720; default 12). `autoMove` false means the work is never moved by itself (the owner can still move it with host.move-work); true turns it on. `null` clears a figure to its default; a figure not named keeps its value. It counts from the next pass.", args: { "graceHours?": "1 to 720, or null to clear", "autoMove?": "true, false, or null to clear", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["graceHours", "autoMove", "expectedRevision"]); return asJson({ ...(await quietHostSettingsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "host.move-work", kind: "command", summary: "The owner moves the work off a host right away (owner only), whether or not the host is quiet and whatever the quiet-host setting says: each live attempt of the host is re-placed from its last checkpoint on another host the placement rules allow (the old host is fenced). Attempts no host can take stay where they are and are listed with the reason; at most 25 are moved per call (`more` says so). The command ID makes a repeat move nothing twice.", args: { hostId: "the host, for example `host:build-1`" }, result: "`{ hostId, moved: [{ attemptId, to }], skipped: [{ attemptId, reason }], more }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["hostId"]); return asJson({ ...(await quietHostsOf(c).moveWork(c.principal, { commandId: need(id), hostId: a["hostId"] as string })) }); } },
   { name: "workers.limits.get", kind: "query", summary: "What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).", args: {}, result: "`{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; each has any of `cpus`, `memoryMb`, `diskMb`, `processes`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await workerLimitsOf(c).get(c.principal) }); } },
   { name: "workers.limits.set", kind: "command", summary: "The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216) and `processes` (1 to 100000), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.", args: { limits: "for example `{ \"memoryMb\": 4096, \"processes\": 256 }`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

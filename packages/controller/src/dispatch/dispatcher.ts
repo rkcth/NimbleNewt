@@ -611,6 +611,18 @@ export class DispatcherService {
     return out;
   }
 
+  /** Every attempt the dispatcher holds live (not finished), for the staff passes that look at where work runs (the quiet-host pass). Only staff may ask. */
+  async liveAttemptIds(by: Principal): Promise<string[]> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not list live attempts`);
+    const out: string[] = [];
+    for (const id of await this.#liveIds()) {
+      const d = await this.#load(id);
+      if (d !== undefined && d.body.state !== "finished") out.push(id);
+    }
+    return out;
+  }
+
   async get(by: Principal, attemptId: string): Promise<View<DispatchBody> | undefined> {
     const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
     if (d === undefined) return undefined;

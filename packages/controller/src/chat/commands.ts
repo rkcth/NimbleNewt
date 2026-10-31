@@ -52,6 +52,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
+  // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.
+  "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },
+  "host.move-work": { verb: "Move the work off a host", mode: "apply" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
   "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
@@ -157,6 +160,7 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "resource.bind": /\b(bind|add|attach|connect|link)/i,
   "task.transfer": /\b(transfer|hand over|reassign|move)/i,
   "task.assign": /\b(assign|give|allocate)/i,
+  "host.move-work": /\b(move|relocate|re-?place|reassign|transfer|shift|take)/i,
 };
 
 /** The key into `MOVE_VERBS` for a command, or undefined when the command needs no verb. */
@@ -203,7 +207,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (op === "decision.record" && args["category"] === "gate") return "a gate holds or releases work until you say otherwise, so it is shown first";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
-  if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
   if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
