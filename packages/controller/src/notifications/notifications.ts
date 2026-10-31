@@ -119,7 +119,7 @@ export interface ChannelAdapter { send(message: { readonly deliveryId: string; r
  */
 export type Responder = (owner: Principal, item: View<ItemBody>, answer: string, commandId: string) => Promise<void>;
 
-export const NOTIFICATION_LIMITS = { label: 200, detail: 200, retries: 5, retryMinutes: [1, 5, 30, 120, 480] as readonly number[], openItems: 1000, openNotices: 500, failedKept: 100, digestItems: 50, digestsPerRun: 20, occurrences: 50 } as const;
+export const NOTIFICATION_LIMITS = { label: 200, detail: 200, retries: 5, retryMinutes: [1, 5, 30, 120, 480] as readonly number[], openItems: 1000, openNotices: 500, failedKept: 100, digestItems: 50, digestsPerRun: 20, escalationsPerRun: 25, occurrences: 50 } as const;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const ITEM_ID = /^ntf-[a-z2-7]{20}$/;
@@ -496,12 +496,17 @@ export class NotificationService {
   async #escalateStale(settings: NotificationSettings, now: string): Promise<void> {
     if (settings.escalateAfterHours === null) return;
     const limit = Date.parse(now) - (settings.escalateAfterHours ?? DEFAULT_ESCALATE_AFTER_HOURS) * 3_600_000;
-    for (const item of await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))) {
+    let raised = 0;
+    // Oldest first and at most `escalationsPerRun` a tick, so a large backlog is worked off over several ticks and the oldest wait is never overtaken.
+    const open = (await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))).sort((a, b) => (a.firstAt < b.firstAt ? -1 : a.firstAt > b.firstAt ? 1 : a.id < b.id ? -1 : 1));
+    for (const item of open) {
+      if (raised >= NOTIFICATION_LIMITS.escalationsPerRun) break;
       if (item.state === "answered" || item.state === "settled" || item.escalatedAt !== undefined || levelOf(item, settings.levelByKind) !== "needs-you" || Date.parse(item.firstAt) > limit) continue;
       // What the item points at may have been settled in its own flow (a blocker resolved, a review decided): a settled record is not raised as Urgent.
       try { await this.#describe(item.kind, item.ref, item.projectId); } catch (error) { if (error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command")) continue; throw error; }
       const hours = Math.floor((Date.parse(now) - Date.parse(item.firstAt)) / 3_600_000);
       const delivery = this.#delivery(settings, { kind: "item", id: item.id }, `URGENT, unanswered for ${hours} hours: ${item.kind}: ${item.label}`, now, `${item.id}|${item.firstAt}|escalated`);
+      raised++;
       await this.#apply("notification.escalate", { commandId: `escalate-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
         const current = await this.#runner.get("notification-item", item.id);
         const body = current?.body as unknown as ItemBody | undefined;

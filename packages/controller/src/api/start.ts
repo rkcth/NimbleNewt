@@ -14,7 +14,7 @@ import { reassignWarningSink } from "../meetings/reassign-warning.js";
 import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApplier, taskUpdateApplier } from "../meetings/record.js";
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
-import { NotificationService } from "../notifications/index.js";
+import { NotificationService, type ChannelAdapter } from "../notifications/index.js";
 import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
@@ -134,6 +134,11 @@ export interface StartOptions {
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
    */
   readonly dispatch?: DispatchStartOptions;
+  /**
+   * How the owner is reached outside the inbox (card U11b): the named channel adapters the notification service delivers through when the owner sets the channel to `external` (Urgent items, escalations and digests
+   * all go through them), and a fixed clock for tests. With the dispatcher, each tick runs `notifications.runDue` (escalation of unattended Needs-you items, Notice expiry, digests, retries); without it nothing runs it.
+   */
+  readonly notifications?: { readonly channels?: Record<string, ChannelAdapter>; readonly clock?: () => string };
   /**
    * The protected tool bridge for catalogue tools (card T06, wired by T02b): the script runner and which hosts are this machine. Off unless given (and it needs `dispatch`). The service is built ONCE here, over the controller's one
    * catalogue, so a revocation reaches the calls it runs; `revocationPolicy` is only the fallback for a revocation that carried no owner choice.
@@ -383,7 +388,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const coverageSettings = CoverageSettingsService.withEpoch(storage, epoch);
     const coverage = CoverageService.withEpoch(storage, epoch, coverageSettings);
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
-    const notifications = NotificationService.withEpoch(storage, epoch);
+    const notifications = NotificationService.withEpoch(storage, epoch, { ...(options.notifications?.channels === undefined ? {} : { channels: options.notifications.channels }), ...(options.notifications?.clock === undefined ? {} : { clock: options.notifications.clock }) });
     const messages = AgentMessageService.withEpoch(storage, epoch, {
       onSent: async (e) => { await activity.record({ id: "service:messages", kind: "service", name: "messages", grants: [] } as Principal, { commandId: `msg-act:${e.messageId}`, taskId: e.taskId, kind: e.ownerSent ? "owner-message" : "agent-message", summary: `${e.sender} sent ${e.to} a ${e.class} message: ${e.purpose}`, manifest: { refs: [{ kind: "agent-message", id: e.messageId }] } } as never); },
       availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
@@ -631,7 +636,7 @@ export async function startController(options: StartOptions): Promise<Controller
             if (taskId === undefined) throw new DomainError("unavailable", `${e.escalatedTo} holds no task in the project to file the escalation notice against`);
             await messages.noticeFromController({ commandId: `inc-esc-${e.id}`, taskId, to: e.escalatedTo, purpose: "An incident was escalated to you", text: `${detail} Responsibility ${e.responsibilityId}; incident ${e.id}.` });
           }
-        } }, eventSources: eventSourceList, eventSourcesOff: () => eventSourceSettings.disabled(), workerLimits: () => workerLimits.effective(), workerPolicy: { bestEffortAllowed: () => workerLimits.bestEffortAllowed(), recordLaunch: (r) => workerLimits.recordLaunch(r) }, dispatchLimits: () => dispatchLimits.effective(), taskMinutes: async (taskId) => { const v = await configuration.taskValue("time.maxMinutes", taskId); return typeof v === "number" ? v : undefined; }, ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), resumes, sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }, { name: "workend.complete", sweep: () => workEnd.recover() }, { name: "scratch.recover", sweep: async () => { await scratchCleanup.recover(); } }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), ...(options.meetingWake === undefined ? {} : { meetingWake: meetingWakeSink(options.meetingWake, options.meetingWake.timeoutMs === undefined ? {} : { timeoutMs: options.meetingWake.timeoutMs }) }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+        } }, eventSources: eventSourceList, eventSourcesOff: () => eventSourceSettings.disabled(), workerLimits: () => workerLimits.effective(), workerPolicy: { bestEffortAllowed: () => workerLimits.bestEffortAllowed(), recordLaunch: (r) => workerLimits.recordLaunch(r) }, dispatchLimits: () => dispatchLimits.effective(), taskMinutes: async (taskId) => { const v = await configuration.taskValue("time.maxMinutes", taskId); return typeof v === "number" ? v : undefined; }, ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), resumes, sweeps: [{ name: "notifications.run", sweep: () => notifications.runDue() }, { name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }, { name: "workend.complete", sweep: () => workEnd.recover() }, { name: "scratch.recover", sweep: async () => { await scratchCleanup.recover(); } }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), ...(options.meetingWake === undefined ? {} : { meetingWake: meetingWakeSink(options.meetingWake, options.meetingWake.timeoutMs === undefined ? {} : { timeoutMs: options.meetingWake.timeoutMs }) }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
       } catch (error) {
         // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
         dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";
