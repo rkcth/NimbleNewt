@@ -411,6 +411,17 @@ test("a checkout with an untracked file, or with a file an ignore rule hides, is
   } finally { await w.done(); }
 });
 
+test("a landing whose shared tree gained another writer's file while it ran is reported as partial and not marked landed, although the head and branch did not move (card H12q re-review)", { skip }, async () => {
+  const w = await world({ hooks: { afterWrite: async () => { await writeFile(join(w.shared, "src", "intruder.ts"), "x\n"); } } });
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    const r = await w.host.run(call("landing"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["landed"], detailOf(r)["partial"]], [false, true]);
+  } finally { await w.done(); }
+});
+
 test("a script committed as executable (mode 100755) lands executable in the shared tree (card H12q re-review)", { skip: process.platform === "win32" ? "POSIX modes" : false }, async () => {
   const w = await world();
   try {

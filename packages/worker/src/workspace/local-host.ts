@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import { WorkspaceError } from "./errors.js";
@@ -74,7 +74,7 @@ export class LocalWorkspaces {
   }
 
   /** Where the bridge keeps its locks and kept changes for a shared tree: one place per tree, whichever task asks. */
-  #stateOf(shared: string): string { return join(this.#options.root, "shared-state", createHash("sha256").update(resolve(shared)).digest("hex").slice(0, 24)); }
+  #stateOf(shared: string): string { return join(this.#options.root, "shared-state", createHash("sha256").update(((): string => { try { return realpathSync(shared); } catch { return resolve(shared); } })()).digest("hex").slice(0, 24)); }
 
   /** Where the task's checkout is, or `undefined` when this host holds none for it (no shared repository for the project, a malformed name, or nothing made yet). */
   locate(call: { readonly taskId: string; readonly projectId: string }): CheckoutLocation | undefined {

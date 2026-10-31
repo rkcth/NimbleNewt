@@ -136,3 +136,20 @@ test("two tasks of a project share the bridge's state, and names that differ onl
     await assert.rejects(w.ws.ensure({ taskId: "tsk-x", projectId: "journal" }), /plain name/, "a project cannot take the name of the host's own folders");
   } finally { await w.done(); }
 });
+
+test("the bridge state of a shared tree is the same whichever spelling of its path names it (a link to it, a trailing slash), so one tree has one lock (card H12q re-review)", { skip: process.platform === "win32" ? "POSIX links" : skip }, async () => {
+  const w = await world();
+  try {
+    const { symlink } = await import("node:fs/promises");
+    const link = join(w.dir, "shared-link");
+    await symlink(w.shared, link);
+    const root = join(w.dir, "work2");
+    const viaLink = new LocalWorkspaces({ root, git: w.git, shared: (p) => (p === "prj-one" ? link : undefined), busy: () => [], landing: () => ({ branch: "main", requirePermit: false }) });
+    const direct = new LocalWorkspaces({ root, git: w.git, shared: (p) => (p === "prj-one" ? `${w.shared}/` : undefined), busy: () => [], landing: () => ({ branch: "main", requirePermit: false }) });
+    await viaLink.ensure({ taskId: "tsk-one", projectId: "prj-one" });
+    await direct.ensure({ taskId: "tsk-two", projectId: "prj-one" });
+    const a = viaLink.locate({ taskId: "tsk-one", projectId: "prj-one" })!;
+    const b = direct.locate({ taskId: "tsk-two", projectId: "prj-one" })!;
+    assert.equal(a.bridgeState, b.bridgeState);
+  } finally { await w.done(); }
+});

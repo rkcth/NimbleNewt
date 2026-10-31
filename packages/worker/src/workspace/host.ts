@@ -123,7 +123,9 @@ export class WorkspaceHost {
       return stale !== undefined ? no(stale) : this.#once(call, operation as HostOperation, where);
     };
     // What writes the shared working tree is one at a time per shared tree, whichever task asks (the order is always checkout, then shared tree).
-    return this.#serial(where.checkout, operation === "integration" || operation === "landing" ? () => this.#serial(`shared:${where.shared}`, work) : work);
+    // The key is the shared tree itself, not one spelling of its path: a link, a different case or a trailing slash must not give a second lock.
+    const sharedKey = await realpath(where.shared).catch(() => where.shared);
+    return this.#serial(where.checkout, operation === "integration" || operation === "landing" ? () => this.#serial(`shared:${sharedKey}`, work) : work);
   }
 
   /** Why the request must not start now (its deadline passed, or an attempt it names is running), or `undefined`. Nothing is written to the journal for a request refused here, so it is not counted as begun. */
@@ -249,7 +251,11 @@ export class WorkspaceHost {
     await this.#options.hooks?.afterWrite?.();
     // After the writes: the tree must still be on the same branch and head. A commit during the landing may have taken some of the files; that is reported, not repaired.
     const after = await git.sharedTree(where.shared).catch(() => undefined);
-    if (after === undefined || after.head !== first.head || after.branch !== policy.branch) {
+    // The tree must hold exactly the landed files (not more, not fewer): another writer, or a commit that took some of them, shows here even when the head and branch look the same.
+    const expected = new Set(files.map((f) => f.path));
+    const found = new Set(after?.entries.map((e) => e.path) ?? []);
+    const sameEntries = after !== undefined && found.size === expected.size && [...expected].every((p) => found.has(p));
+    if (after === undefined || after.head !== first.head || after.branch !== policy.branch || !sameEntries) {
       return { ok: true, summary: `${result.count} file(s) were written, but the shared workspace's head or branch changed during the landing (or could not be read afterwards); the checkout was not marked as landed and the written files may be partly committed: look at the shared workspace`, detail: { written: result.count, kept: 0, skipped: plan.files.length - files.length, changed: true, landed: false, partial: true } };
     }
     let marked = false;
@@ -290,7 +296,8 @@ export class WorkspaceHost {
         throw error;
       }
       if (planned.length === 0) return { ok: true, summary: "the checkout holds no change from its base; nothing to integrate", detail: { written: 0, kept: 0, skipped: 0, changed: false } };
-      const results = await git.integrate({ gitDir: where.gitDir, checkout: where.checkout, bridge, author, reason: call.reason });
+      // The same exclusive hold as a landing takes: an integration and a landing never write the shared tree at the same moment (in this process or another using the same bridge state).
+      const results = await bridge.exclusive("landing", () => git.integrate({ gitDir: where.gitDir, checkout: where.checkout, bridge, author, reason: call.reason }));
       const written = results.filter((r) => r.result.status === "written").length;
       const kept = results.flatMap((r) => (r.result.status === "rejected" ? [{ path: r.path.slice(0, 200), pendingId: r.result.pendingId }] : []));
       const skipped = results.filter((r) => r.result.status === "skipped").length;
