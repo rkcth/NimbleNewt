@@ -36,7 +36,7 @@ const rig: BoundaryRig = {
   },
 };
 
-for (const [action, expected] of [["operation", 30], ["claim", 6], ["epoch", 4], ["retry", 5]] as const) {
+for (const [action, expected] of [["operation", 31], ["claim", 6], ["epoch", 4], ["retry", 5]] as const) {
   test(`SQLite worker thread: a process killed before or after every statement of ${action === "operation" ? "a complex operation" : `a ${action}`} leaves either all of it or none of it, and it is durable exactly when COMMIT has run`, async (t) => {
     const report = await runBoundaryQualification(rig, action);
     t.diagnostic(`crash matrix (${action}): ${report.statements} statements, ${report.points} crash points, committed only at: ${report.committedPoints.join(", ")}`);
