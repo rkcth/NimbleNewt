@@ -2599,10 +2599,10 @@ Arguments:
 
 - `handoffId`: the hand-off
 - `acceptGaps` (optional): true to hand over an incomplete package
-- `reassignResponsibilities` (optional): IDs of the sender's responsibilities (listed in the package) to move to the recipient with the task; needs the right to assign responsibilities; not with a temporary reassignment; a failure for one leaves it with the sender and is reported in `reassigned`
+- `reassignResponsibilities` (optional): IDs of the sender's responsibilities (listed in the package) to move to the recipient with the task; needs the rights to assign and write responsibilities in the project, and the recipient must be an active agent (all checked before anything moves); not with a temporary reassignment; a repeat must name the same list. Moved at once; a recipient lacking rights for a duty is warned about to the owner, naming them. A failure for one leaves it with the sender and is reported in `reassigned`
 - `commandId`: required
 
-Result: `{ item: { id, phase, … } }`.
+Result: `{ item: { id, phase, reassign?: { ids, by, at }, reassigned?: { at, moved: [id], failed: [{ id, reason }] }, … } }`: `reassign` is what was asked, `reassigned` what came of it (present once the task has moved).
 
 #### `handoff.takeover`
 

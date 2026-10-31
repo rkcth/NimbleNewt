@@ -83,6 +83,14 @@ for (const backend of backends) {
       assert.equal((await say("Complete the Build the login hand-off, gaps and all.")).status, "proposed", "accepting gaps is shown first");
       script["What about the Build the login hand-off."] = [cmd("handoff.complete", { taskTitle: "Build the login" }, "What about the Build the login hand-off")];
       assert.equal((await say("What about the Build the login hand-off.")).status, "proposed", "no word for the move: shown first");
+      // Responsibilities move only by IDs the owner said (a model must not pick which duties move); the refusal tells the owner what to say, and with the IDs in the message the move is shown first.
+      const rid = "rsp-aaaaaaaaaaaaaaaaaaaa";
+      script["Complete the Build the login hand-off and move its duties."] = [cmd("handoff.complete", { taskTitle: "Build the login", reassignResponsibilities: [rid] }, "Complete the Build the login hand-off")];
+      const guessed = await say("Complete the Build the login hand-off and move its duties.");
+      assert.equal(guessed.status, "refused");
+      assert.match(JSON.stringify(guessed), /rsp- IDs/);
+      script[`Complete the Build the login hand-off and move ${rid}.`] = [cmd("handoff.complete", { taskTitle: "Build the login", reassignResponsibilities: [rid] }, "Complete the Build the login hand-off")];
+      assert.equal((await say(`Complete the Build the login hand-off and move ${rid}.`)).status, "proposed", "moving duties is shown first");
       script["Cancel the Build the login hand-off."] = [cmd("handoff.cancel", { taskTitle: "Build the login" }, "Cancel the Build the login hand-off")];
       assert.equal((await say("Cancel the Build the login hand-off.")).status, "applied");
       assert.deepEqual(calls, ["cancel"]);

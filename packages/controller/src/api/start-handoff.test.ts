@@ -7,7 +7,9 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { WorkerHost } from "../dispatch/index.js";
 import { PI } from "../dispatch/testing/world.js";
-import { responsibilityHandover } from "../lifecycle/index.js";
+import { DomainError } from "../domain/errors.js";
+import { NotificationService } from "../notifications/index.js";
+import { describeReassigned, responsibilityHandover } from "../lifecycle/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -244,15 +246,102 @@ test("the owner moves chosen responsibilities of the sender to the recipient wit
     const partial = await mover.apply(rob, { handoffId: "hnd-x", ids: [r4.id, r3.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
     assert.deepEqual(partial.moved, [r4.id]);
     assert.deepEqual(partial.failed.map((f) => f.id), [r3.id]);
-    assert.match(partial.failed[0]!.reason, /no longer answered for by the sender/);
+    assert.match(partial.failed[0]!.reason, /no longer the sender/);
     const again = await mover.apply(rob, { handoffId: "hnd-x", ids: [r4.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
     assert.deepEqual(again.moved, [r4.id], "repeating it is harmless");
     const gone = await mover.apply(undefined, { handoffId: "hnd-y", ids: [r2.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
     assert.deepEqual(gone.moved, []);
     assert.match(gone.failed[0]!.reason, /gone or no longer active/);
     assert.equal(await ownerOf(r2.id), `agent:${a}`);
+    // A storage error is not an answer for the entry: it is thrown so the step is repeated; a refusal of the update is a final answer for that entry only.
+    const r6 = await mk("6", `agent:${a}`);
+    const flaky = (error: Error) => responsibilityHandover({ responsibilities: { get: (by: never, id: string) => c.services.responsibilities.get(by, id), update: async () => { throw error; } } as never, projectOf: async () => project });
+    await assert.rejects(flaky(new Error("SQLITE_BUSY")).apply(rob, { handoffId: "hnd-z", ids: [r6.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } }), /SQLITE_BUSY/);
+    const refusedUpdate = await flaky(new DomainError("invalid_command", "must be an active agent")).apply(rob, { handoffId: "hnd-z", ids: [r6.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
+    assert.deepEqual(refusedUpdate.failed, [{ id: r6.id, reason: "must be an active agent" }]);
+    assert.equal(await ownerOf(r6.id), `agent:${a}`);
+    // A recipient that is not an active agent is refused before anything moves.
+    const picky = responsibilityHandover({ responsibilities: c.services.responsibilities, projectOf: async () => project, activeAgent: async () => false });
+    await assert.rejects(picky.check(rob, { taskId: t1, ids: [r2.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } }), /not an active agent/);
     // Without the right to assign, nothing is accepted.
     const nobody = { id: "agent:zzz", kind: "agent", name: "zzz", grants: [] } as never;
     await assert.rejects(mover.check(nobody, { taskId: t1, ids: [r2.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } }), /may not assign/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("moving responsibilities with a hand-off: refused before anything moves without the assign and write rights, for another project's or a retired duty, for an inactive recipient; a recipient lacking rights is warned about to the owner; the activity sentence names what stayed (card L03i)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-handoff-reassign2-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const other = (await call(boot.token, "project.create", { name: "Shed" }, "p2")).result.id as string;
+    const grant = async (who: string, action: string, proj = project) => { await c.services.grants.grant(rob, { commandId: `g-${who}-${action}-${proj}`, grantee: who.startsWith("agent:") ? who : `agent:${who}`, action, project: proj, source: "direct", basis: "test" } as never); };
+    const agent = async (n: string, actions: string[]) => { const id = (await c.services.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id; for (const a of actions) await grant(id, a); return id; };
+    const a = await agent("A", ["responsibility.read"]);
+    const bare = await agent("Bare", ["attempt.work"]);
+    const full = await agent("Full", ["attempt.work", "responsibility.read", "responsibility.write"]);
+    const mkTask = async (n: string) => { const t = (await call(boot.token, "task.create", { projectId: project, title: n, description: n }, `t-${n}`)).result.id as string; await call(boot.token, "task.transition", { taskId: t, to: "ready", expectedRevision: 1 }, `tr-${n}`); assert.ok((await call(boot.token, "task.assign", { taskId: t, owner: { kind: "agent", id: a } }, `as-${n}`)).ok); return t; };
+    const mk = (n: string, proj: string, ownerId: string) => c.services.responsibilities.create(rob, { commandId: `r-${n}`, projectId: proj, title: `Duty ${n}`, objective: "o", desiredCondition: "tidy", ownerId } as never);
+    const ownerOf = async (id: string) => (await c.services.responsibilities.get(rob, id))?.ownerId;
+    // A caller who may hand the task over but not assign responsibilities.
+    await c.services.principals.enroll(rob, { commandId: "e-mgr", kind: "agent", name: "mgr", grants: [{ action: "assignment.manage", project }, { action: "assignment.read", project }, { action: "task.read", project }, { action: "responsibility.read", project }] });
+    const mgr = (await c.services.principals.issueCredential(rob, "agent:mgr")).token;
+    const t1 = await mkTask("one");
+    const r1 = await mk("1", project, `agent:${a}`);
+    const h1 = await call(mgr, "handoff.prepare", { taskId: t1, to: { kind: "agent", id: full }, reason: "leave" }, "h1");
+    assert.ok(h1.ok, JSON.stringify(h1));
+    const noAssign = await call(mgr, "handoff.complete", { handoffId: h1.result.item.id, acceptGaps: true, reassignResponsibilities: [r1.id] }, "c1");
+    assert.equal(noAssign.error.code, "invalid_command", JSON.stringify(noAssign));
+    assert.match(noAssign.error.message, /responsibility\.assign is missing/);
+    await grant("mgr", "responsibility.assign");
+    const noWrite = await call(mgr, "handoff.complete", { handoffId: h1.result.item.id, acceptGaps: true, reassignResponsibilities: [r1.id] }, "c2");
+    assert.equal(noWrite.error.code, "invalid_command", JSON.stringify(noWrite));
+    assert.match(noWrite.error.message, /responsibility\.write is missing/);
+    assert.equal(await ownerOf(r1.id), `agent:${a}`);
+    assert.equal((await call(boot.token, "handoff.get", { handoffId: h1.result.item.id })).result.item.phase, "ready", "nothing moved");
+    // Without the list the caller still hands the task over; no duty moved.
+    assert.ok((await call(mgr, "handoff.complete", { handoffId: h1.result.item.id, acceptGaps: true }, "c3")).ok);
+    assert.equal(await ownerOf(r1.id), `agent:${a}`);
+
+    // Another project's duty and a retired duty are refused, with the owner completing; the task did not move.
+    const t2 = await mkTask("two");
+    const foreign = await mk("2", other, `agent:${a}`);
+    const retired = await mk("3", project, `agent:${a}`);
+    assert.ok((await c.services.responsibilities.update(rob, { commandId: "ret", responsibilityId: retired.id, expectedRevision: retired.revision, state: "retired" } as never)).id);
+    await grant(bare, "responsibility.read"); // bare keeps attempt.work + read; lacks write
+    const h2 = await call(boot.token, "handoff.prepare", { taskId: t2, to: { kind: "agent", id: bare }, reason: "leave" }, "h2");
+    assert.ok(h2.ok, JSON.stringify(h2));
+    for (const [rid, label] of [[foreign.id, "another project"], [retired.id, "retired"]] as const) {
+      const refused = await call(boot.token, "handoff.complete", { handoffId: h2.result.item.id, acceptGaps: true, reassignResponsibilities: [rid] }, `c-${label}`);
+      assert.equal(refused.error.code, "invalid_command", `${label}: ${JSON.stringify(refused)}`);
+    }
+    assert.equal((await call(boot.token, "handoff.get", { handoffId: h2.result.item.id })).result.item.phase, "ready");
+
+    // A recipient that cannot fully hold the duty gets it at once and the owner is warned, naming what is missing; the warning is raised once.
+    const r4 = await mk("4", project, `agent:${a}`);
+    const done = await call(boot.token, "handoff.complete", { handoffId: h2.result.item.id, acceptGaps: true, reassignResponsibilities: [r4.id] }, "c-ok");
+    assert.ok(done.ok, JSON.stringify(done));
+    assert.deepEqual(done.result.item.reassigned.moved, [r4.id]);
+    assert.equal(await ownerOf(r4.id), `agent:${bare}`, "moved at once, not held back by the missing right");
+    const warnings = (await NotificationService.withEpoch(c.storage, c.epoch, {}).inbox(rob)).items.filter((i: any) => /after a hand-off but lacks/.test(String((i as any).detail ?? JSON.stringify(i))));
+    assert.equal(warnings.length, 1);
+    assert.match(JSON.stringify(warnings[0]), /responsibility\.write/);
+    assert.ok(!/responsibility\.read, /.test(JSON.stringify(warnings[0])), "only what is missing is named");
+    // A recipient with every right is not warned about.
+    const t3 = await mkTask("three");
+    const r5 = await mk("5", project, `agent:${a}`);
+    await grant(full, "attempt.work");
+    const h3 = await call(boot.token, "handoff.prepare", { taskId: t3, to: { kind: "agent", id: full }, reason: "leave" }, "h3");
+    assert.ok((await call(boot.token, "handoff.complete", { handoffId: h3.result.item.id, acceptGaps: true, reassignResponsibilities: [r5.id] }, "c-ok2")).ok);
+    assert.equal((await NotificationService.withEpoch(c.storage, c.epoch, {}).inbox(rob)).items.filter((i: any) => /after a hand-off but lacks/.test(JSON.stringify(i))).length, 1);
+
+    // The sentence for the task's record says what stayed with the sender and why.
+    const note = describeReassigned({ moved: ["rsp-a"], failed: [{ id: "rsp-b", reason: "retired meanwhile" }] });
+    assert.match(note, /moved with it: 1\./);
+    assert.match(note, /1 stayed with the sender: rsp-b \(retired meanwhile\)/);
+    assert.equal(describeReassigned(undefined), "");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

@@ -7,4 +7,4 @@ export { STOP_CHOICES, STOP_LIMITS, StopService, type InventoryItem, type StopCh
 export { agentsUnder, dispatchStopPorts, hostLocalWork, swarmDescendants, swarmDescendantsInfo, type LocalWork } from "./dispatch-ports.js";
 export { HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, REQUIRED_SECTIONS, type TaskHandoffBody, type HandoffPhase, type HandoffSection, type HandoffSources, type ResponsibilityHandover } from "./handoff.js";
 export { controllerHandoffSources } from "./handoff-sources.js";
-export { responsibilityHandover } from "./handoff-responsibilities.js";
+export { describeReassigned, responsibilityHandover } from "./handoff-responsibilities.js";

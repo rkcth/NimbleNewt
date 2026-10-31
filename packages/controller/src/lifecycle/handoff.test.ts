@@ -6,7 +6,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { HandoffService, PauseService, StopService, type HandoffSources, type InventoryItem, type StopPorts } from "./index.js";
+import { HandoffService, PauseService, StopService, type HandoffSources, type ResponsibilityHandover, type InventoryItem, type StopPorts } from "./index.js";
 
 after(stopServer);
 
@@ -56,7 +56,7 @@ class Sources implements HandoffSources {
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; mgr: Principal; ann: Principal; task: string; a: { kind: string; id: string }; b: { kind: string; id: string }; rt: Runtime; src: Sources; stops: StopService; pauses: PauseService;
-    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
+    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; resp: ResponsibilityHandover; told: { handoffId: string; reassigned?: unknown }[]; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -83,14 +83,16 @@ for (const backend of backends) {
         const failTransfer = { times: 0 };
         // The transfer can be made to fail once or more before it reaches the store, as a crash before it would.
         const assignments = { getAssignment: (t: string) => real.getAssignment(t), transferTask: async (cmd: Parameters<AssignmentService["transferTask"]>[0]) => { if (failTransfer.times > 0) { failTransfer.times--; throw new Error("process died before the transfer"); } return real.transferTask(cmd); } } as unknown as AssignmentService;
+        const told: { handoffId: string; reassigned?: unknown }[] = [];
+        const resp: ResponsibilityHandover = { check: async () => undefined, apply: async (_by, r) => ({ moved: [...r.ids], failed: [] }) };
         const mk = (asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService => {
           const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
           const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
-          return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src, ...(asker === undefined ? {} : { asker }), ...(given === undefined ? {} : { onReturnGivenUp: async (_by: Principal, e: { handoffId: string; taskId: string; reason: string }) => { given.push(e); } }) }, options);
+          return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src, responsibilities: { check: (...x) => resp.check(...x), apply: (...x) => resp.apply(...x) }, onTransferred: async (_by: Principal, e: { handoffId: string; reassigned?: unknown }) => { told.push(e); }, ...(asker === undefined ? {} : { asker }), ...(given === undefined ? {} : { onReturnGivenUp: async (_by: Principal, e: { handoffId: string; taskId: string; reason: string }) => { given.push(e); } }) }, options);
         };
         const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
         const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
-        await body({ owner, mgr, ann, task, a, b, rt, src, stops, pauses, handoffs: mk(), assignments: real, failTransfer, reopen: mk });
+        await body({ owner, mgr, ann, task, a, b, rt, src, stops, pauses, handoffs: mk(), assignments: real, failTransfer, resp, told, reopen: mk });
       } finally { await world.close(); }
     });
   const scopeOf = (task: string) => ({ kind: "task", id: task }) as const;
@@ -313,5 +315,35 @@ for (const backend of backends) {
     await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id });
     assert.equal(await paused(c), true, "the owner's hold is never lifted by a hand-off");
     assert.equal(await ownerOf(c), `${c.b.id}@2`);
+  });
+
+  suite("responsibilities moved with a hand-off: a storage error is retried by the sweep (not recorded as a failure), the asker is looked up again, the result reaches the activity hook, a changed list is refused (card L03i)", async (c) => {
+    const calls: { by: string; name: string; ids: readonly string[] }[] = [];
+    let busy = 1;
+    c.resp.apply = async (by, r) => { calls.push({ by: by?.id ?? "none", name: by?.name ?? "none", ids: r.ids }); if (busy > 0) { busy--; throw new Error("SQLITE_BUSY"); } return { moved: [r.ids[0]!], failed: r.ids.slice(1).map((id) => ({ id, reason: "retired meanwhile" })) }; };
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    // The task moves, then the responsibilities step hits a busy store: the hand-off is not finished and nothing is recorded as failed.
+    await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-a", "rsp-b"] }), /SQLITE_BUSY/);
+    assert.equal(await ownerOf(c), `${c.b.id}@2`, "the task itself has moved");
+    const mid = await c.handoffs.get(c.owner, h.id);
+    assert.equal(mid?.phase, "transferring");
+    assert.equal(mid?.reassigned, undefined, "a storage error is no answer for the entries");
+    // A repeat naming another list is refused, not silently dropped; the same list is fine.
+    await refuses("invalid_command", () => c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-c"] }));
+    assert.equal(calls.length, 1);
+    // The sweep repeats the step as the one who asked, looked up again (not as the sweeper).
+    const asker = { ...c.mgr, name: "looked-up-again" } as Principal;
+    const swept = await c.reopen(async (id) => (id === c.mgr.id ? asker : undefined)).sweep(c.owner);
+    assert.deepEqual(swept, { advanced: [h.id], failed: [] });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.name, "looked-up-again");
+    assert.equal(calls[1]!.by, c.mgr.id);
+    const done = await c.handoffs.get(c.owner, h.id);
+    assert.equal(done?.phase, "transferred");
+    assert.deepEqual(done?.reassigned?.moved, ["rsp-a"]);
+    assert.deepEqual(done?.reassigned?.failed, [{ id: "rsp-b", reason: "retired meanwhile" }]);
+    assert.deepEqual(c.told.map((t) => t.reassigned), [done?.reassigned], "the activity hook is told what moved and what stayed");
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-b", "rsp-a"] }); // same list, any order: a harmless repeat
+    await refuses("invalid_command", () => c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-z"] }));
   });
 }
