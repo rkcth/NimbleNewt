@@ -273,6 +273,34 @@ export class StandupService {
     return schedule === undefined || found === undefined ? undefined : { schedule, config: view<StandupConfigBody>(found) };
   }
 
+  /**
+   * A project's stand-ups (not the ended ones unless asked), oldest first, for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. At most `limit` (default 20, at most 50) are returned;
+   * `more` says some were left out. Added for the chat (card M03g), which names a stand-up by its title.
+   */
+  async list(viewer: Principal, projectId: string, options: { includeEnded?: boolean; limit?: number } = {}): Promise<{ items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[]; more: boolean } | undefined> {
+    const project = checkProjectId(projectId);
+    const limit = options.limit === undefined ? 20 : whole(options.limit, "limit", 1, STANDUP_LIMITS.agendaPage);
+    const items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[] = [];
+    let readable = false;
+    let after: string | undefined;
+    for (let pages = 0; pages < 20; pages++) {
+      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      if (chunk.length === 0) break;
+      for (const c of chunk) {
+        if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
+        const schedule = await this.#meetings.schedule(viewer, c.id);
+        if (schedule === undefined) continue;
+        readable = true;
+        if (schedule.state === "ended" && options.includeEnded !== true) continue;
+        if (items.length >= limit) return { items, more: true };
+        items.push({ scheduleId: c.id, title: schedule.title, state: schedule.state, time: schedule.time, timeZone: schedule.timeZone, revision: schedule.revision });
+      }
+      after = chunk[chunk.length - 1]!.id;
+      if (chunk.length < 100) break;
+    }
+    return readable || items.length > 0 ? { items, more: false } : undefined;
+  }
+
   // ---- preparation ---------------------------------------------------------------------------------------------------------------
 
   /**
@@ -774,6 +802,15 @@ export function allocationFrom(configuration: { effective(by: Principal): Promis
     if (values === undefined) return undefined;
     const num = (key: string): number | undefined => { const v = values[key]?.value; return typeof v === "number" ? v : undefined; };
     const floor = num("workClass.pcFloor"); const target = num("workClass.pcTarget"); const ceiling = num("workClass.pcCeiling");
+    return { ...(floor === undefined ? {} : { floor }), ...(target === undefined ? {} : { target }), ...(ceiling === undefined ? {} : { ceiling }) };
+  };
+}
+
+/** The same allocation from a reader of single installation settings (`ConfigurationService.installationValue`), which needs no principal. A key that is not a number is left out; a failing read gives undefined (the review then says no allocation is set). */
+export function allocationFromValue(read: (key: string) => Promise<unknown>): () => Promise<Allocation | undefined> {
+  return async () => {
+    const num = async (key: string): Promise<number | undefined> => { const v = await read(key); return typeof v === "number" ? v : undefined; };
+    const floor = await num("workClass.pcFloor"); const target = await num("workClass.pcTarget"); const ceiling = await num("workClass.pcCeiling");
     return { ...(floor === undefined ? {} : { floor }), ...(target === undefined ? {} : { target }), ...(ceiling === undefined ? {} : { ceiling }) };
   };
 }

@@ -132,8 +132,13 @@ export interface ContextBody {
   readonly focusProjectId?: string;
   /** The latest question whose answer would carry on held commands. */
   readonly awaiting?: { readonly turnId: string; readonly question: string; readonly choices: readonly string[] };
-  readonly projects: Readonly<Record<string, { readonly touchedAt: string; readonly lastTaskId?: string; readonly turns: readonly { readonly turnId: string; readonly at: string; readonly summary: string }[] }>>;
+  readonly projects: Readonly<Record<string, { readonly touchedAt: string; readonly lastTaskId?: string; readonly turns: readonly { readonly turnId: string; readonly at: string; readonly summary: string; /** What happened later to the topic (card M03g): shown by `context()` only, never stored. */ readonly followUps?: { readonly count: number; readonly latest: readonly { readonly text: string; readonly at: string }[] } }[] }>>;
 }
+
+/** Follow-ups are read for the project in focus and the few most recently touched ones; the rest of the listing shows no follow-ups (card M03g). */
+export const FOLLOW_UP_PROJECTS = 5;
+/** The latest follow-ups of a turn the listing shows. */
+export const FOLLOW_UP_SHOWN = 3;
 
 export interface TurnResult {
   readonly turnId: string;
@@ -336,7 +341,21 @@ export class ChatService {
 
   /** The owner's conversation context: the project in focus and, per project, what was last said and done there. Switching focus keeps every project's own thread. */
   async context(token: unknown): Promise<ContextBody> {
-    return this.#context((await this.#owner(token)).id);
+    const context = await this.#context((await this.#owner(token)).id);
+    // What the stand-up (or anything else) put back on a turn is shown in the listing of turns. Read, never stored: the stored summary stays what it was when the turn was done.
+    const ids = Object.entries(context.projects).sort((a, b) => (a[0] === context.focusProjectId ? -1 : b[0] === context.focusProjectId ? 1 : b[1].touchedAt.localeCompare(a[1].touchedAt))).slice(0, FOLLOW_UP_PROJECTS).map(([id]) => id);
+    const projects = { ...context.projects };
+    for (const id of ids) {
+      const entry = projects[id]!;
+      const turns = [];
+      for (const t of entry.turns) {
+        const body = await this.#turn(t.turnId).catch(() => undefined);
+        const f = body?.followUps ?? [];
+        turns.push(f.length === 0 ? t : { ...t, followUps: { count: f.length, latest: f.slice(-FOLLOW_UP_SHOWN).map(({ text, at }) => ({ text, at })) } });
+      }
+      projects[id] = { ...entry, turns };
+    }
+    return { ...context, projects };
   }
 
   /** Changes the focus (the project later messages are about). It changes nothing about a task that is running or a proposal that was drawn up: those carry their own project. */
@@ -519,7 +538,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { inquiryId: "questionTopic", occurrenceId: "meetingTopic", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", watchedTaskId: "watchedTaskTitle" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -682,6 +701,24 @@ export class ChatService {
       const found = await this.#get(token, "agenda.get", { itemId: args["itemId"] });
       if (found === undefined) return refuse("not_found", "no such agenda item");
       labels[String(args["itemId"])] = String(found["topic"]);
+    }
+    // A stand-up named by its title (or the only one of the project): exactly one whose title contains the words, else the owner is asked.
+    if (intent.op === "standup.update") {
+      const named = args["standupTitle"];
+      delete args["standupTitle"];
+      if (named !== undefined && args["scheduleId"] !== undefined) return refuse("invalid_command", "give either scheduleId or standupTitle, not both");
+      if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "standupTitle must be text");
+      const listed = await this.#get(token, "standup.list", { projectId });
+      const all = (listed?.["items"] as Record<string, unknown>[] | undefined) ?? [];
+      if (args["scheduleId"] === undefined) {
+        const words = typeof named === "string" ? named.trim().toLowerCase() : "";
+        const matches = all.filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
+        if (matches.length === 0) return refuse("not_found", words === "" ? "there is no stand-up in that project" : `no stand-up in that project is called "${words.slice(0, 80)}"`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["scheduleId"])} (${String(m["title"]).slice(0, 60)})`), field: "scheduleId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["scheduleId"])) };
+        args["scheduleId"] = String(matches[0]!["scheduleId"]);
+      } else if (!all.some((i) => i["scheduleId"] === args["scheduleId"])) return refuse("not_found", "that stand-up is not in this project");
+      const chosen = all.find((i) => i["scheduleId"] === args["scheduleId"]);
+      if (chosen !== undefined) labels[String(args["scheduleId"])] = String(chosen["title"]);
     }
     // A question to the owner named by its words (or the only one waiting): the one open question whose words, task or asker contain them, else the owner is asked.
     if (intent.op === "owner.answer") {
@@ -968,6 +1005,11 @@ export class ChatService {
       case "agenda": {
         const item = typeof args["itemId"] === "string" ? await this.#get(token, "agenda.get", { itemId: args["itemId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
+      }
+      case "standup": {
+        const item = typeof args["scheduleId"] === "string" ? await this.#get(token, "standup.get", { scheduleId: args["scheduleId"] }) : undefined;
+        const revision = (item?.["schedule"] as { revision?: number } | undefined)?.revision;
+        return revision === undefined ? refuse("not_found", "no such stand-up") : { ok: true, name: "expectedRevision", value: revision + ahead(`standup:${args["scheduleId"] as string}`) };
       }
       case "decision": {
         // The version of the topic the owner's session sees now (0 when nothing was decided): the newest live version that applies to the scope (task-level ones count for a project-wide decision), so a decision that moved meanwhile is never overwritten.
@@ -1564,6 +1606,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "difficulty.set-profiles": return "difficulty-profiles";
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
+    case "standup.update": return `standup:${a["scheduleId"] as string}`;
     case "notifications.configure": return "notifications";
     case "retention.settings.set": return "retention";
     case "catalog.policy.change": return "catalog-policy";

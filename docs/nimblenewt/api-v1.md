@@ -833,6 +833,18 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `standup.list`
+
+A project's stand-ups with their title, state (active, paused, ended), time and zone and the revision to quote when changing one. Ended ones are left out unless asked for. Needs the right to read the project's meetings; otherwise nothing is found.
+
+Arguments:
+
+- `projectId`: the project
+- `includeEnded` (optional): also list ended stand-ups
+- `limit` (optional): most items, 1 to 50, default 20
+
+Result: `{ item: { items, more } }`.
+
 #### `watch.list`
 
 Owner only: the active watches.

@@ -39,7 +39,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U09b, U08, U10, U11, U11b, U11c, U11d, U14 |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12q, H12s, H12r, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02, V02b, V02c |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M02g, M03, M03b, M03c, M03d, M03e, M03f, M03g, M04, M04b, M04c, M04d, M04e, M04f, M04g, M04h, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M02g, M03, M03b, M03c, M03d, M03e, M03f, M03g, M03h, M04, M04b, M04c, M04d, M04e, M04f, M04g, M04h, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T02c, T02d, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P03b, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
@@ -2230,8 +2230,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M03f.
-- **Deliverable:** Split from M03f (2026-10-30): the allocation sink (needs the configuration service in the dispatch composition) and the usage sink (nothing measures worker-slot time per project yet), showing follow-ups in the chat's own listing of turns, chat commands for stand-ups, and an agenda outcome that asks the owner a new question (an inquiry or chat turn created by the stand-up itself).
-- **Acceptance and verification:** A stand-up runs end to end in the running controller with every sink and the owner can run and read it through chat.
+- **Deliverable:** Split from M03f (2026-10-30), narrowed 2026-10-31: the allocation sink (the configured P/PC allocation is read through the controller's installation settings), follow-ups shown in the chat's listing of turns, and chat commands for stand-ups (pause, resume, end or rename one by its title; set one up as a proposal; deliver outcomes) are built. Remaining: see M03h.
+- **Acceptance and verification:** The allocation shows in the stand-up balance review in the running controller, a follow-up shows in the listing of turns, and the owner can change and deliver stand-ups through chat.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M03h — Finish stand-ups: usage sink, owner questions raised by a stand-up, chat to run and read a stand-up
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M03g.
+- **Deliverable:** Split from M03g (2026-10-31): the usage sink (nothing measures worker-slot time per project yet, so the review still counts tasks), an agenda outcome that asks the owner a new question (an inquiry or chat turn created by the stand-up itself), chat commands to prepare a stand-up now, read a brief and add a statement for an agent, and showing the stand-ups of a project in the chat's status answers (today only the agenda and the planned meetings are shown).
+- **Acceptance and verification:** A stand-up runs end to end in the running controller with every sink, a stand-up can ask the owner a new question and the owner can run and read a stand-up through chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M04 — Implement meeting attendance and return to work
@@ -3047,7 +3055,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, L05c, U14, M02g, M03g, M04g, M04h, L03i, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
