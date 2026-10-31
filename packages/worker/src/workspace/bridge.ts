@@ -43,9 +43,11 @@ export class WorkspaceBridge {
   readonly #shared: string;
   readonly #state: string;
   readonly #clock: () => string;
+  readonly #fault: ((phase: "rename" | "restore", path: string) => void) | undefined;
 
   /** `shared` is the shared workspace. `state` is where locks and kept changes live: outside `shared` and out of every sandbox's reach. */
-  constructor(options: { shared: string; state: string; clock?: () => string }) {
+  constructor(options: { shared: string; state: string; clock?: () => string; /** For tests: called before each rename of a set and before each put-back; it may throw to simulate a failing disk. */ fault?: (phase: "rename" | "restore", path: string) => void }) {
+    this.#fault = options.fault;
     this.#shared = options.shared;
     this.#state = options.state;
     this.#clock = options.clock ?? (() => new Date().toISOString());
@@ -97,7 +99,7 @@ export class WorkspaceBridge {
    * path that must be reviewed before it changes), nothing is written and those files are kept for review. Otherwise every new content is first made beside its file, then renamed into place; if one step fails the
    * ones already made are put back as they were. `guard` is asked inside the locks just before the first rename and may refuse. Folders made on the way stay (they are empty).
    */
-  async writeSet(request: { changes: readonly { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; hold?: string }[]; author: string; reason: string; guard?: () => Promise<void> }): Promise<{ status: "written"; count: number } | { status: "kept"; kept: { path: string; pendingId: string; foundVersion: string; why: "moved" | "held" }[] }> {
+  async writeSet(request: { changes: readonly { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; hold?: string; /** The file is to be executable (git mode 100755) or not; absent: keep the mode the file has (0644 for a new file). Ignored on Windows. */ executable?: boolean }[]; author: string; reason: string; guard?: () => Promise<void> }): Promise<{ status: "written"; count: number } | { status: "kept"; kept: { path: string; pendingId: string; foundVersion: string; why: "moved" | "held" }[] }> {
     const { changes } = request;
     if (changes.length > BRIDGE_LIMITS.setFiles) throw new WorkspaceError("invalid_path", `more than ${BRIDGE_LIMITS.setFiles} files cannot be written as one step`);
     let total = 0;
@@ -134,33 +136,41 @@ export class WorkspaceBridge {
       }
       await request.guard?.();
       // Phase one: every new content is made beside its file. Nothing in place has changed yet.
-      const made: { absolute: string; temporary?: string; old: Buffer | undefined; mode: number; exists: boolean; done: boolean }[] = [];
+      const made: { path: string; absolute: string; temporary?: string; old: Buffer | undefined; oldMode: number | undefined; mode: number; exists: boolean; done: boolean }[] = [];
       try {
         for (const f of found) {
           const c = f.c;
-          if (c.op === "delete") { made.push({ absolute: f.safe!.absolute, old: f.old, mode: 0o644, exists: true, done: false }); continue; }
+          if (c.op === "delete") { made.push({ path: c.path, absolute: f.safe!.absolute, old: f.old, oldMode: f.safe!.exists === "file" ? (await lstat(f.safe!.absolute)).mode & 0o777 : undefined, mode: 0o644, exists: true, done: false }); continue; }
           const safe = f.safe === undefined || f.safe.exists !== "file" ? await resolveSafe(this.#shared, c.path, { forWrite: true, createParents: true }) : f.safe;
           const exists = safe.exists === "file";
-          const mode = exists ? (await lstat(safe.absolute)).mode & 0o777 : 0o644;
+          const oldMode = exists ? (await lstat(safe.absolute)).mode & 0o777 : undefined;
+          // The mode the file has stays; a landing says when the file is (or is no longer) executable.
+          const mode = c.executable === undefined ? (oldMode ?? 0o644) : c.executable ? (oldMode ?? 0o644) | 0o111 : (oldMode ?? 0o644) & ~0o111;
           const temporary = `${safe.absolute}.nn-${randomBytes(8).toString("hex")}.tmp`;
           const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, mode);
-          made.push({ absolute: safe.absolute, temporary, old: f.old, mode, exists, done: false });
+          made.push({ path: c.path, absolute: safe.absolute, temporary, old: f.old, oldMode, mode, exists, done: false });
           try { await handle.writeFile(c.content!); await handle.sync(); } finally { await handle.close(); }
           if (process.platform !== "win32") await chmod(temporary, mode);
         }
         // Phase two: the renames. A failure puts back what was already changed.
         for (const m of made) {
+          this.#fault?.("rename", m.path);
           if (m.temporary === undefined) await rm(m.absolute, { force: true }); else await rename(m.temporary, m.absolute);
           m.done = true;
         }
       } catch (error) {
+        // Putting back is judged file by file: what was restored and what could not be is told exactly, never "nothing was written".
+        const restored: string[] = []; const notRestored: string[] = [];
         for (const m of made) {
+          if (m.temporary !== undefined) await rm(m.temporary, { force: true }).catch(() => undefined);
+          if (!m.done) continue;
           try {
-            if (m.temporary !== undefined) await rm(m.temporary, { force: true });
-            if (!m.done) continue;
-            if (m.old === undefined) await rm(m.absolute, { force: true }); else await this.#replace(m.absolute, m.old, false);
-          } catch { /* the rest is still put back */ }
+            this.#fault?.("restore", m.path);
+            if (m.old === undefined) await rm(m.absolute, { force: true }); else await this.#replace(m.absolute, m.old, false, m.oldMode);
+            restored.push(m.path);
+          } catch { notRestored.push(m.path); }
         }
+        if (notRestored.length > 0) throw new WorkspaceError("partial", `the files could not be written together and ${notRestored.length} of the ${restored.length + notRestored.length} already changed could not be put back`, { detail: { restored, notRestored, written: [...restored, ...notRestored] } });
         throw error instanceof WorkspaceError ? error : new WorkspaceError("unavailable", "the files could not be written together; the ones already changed were put back");
       }
       return { status: "written", count: made.length };
@@ -234,10 +244,11 @@ export class WorkspaceBridge {
   }
 
   /** Puts new content in place by writing a new file beside the old one and renaming it over: the old file's inode (and so any link to it) is never written through. */
-  async #replace(absolute: string, content: Buffer, exists: boolean): Promise<void> {
+  async #replace(absolute: string, content: Buffer, exists: boolean, modeOverride?: number): Promise<void> {
     const temporary = `${absolute}.nn-${randomBytes(8).toString("hex")}.tmp`;
     let mode = 0o644;
     if (exists) mode = (await lstat(absolute)).mode & 0o777;
+    if (modeOverride !== undefined) mode = modeOverride;
     let created = false;
     try {
       const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, mode);

@@ -225,7 +225,7 @@ export class WorkspaceHost {
     let result;
     try {
       result = await bridge.exclusive("landing", () => bridge.writeSet({
-        changes: files.map((f) => ({ path: f.path, op: f.op, expectedVersion: f.expectedVersion, ...(f.content === undefined ? {} : { content: f.content }), ...(isProtectedPath(f.path, patterns) ? { hold: "a protected path (CI, hooks or Git attributes) is changed only by review" } : {}) })),
+        changes: files.map((f) => ({ path: f.path, op: f.op, expectedVersion: f.expectedVersion, ...(f.content === undefined ? {} : { content: f.content }), ...(f.executable === undefined ? {} : { executable: f.executable }), ...(isProtectedPath(f.path, patterns) ? { hold: "a protected path (CI, hooks or Git attributes) is changed only by review" } : {}) })),
         author, reason: call.reason,
         guard: async () => {
           const again = await treeProblem();
@@ -235,6 +235,11 @@ export class WorkspaceHost {
       }));
     } catch (error) {
       if (error instanceof WorkspaceError && (error.code === "stale" || error.code === "unavailable")) return no(`${cut(error.message)}; nothing was landed`);
+      // A put-back that failed in part: the shared tree is in a mixed state, which is told exactly (never "nothing was landed"), and the owner is pointed at it by a blocker.
+      if (error instanceof WorkspaceError && error.code === "partial" && error.detail !== undefined) {
+        const d = error.detail;
+        return { ok: true, summary: cut(`${error.message}; the shared workspace is in a mixed state: restored ${d.restored.slice(0, 5).join(", ") || "none"}; NOT restored (still hold the landing's content): ${d.notRestored.slice(0, 5).join(", ")}; the checkout was not marked as landed; look at the shared workspace`), detail: { written: d.written.length, kept: 0, skipped: 0, changed: true, landed: false, partial: true, restored: d.restored.slice(0, 20), notRestored: d.notRestored.slice(0, 20), blocker: "the shared workspace holds part of a failed landing" } };
+      }
       throw error;
     }
     if (result.status === "kept") {

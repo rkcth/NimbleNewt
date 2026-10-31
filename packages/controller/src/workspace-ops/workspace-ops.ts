@@ -273,7 +273,7 @@ export class WorkspaceOpService {
           if (body.operation === "landing" && found.landed !== true) {
             const names = Array.isArray(found.keptFiles) ? found.keptFiles.flatMap((k) => (k !== null && typeof k === "object" && typeof (k as { path?: unknown }).path === "string" ? [(k as { path: string }).path] : [])).slice(0, 5) : [];
             const written = typeof found.written === "number" ? found.written : 0, kept = typeof found.kept === "number" ? found.kept : 0;
-            if (written > 0 || kept > 0) notLanded = `was NOT landed: ${written} file(s) were written to the shared workspace and ${kept} were kept for the owner's review${names.length === 0 ? "" : ` (${names.join(", ")})`}${found.partial === true ? "; the shared workspace changed during the landing, so the owner checks it" : "; a landing is all or nothing, so the rest needs the owner's decision or a new landing"}`;
+            if (written > 0 || kept > 0) notLanded = `was NOT landed: ${written} file(s) were written to the shared workspace and ${kept} were kept for the owner's review${names.length === 0 ? "" : ` (${names.join(", ")})`}${found.partial === true ? "; the shared workspace changed during the landing or could not be fully restored after a failure, so the owner checks it" : "; a landing is all or nothing, so the rest needs the owner's decision or a new landing"}`;
             changed = false;
           }
           // A quarantined checkout is gone from under the agent: while it is still quiet its attempt is stopped (it would only fail on a missing folder), and the task is left as it is.
@@ -294,8 +294,9 @@ export class WorkspaceOpService {
       if (body.operation === "landing" && this.#deps.notify !== undefined) {
         const waiting = outcome !== null && typeof outcome === "object" && outcome.ok === true && (outcome.detail as { waitingToCommit?: unknown } | undefined)?.waitingToCommit === true;
         const dirty = outcome !== null && typeof outcome === "object" && outcome.ok === false && /uncommitted file\(s\)/.test(String((outcome as { reason?: unknown }).reason ?? ""));
-        if (waiting || dirty) {
-          const text = waiting ? `Task ${body.taskId}: its work was landed in the shared workspace and waits there, uncommitted. Commit or clear those files so the next landing can go ahead.` : `Task ${body.taskId}: a landing was refused because the shared workspace holds uncommitted files (an earlier landing's, or other work). Commit or clear them, then ask again.`;
+        const mixed = outcome !== null && typeof outcome === "object" && outcome.ok === true && Array.isArray((outcome.detail as { notRestored?: unknown } | undefined)?.notRestored) && ((outcome.detail as { notRestored: unknown[] }).notRestored.length > 0);
+        if (waiting || dirty || mixed) {
+          const text = mixed ? `Task ${body.taskId}: a landing failed part-way and some files in the shared workspace could not be put back (${String(((outcome as unknown as { detail: { notRestored: unknown[] } }).detail.notRestored).slice(0, 5))}). The shared workspace needs your attention before another landing.` : waiting ? `Task ${body.taskId}: its work was landed in the shared workspace and waits there, uncommitted. Commit or clear those files so the next landing can go ahead.` : `Task ${body.taskId}: a landing was refused because the shared workspace holds uncommitted files (an earlier landing's, or other work). Commit or clear them, then ask again.`;
           try { await this.#deps.notify({ commandId: `wsn-${id}`, taskId: body.taskId, text: text.slice(0, 400) }); } catch { /* the outcome is recorded either way; the notice is retried by a repeat of the request only */ }
         }
       }

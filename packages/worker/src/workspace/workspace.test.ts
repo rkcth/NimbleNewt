@@ -301,3 +301,46 @@ test("protected paths: CI configuration, hooks and Git attributes match anywhere
   assert.equal(isProtectedPath("src/a.ts", ["src/a.ts"]), true);
   assert.equal(isProtectedPath(".gitattributes", []), false);
 });
+
+test("a set write that fails part-way and cannot put everything back says exactly which files are restored and which are not (not 'nothing was landed'), and put-back keeps the file mode (card H12q re-review)", { skip: isWindows ? "POSIX permissions" : false }, async () => {
+  const w = await world();
+  try {
+    const script = Buffer.from("#!/bin/sh\necho one\n");
+    await writeFile(join(w.shared, "run.sh"), script); await chmod(join(w.shared, "run.sh"), 0o755);
+    const main = Buffer.from("export const x = 1;\n");
+    // The second rename fails (a full disk), and putting back the first also fails for run.sh only.
+    let renames = 0;
+    const faulty = new WorkspaceBridge({ shared: w.shared, state: w.state, fault: (phase, path) => { if (phase === "rename" && ++renames === 2) throw new Error("ENOSPC: no space left on device"); if (phase === "restore" && path === "run.sh") throw new Error("ENOSPC again"); } });
+    const changes = [
+      { path: "README.md", op: "write" as const, expectedVersion: versionOf(Buffer.from("hello\n")), content: Buffer.from("changed readme\n") },
+      { path: "run.sh", op: "write" as const, expectedVersion: versionOf(script), content: Buffer.from("#!/bin/sh\necho two\n") },
+      { path: "src/main.ts", op: "write" as const, expectedVersion: versionOf(main), content: Buffer.from("changed\n") },
+    ];
+    // Sorted by path: README.md, run.sh, src/main.ts. The rename of run.sh (second) fails; README.md was done and is restored; run.sh was never renamed.
+    const err = await faulty.writeSet({ changes, author: "a", reason: "r" }).then(() => undefined, (e: unknown) => e);
+    assert.equal((err as WorkspaceError).code, "unavailable", "a clean put-back is the plain failure: nothing was left changed");
+    assert.equal(await readFile(join(w.shared, "README.md"), "utf8"), "hello\n");
+    assert.equal((await stat(join(w.shared, "run.sh"))).mode & 0o777, 0o755);
+    // Now the third rename fails; run.sh (already renamed) cannot be put back: the answer names it.
+    renames = 0;
+    const faulty2 = new WorkspaceBridge({ shared: w.shared, state: w.state, fault: (phase, path) => { if (phase === "rename" && ++renames === 3) throw new Error("ENOSPC"); if (phase === "restore" && path === "run.sh") throw new Error("ENOSPC again"); } });
+    const err2 = await faulty2.writeSet({ changes, author: "a", reason: "r" }).then(() => undefined, (e: unknown) => e) as WorkspaceError;
+    assert.equal(err2.code, "partial");
+    assert.deepEqual(err2.detail?.restored, ["README.md"]);
+    assert.deepEqual(err2.detail?.notRestored, ["run.sh"]);
+    assert.equal(await readFile(join(w.shared, "README.md"), "utf8"), "hello\n", "restored");
+    assert.equal(await readFile(join(w.shared, "run.sh"), "utf8"), "#!/bin/sh\necho two\n", "not restored: still the landing's content");
+    // A put-back that works keeps the executable bit of what it restores.
+    await writeFile(join(w.shared, "run.sh"), script); await chmod(join(w.shared, "run.sh"), 0o755);
+    renames = 0;
+    const faulty3 = new WorkspaceBridge({ shared: w.shared, state: w.state, fault: (phase) => { if (phase === "rename" && ++renames === 3) throw new Error("ENOSPC"); } });
+    await assert.rejects(faulty3.writeSet({ changes, author: "a", reason: "r" }));
+    assert.equal(await readFile(join(w.shared, "run.sh"), "utf8"), script.toString());
+    assert.equal((await stat(join(w.shared, "run.sh"))).mode & 0o777, 0o755, "the restored script is still executable");
+    // A landing says when a file is executable: a new script lands executable, and a file that stops being executable loses the bit.
+    const ok = await w.bridge.writeSet({ changes: [{ path: "bin/tool.sh", op: "write", expectedVersion: ABSENT, content: Buffer.from("#!/bin/sh\n"), executable: true }, { path: "run.sh", op: "write", expectedVersion: versionOf(script), content: Buffer.from("plain\n"), executable: false }], author: "a", reason: "r" });
+    assert.equal(ok.status, "written");
+    assert.equal((await stat(join(w.shared, "bin", "tool.sh"))).mode & 0o111, 0o111);
+    assert.equal((await stat(join(w.shared, "run.sh"))).mode & 0o111, 0);
+  } finally { await w.done(); }
+});

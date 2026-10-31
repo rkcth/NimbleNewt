@@ -454,13 +454,13 @@ export class GitBridge {
    * is never read, so a file written after the checks (by a process still running in the sandbox) cannot change what is landed. A Git-named path, a link or submodule, a path with a name problem, a file over the size limit
    * and too many files refuse the whole plan. A change of mode alone is listed as `modeOnly` (not carried).
    */
-  async landingPlan(options: { gitDir: string }): Promise<{ base: string; head: string; files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean }[] }> {
+  async landingPlan(options: { gitDir: string }): Promise<{ base: string; head: string; files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean; executable?: boolean }[] }> {
     const base = await this.#base(options.gitDir);
     const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
     if (base === head) return { base, head, files: [] };
     const listing = (await this.#run(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", base, head], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
     if (listing.length / 2 > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed`);
-    const files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean }[] = [];
+    const files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean; executable?: boolean }[] = [];
     let total = 0;
     for (let i = 0; i + 1 < listing.length; i += 2) {
       const [oldMode = "", newMode = "", oldSha = "", newSha = "", status = ""] = listing[i]!.slice(1).split(" ");
@@ -476,7 +476,7 @@ export class GitBridge {
       if (content === undefined) throw new WorkspaceError("invalid_path", `${JSON.stringify(path.slice(0, 80))} could not be read at the checkout's head`);
       total += content.length;
       if (total > 64 * 1024 * 1024) throw new WorkspaceError("invalid_path", "the change is larger than 64 MiB in total");
-      files.push({ path, op: "write", expectedVersion, content, modeOnly: false });
+      files.push({ path, op: "write", expectedVersion, content, modeOnly: false, executable: newMode === "100755" });
     }
     return { base, head, files };
   }

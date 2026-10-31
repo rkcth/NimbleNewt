@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -408,6 +408,20 @@ test("a checkout with an untracked file, or with a file an ignore rule hides, is
     assert.match(reasonOf(await w.host.run(call("landing"))), /not committed/);
     await rm(join(w.where.checkout, "build.log"));
     assert.equal(detailOf(await w.host.run(call("landing")))["landed"], true);
+  } finally { await w.done(); }
+});
+
+test("a script committed as executable (mode 100755) lands executable in the shared tree (card H12q re-review)", { skip: process.platform === "win32" ? "POSIX modes" : false }, async () => {
+  const w = await world();
+  try {
+    await mkdir(join(w.where.checkout, "bin"), { recursive: true });
+    await writeFile(join(w.where.checkout, "bin", "run.sh"), "#!/bin/sh\necho hi\n");
+    execFileSync("chmod", ["755", join(w.where.checkout, "bin", "run.sh")]);
+    commitCheckout(w, "add script");
+    assert.match(sh(w.where.checkout, "--git-dir", w.where.gitDir, "ls-tree", "HEAD", "bin/run.sh"), /^100755 /);
+    const r = await w.host.run(call("landing"));
+    assert.equal(detailOf(r)["landed"], true, JSON.stringify(r));
+    assert.equal(statSync(join(w.shared, "bin", "run.sh")).mode & 0o111, 0o111, "the landed script is executable");
   } finally { await w.done(); }
 });
 
