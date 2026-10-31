@@ -738,11 +738,13 @@ export class ChatService {
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "catalog.running", args: { name: args["name"], version: args["version"] } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
       const running = (found.result["items"] ?? []) as { attemptId: string; callId: string; taskId: string; agentId: string }[];
+      const total = typeof found.result["total"] === "number" ? Math.max(found.result["total"], running.length) : running.length;
       const listed = running.slice(0, 10).map((r) => `call ${String(r.callId).slice(0, 40)} of task ${String(r.taskId).slice(0, 60)} (agent ${String(r.agentId).slice(0, 60)})`);
-      const more = running.length > listed.length ? ` and ${running.length - listed.length} more` : "";
-      if (running.length > 0) notes.push(`${running.length} running ${running.length === 1 ? "call" : "calls"} of ${args["name"].slice(0, 80)} ${args["version"].slice(0, 20)}: ${listed.join("; ")}${more}.`.slice(0, CHAT_LIMITS.line - 10));
+      const more = total > listed.length ? ` and ${total - listed.length} more` : "";
+      if (total > 0) notes.push(`${total} running ${total === 1 ? "call" : "calls"} of ${args["name"].slice(0, 80)} ${args["version"].slice(0, 20)}: ${listed.join("; ")}${more}.`.slice(0, CHAT_LIMITS.line - 10));
+      notes.push("A version is revoked once: choosing finish cannot be changed to cancel later. Cancel reaches every running call when it is carried out, including calls that start before you accept.");
       if (args["runningCalls"] === undefined) {
-        if (running.length > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, or be cancelled? (A cancelled call ends as failed.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed"], field: "runningCalls", choices: ["finish", "cancel"] };
+        if (total > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, or be cancelled? (A cancelled call ends as failed.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed"], field: "runningCalls", choices: ["finish", "cancel"] };
         // Nothing is running now: the choice is recorded as finish, so a call that slips in before the owner accepts is not cancelled without being asked.
         args["runningCalls"] = "finish";
       }

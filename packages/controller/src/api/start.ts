@@ -232,6 +232,7 @@ async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<st
  */
 export async function startController(options: StartOptions): Promise<Controller> {
   if (options.meetingWake !== undefined) checkMeetingWakeTimeout(options.meetingWake.timeoutMs);
+  if (options.tools !== undefined && options.dispatch === undefined) throw new Error("options.tools needs options.dispatch: the tool bridge runs over the dispatcher, so without it the tools would be ignored");
   const print = options.print ?? ((line: string) => { process.stderr.write(`${line}\n`); });
   const override = overrideRequested(options.argv, options.env);
   const facts = options.facts ?? detectEnvironment();
@@ -275,6 +276,7 @@ export async function startController(options: StartOptions): Promise<Controller
   }
 
   let dispatch: DispatchHandle | undefined;
+  let toolsLive: ToolExecutionService | undefined;
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
@@ -375,8 +377,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Typed commands (card T09b): the `nimblenewt.` names are the state-API operations, `toolbox.` and `a_<id>.` names come from the catalog.
     // ONE catalogue for the whole controller: its revocation listeners live on the instance, so the revoke path and the tool bridge must share it.
     const catalogService = CatalogService.withEpoch(storage, epoch, desks);
-    let toolsLive: ToolExecutionService | undefined;
-    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), running: async (_owner, name, version) => toolsLive?.runningCalls(name, version) ?? [] };
+    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), running: async (_owner, name, version) => ({ calls: toolsLive?.runningCalls(name, version) ?? [], total: toolsLive?.runningTotal(name, version) ?? 0 }) };
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(catalogService)));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
@@ -547,6 +548,7 @@ export async function startController(options: StartOptions): Promise<Controller
       close: async () => { tools?.dispose(); await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
+    toolsLive?.dispose();
     await dispatch?.driver.stop().catch(() => undefined);
     await dispatch?.closeWorkers().catch(() => undefined);
     await storage.close().catch(() => undefined);

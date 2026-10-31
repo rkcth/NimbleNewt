@@ -126,8 +126,30 @@ export function guardedSignal(source: AbortSignal): AbortSignal {
   const signal = guard.signal;
   const target = signal as unknown as { addEventListener(type: string, listener: (event: unknown) => void, options?: unknown): void; onabort: unknown };
   const add = target.addEventListener.bind(signal);
+  const remove = (signal as unknown as { removeEventListener(type: string, listener: (event: unknown) => void, options?: unknown): void }).removeEventListener.bind(signal);
   const wrap = (listener: Listener) => (event: unknown): void => { try { if (typeof listener === "function") listener.call(signal, event); else listener.handleEvent(event); } catch { /* contained */ } };
-  target.addEventListener = (type, listener, options) => { if (listener !== null && listener !== undefined) add(type, wrap(listener as Listener), options); };
+  // The wrapper that stands for each listener (by type and capture flag), so removeEventListener removes what addEventListener added, and adding the same listener twice is still one registration.
+  const wrappers = new WeakMap<object, Map<string, (event: unknown) => void>>();
+  const capture = (options: unknown): boolean => (typeof options === "boolean" ? options : typeof options === "object" && options !== null && (options as { capture?: unknown }).capture === true);
+  const keyOf = (type: string, options: unknown): string => `${String(type)}|${capture(options)}`;
+  target.addEventListener = (type, listener, options) => {
+    if (listener === null || listener === undefined) return;
+    const known = wrappers.get(listener) ?? new Map<string, (event: unknown) => void>();
+    wrappers.set(listener, known);
+    const key = keyOf(type, options);
+    let wrapper = known.get(key);
+    if (wrapper === undefined) { wrapper = wrap(listener as Listener); known.set(key, wrapper); }
+    add(type, wrapper, options);
+  };
+  (signal as unknown as { removeEventListener: unknown }).removeEventListener = (type: string, listener: unknown, options?: unknown): void => {
+    if (listener === null || listener === undefined || (typeof listener !== "object" && typeof listener !== "function")) return;
+    const known = wrappers.get(listener);
+    const key = keyOf(type, options);
+    const wrapper = known?.get(key);
+    if (wrapper === undefined) return;
+    remove(type, wrapper, options);
+    known!.delete(key);
+  };
   let handler: ((event: unknown) => unknown) | null = null;
   Object.defineProperty(signal, "onabort", { configurable: true, get: () => handler, set: (fn: unknown) => { handler = typeof fn === "function" ? (fn as (event: unknown) => unknown) : null; } });
   add("abort", wrap((event) => { handler?.(event); }));
@@ -163,6 +185,9 @@ export class ToolExecutionService {
   runningCalls(name: string, version: string): { readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }[] {
     return [...(this.#running.get(`${name}|${version}`) ?? [])].slice(0, BRIDGE_LIMITS.runningListed).map(({ attemptId, callId, taskId, agentId }) => ({ attemptId, callId, taskId, agentId }));
   }
+
+  /** How many calls of the version are running in all (the list above is cut). */
+  runningTotal(name: string, version: string): number { return this.#running.get(`${name}|${version}`)?.size ?? 0; }
 
   /**
    * What the owner chose on the revoke command decides; with no choice (nobody could be asked) the dependency `revocationPolicy` answers, and without one the run finishes. A policy that cannot be read, or answers

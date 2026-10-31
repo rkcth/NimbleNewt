@@ -172,14 +172,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.running`
 
-The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach. Each is named by attempt, call, task and agent, never by its input; at most 50 are listed.
+The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach. Each is named by attempt, call, task and agent, never by its input; at most 50 are listed, and `total` counts all of them.
 
 Arguments:
 
 - `name`: the canonical tool name
 - `version`: major.minor.patch
 
-Result: `{ items: [{ attemptId, callId, taskId, agentId }] }`.
+Result: `{ items: [{ attemptId, callId, taskId, agentId }], total }`.
 
 #### `integration.get`
 
@@ -1614,7 +1614,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.revoke`
 
-The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed. Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets `finish`.
+The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed. Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets `finish`. `finish` cannot be changed to `cancel` later: a version is revoked once, and a second revoke is refused. `cancel` reaches every running call of the version at the moment it is carried out, including calls that started between the preview and the acceptance.
 
 Arguments:
 

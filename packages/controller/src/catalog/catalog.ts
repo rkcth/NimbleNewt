@@ -275,7 +275,7 @@ export class CatalogService {
     const ref: AggregateRef = { kind: "catalog-revocation", id: versionId };
     const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", command.name) };
     await this.#runner.command("catalog.revoke", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { versionId, reason, runningCalls: runningCalls ?? null },
+      payload: { versionId, reason, ...(runningCalls === undefined ? {} : { runningCalls }) },
       build: async () => {
         const entry = await this.#runner.get(eref.kind, eref.id);
         const prior = entry?.body as unknown as EntryBody | undefined;

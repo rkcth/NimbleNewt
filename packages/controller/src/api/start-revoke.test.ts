@@ -14,6 +14,8 @@ import { PolicyService } from "../policy/index.js";
 import { DifficultyService } from "../routing/index.js";
 import type { BridgeResponse, ScriptLaunch } from "../toolbridge/index.js";
 import { guardedSignal } from "../toolbridge/service.js";
+import { derivedId } from "../domain/ids.js";
+import { canonicalJson, sha256 } from "../storage/json.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -272,4 +274,50 @@ test("in chat, when the owner already said finish no question is asked and a cho
   assert.equal(seen.applied, "applied", JSON.stringify(seen.appliedAll));
   assert.equal(out.aborted, false);
   assert.equal(out.running["state"], "confirmed");
+});
+
+test("guardedSignal: removeEventListener removes what addEventListener added (also with once and capture), so a finished call leaks no listener and cannot kill an ended run (card T02b fix)", async () => {
+  const source = new AbortController();
+  const signal = guardedSignal(source.signal);
+  const ran: string[] = [];
+  const stop = (): void => { ran.push("stop"); };
+  signal.addEventListener("abort", stop);
+  signal.addEventListener("abort", stop); // the same listener twice is one registration, as natively
+  signal.removeEventListener("abort", stop);
+  const once = (): void => { ran.push("once"); };
+  signal.addEventListener("abort", once, { once: true });
+  signal.removeEventListener("abort", once);
+  const cap = (): void => { ran.push("cap"); };
+  signal.addEventListener("abort", cap, true);
+  signal.removeEventListener("abort", cap, { capture: true });
+  const kept = (): void => { ran.push("kept"); };
+  signal.addEventListener("abort", kept, { once: true });
+  const object = { handleEvent: (): void => { ran.push("object"); } };
+  signal.addEventListener("abort", object);
+  signal.removeEventListener("abort", object);
+  signal.removeEventListener("abort", () => undefined); // an unknown listener is ignored
+  source.abort(new Error("why"));
+  await sleep(10);
+  assert.deepEqual(ran, ["kept"]);
+});
+
+test("catalog.revoke without a choice keeps the digest the command had before the choice existed, so a replay recorded earlier still matches; catalog.running reports the total (card T02b fix)", async () => {
+  const seen: Record<string, any> = {};
+  await scenario(async ({ c, name, owner, call, ownerPrincipal }) => {
+    const listed = await call(owner, "catalog.running", { name, version: "1.0.0" });
+    seen.total = [listed.result.items.length, listed.result.total, c.tools!.runningTotal(name, "1.0.0")];
+    await c.services.catalog.revoke(ownerPrincipal, { commandId: "rv-nochoice", name, version: "1.0.0", reason: "bad" });
+    const audit = (await c.storage.listAudit({ afterSeq: 0, limit: 500 })).filter((a) => a.type === "catalog.revoke");
+    seen.digest = (audit[0]?.detail as Record<string, unknown> | undefined)?.["commandDigest"];
+    seen.expected = sha256(canonicalJson({ v: 1, type: "catalog.revoke", actor: ownerPrincipal.id, payload: { versionId: derivedId("cav", `${name}|1.0.0`), reason: "bad" } }));
+  });
+  assert.deepEqual(seen.total, [1, 1, 1]);
+  assert.equal(seen.digest, seen.expected);
+});
+
+test("startController refuses tools without dispatch, with a clear message (card T02b fix)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-revoke-"));
+  try {
+    await assert.rejects(startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], tools: { runner: { run: async () => ({ text: "{}", cpuMs: 1 }) }, isLocalHost: () => true } }), /options\.tools needs options\.dispatch/);
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
