@@ -192,6 +192,8 @@ export interface ComposeInput {
   readonly availability?: (principalId: string) => Promise<Availability>;
   /** Brings an agent the host reports stopped or suspended up for one meeting, after the owner authorized it (card M04f). Absent: the owner's authorization is refused ("no wake path"). */
   readonly meetingWake?: WakeSink;
+  /** Whether a task's work is a safe long-running operation during a meeting (card M04g, asked only for a running attempt). `options.dispatcher.safeLongRunning` replaces it. */
+  readonly safeLongRunning?: (taskId: string, attemptId: string) => Promise<boolean>;
   /** Release-test jobs carried to the hosts the owner authorized (card X09b). */
   readonly release?: Pick<ReleaseService, "jobsFor" | "pickUp" | "reportFromHost" | "expire">;
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
@@ -528,7 +530,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       routeKept: async (k) => { await context.routeKept(principal, { taskId: k.taskId }); },
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
-    }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
+    }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...((i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning) === undefined ? {} : { safeLongRunning: (i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning)! }), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
     i.bindWorkspacePort?.(async (taskId) => {

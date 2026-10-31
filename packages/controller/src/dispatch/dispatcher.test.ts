@@ -1450,21 +1450,62 @@ for (const backend of backends) {
     assert.deepEqual(asked, ["yields=false"]);
   });
 
-  suite("a provisional safeLongRunning predicate is passed to the meeting check; absent or failing it is not passed (card M04e)", async (c) => {
+  suite("a new attempt is deferred by a meeting however safe its task's jobs are: admission never passes safeLongRunning (card M04g)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, []));
     await c.task("t", ann);
     const asked: (boolean | undefined)[] = [];
+    let predicateCalls = 0;
     const meetings = {
       revalidation: async () => ({ required: false, entries: [] }),
       admission: async (_by: unknown, q: { safeLongRunning?: boolean }) => { asked.push(q.safeLongRunning); return { decision: "defer" as const, reason: "later" }; },
     };
-    c.dispatcher = c.restart({ meetings: meetings as never });
-    await c.dispatcher.tick();
-    c.dispatcher = c.restart({ meetings: meetings as never }, { safeLongRunning: async () => true });
-    await c.dispatcher.tick();
-    c.dispatcher = c.restart({ meetings: meetings as never }, { safeLongRunning: async () => { throw new Error("unknown"); } });
-    await c.dispatcher.tick();
-    assert.deepEqual(asked, [undefined, true, undefined]);
+    c.dispatcher = c.restart({ meetings: meetings as never }, { safeLongRunning: async () => { predicateCalls += 1; return true; } });
+    assert.deepEqual((await c.dispatcher.tick()).skipped.map((x) => x.check), ["meeting"], "still deferred");
+    assert.deepEqual(asked, [undefined]);
+    assert.equal(predicateCalls, 0, "the predicate is not even read for a new attempt");
+  });
+
+  suite("a RUNNING attempt carries on during a meeting only when the predicate says so for that attempt, a meeting concerns the agent and the predicate is read lazily (card M04g)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const { attemptId, taskId } = await c.task("t", ann);
+    const calls: string[] = [];
+    let meeting: { occurrenceId: string; startsAt: string; endsAt: string } | undefined;
+    let answer: () => boolean = () => true;
+    const meetings = {
+      revalidation: async () => ({ required: false, entries: [] }),
+      admission: async () => (meeting === undefined ? { decision: "start" as const, reason: "none" } : { decision: "start" as const, reason: "meeting", meeting }),
+    };
+    const hold = deferred<void>();
+    c.worker.script = async () => { await hold.promise; return { status: "completed" }; };
+    const d = c.restart({ meetings: meetings as never }, { safeLongRunning: async (t: string, a: string) => { calls.push(`${t === taskId} ${a === attemptId}`); return answer(); } });
+    const theMeeting = { occurrenceId: "mto-x", startsAt: "2026-01-01T00:00:00.000Z", endsAt: "2026-01-01T01:00:00.000Z" };
+    meeting = theMeeting;
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: true }), false, "not running yet: a new attempt never carries on, even in a meeting with a yes-saying predicate");
+    assert.deepEqual(calls, []);
+    meeting = undefined;
+    await d.tick();
+    assert.equal((await d.get(c.owner, attemptId!))!.state, "running");
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: true }), false, "no meeting concerns the agent");
+    assert.deepEqual(calls, [], "the predicate is not read without a meeting");
+    meeting = theMeeting;
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: true }), true);
+    assert.deepEqual(calls, ["true true"], "asked for this task and this attempt");
+    calls.length = 0;
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: false }), false, "the conversation is still working: it does not carry on");
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, {} as never), false, "idleness not established");
+    assert.deepEqual(calls, [], "the predicate is not read then");
+    answer = () => false;
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: true }), false, "foreground work remains: it yields");
+    answer = () => { throw new Error("store down"); };
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: true }), false, "fails closed");
+    assert.equal(await d.carriesOnDuringMeeting("not-an-attempt", { conversationIdle: true }), false);
+    hold.resolve();
+    await d.idle();
+    answer = () => true;
+    calls.length = 0;
+    assert.notEqual((await d.get(c.owner, attemptId!))!.state, "running");
+    assert.equal(await d.carriesOnDuringMeeting(attemptId!, { conversationIdle: true }), false, "an attempt that is no longer running does not carry on");
+    assert.deepEqual(calls, []);
   });
 
   suite("an effect call recorded on the ledger is never run again outside it: asked again with a local executor, or through begin, after a restart, it is settled from the ledger", async (c) => {

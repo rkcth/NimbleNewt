@@ -39,7 +39,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U09b, U08, U10, U11, U11b, U11c, U11d, U14 |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12q, H12s, H12r, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02, V02b, V02c |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M02g, M03, M03b, M03c, M03d, M03e, M03f, M03g, M04, M04b, M04c, M04d, M04e, M04f, M04g, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M02g, M03, M03b, M03c, M03d, M03e, M03f, M03g, M04, M04b, M04c, M04d, M04e, M04f, M04g, M04h, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T02c, T02d, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P03b, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
@@ -2290,16 +2290,24 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Status:** implemented; commits `1bd970f`, `0139674`, `33ff0ce`, `7b55417`, `e94975e`, `43fe62e`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The owner asks in chat for a stopped agent to attend and is told what it means; planned meetings and rosters are readable in chat; a wake path reaches a host hook once per wake with a bounded wait; the dispatcher passes a provisional safeLongRunning predicate. A real predicate and a host that supplies the wake are M04g.
 - **Blockers:** M04e.
-- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent (and planned meetings and rosters in chat), a wake path (meetingWakeSink, StartOptions.meetingWake) for agents the host's own availability hook reports stopped, and a safeLongRunning predicate the dispatcher passes to the meeting check. Composing a real predicate and a host that supplies the wake moved to M04g (2026-10-30)..
+- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent (and planned meetings and rosters in chat), a wake path (meetingWakeSink, StartOptions.meetingWake) for agents the host's own availability hook reports stopped, and a safeLongRunning predicate the dispatcher passes to the meeting check. Composing a real predicate and a host that supplies the wake moved to M04g (2026-10-30).
 - **Acceptance and verification:** The owner can ask in chat for a stopped agent to attend and is told what it means; the wake reaches the host once per wake with a bounded wait, and a failing host is told without its own text.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### M04g — Compose a real safeLongRunning and a host that wakes stopped agents
+### M04g — Compose a real safeLongRunning from the job records
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M04f.
-- **Deliverable:** Split from M04f (2026-10-30): a definition of a long-running operation that is safe to carry on during a meeting (needs T07 job knowledge) composed into the dispatcher, and a real host (L02/L03) that supplies the wake hook and reports the woken agent available, so the owner's wake works outside tests.
-- **Acceptance and verification:** A long job that cannot yield is refused during a meeting and a safe one carries on; the owner's wake of a stopped agent works against a real host.
+- **Deliverable:** Split from M04f (2026-10-30), narrowed 2026-10-31: a safeLongRunning predicate built from the T07 job records, asked per RUNNING attempt (never for a new one): the attempt's own unfinished jobs are all background jobs that are dispatched or running; chat-settable `meeting.safeLongRunning`, default on. Composed by the controller as `Dispatcher.carriesOnDuringMeeting(attemptId, {conversationIdle})`, plus a gate that refuses an agent's new background or long job on any task from the notice before a meeting. The host that supplies the wake hook moved to M04h.
+- **Acceptance and verification:** A long job that cannot yield is refused during a meeting and a safe one carries on.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M04h — A real host that wakes stopped agents
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M04g.
+- **Deliverable:** Split from M04g (2026-10-31): a host (L02/L03 and the local worker host) that reports an agent stopped or suspended through the availability hook (today the pause gate answers `paused` first for a stopped scope, so the host's `stopped` is never reached for it), supplies `meetingWake.recover`, and reports the woken agent available for the one meeting and stopped again after it, composed by the controller instead of left to the embedding application. Also remaining from M04g: a caller for `carriesOnDuringMeeting` (nothing in the controller yields a running attempt for a meeting by itself; the agent interrupts its own tasks with `prepare`), and result handling for an attempt that waits on its background jobs (needs the agent, not modelled). The caller must also establish that the agent's conversation is idle (waiting on its jobs): the controller cannot tell an idle attempt from one still working beside a background job, so `carriesOnDuringMeeting` needs `conversationIdle: true` from it. T07 follow-ups: `jobs.decide` restart moves a background job back to dispatched during a meeting without asking; jobs admitted by host or service credentials skip the gate; the gate can race with a meeting created after it read; a withheld seat (agent not attending) is over-refused near a meeting.
+- **Acceptance and verification:** The owner's wake of a stopped agent works against a real host: the agent attends one meeting and is back as it was.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M05 — Implement meeting facilitation and owner control
@@ -3039,7 +3047,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, L05c, U14, M02g, M03g, M04g, L03i, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, L05c, U14, M02g, M03g, M04g, M04h, L03i, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

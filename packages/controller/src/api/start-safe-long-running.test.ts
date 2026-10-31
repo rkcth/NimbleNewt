@@ -1,0 +1,161 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { AdmissionService } from "../admission/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
+import { EXEC_PROFILES, PI, ROUTING_TABLE, ScriptedWorker, workGrants } from "../dispatch/testing/world.js";
+import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { HostService } from "../hosts/index.js";
+import { PolicyService } from "../policy/index.js";
+import { DifficultyService } from "../routing/index.js";
+import { startController } from "./index.js";
+
+const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
+const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
+const AGENT = "agt-abcdefghijklmnopqrst";
+
+/** A controller with one agent whose first attempt is RUNNING (a scripted worker held open) and a second task with a waiting attempt. */
+async function world(dispatcherExtra: Record<string, unknown> = {}, clock?: () => string) {
+  const d = mkdtempSync(join(tmpdir(), "nn-safelong-"));
+  const problems: unknown[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const worker = new ScriptedWorker("host:w1", async () => { await gate; return { status: "completed", text: "done" }; });
+  // The one harness cannot abort a conversation, so only the rules under test decide what is deferred.
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [{ ...PI, abort: "none" as const }],
+    dispatch: { timer: new ManualTimer(), manual: true, workers: [worker], dispatcher: dispatcherExtra as never, ...(clock === undefined ? {} : { clock }) }, onInternalError: (e) => { problems.push(e); },
+  });
+  const s = c.services;
+  const boot = await s.principals.bootstrapOwner({ name: "rob" });
+  const owner = await s.principals.authenticate(boot.token);
+  await s.routing.setTable(owner, { commandId: "rt", expectedRevision: 0, table: { ...ROUTING_TABLE, roles: { coordinator: "r-cloud", "safety-supervisor": "r-cloud" } } } as never);
+  await DifficultyService.withEpoch(c.storage, c.epoch, s.routing, s.contracts).setProfiles(owner, { commandId: "sp", expectedRevision: 0, profiles: EXEC_PROFILES } as never);
+  await s.principals.enroll(owner, { commandId: "e-host", kind: "host", name: "w1", grants: [] });
+  const hostP = await s.principals.authenticate((await s.principals.issueCredential(owner, "host:w1")).token);
+  const hosts = HostService.withEpoch(c.storage, c.epoch, s.assignments);
+  await hosts.announce(hostP, { commandId: "an", capabilities: { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] } });
+  await hosts.heartbeat(hostP, { commandId: "hb", sequence: 1 });
+  await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
+  await PolicyService.withEpoch(c.storage, c.epoch, s.grants).set(owner, { scope: "installation", commandId: "pol", profile: "autonomous" } as never);
+  const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }] });
+  const task = async (n: number): Promise<{ taskId: string; attemptId: string }> => {
+    const taskId = (await s.projects.createTask({ commandId: `t${n}`, actor: owner.id, projectId: project, title: `Order seeds ${n}` })).id;
+    await s.projects.transitionTask({ commandId: `r${n}`, actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
+    await s.assignments.assignTask({ commandId: `as${n}`, actor: owner.id, taskId, owner: { kind: "agent", id: AGENT } });
+    const a = (await s.assignments.getAssignment(taskId))!;
+    const attemptId = (await s.assignments.admitAttempt({ commandId: `ad${n}`, actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: AGENT }, harness: "pi" })).id;
+    return { taskId, attemptId };
+  };
+  const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string } }>;
+  const close = async () => { release(); await c.dispatch?.dispatcher.idle(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); };
+  return { c, s, owner, project, task, call, problems, close, agent: `agent:${AGENT}` };
+}
+
+test("through the composed controller a running attempt with only background jobs carries on during a meeting, a new attempt never starts, an agent cannot admit a new long job on any task, and the setting turns the rule off (card M04g)", async () => {
+  const w = await world();
+  try {
+    const { c, s, owner, project, call } = w;
+    const first = await w.task(1);
+    await c.dispatch!.dispatcher.tick();
+    assert.equal((await c.dispatch!.dispatcher.get(owner, first.attemptId))!.state, "running");
+    const carries = () => c.dispatch!.dispatcher.carriesOnDuringMeeting(first.attemptId, { conversationIdle: true });
+    // A running background job exists, but no meeting concerns the agent yet.
+    const jobId = (await s.jobs.admit(owner, { commandId: "ja", taskId: first.taskId, kind: "tool", label: "build", operationId: "op-1", background: true, attemptId: first.attemptId })).id;
+    await s.jobs.report(owner, { commandId: "jr1", jobId, state: "dispatched", host: "host-1" });
+    await s.jobs.report(owner, { commandId: "jr2", jobId, state: "running" });
+    assert.equal(await carries(), false, "no meeting: nothing to carry on past");
+    const meeting = await call("meeting.call-urgent", { projectId: project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1");
+    assert.ok(meeting.ok, JSON.stringify(meeting));
+    assert.equal(await carries(), true, "a running attempt with only a running background job carries on once its conversation is idle");
+    assert.equal(await c.dispatch!.dispatcher.carriesOnDuringMeeting(first.attemptId, { conversationIdle: false }), false, "the worker is held open (busy): never carries on unless idleness is established");
+    // The setting, chat-settable, turns the rule off and on.
+    let rev: number | undefined;
+    const set = async (n: string, value: unknown): Promise<void> => { const st = await s.configuration.stage(owner, { commandId: `${n}s`, layer: "installation", ...(rev === undefined ? {} : { expectedRevision: rev }), set: { "meeting.safeLongRunning": value } }); rev = (await s.configuration.apply(owner, { commandId: `${n}a`, layer: "installation", expectedRevision: st.revision })).revision; };
+    await assert.rejects(set("bad", "yes"), /true or false/);
+    await set("off", false);
+    assert.equal(await carries(), false, "setting off");
+    await set("on", true);
+    assert.equal(await carries(), true);
+    // A foreground job of the attempt makes it yield.
+    await s.jobs.admit(owner, { commandId: "jb", taskId: first.taskId, kind: "tool", label: "interactive", operationId: "op-2", background: false, attemptId: first.attemptId });
+    assert.equal(await carries(), false, "a foreground job: it yields");
+    // A NEW attempt is deferred by the meeting even though the agent has a safe running job.
+    const second = await w.task(2);
+    const sj = (await s.jobs.admit(owner, { commandId: "jsafe", taskId: second.taskId, kind: "tool", label: "own", operationId: "op-own", background: true, attemptId: second.attemptId })).id;
+    await s.jobs.report(owner, { commandId: "jsafe1", jobId: sj, state: "dispatched", host: "host-1" });
+    await s.jobs.report(owner, { commandId: "jsafe2", jobId: sj, state: "running" });
+    const tick = await c.dispatch!.dispatcher.tick();
+    assert.ok([...tick.skipped, ...tick.blocked].some((x) => x.attemptId === second.attemptId && x.check === "meeting"), JSON.stringify(tick));
+    assert.equal((await c.dispatch!.dispatcher.get(owner, second.attemptId))?.state !== "running", true);
+    // The agent itself cannot admit a new background or long job on a task that is not the meeting's own; the owner still can.
+    const ann = await s.principals.authenticate((await s.principals.issueCredential(owner, w.agent)).token);
+    await assert.rejects(s.jobs.admit(ann, { commandId: "ja2", taskId: second.taskId, kind: "tool", label: "late", operationId: "op-3", background: true }), /long-running work is not started/);
+    await assert.rejects(s.jobs.admit(ann, { commandId: "ja3", taskId: second.taskId, kind: "tool", label: "late", operationId: "op-4", longRunning: true }), /long-running work is not started/);
+    // The gate fails closed when the meeting check itself fails.
+    const real = c.dispatch!.attendance.admission.bind(c.dispatch!.attendance);
+    (c.dispatch!.attendance as any).admission = async () => { throw new Error("store down"); };
+    await assert.rejects(s.jobs.admit(ann, { commandId: "ja6", taskId: second.taskId, kind: "tool", label: "late", operationId: "op-7", background: true }), /could not be checked/);
+    (c.dispatch!.attendance as any).admission = real;
+    await s.jobs.admit(ann, { commandId: "ja4", taskId: second.taskId, kind: "tool", label: "short", operationId: "op-5" });
+    await s.jobs.admit(owner, { commandId: "ja5", taskId: second.taskId, kind: "tool", label: "owner's", operationId: "op-6", background: true });
+    assert.deepEqual(w.problems, []);
+  } finally { await w.close(); }
+});
+
+test("an agent can admit a background job on any task when no meeting concerns it (card M04g)", async () => {
+  const w = await world();
+  try {
+    const t = await w.task(1);
+    const ann = await w.s.principals.authenticate((await w.s.principals.issueCredential(w.owner, w.agent)).token);
+    await w.s.jobs.admit(ann, { commandId: "ja", taskId: t.taskId, kind: "tool", label: "build", operationId: "op-1", background: true });
+  } finally { await w.close(); }
+});
+
+test("an explicit dispatcher.safeLongRunning wins over the composed one, and an explicit undefined key does not remove it (card M04g)", async () => {
+  const seen: string[] = [];
+  for (const [label, extra, expectCalls] of [["explicit", { safeLongRunning: async () => { seen.push("explicit"); return true; } }, ["explicit"]], ["undefined", { safeLongRunning: undefined }, []]] as const) {
+    seen.length = 0;
+    const w = await world(extra);
+    try {
+      const first = await w.task(1);
+      await w.c.dispatch!.dispatcher.tick();
+      const jobId = (await w.s.jobs.admit(w.owner, { commandId: "ja", taskId: first.taskId, kind: "tool", label: "b", operationId: "op-1", background: true, attemptId: first.attemptId })).id;
+      await w.s.jobs.report(w.owner, { commandId: "jr1", jobId, state: "dispatched", host: "h" });
+      assert.ok((await w.call("meeting.call-urgent", { projectId: w.project, title: "Hotfix", reason: "r", roster: [w.agent] }, "mu1")).ok);
+      const carries = await w.c.dispatch!.dispatcher.carriesOnDuringMeeting(first.attemptId, { conversationIdle: true });
+      assert.deepEqual(seen, expectCalls, label);
+      assert.equal(carries, true, `${label}: the composed predicate (a dispatched background job) or the explicit one says yes`);
+    } finally { await w.close(); }
+  }
+});
+
+test("the gate refuses an agent's new long job from the notice before a planned meeting (inside leadMinutes, not yet started) and not before; lead 0 refuses only once it has started (card M04g)", async () => {
+  let now = Date.parse("2026-11-02T07:00:00.000Z");
+  const w = await world({}, () => new Date(now).toISOString());
+  try {
+    const { s, owner, project, call } = w;
+    const t = await w.task(1);
+    const ann = await s.principals.authenticate((await s.principals.issueCredential(owner, w.agent)).token);
+    const sched = await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: [w.agent], time: "08:00", timeZone: "UTC", recurrence: { kind: "once", date: "2026-11-02" } }, "ms1");
+    assert.ok(sched.ok, JSON.stringify(sched));
+    const tryJob = (n: string) => s.jobs.admit(ann, { commandId: `j-${n}`, taskId: t.taskId, kind: "tool", label: n, operationId: `op-${n}`, background: true }).then(() => "admitted", (e: Error) => e.message);
+    now = Date.parse("2026-11-02T07:50:00.000Z");
+    await w.c.dispatch!.dispatcher.tick();
+    assert.equal(await tryJob("early"), "admitted", "ten minutes ahead: before the default five-minute notice");
+    now = Date.parse("2026-11-02T07:56:00.000Z");
+    await w.c.dispatch!.dispatcher.tick();
+    assert.match(await tryJob("lead"), /long-running work is not started/, "four minutes ahead, planned and not started: refused");
+    // Lead 0: the notice is gone; only a meeting that has started (or is about to within a minute) refuses.
+    const st = await s.configuration.stage(owner, { commandId: "l0s", layer: "installation", set: { "meeting.leadMinutes": 0 } });
+    await s.configuration.apply(owner, { commandId: "l0a", layer: "installation", expectedRevision: st.revision });
+    assert.equal(await tryJob("l0-far"), "admitted", "lead 0: four minutes ahead is no longer inside any notice");
+    now = Date.parse("2026-11-02T07:59:30.000Z");
+    assert.match(await tryJob("l0-near"), /long-running work is not started/, "half a minute before the start");
+    now = Date.parse("2026-11-02T08:10:00.000Z");
+    assert.match(await tryJob("l0-on"), /long-running work is not started/, "while it is on");
+  } finally { await w.close(); }
+});

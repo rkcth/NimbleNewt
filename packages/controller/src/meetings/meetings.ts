@@ -212,6 +212,7 @@ export const MEETING_LIMITS = {
 /** The setting that holds the owner's time zone for meetings. Pass these as `settings` to the configuration service. */
 export const MEETING_SETTINGS: readonly SettingDefinition[] = [
   { key: "meeting.leadMinutes", kind: "default", check: (v) => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MEETING_LIMITS.leadMax ? v : (() => { throw `must be a whole number of minutes from 0 to ${MEETING_LIMITS.leadMax}`; })()), effect: "next-request", description: "How many minutes before a meeting its invited agents are invited and kept free of new work (default 5; at least the schedule's own preparation time)." },
+  { key: "meeting.safeLongRunning", kind: "default", check: (v) => (typeof v === "boolean" ? v : (() => { throw "must be true or false"; })()), effect: "next-request", description: "Whether background jobs already running for an agent's task carry on while the agent attends a meeting (default true). False: all long work near a meeting is deferred." },
   { key: "meeting.timeZone", kind: "default", check: (v) => knownZone(v) ?? (() => { throw "must be an IANA time zone name such as Europe/Berlin"; })(), effect: "next-request", description: "The time zone meeting schedules use when they name none." },
 ];
 

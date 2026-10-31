@@ -203,10 +203,10 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
   readonly expectedMinutes?: number;
   /**
-   * PROVISIONAL (card M04e; owner question open: what makes a long-running operation "safe"). Says whether the work of a task is a safe long-running operation that carries on while its agent attends a meeting.
-   * Absent, or throwing, means "not safe" (fails closed: the work is deferred like any long work that cannot yield). No definition is composed yet.
+   * (Card M04e; the controller composes a real one from T07 jobs, card M04g, unless this replaces it.) Says whether a RUNNING attempt's remaining work is only background jobs, so it carries on while its agent attends a meeting (`carriesOnDuringMeeting`). It never lets a new attempt start during a meeting.
+   * Absent, or throwing, means "not safe" (fails closed).
    */
-  readonly safeLongRunning?: (taskId: string) => Promise<boolean>;
+  readonly safeLongRunning?: (taskId: string, attemptId: string) => Promise<boolean>;
   readonly catalog?: ActionCatalog;
   /** The bridge for each effect kind, so an effect that was started before a restart is reconciled without the worker. */
   readonly bridges?: Readonly<Record<string, EffectBridge>>;
@@ -502,6 +502,22 @@ export class DispatcherService {
   /** Resolves when every turn this dispatcher started has ended. */
   async idle(): Promise<void> {
     while (this.#live.size > 0 || this.#ending.size > 0) await Promise.allSettled([...[...this.#live.values()].map((l) => l.turn), ...this.#ending]);
+  }
+
+  /**
+   * Card M04g: whether a RUNNING attempt may carry on while its agent attends a meeting, because what it has left is only background jobs (`options.safeLongRunning`). The caller must ESTABLISH that the agent's own conversation is idle (it is waiting on its jobs) and say so with `conversationIdle: true`: this controller cannot tell an idle attempt from one still working next to a background job, so without that input the answer is always false.
+   * Also false for an attempt that is not running (a new attempt never starts during a meeting: admission does not ask), when no meeting concerns the agent (the predicate is not read then), without the option, and on any failure.
+   * Nothing in the controller yields a running attempt for a meeting by itself yet (the agent interrupts its own tasks with `prepare`); the decision to interrupt, and the idle determination, are the caller's (remainder on M04h).
+   */
+  async carriesOnDuringMeeting(attemptId: string, input: { readonly conversationIdle: boolean }): Promise<boolean> {
+    try {
+      if (input?.conversationIdle !== true || typeof attemptId !== "string" || !ATTEMPT.test(attemptId) || this.#options.safeLongRunning === undefined || this.#deps.meetings === undefined) return false;
+      const d = await this.#load(attemptId);
+      if (d === undefined || d.body.state !== "running") return false;
+      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: d.body.agentId, expectedMinutes: 1 });
+      if (advice.meeting === undefined) return false;
+      return (await this.#options.safeLongRunning(d.body.taskId, attemptId)) === true;
+    } catch { return false; }
   }
 
   // ---- the gateway and the worker's heartbeat -------------------------------------------------------------------------------------
@@ -1084,8 +1100,7 @@ export class DispatcherService {
       // With no harness shipped nothing can stop a conversation, so nothing yields (an empty list is not "every harness can").
       const shipped = this.#deps.harnesses.list();
       const yieldsAtBoundary = shipped.length > 0 && shipped.every((h) => h.abort !== "none");
-      const safeLongRunning = this.#options.safeLongRunning === undefined ? false : await this.#options.safeLongRunning(taskId).then((v) => v === true, () => false);
-      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary, ...(safeLongRunning ? { safeLongRunning } : {}) });
+      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary });
       if (advice.decision === "defer") return skip("meeting", "a meeting the agent attends starts before this work would end");
     }
     // 5. Route and harness, and the recovery gate: every admission names its harness.
