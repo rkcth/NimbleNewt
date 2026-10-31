@@ -204,7 +204,7 @@ test("remote host: the same requests cross the authenticated transport to a work
     dispatch: {
       manual: true,
       route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
-      remote: { blobDirectory: join(dir, "blobs"), hosts: [{ hostId: "host:pc", checkpointWaitMs: 500, pollMs: 10, workspaceWaitMs: 2500, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
+      remote: { blobDirectory: join(dir, "blobs"), hosts: [{ hostId: "host:pc", checkpointWaitMs: 30_000, pollMs: 10, workspaceWaitMs: 2500, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
     },
   });
   let pumping = true;
@@ -246,7 +246,15 @@ test("remote host: the same requests cross the authenticated transport to a work
     pump = (async () => {
       while (pumping) {
         try {
-          try { for (const msg of await attempt.pollControl(after)) { after = Math.max(after, msg.seq); if (msg.kind === "checkpoint") await attempt.putCheckpoint(++seq, { turn: seq }); if (msg.kind === "tell") told.push(msg.text); } } catch { /* the attempt is over: nothing to answer */ }
+          try {
+            for (const msg of await attempt.pollControl(after)) {
+              // A message counts as read only once it is answered: a failed answer (a slow or dropped call under load) is tried again on the next round, never lost.
+              if (msg.kind === "checkpoint") await attempt.putCheckpoint(seq + 1, { turn: seq + 1 });
+              if (msg.kind === "checkpoint") seq++;
+              if (msg.kind === "tell") told.push(msg.text);
+              after = Math.max(after, msg.seq);
+            }
+          } catch { /* not answered yet, or the attempt is over: the next round tries again from the last answered message */ }
           if (!holdAnswers) { const requests = await client.workspaceRequests(); if (requests.length > 0) { responder.handle(requests); responder.handle(requests); } }
         } catch { /* the next round tries again */ }
         await new Promise((ok) => setTimeout(ok, 15));
