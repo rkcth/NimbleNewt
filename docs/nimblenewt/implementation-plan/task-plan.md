@@ -2226,7 +2226,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** An agenda outcome reaches the chat turn or inquiry it came from once, across a replay and a restart; the owner's list is in the prepared stand-up and only for the owner.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### M03g — Finish stand-ups: allocation and usage sinks, follow-ups in the chat listing, stand-up chat commands, new owner questions
+### M03g — Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M03f.

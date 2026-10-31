@@ -26,7 +26,8 @@ test("the stand-up's balance review shows the P/PC allocation the owner configur
       return JSON.stringify((await call("standup.prepared", { occurrenceId: m.result.id })).result.item.review) as never;
     };
     const before = await review("1") as unknown as string;
-    assert.doesNotMatch(before, /ceiling 50%/);
+    assert.match(before, /no P\/PC allocation is set/, "built-in defaults (floor 0, ceiling 100) are not an allocation");
+    assert.doesNotMatch(before, /planned PC share/);
     const staged = await c.services.configuration.stage(rob, { commandId: "cfg1", layer: "installation", set: { "workClass.pcFloor": 10, "workClass.pcTarget": 30, "workClass.pcCeiling": 50 } });
     await c.services.configuration.apply(rob, { commandId: "cfg2", layer: "installation", expectedRevision: staged.revision });
     const after = await review("2") as unknown as string;

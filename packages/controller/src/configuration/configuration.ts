@@ -316,6 +316,12 @@ export class ConfigurationService {
     return (await this.#combined([await this.#link("installation", "installation")])).values[key]?.value;
   }
 
+  /** One installation-level setting with whether the owner set it: a value that is only the built-in default has `set: false` (card M03g). For the controller's own reading, like `installationValue`. */
+  async installationSetting(key: string): Promise<{ value: unknown; set: boolean }> {
+    const found = (await this.#combined([await this.#link("installation", "installation")])).values[key];
+    return { value: found?.value, set: found !== undefined && found.source.layer !== "default" };
+  }
+
   // ---- routing binding (card R01) -------------------------------------------------------------------------------------------
 
   /**

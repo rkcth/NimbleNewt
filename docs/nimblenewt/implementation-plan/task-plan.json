@@ -6276,7 +6276,7 @@
       "id": "M03g",
       "parent": "N12",
       "existing_issue": "AII-262",
-      "title": "Finish stand-ups: allocation and usage sinks, follow-ups in the chat listing, stand-up chat commands, new owner questions",
+      "title": "Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands",
       "depends_on": [
         "M03f"
       ],

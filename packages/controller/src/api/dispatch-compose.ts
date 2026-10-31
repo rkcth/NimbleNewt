@@ -250,7 +250,7 @@ export interface ComposeInput {
   /** True while the maintenance barrier is up (card K01h): the driver skips its ticks. */
   readonly hold?: () => boolean;
   /** One installation-level setting, for the controller's own reading (`ConfigurationService.installationValue`): the stand-up's balance review reads the P/PC allocation (`workClass.pcFloor`, `pcTarget`, `pcCeiling`) through it (card M03g). Absent: the review says no allocation is set. */
-  readonly installationValue?: (key: string) => Promise<unknown>;
+  readonly installationSetting?: (key: string) => Promise<{ value: unknown; set: boolean }>;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
   readonly leadMinutes?: () => Promise<number | undefined>;
 }
@@ -326,7 +326,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // The one owner-level read the stand-up preparation needs: the inbox, nothing else; the elevated principal does not leave this closure.
   const ownerInboxFor = needsOwnerFrom({ inbox: () => notifications.inbox(recovering(principal)) }, principal);
   const ownerNoticesFor = noticesFrom({ inbox: () => notifications.inbox(recovering(principal)) }, principal);
-  const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision), waitingMessages: (by, agent) => messages.waitingAtStandup(by, agent), ownerItems: ownerInboxFor, ownerNotices: ownerNoticesFor, ...(i.installationValue === undefined ? {} : { allocation: allocationFromValue(i.installationValue) }), outcomes: agendaOutcomeSink({ followUp: (turnId, f) => followUps.add(turnId, f), inquiry: async (id) => { const q = (await storage.getAggregate({ kind: "inquiry", id }))?.body as unknown as { asker?: string; taskId?: string } | undefined; return q?.asker === undefined || q.taskId === undefined ? undefined : { asker: q.asker, taskId: q.taskId }; }, messages }) });
+  const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision), waitingMessages: (by, agent) => messages.waitingAtStandup(by, agent), ownerItems: ownerInboxFor, ownerNotices: ownerNoticesFor, ...(i.installationSetting === undefined ? {} : { allocation: allocationFromValue(i.installationSetting) }), outcomes: agendaOutcomeSink({ followUp: (turnId, f) => followUps.add(turnId, f), inquiry: async (id) => { const q = (await storage.getAggregate({ kind: "inquiry", id }))?.body as unknown as { asker?: string; taskId?: string } | undefined; return q?.asker === undefined || q.taskId === undefined ? undefined : { asker: q.asker, taskId: q.taskId }; }, messages }) });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
   const quiet: { service?: QuietHostService } = {};

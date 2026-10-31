@@ -120,7 +120,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Topics for a later stand-up (card M03). Capturing and correcting are reversible edits of a saved topic and apply at once, shown back to the owner; a topic that records an instruction or a decision for the team is first shown (see `proposalReason`).
   "agenda.capture": { verb: "Add agenda item", mode: "apply", needsProject: true },
   "agenda.correct": { verb: "Correct agenda item", mode: "apply", revision: "agenda", needsProject: true },
-  // Stand-ups (card M03g). Pausing, resuming, ending or renaming one follows the profile like other explicit orders; a change of who attends or when it is held is shown first (see `proposalReason`). Setting one up wakes agents on a schedule, so it is always shown first. Delivering outcomes only puts decisions back where they came from.
+  // Stand-ups (card M03g). Pausing or renaming one follows the profile like other explicit orders; ending (cannot be undone) and resuming are always shown first; a change of who attends or when it is held is shown first (see `proposalReason`). Setting one up wakes agents on a schedule, so it is always shown first. Delivering outcomes only puts decisions back where they came from.
   "standup.update": { verb: "Change stand-up", mode: "profile", revision: "standup", needsProject: true },
   "standup.configure": { verb: "Set up stand-up", mode: "propose", needsProject: true },
   "standup.deliver": { verb: "Deliver stand-up outcomes", mode: "apply", needsProject: true },
@@ -285,6 +285,9 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (op === "decision.record" && args["category"] === "gate") return "a gate holds or releases work until you say otherwise, so it is shown first";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
+  // Ending a stand-up cannot be undone (an ended schedule is never revived), and resuming one wakes agents again (and ends it instead when its end date has passed): both are shown first in every profile. Pausing and renaming apply as an explicit order.
+  if (op === "standup.update" && args["state"] === "ended") return "ending a stand-up cannot be undone (an ended stand-up cannot be started again), so it is shown first";
+  if (op === "standup.update" && args["state"] === "active") return "resuming a stand-up wakes its agents again (and ends it instead if its end date has passed), so it is shown first";
   // Pausing, resuming, ending or renaming a stand-up is a plain edit; who attends and when it is held changes what agents are woken for, so it is shown first.
   if (op === "standup.update" && ["roster", "time", "timeZone", "recurrence", "durationMinutes", "prepareMinutes", "windowFrom", "windowTo", "coverageHours"].some((f) => args[f] !== undefined)) return "it changes who attends or when the stand-up is held, so it is shown first";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { chatTurnFollowUps } from "./follow-ups.js";
-import { StandupService } from "../standups/index.js";
+import { StandupService, agendaOutcomeSink } from "../standups/index.js";
 import type { ChatService, Outcome } from "./index.js";
 import { cid, openWorld, type World } from "./testing/harness.js";
 
@@ -18,7 +18,7 @@ for (const backend of backends) {
       const holder: { s?: StandupService } = {};
       const lazy = new Proxy({}, { get: (_t, k) => (...a: unknown[]) => (holder.s as unknown as Record<string, (...x: unknown[]) => unknown>)[k as string]!(...a) }) as StandupService;
       const w = await openWorld(backend, script, undefined, { standups: lazy });
-      holder.s = StandupService.withEpoch(w.world.storage, w.projects.epoch, { meetings: w.meetings, assignments: w.assignments }, { availability: async () => "available" });
+      holder.s = StandupService.withEpoch(w.world.storage, w.projects.epoch, { meetings: w.meetings, assignments: w.assignments }, { availability: async () => "available", outcomes: agendaOutcomeSink({ followUp: (turnId, f) => chatTurnFollowUps(w.world.storage, w.projects.epoch).add(turnId, f), inquiry: async () => undefined, messages: { noticeFromController: async () => undefined } }) });
       const ctl = {
         sched: async (projectId: string, title: string) => {
           const agent = await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: `A-${title}` });
@@ -46,28 +46,48 @@ for (const backend of backends) {
     assert.equal((await ctl.schedule(morning)).state, "paused");
     assert.equal((await ctl.schedule(evening)).state, "active", "the other stand-up is untouched");
 
+    // Resuming wakes agents again: shown first even in the autonomous profile; applying the proposal resumes it.
     script["Resume the morning stand-up."] = [cmd("standup.update", { standupTitle: "morning", state: "active" }, "Resume the morning stand-up")];
-    assert.equal(only((await say(w, chat, "Resume the morning stand-up.")).outcomes).status, "applied");
+    const resume = only((await say(w, chat, "Resume the morning stand-up.")).outcomes);
+    assert.equal(resume.status, "proposed", JSON.stringify(resume));
+    assert.equal((await ctl.schedule(morning)).state, "paused", "nothing changed before the owner applies it");
+    await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: resume.proposalId! });
     assert.equal((await ctl.schedule(morning)).state, "active");
 
-    // A new time changes when agents are woken: shown first, nothing changes until the owner applies it.
-    script["Move the evening wrap stand-up to 09:30."] = [cmd("standup.update", { standupTitle: "evening", time: "09:30" }, "Move the evening wrap stand-up to 09:30")];
-    const moved = only((await say(w, chat, "Move the evening wrap stand-up to 09:30.")).outcomes);
-    assert.equal(moved.status, "proposed", JSON.stringify(moved));
-    assert.equal((await ctl.schedule(evening)).time, "09:00");
+    // Ending cannot be undone: a proposal in every profile, and once applied the stand-up cannot be changed again.
+    script["End the evening wrap stand-up."] = [cmd("standup.update", { standupTitle: "evening", state: "ended" }, "End the evening wrap stand-up")];
+    const end = only((await say(w, chat, "End the evening wrap stand-up.")).outcomes);
+    assert.equal(end.status, "proposed", JSON.stringify(end));
+    assert.equal((await ctl.schedule(evening)).state, "active");
+    await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: end.proposalId! });
+    assert.equal((await ctl.schedule(evening)).state, "ended");
+    script["Pause the evening wrap stand-up."] = [cmd("standup.update", { standupTitle: "evening", state: "paused" }, "Pause the evening wrap stand-up")];
+    const gone = only((await say(w, chat, "Pause the evening wrap stand-up.")).outcomes);
+    assert.equal(gone.status, "refused");
+    assert.match(String(gone.message), /has ended/);
 
-    // Two stand-ups match: the owner is asked and nothing changes.
+    // A new time changes when agents are woken: shown first, nothing changes until the owner applies it.
+    script["Move the morning sync stand-up to 09:30."] = [cmd("standup.update", { standupTitle: "morning", time: "09:30" }, "Move the morning sync stand-up to 09:30")];
+    const moved = only((await say(w, chat, "Move the morning sync stand-up to 09:30.")).outcomes);
+    assert.equal(moved.status, "proposed", JSON.stringify(moved));
+    assert.equal((await ctl.schedule(morning)).time, "09:00");
+
+    // Two active stand-ups match: the owner is asked which, with both as options, and nothing changes.
+    const second = await ctl.sched(a, "Afternoon check");
     script["Pause the stand-up."] = [cmd("standup.update", { state: "paused" }, "Pause the stand-up")];
     const asked = only((await say(w, chat, "Pause the stand-up.")).outcomes);
-    assert.notEqual(asked.status, "applied");
-    assert.equal((await ctl.schedule(evening)).state, "active");
+    assert.equal(asked.status, "asked", JSON.stringify(asked));
+    assert.ok(JSON.stringify(asked).includes(morning) && JSON.stringify(asked).includes(second), "both stand-ups are offered");
+    assert.ok(!JSON.stringify(asked).includes(evening), "an ended stand-up is not offered");
+    assert.equal((await ctl.schedule(morning)).state, "active");
+    assert.equal((await ctl.schedule(second)).state, "active");
 
     // Someone who may not read the project's meetings finds no stand-ups through the list either.
     const nobody = await w.agent("nobody", []);
     const denied = await w.api.handle(nobody.token, { v: 1, op: "standup.list", args: { projectId: a } } as never) as { ok: boolean };
     assert.equal(denied.ok, false);
     const listed = await w.api.handle(w.ownerToken, { v: 1, op: "standup.list", args: { projectId: a } } as never) as unknown as { ok: boolean; result: { item: { items: { title: string }[] } } };
-    assert.deepEqual(listed.result.item.items.map((i) => i.title).sort(), ["Evening wrap", "Morning sync"]);
+    assert.deepEqual(listed.result.item.items.map((i) => i.title).sort(), ["Afternoon check", "Morning sync"], "the ended one is left out");
 
     // A stand-up of another project cannot be reached by its ID from this one.
     const other = await ctl.sched(await w.project("B"), "Other team");
@@ -90,9 +110,31 @@ for (const backend of backends) {
     script["Set up a daily stand-up at 09:00, held between 08:00 and 10:00 Europe/London."] = [cmd("standup.configure", { title: "Daily", roster: [], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/London", recurrence: "daily" }, "Set up a daily stand-up at 09:00, held between 08:00 and 10:00 Europe/London")];
     const setUp = only((await say(w, chat, "Set up a daily stand-up at 09:00, held between 08:00 and 10:00 Europe/London.")).outcomes);
     assert.equal(setUp.status, "proposed", JSON.stringify(setUp));
+    // A topic raised in chat is resolved; delivering puts the outcome on that turn once, and a second delivery adds nothing.
+    script["Bring up the flaky tests at the stand-up."] = [cmd("agenda.capture", { topic: "the flaky tests" }, "Bring up the flaky tests")];
+    const raised = await say(w, chat, "Bring up the flaky tests at the stand-up.");
+    const item = (await w.meetings.agendaItem(w.owner, only(raised.outcomes).id!))!;
+    await w.meetings.setAgendaState(w.owner, { commandId: cid("st"), itemId: item.id, expectedRevision: item.revision, to: "resolved", outcomeNote: "Quarantine them." });
+    const followUps = async () => ((await chat.getTurn(w.ownerToken, raised.turnId))!.followUps ?? []).length;
+    assert.equal(await followUps(), 0);
     script["Deliver the stand-up outcomes."] = [cmd("standup.deliver", {}, "Deliver the stand-up outcomes")];
     const delivered = only((await say(w, chat, "Deliver the stand-up outcomes.")).outcomes);
     assert.equal(delivered.status, "applied", JSON.stringify(delivered));
+    assert.equal(await followUps(), 1, "the outcome reached the turn it came from");
+    script["Deliver them again."] = [cmd("standup.deliver", {}, "Deliver them again")];
+    assert.equal(only((await say(w, chat, "Deliver them again.")).outcomes).status, "applied");
+    assert.equal(await followUps(), 1, "a second delivery tells nothing again");
+  });
+
+  suite("in the strict profile even a pause is shown first (card M03g)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "strict";
+    const id = await ctl.sched(a, "Morning sync");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    script["Pause the morning stand-up."] = [cmd("standup.update", { standupTitle: "morning", state: "paused" }, "Pause the morning stand-up")];
+    assert.equal(only((await say(w, chat, "Pause the morning stand-up.")).outcomes).status, "proposed");
+    assert.equal((await ctl.schedule(id)).state, "active");
   });
 
   suite("the chat's listing of turns shows what the stand-up put back on a turn, only the latest few, and the stored summary is unchanged (card M03g)", async (w, script) => {
@@ -107,7 +149,7 @@ for (const backend of backends) {
     const follow = chatTurnFollowUps(w.world.storage, w.projects.epoch);
     for (let i = 1; i <= 5; i++) await follow.add(r.turnId, { key: `k${i}`, text: `Decided ${i}.` });
     const shown = (await listed()).followUps!;
-    assert.equal(shown.count, 5);
+    assert.equal(shown.kept, 5);
     assert.deepEqual(shown.latest.map((f) => f.text), ["Decided 3.", "Decided 4.", "Decided 5."]);
     const stored = (await w.world.storage.getAggregate({ kind: "chat-context", id: `ctx:${w.owner.id}` }))!.body as unknown as { projects: Record<string, { turns: Record<string, unknown>[] }> };
     assert.ok(stored.projects[a]!.turns.every((t) => t["followUps"] === undefined), "the listing adds it on reading; the stored context is not changed");
