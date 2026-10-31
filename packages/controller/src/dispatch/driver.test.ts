@@ -8,7 +8,7 @@ import type { TickReport } from "./dispatcher.js";
 
 after(stopServer);
 
-const report = (extra: Partial<TickReport> = {}): TickReport => ({ at: "2026-10-23T09:00:00.000Z", started: [], waiting: [], skipped: [], blocked: [], lost: [], readmitted: [], reprioritized: 0, approvals: [], loops: [], failures: [], scanned: 0, complete: true, ...extra });
+const report = (extra: Partial<TickReport> = {}): TickReport => ({ at: "2026-10-23T09:00:00.000Z", started: [], waiting: [], capacityWaits: [], skipped: [], blocked: [], lost: [], readmitted: [], reprioritized: 0, approvals: [], loops: [], failures: [], scanned: 0, complete: true, ...extra });
 
 function fake(tick: () => Promise<TickReport>) {
   const log = { ticks: 0, shutdowns: 0, idles: 0, drops: 0, shutdownFails: false };

@@ -231,6 +231,18 @@ Result: `{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value?
 
 Completion: finished when accepted (`completed: true`).
 
+#### `capacity.limits.get`
+
+The optional capacity caps (owner only): the owner's entries (on or off, with the kept figure) and what applies now. All are off (no cap) unless set.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value? }` for `perProject`, `perAgent`, `fanIn`), `effective` (a figure that is absent is not capped).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `events.sources.get`
 
 Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.
@@ -1839,6 +1851,22 @@ Arguments:
 - `disable` (optional): limit names to turn off
 - `unset` (optional): limit names to forget
 - `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `capacity.limits.change`
+
+The owner changes the optional capacity caps (owner only), leaving the others as they are: `perProject` (attempts running at once for one project), `perAgent` (for one agent) and `fanIn` (running attempts that report to one supervisor or reviewer), each 1 to 1000. All are off by default. Work over a cap waits for capacity (it does not fail) and is served fairly; work already running is never stopped by a lower cap. `set` turns the named caps on with a figure (a null figure turns it off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry. A cap is named once. A change counts from the next admission decision and lets waiting work in at once. This is the form the chat uses.
+
+Arguments:
+
+- `set` (optional): for example `{ "perProject": 2, "fanIn": 3 }`
+- `enable` (optional): cap names to turn on again
+- `disable` (optional): cap names to turn off
+- `unset` (optional): cap names to forget
+- `expectedRevision` (optional): the revision you read (0 when none is set)
 
 Result: `{ revision }`.
 

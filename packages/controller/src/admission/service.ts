@@ -2,15 +2,17 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, text } from "../domain/model.js";
 import { CommandRunner, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
+import { CAPS_REF, capsOf } from "./caps.js";
 import type { PrincipalBody } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import {
-  EMPTY_STATE, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
+  EMPTY_STATE, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, waitReason, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
 } from "./policy.js";
 
 const STATE: AggregateRef = { kind: "admission-state", id: "admission" };
 const CLASSES: readonly RequestClass[] = ["productive", "inquiry", "review"];
 const REQUEST_ID = /^req-[a-z2-7]{20}$/;
+const LABEL = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,119}$/;
 const HOST_ID = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -23,9 +25,13 @@ export interface RequestAdmission extends CommandMeta {
   readonly memoryMb: number;
   /** The running request that is starting this one. */
   readonly parent?: string;
+  /** Who and what the work belongs to, for the owner's optional caps (project, agent, and the supervisor or reviewer that receives its report). */
+  readonly project?: string;
+  readonly agent?: string;
+  readonly reportsTo?: string;
 }
 
-export type Where = { readonly state: "running" | "waiting"; readonly entry: Entry; readonly position?: number } | { readonly state: "withdrawn"; readonly reason: string } | { readonly state: "absent" };
+export type Where = { readonly state: "running"; readonly entry: Entry } | { readonly state: "waiting"; readonly entry: Entry; readonly position?: number; /** Why it waits ("waiting for capacity: ..."); absent when only order holds it back. */ readonly reason?: string } | { readonly state: "withdrawn"; readonly reason: string } | { readonly state: "absent" };
 
 /**
  * Priority admission and reserved control capacity (card H03). One small durable record holds what is running and what waits, so every decision is made on the whole picture in a single
@@ -49,7 +55,9 @@ export class AdmissionService {
   /** Asks to start something. It is admitted at once if a place is free, otherwise it waits in order; a full queue or a spawn beyond the limits is refused. */
   async request(command: RequestAdmission): Promise<{ id: string; state: "running" | "waiting" | "released"; replayed: boolean }> {
     const result = await this.#retrying(() => this.#runner.command("admission.request", command, async (meta) => {
-      onlyKnown(command, ["commandId", "actor", "class", "priority", "host", "cpus", "memoryMb", "parent"]);
+      onlyKnown(command, ["commandId", "actor", "class", "priority", "host", "cpus", "memoryMb", "parent", "project", "agent", "reportsTo"]);
+      const label = (v: unknown, field: string): string | undefined => (v === undefined ? undefined : typeof v === "string" && LABEL.test(v) ? v : invalid(field, "is not a valid ID"));
+      const project = label(command.project, "project"), agent = label(command.agent, "agent"), reportsTo = label(command.reportsTo, "reportsTo");
       const cls = CLASSES.includes(command.class) ? command.class : invalid("class", `must be one of ${CLASSES.join(", ")}`);
       const priority = command.priority === undefined ? 5 : command.priority;
       if (!Number.isSafeInteger(priority) || priority < 0 || priority > 9) invalid("priority", "must be a whole number from 0 to 9");
@@ -62,11 +70,13 @@ export class AdmissionService {
       const parent = command.parent === undefined ? undefined : (typeof command.parent === "string" && REQUEST_ID.test(command.parent) ? command.parent : invalid("parent", "is not a request ID"));
       const id = derivedId("req", meta.commandId);
       return {
-        payload: { class: cls, priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }) },
+        payload: { class: cls, priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }) },
         build: async () => {
           const loaded = await this.#load();
           const revision = loaded.revision;
           const state = await this.#prepare(loaded.state);
+          // An unreadable caps record stops new requests (nothing starts on a guess); release and the other decisions below never depend on it.
+          const caps = await this.#caps();
           if ([...state.running, ...state.queue].some((e) => e.id === id)) throw new DomainError("command_conflict", `request ${id} already exists`);
           const depth = parent === undefined ? 0 : await this.#childDepth(state, parent);
           if (depth > state.limits.depth) throw new DomainError("invalid_command", `starting this would make a chain of ${depth} attempts starting attempts; the limit is ${state.limits.depth}`, { field: "parent" });
@@ -77,9 +87,9 @@ export class AdmissionService {
             const cap = state.capacity[host]!;
             if ((cpus as number) > cap.cpus || (memoryMb as number) > cap.memoryMb) throw new DomainError("invalid_command", `${host} can never run a request of ${cpus} CPUs and ${memoryMb} MB (it has ${cap.cpus} and ${cap.memoryMb})`, { field: "cpus" });
           }
-          const entry: Entry = { id, class: cls, priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), depth, seq: state.nextSeq, skipped: 0, at: this.#runner.now() };
+          const entry: Entry = { id, class: cls, priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }), depth, seq: state.nextSeq, skipped: 0, at: this.#runner.now() };
           const queued: AdmissionState = { ...state, queue: [...state.queue, entry], nextSeq: state.nextSeq + 1 };
-          const after = promote(queued).state;
+          const after = promote({ ...queued, caps }).state;
           // The bound is on what is left waiting: a request that is admitted at once never sat in the queue.
           if (after.queue.length > state.limits.queue) throw new DomainError("unavailable", `the queue is full (${state.limits.queue} waiting); try again later`);
           return this.#built(revision, after, { request: id, class: cls });
@@ -112,7 +122,7 @@ export class AdmissionService {
           const dropped = descendants(state.queue, requestId);
           dropped.add(requestId);
           const next: AdmissionState = { ...state, running: state.running.filter((e) => e.id !== requestId), queue: state.queue.filter((e) => !dropped.has(e.id)) };
-          return this.#built(revision, promote(next).state, { request: requestId, reason, withdrawn: dropped.size - 1 });
+          return this.#built(revision, (await this.#promote(next)), { request: requestId, reason, withdrawn: dropped.size - 1 });
         },
       };
     }));
@@ -129,7 +139,7 @@ export class AdmissionService {
         build: async () => {
           const loaded = await this.#load();
           const state = await this.#prepare(loaded.state);
-          return this.#built(loaded.revision, promote({ ...state, limits }).state, { limits: limits as unknown as JsonObject });
+          return this.#built(loaded.revision, (await this.#promote({ ...state, limits })), { limits: limits as unknown as JsonObject });
         },
       };
     }));
@@ -158,7 +168,7 @@ export class AdmissionService {
           const next: AdmissionState = { ...state, capacity: { ...state.capacity, [host]: { cpus: cpus as number, memoryMb: memoryMb as number } } };
           // Waiting requests that can no longer fit the lowered capacity are withdrawn (with the reason on record) rather than left to wait for ever.
           const prepared = await this.#prepare(next);
-          return this.#built(revision, promote(prepared).state, { host, cpus: cpus as number, memoryMb: memoryMb as number, withdrawn: prepared.withdrawn.length - next.withdrawn.length });
+          return this.#built(revision, (await this.#promote(prepared)), { host, cpus: cpus as number, memoryMb: memoryMb as number, withdrawn: prepared.withdrawn.length - next.withdrawn.length });
         },
       };
     }));
@@ -178,7 +188,7 @@ export class AdmissionService {
           const loaded = await this.#load();
           const state = await this.#prepare(loaded.state);
           withdrawn = state.withdrawn.length - loaded.state.withdrawn.length;
-          return this.#built(loaded.revision, promote(state).state, { withdrawn });
+          return this.#built(loaded.revision, (await this.#promote(state)), { withdrawn });
         },
       };
     }));
@@ -218,7 +228,7 @@ export class AdmissionService {
           }
           report = { changed, unchanged, missing };
           const next: AdmissionState = { ...state, queue: state.queue.map((e) => (wanted.has(e.id) ? { ...e, priority: wanted.get(e.id)! } : e)) };
-          return this.#built(loaded.revision, promote(next).state, { changed, unchanged, missing });
+          return this.#built(loaded.revision, (await this.#promote(next)), { changed, unchanged, missing });
         },
       };
     }));
@@ -236,7 +246,9 @@ export class AdmissionService {
       return gone === undefined ? { state: "absent" } : { state: "withdrawn", reason: gone.reason };
     }
     const ahead = order(state, laneOf(waiting.class));
-    return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1 };
+    let reason: string | null = null;
+    try { reason = waitReason({ ...state, caps: await this.#caps() }, waiting); } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; reason = "waiting for capacity: the owner's capacity limits setting is damaged, nothing new starts until it is repaired"; }
+    return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1, ...(reason === null ? {} : { reason }) };
   }
 
   async snapshot(): Promise<AdmissionState & { revision: number }> {
@@ -251,7 +263,21 @@ export class AdmissionService {
     return found === undefined ? { state: EMPTY_STATE, revision: 0 } : { state: { ...EMPTY_STATE, ...(found.body as unknown as AdmissionState) }, revision: found.revision };
   }
 
-  #built(revision: number, state: AdmissionState, detail: JsonObject) {
+  /** The owner's caps now. Throws `integrity` when the record is damaged. */
+  async #caps(): Promise<NonNullable<AdmissionState["caps"]>> {
+    const found = await this.#runner.get(CAPS_REF.kind, CAPS_REF.id);
+    return capsOf(found?.body, found?.revision);
+  }
+
+  /** Admits what fits under the caps now. A damaged caps record admits nothing new (work waits; stop and release still work) until it is repaired. */
+  async #promote(state: AdmissionState): Promise<AdmissionState> {
+    let caps: NonNullable<AdmissionState["caps"]>;
+    try { caps = await this.#caps(); } catch (error) { if (error instanceof DomainError && error.code === "integrity") return state; throw error; }
+    return promote({ ...state, caps }).state;
+  }
+
+  #built(revision: number, stateWithCaps: AdmissionState, detail: JsonObject) {
+    const { caps: _caps, ...state } = stateWithCaps; void _caps;
     const change: Change = revision === 0
       ? { type: "create", ref: STATE, body: state as unknown as JsonObject }
       : { type: "update", ref: STATE, expectedRevision: revision, body: state as unknown as JsonObject };

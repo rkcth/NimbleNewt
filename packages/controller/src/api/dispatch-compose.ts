@@ -25,7 +25,7 @@ import type { StallEvent, StallService } from "../health/index.js";
 /** The characters per token the relay assumes when it sizes a prompt for stall detection: low on purpose, so the estimate errs on the large side (card V01b). */
 const RELAY_CHARS_PER_TOKEN = 3;
 import { EffectService } from "../domain/effects.js";
-import type { RunnerOptions } from "../domain/runner.js";
+import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import type { WaitService } from "../domain/waits.js";
 import { EventService, SourceService, noticeThroughNotifications, type EventSource } from "../events/index.js";
@@ -248,6 +248,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   });
   const principal = await i.principals.authenticate(issued.token);
   const admission = AdmissionService.withEpoch(storage, epoch, ro);
+  // Who receives a child task's report (the owner of the task that spawned it), for the owner's optional fan-in cap (card H10b). A task that was not spawned reports to no one.
+  const links = new CommandRunner(storage, epoch, ro);
+  const reportsToOf = async (taskId: string): Promise<string | undefined> => {
+    const link = (await links.get("swarm-link", taskId))?.body as unknown as { parentTaskId?: string } | undefined;
+    if (link?.parentTaskId === undefined) return undefined;
+    const parent = await i.assignments.getAssignment(link.parentTaskId);
+    return parent?.state === "assigned" ? parent.owner?.id : undefined;
+  };
   const hosts = HostService.withEpoch(storage, epoch, i.assignments, ro);
   const effects = EffectService.withEpoch(storage, epoch, i.assignments, { ...ro, holder: "dispatcher" });
   const blockers = BlockerService.withEpoch(storage, epoch, ro);
@@ -472,7 +480,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
+      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),

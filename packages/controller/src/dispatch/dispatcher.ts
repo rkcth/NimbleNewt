@@ -77,6 +77,8 @@ export interface DispatcherDeps {
   readonly projects: Pick<ProjectService, "getTask">;
   readonly credentials: Pick<TaskCredentialService, "issueForAttempt" | "principalOf" | "endForAttempt">;
   readonly admission: Pick<AdmissionService, "request" | "release" | "where" | "reprioritize" | "snapshot">;
+  /** Who receives the report of a task's attempt (card H10b): the agent of the task that spawned it. Used for the owner's optional fan-in cap; `undefined` means no supervisor. */
+  readonly reportsTo?: (taskId: string) => Promise<string | undefined>;
   readonly hosts: Pick<HostService, "status">;
   /** The worker hosts, local or remote, in the order they are tried. They all implement the same contract. */
   readonly workers: readonly WorkerHost[];
@@ -199,6 +201,8 @@ export interface TickReport {
   readonly started: readonly string[];
   /** Attempts whose request waits for a place. */
   readonly waiting: readonly string[];
+  /** Attempts that wait only because a capacity limit is full (not a failure), with why ("waiting for capacity: ..."); they are also in `waiting`. */
+  readonly capacityWaits: readonly { readonly attemptId: string; readonly reason: string }[];
   readonly skipped: readonly { readonly taskId: string; readonly attemptId: string; readonly check: DispatchCheck; readonly reason: string }[];
   /** Attempts that cannot be started for a reason waiting does not fix: a blocker names who can change it. */
   readonly blocked: readonly { readonly taskId: string; readonly attemptId: string; readonly check: DispatchCheck; readonly blockerId: string }[];
@@ -299,7 +303,7 @@ export class DispatcherService {
 
   async #tick(): Promise<TickReport> {
     const at = this.#runner.now();
-    const started: string[] = [], waiting: string[] = [], lost: string[] = [], readmitted: string[] = [];
+    const started: string[] = [], waiting: string[] = [], capacityWaits: { attemptId: string; reason: string }[] = [], lost: string[] = [], readmitted: string[] = [];
     const skipped: { taskId: string; attemptId: string; check: DispatchCheck; reason: string }[] = [];
     const blocked: { taskId: string; attemptId: string; check: DispatchCheck; blockerId: string }[] = [];
     const approvals: { attemptId: string; operationId: string; verdict: "approved" | "denied" | "expired" }[] = [];
@@ -336,7 +340,7 @@ export class DispatcherService {
       let outcome: AdvanceOutcome;
       try { outcome = await this.#advance(d); } catch (error) { failures.push({ taskId: d.body.taskId, attemptId: id, error: errorText(error) }); continue; }
       if (outcome.kind === "started") started.push(id);
-      else if (outcome.kind === "waiting") waiting.push(id);
+      else if (outcome.kind === "waiting") { waiting.push(id); if (outcome.reason !== undefined) capacityWaits.push({ attemptId: id, reason: outcome.reason }); }
       else if (outcome.kind === "skipped") skipped.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, reason: outcome.reason });
       else if (outcome.kind === "blocked") blocked.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, blockerId: outcome.blockerId });
     }
@@ -350,7 +354,7 @@ export class DispatcherService {
         const next = await this.#advance(d).catch((error: unknown): { kind: "failed"; error: string } => { if (isDomainError(error, "stale_epoch")) throw error; return { kind: "failed", error: errorText(error) }; });
         if (next.kind === "failed") { failures.push({ taskId: found.taskId, attemptId: found.attemptId, error: next.error }); continue; }
         if (next.kind === "started") started.push(found.attemptId);
-        else if (next.kind === "waiting") waiting.push(found.attemptId);
+        else if (next.kind === "waiting") { waiting.push(found.attemptId); if (next.reason !== undefined) capacityWaits.push({ attemptId: found.attemptId, reason: next.reason }); }
         else if (next.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, reason: next.reason });
         else if (next.kind === "blocked") blocked.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, blockerId: next.blockerId });
       } else if (found.outcome.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: found.outcome.check, reason: found.outcome.reason });
@@ -379,7 +383,7 @@ export class DispatcherService {
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? error.message.slice(0, 200) : "failed" });
       }
     }
-    return { at, started, waiting, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };
+    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };
   }
 
   /**
@@ -1134,7 +1138,7 @@ export class DispatcherService {
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
     if (where.state !== "running" && where.state !== "waiting") await this.#giveBack(d);
-    if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting" } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
+    if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting", ...(where.reason === undefined ? {} : { reason: where.reason }) } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
     // Card R05b: the allowance is held before the attempt starts, so two attempts of sibling tasks cannot count on the same money or compute. Nothing to reserve with: nothing is held.
     const held = await this.#reserve(d);
     if (held !== undefined) { await this.#giveBack(d); return held; }
@@ -1207,7 +1211,9 @@ export class DispatcherService {
     }
     const n = d.body.requests ?? 0;
     const priority = await this.#deps.contracts.priorityOf(d.body.taskId);
-    const asked = await this.#deps.admission.request({ commandId: `dpa-req:${d.body.attemptId}:${n}`, actor: DISPATCHER_ACTOR, class: "productive", priority, host: host.hostId, cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
+    // Who the work counts for under the owner's optional caps: its project, its agent and (for a child task) the agent of the task it reports to. A supervisor that cannot be read is simply not counted.
+    const reportsTo = this.#deps.reportsTo === undefined ? undefined : await this.#deps.reportsTo(d.body.taskId).catch((e: unknown) => { this.#options.onError?.(e); return undefined; });
+    const asked = await this.#deps.admission.request({ commandId: `dpa-req:${d.body.attemptId}:${n}`, actor: DISPATCHER_ACTOR, class: "productive", priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(reportsTo === undefined ? {} : { reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
     await this.#update(d.body.attemptId, (b) => ({ ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }));
     return asked.id;
   }
@@ -1615,7 +1621,7 @@ export class DispatcherService {
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : "failed").slice(0, 300);
 type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
-type AdvanceOutcome = { kind: "started" } | { kind: "waiting" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
+type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; reason?: string } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */
 const exhausted = (limit: number, used: number): boolean => limit > 0 && used >= limit;

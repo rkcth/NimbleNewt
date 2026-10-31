@@ -38,6 +38,7 @@ import type { StallService } from "../health/stall.js";
 import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
+import type { CapacityLimitsService } from "../admission/caps.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
@@ -118,6 +119,7 @@ export interface Context {
   /** Absent when the controller runs without remote hosts. */
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
+  readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
@@ -262,6 +264,7 @@ const recoveryLadderOf = (c: Context): NonNullable<Context["recoveryLadder"]> =>
 const recoveryStepOf = (c: Context): NonNullable<Context["recoveryStep"]> => c.recoveryStep ?? unavailable("recovery steps");
 const resumeSettingsOf = (c: Context): NonNullable<Context["resumeSettings"]> => c.resumeSettings ?? unavailable("resume settings");
 const cleanupSettingsOf = (c: Context): NonNullable<Context["cleanupSettings"]> => c.cleanupSettings ?? unavailable("cleanup settings");
+const capacityLimitsOf = (c: Context): NonNullable<Context["capacityLimits"]> => c.capacityLimits ?? unavailable("capacity limits");
 const dispatchLimitsOf = (c: Context): NonNullable<Context["dispatchLimits"]> => c.dispatchLimits ?? unavailable("dispatcher limits");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
 const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
@@ -461,6 +464,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await dispatchLimitsOf(c).get(c.principal) }); } },
   { name: "dispatch.limits.change", kind: "command", summary: "The owner changes the dispatcher's limits (owner only), leaving the others as they are: `attemptMinutes` (1 to 525600: how long an attempt may run) and `maxAttempts` (1 to 1000: attempts admitted after a lost one). Both are off by default. `set` turns the named limits on with a figure (a null figure turns the limit off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry so the start-up option or no limit applies. A task's contract `maxMinutes`/`maxAttempts` still applies. It counts from the next attempt claimed or re-admitted; an attempt already running keeps the expiry it was given. This is the form the chat uses.", args: { "set?": "for example `{ \"attemptMinutes\": 240, \"maxAttempts\": 3 }`", "enable?": "limit names to turn on again", "disable?": "limit names to turn off", "unset?": "limit names to forget", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["set", "enable", "disable", "unset", "expectedRevision"]); return asJson({ ...(await dispatchLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "capacity.limits.get", kind: "query", summary: "The optional capacity caps (owner only): the owner's entries (on or off, with the kept figure) and what applies now. All are off (no cap) unless set.", args: {}, result: "`{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value? }` for `perProject`, `perAgent`, `fanIn`), `effective` (a figure that is absent is not capped).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await capacityLimitsOf(c).get(c.principal) }); } },
+  { name: "capacity.limits.change", kind: "command", summary: "The owner changes the optional capacity caps (owner only), leaving the others as they are: `perProject` (attempts running at once for one project), `perAgent` (for one agent) and `fanIn` (running attempts that report to one supervisor or reviewer), each 1 to 1000. All are off by default. Work over a cap waits for capacity (it does not fail) and is served fairly; work already running is never stopped by a lower cap. `set` turns the named caps on with a figure (a null figure turns it off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry. A cap is named once. A change counts from the next admission decision and lets waiting work in at once. This is the form the chat uses.", args: { "set?": "for example `{ \"perProject\": 2, \"fanIn\": 3 }`", "enable?": "cap names to turn on again", "disable?": "cap names to turn off", "unset?": "cap names to forget", "expectedRevision?": "the revision you read (0 when none is set)" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["set", "enable", "disable", "unset", "expectedRevision"]); return asJson({ ...(await capacityLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "events.sources.get", kind: "query", summary: "Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.", args: {}, result: "`{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`, `critical`).", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await eventSourceSettingsOf(c).get(c.principal) }); } },
   { name: "events.sources.set", kind: "command", summary: "The owner names the event sources to leave off (owner only); the list replaces the earlier one and an empty list turns all on. Each must be a source this controller has. A source not listed, including one added later, is watched. A turned-off source is not polled from the next tick and keeps its saved position, so what happened meanwhile is reported when it is turned on again.", args: { disabled: "source IDs to leave off, for example `[\"service-health\"]`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A source the controller relies on (critical) cannot be turned off.", completion: { kind: "completed" },
