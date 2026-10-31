@@ -8,7 +8,9 @@ import { fold } from "./names.js";
  * compared the way a case-insensitive filesystem would see them (`fold`).
  */
 export const DEFAULT_PROTECTED_PATHS: readonly string[] = [
-  ".gitattributes", ".gitmodules", ".husky/", ".githooks/", ".github/workflows/", ".github/actions/", ".gitlab-ci.yml", ".circleci/", "azure-pipelines.yml", "Jenkinsfile", ".pre-commit-config.yaml", ".travis.yml", "bitbucket-pipelines.yml",
+  ".gitattributes", ".gitmodules", ".husky/", ".githooks/", ".github/", ".gitlab-ci.yml", ".circleci/", "azure-pipelines.yml", "Jenkinsfile", ".pre-commit-config.yaml", ".travis.yml", "bitbucket-pipelines.yml",
+  // Files that change what runs or what is trusted when the project is built, installed or reviewed: ownership and dependency bots, ignore rules, and package manager configuration.
+  "dependabot.yml", "renovate.json", ".renovaterc", "CODEOWNERS", ".gitignore", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", "pip.conf", "pip.ini", ".pypirc", ".cargo/", ".mvn/", "nuget.config", ".bazelrc",
 ];
 
 export function isProtectedPath(path: string, patterns: readonly string[] = DEFAULT_PROTECTED_PATHS): boolean {

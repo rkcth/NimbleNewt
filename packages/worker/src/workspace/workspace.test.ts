@@ -296,7 +296,8 @@ test("a set of files is written all together or not at all: a held or moved file
 
 test("protected paths: CI configuration, hooks and Git attributes match anywhere they act, ordinary files do not, and the list is replaceable", () => {
   for (const p of [".gitattributes", "sub/.gitattributes", ".GITMODULES", ".github/workflows/ci.yml", ".github/Workflows/deep/x.yml", ".husky/pre-commit", ".gitlab-ci.yml", "Jenkinsfile", ".circleci/config.yml"]) assert.equal(isProtectedPath(p), true, p);
-  for (const p of ["src/a.ts", ".github/CODEOWNERS", "docs/.husky/x", "workflows/ci.yml", ".gitignore"]) assert.equal(isProtectedPath(p), false, p);
+  for (const p of ["src/a.ts", "docs/.husky/x", "workflows/ci.yml", "docs/github/x.yml", "package.json"]) assert.equal(isProtectedPath(p), false, p);
+  for (const p of [".github/CODEOWNERS", ".github/dependabot.yml", ".github/ISSUE_TEMPLATE/bug.md", "CODEOWNERS", "docs/CODEOWNERS", ".gitignore", "sub/.gitignore", ".npmrc", "packages/a/.npmrc", ".yarnrc.yml", ".cargo/config.toml"]) assert.equal(isProtectedPath(p), true, p);
   assert.equal(isProtectedPath("src/a.ts", ["src/a.ts"]), true);
   assert.equal(isProtectedPath(".gitattributes", []), false);
 });

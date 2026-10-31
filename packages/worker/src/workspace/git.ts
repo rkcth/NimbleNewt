@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
@@ -14,6 +14,8 @@ import { open } from "node:fs/promises";
 
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** Where the commits made through a permit are listed: a file in the checkout's git directory (host side, outside the checkout the agent edits). Text in a commit message proves nothing; a commit counts as permitted only if `commit()` made it and listed it here. */
+export const permitLedgerPath = (gitDir: string): string => join(gitDir, "nn-permit-ledger");
 
 /** A digest of a list of staged files in the one form the controller and the worker both compute: sorted by path, each as {"op","path"}. */
 export const filesDigest = (files: readonly { path: string; op: "write" | "delete" }[]): string =>
@@ -406,6 +408,8 @@ export class GitBridge {
     const env = { GIT_AUTHOR_NAME: permit.author.name, GIT_AUTHOR_EMAIL: permit.author.email, GIT_COMMITTER_NAME: permit.committer.name, GIT_COMMITTER_EMAIL: permit.committer.email };
     const commitId = (await this.#run(["commit-tree", permit.tree, "-p", permit.base, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
     if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+    // The commit is listed before the branch moves to it, so a commit that is on the branch is always listed; one that is only listed (a crash between the two) is not reachable and counts for nothing.
+    await appendFile(permitLedgerPath(options.gitDir), `${commitId} ${permit.trailers.find((t) => t.startsWith("NimbleNewt-Request: "))?.slice(20) ?? ""}\n`, { mode: 0o600 });
     // The checkout's branch moves only from the reviewed base to the new commit.
     await this.#run(["update-ref", "HEAD", commitId, permit.base], { gitDir: options.gitDir });
     return { commitId, parent: permit.base };
@@ -477,15 +481,17 @@ export class GitBridge {
     return { base, head, files };
   }
 
-  /** The commits between the base and the checkout's head (oldest last, as git lists them) that do not carry the commit permit's marks for this task: the `NimbleNewt-Request:` and `NimbleNewt-Task:` trailers the review gate adds (A06). */
+  /** The commits between the base and the checkout's head (oldest last, as git lists them) that were not made through a commit permit for this task (they are not in the host-side permit ledger, or lack the marks): the `NimbleNewt-Request:` and `NimbleNewt-Task:` trailers the review gate adds (A06). */
   async unpermitted(options: { gitDir: string; taskId: string }): Promise<string[]> {
     const base = await this.#base(options.gitDir);
     const out = (await this.#run(["log", "--format=%H%x1f%B%x1e", `${base}..HEAD`], { gitDir: options.gitDir })).stdout.split("\x1e").map((x) => x.trim()).filter(Boolean);
+    // The marks in a message are text anybody can type: a commit is permitted only when `commit()` listed it in the host-side ledger as well.
+    const listed = new Set((await readFile(permitLedgerPath(options.gitDir), "utf8").catch(() => "")).split("\n").map((l) => l.split(" ")[0]!).filter((x) => COMMIT.test(x)));
     return out.flatMap((entry) => {
       const [sha = "", message = ""] = entry.split("\x1f");
       const request = /^NimbleNewt-Request: \S+$/m.test(message);
       const task = message.split("\n").some((l) => l === `NimbleNewt-Task: ${options.taskId}`);
-      return request && task ? [] : [sha];
+      return request && task && listed.has(sha) ? [] : [sha];
     });
   }
 

@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GitBridge, WorkspaceBridge, WorkspaceHost, type CheckoutLocation, type HostWorkspaceCall } from "./index.js";
+import { GitBridge, filesDigest, WorkspaceBridge, WorkspaceHost, type CheckoutLocation, type HostWorkspaceCall } from "./index.js";
 
 // Card H12m: the host side of integration, refresh and quarantine, against a real checkout with real git.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
@@ -395,7 +395,8 @@ test("a landing needs a clean shared tree on the named landing branch: another b
 });
 
 test("a checkout with an untracked file, or with a file an ignore rule hides, is not landed (card H12q review)", { skip }, async () => {
-  const w = await world();
+  // The ignore file is itself a protected path by default; this test is about the dirty check, so the project's list is empty here.
+  const w = await world({ landing: () => ({ branch: "main", requirePermit: false, protectedPaths: [] }) });
   try {
     await writeFile(join(w.where.checkout, ".gitignore"), "*.log\n");
     await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
@@ -479,7 +480,13 @@ test("a landing needs the commit permit of the review gate on the checkout's com
   const ok = await world({ landing: () => ({ branch: "main" }) });
   try {
     await writeFile(join(ok.where.checkout, "src", "a.ts"), "export const a = 2;\n");
-    sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "add", "-A"); sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "commit", "-q", "-m", permitted("reviewed work"));
+    // Marks typed into a message of a manual commit prove nothing: the commit is not in the host-side permit ledger, so it is refused (card H12q re-review).
+    sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "add", "-A"); sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "commit", "-q", "-m", permitted("forged marks"));
+    assert.match(reasonOf(await ok.host.run(call("landing"))), /do not carry the commit permit/);
+    sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "reset", "-q", "--soft", "HEAD~1");
+    // A commit made through the permit (GitBridge.commit) is listed and lands.
+    const staged = await ok.git.stage({ gitDir: ok.where.gitDir, checkout: ok.where.checkout });
+    await ok.git.commit({ gitDir: ok.where.gitDir, checkout: ok.where.checkout, permit: { base: staged.base, tree: staged.tree, filesDigest: filesDigest(staged.files), message: "reviewed work", author: { name: "ann", email: "ann@agents.invalid" }, committer: { name: "NimbleNewt", email: "c@nimblenewt.invalid" }, trailers: ["Reviewed-by: owner", "NimbleNewt-Request: req-1", "NimbleNewt-Task: tsk-one"] } });
     assert.equal(detailOf(await ok.host.run(call("landing")))["landed"], true);
     // A permit for another task does not count.
   } finally { await ok.done(); }
