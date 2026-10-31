@@ -61,6 +61,7 @@ import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { QuietHostService } from "../remote/quiet-hosts.js";
+import type { CatalogPolicyService } from "../catalog/policy.js";
 import type { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -161,6 +162,7 @@ export interface StateApiDeps {
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Revoking a catalogue version and listing its running calls (card T02b). */
   readonly catalogRevocation?: CatalogRevocationPort;
+  readonly catalogPolicy?: Pick<CatalogPolicyService, "get" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
   readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
@@ -304,6 +306,7 @@ export class StateApi {
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),
         ...(this.#deps.catalogRevocation === undefined ? {} : { catalogRevocation: this.#deps.catalogRevocation }),
+        ...(this.#deps.catalogPolicy === undefined ? {} : { catalogPolicy: this.#deps.catalogPolicy }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.workEnd === undefined ? {} : { workEnd: this.#deps.workEnd }),

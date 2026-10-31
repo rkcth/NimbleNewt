@@ -10,7 +10,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -44,6 +44,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Which event sources are watched decides what wakes agents and spends work (card H13f): shown first in every profile (provisional; see the notes).
   // Withdrawing a tool version (owner decision 2026-10-30): always shown first; when calls of it are running, the owner is asked whether they finish or are cancelled.
   "catalog.revoke": { verb: "Revoke tool version", mode: "propose" },
+  // The standing answer for running calls when a revoke names none (card T02c): shown first (provisional); the revision is read for the owner.
+  "catalog.policy.change": { verb: "Change what happens to running tool calls when a version is revoked", mode: "propose", revision: "catalog-policy" },
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
   // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
   // How long a stuck agent's concern waits at each supervisor before it climbs is an escalation policy (owner decision 2026-10-30, supervisor ladder): shown first in every profile (provisional).

@@ -53,7 +53,7 @@ export interface VersionBody {
 }
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
 /** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, or cancel them. Absent: nobody was asked (the caller is not chat, or gave no answer), which means `finish`. */
-export type RunningCallsChoice = "finish" | "cancel";
+export type RunningCallsChoice = "finish" | "cancel" | "pause";
 export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string }
 export interface UsageBody {
   readonly versionId: string;
@@ -185,7 +185,7 @@ export class CatalogService {
   readonly #runner: CommandRunner;
   readonly #desks: DeskService;
 
-  readonly #revoked = new Set<(name: string, version: string, runningCalls: RunningCallsChoice | undefined) => void>();
+  readonly #revoked = new Set<(name: string, version: string, runningCalls: RunningCallsChoice | undefined, owner: Principal) => void>();
 
   private constructor(runner: CommandRunner, desks: DeskService) { this.#runner = runner; this.#desks = desks; }
 
@@ -193,7 +193,7 @@ export class CatalogService {
    * Tells `listener` (name, version) after a revocation has been committed (T02b: what happens to work in flight is the listener's policy). A repeat of an already-committed revoke tells again, so a listener must be idempotent;
    * a listener that throws never undoes the revocation. Returns the way to stop listening.
    */
-  onRevoked(listener: (name: string, version: string, runningCalls: RunningCallsChoice | undefined) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
+  onRevoked(listener: (name: string, version: string, runningCalls: RunningCallsChoice | undefined, owner: Principal) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, desks: DeskService, options: RunnerOptions = {}): CatalogService {
     return new CatalogService(new CommandRunner(storage, epoch, options), desks);
@@ -265,7 +265,7 @@ export class CatalogService {
   async revoke(owner: Principal, command: NoActor & { name: string; version: string; reason: string; runningCalls?: RunningCallsChoice }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner revokes a version`);
     onlyKnown(command, ["commandId", "name", "version", "reason", "runningCalls"]);
-    if (command.runningCalls !== undefined && command.runningCalls !== "finish" && command.runningCalls !== "cancel") invalid("runningCalls", "must be finish or cancel");
+    if (command.runningCalls !== undefined && command.runningCalls !== "finish" && command.runningCalls !== "cancel" && command.runningCalls !== "pause") invalid("runningCalls", "must be finish, cancel or pause");
     const runningCalls = command.runningCalls;
     const parsed = parseName(command.name);
     if (parsed === null) invalid("name", "is not a canonical name");
@@ -290,7 +290,7 @@ export class CatalogService {
         };
       },
     }));
-    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls); } catch { /* the revocation stands whatever a listener does */ } }
+    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls, owner); } catch { /* the revocation stands whatever a listener does */ } }
   }
 
   /**
@@ -331,6 +331,100 @@ export class CatalogService {
         return { ref: eref, creates: false, changes: [{ type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name: command.name, version: command.version, setAside: add.length, reason }, contention: async () => new DomainError("stale_revision", "the catalog entry changed at the same moment; ask again") };
       },
     }));
+  }
+
+  /**
+   * The past revocations, newest first (owner only): which version, why, who and when. Never any content. `total` counts them all; at most `limit` (default 50, up to 200) are listed. A revocation whose
+   * version record was later dropped by retention still shows (the revocation record is kept as the record of the act).
+   */
+  async revocations(owner: Principal, query: { name?: string; limit?: number } = {}): Promise<{ items: { name: string; version: string; reason: string; revokedBy: string; at: string }[]; total: number }> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner reads past revocations`);
+    onlyKnown(query, ["name", "limit"]);
+    const limit = query.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > CATALOG_LIMITS.page) invalid("limit", `must be 1 to ${CATALOG_LIMITS.page}`);
+    if (query.name !== undefined && parseName(query.name) === null) invalid("name", "is not a canonical name");
+    const all: { name: string; version: string; reason: string; revokedBy: string; at: string }[] = [];
+    // The entry says which versions of a name were revoked; the revocation record says why. A name is looked at through its entry, so the scan is bounded by the entries.
+    let scanned = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; scanned += 1;
+        const e = a.body as unknown as EntryBody;
+        if (query.name !== undefined && e.name !== query.name) continue;
+        for (const v of e.revoked) {
+          const r = (await this.#runner.get("catalog-revocation", derivedId("cav", `${e.name}|${v}`)))?.body as unknown as RevocationBody | undefined;
+          if (r !== undefined) all.push({ name: e.name, version: v, reason: r.reason, revokedBy: r.revokedBy, at: r.at });
+        }
+      }
+      if (page.length < 200 || scanned >= CATALOG_LIMITS.scan) break;
+    }
+    all.sort((x, y) => (x.at === y.at ? (x.name + x.version < y.name + y.version ? -1 : 1) : x.at < y.at ? 1 : -1));
+    return { items: all.slice(0, limit), total: all.length };
+  }
+
+  /**
+   * Versions that retention may drop (card T02c, K06): for each name, every version that is not among the newest `keep` published versions, is not the entry's latest, and was not revoked (a revoked version stays as the
+   * record of the revocation). Nothing is dropped here; the retention runner shows these, checks what resumable tasks still use, and calls `dropVersion`. `ageDays` is since registration. Bounded by `limit`; `partial` says
+   * more exist or the scan stopped.
+   */
+  async retentionCandidates(by: Principal, keep: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean }> {
+    if (by.kind !== "owner" && by.kind !== "service" && by.kind !== "host") throw new DomainError("forbidden", `${by.id} may not read what retention would drop`);
+    if (!Number.isSafeInteger(keep) || keep < 1 || keep > CATALOG_LIMITS.versions) invalid("keep", `must be 1 to ${CATALOG_LIMITS.versions}`);
+    const items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[] = [];
+    let partial = false; let scanned = 0;
+    const now = Date.parse(this.#runner.now());
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; scanned += 1;
+        const e = a.body as unknown as EntryBody;
+        const ordered = [...e.versions].sort(compare);
+        for (const v of ordered.slice(0, Math.max(0, ordered.length - keep))) {
+          if (v === e.latest || e.revoked.includes(v)) continue;
+          const id = derivedId("cav", `${e.name}|${v}`);
+          const found = await this.#runner.get("catalog-version", id);
+          if (found === undefined) continue;
+          if (items.length >= limit) { partial = true; continue; }
+          items.push({ name: e.name, version: v, versionId: id, revision: found.revision, ageDays: Math.max(0, Math.floor((now - Date.parse((found.body as unknown as VersionBody).registeredAt)) / 86_400_000)) });
+        }
+      }
+      if (page.length < 200) break;
+      if (scanned >= CATALOG_LIMITS.scan) { partial = true; break; }
+    }
+    items.sort((x, y) => (x.name === y.name ? compare(x.version, y.version) : x.name < y.name ? -1 : 1));
+    return { items, partial };
+  }
+
+  /**
+   * Drops one version for retention (card T02c): the version record and its place in the entry go together in one step, guarded by the revisions retention saw. The latest and a revoked version are refused, and so is a
+   * version that is among the newest `keep` now. Its usage records (what ran, for whom) stay: they are history, not a copy of the version. The caller has already checked that no resumable task uses it.
+   * Returns false when the version changed or is gone since it was listed.
+   */
+  async dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }): Promise<boolean> {
+    if (by.kind !== "owner" && by.kind !== "service" && by.kind !== "host") throw new DomainError("forbidden", `${by.id} may not drop a version`);
+    const versionId = derivedId("cav", `${drop.name}|${drop.version}`);
+    const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", drop.name) };
+    const vref: AggregateRef = { kind: "catalog-version", id: versionId };
+    try {
+      await this.#runner.command("catalog.retention.drop", { commandId: `rtc-${sha(`${versionId}|${drop.revision}`).slice(0, 40)}`, actor: by.id }, async () => ({
+        payload: { versionId, revision: drop.revision },
+        build: async () => {
+          const entry = await this.#runner.get(eref.kind, eref.id);
+          const found = await this.#runner.get(vref.kind, vref.id);
+          if (entry === undefined || found === undefined || found.revision !== drop.revision) throw new DomainError("stale_revision", "changed since the preview");
+          const e = entry.body as unknown as EntryBody;
+          const ordered = [...e.versions].sort(compare);
+          if (drop.version === e.latest || e.revoked.includes(drop.version) || !ordered.slice(0, Math.max(0, ordered.length - drop.keep)).includes(drop.version)) throw new DomainError("stale_revision", "it is no longer a version retention may drop");
+          const next: EntryBody = { ...e, versions: e.versions.filter((v) => v !== drop.version), ...(e.deprecated === undefined ? {} : { deprecated: e.deprecated.filter((v) => v !== drop.version) }) };
+          return { ref: vref, creates: false, changes: [{ type: "delete", ref: vref, expectedRevision: found.revision }, { type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name: drop.name, version: drop.version, rule: "catalog-versions-kept", keep: drop.keep } };
+        },
+      }));
+      return true;
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return false;
+      throw error;
+    }
   }
 
   /** One version (or the latest live one), if the reader may see it: system and shared artifacts to any authenticated principal with `catalog.read`, a personal one only to its owner and the installation owner. */

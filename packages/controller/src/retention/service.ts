@@ -43,7 +43,14 @@ export interface IncidentPort {
   archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string }): Promise<number>;
   purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string }): Promise<number>;
 }
+export interface CatalogRetentionPort {
+  retentionCandidates(by: Principal, keep: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean }>;
+  dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }): Promise<boolean>;
+}
+
 export interface RetentionDeps {
+  /** The tool catalogue, for the old-versions rule (card T02c). Absent: that rule does nothing. */
+  readonly catalog?: CatalogRetentionPort;
   readonly settings: Pick<RetentionSettingsService, "effective">;
   readonly backups?: BackupPort;
   readonly incidents?: IncidentPort;
@@ -95,6 +102,8 @@ export interface RunReport {
   readonly digest?: string;
   readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number } };
   readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number };
+  /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set): what it would drop (or dropped), and the versions kept because a resumable task used them. */
+  readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
   readonly runId?: string;
 }
 
@@ -228,14 +237,25 @@ export class RetentionService {
       candidates.sort((a, b) => (a.kind === b.kind ? (a.id < b.id ? -1 : 1) : a.kind < b.kind ? -1 : 1));
       if (candidates.length > limit) { candidates.length = limit; partial = true; }
     }
+    const keepVersions = values.catalogVersionsKept;
+    let versions: { items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean } | undefined;
+    const versionsRetained: { name: string; version: string; reasons: string[] }[] = [];
+    if (keepVersions !== null && this.#deps.catalog !== undefined) {
+      const found = await this.#deps.catalog.retentionCandidates(by, keepVersions, limit);
+      const material = await RetainedMaterial.build(this.#runner.storage);
+      const free = found.items.filter((v) => { const why = material.why("catalog-version", v.versionId); if (why !== undefined) { if (versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); return false; } return true; });
+      versions = { items: free, partial: found.partial };
+      if (found.partial) partial = true;
+    }
     const counts = { daily: values.backupDaily, weekly: values.backupWeekly };
     const backupsPort = this.#deps.backups;
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
-    const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays] });
+    const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)] });
     const base: RunReport = {
       dryRun, enabled: values.derivedDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays } }),
+      ...(versions === undefined ? {} : { catalogVersions: { keep: keepVersions!, candidates: versions.items.map((v) => ({ name: v.name, version: v.version, ageDays: v.ageDays })), retained: versionsRetained, removed: 0, partial: versions.partial } }),
     };
     if (dryRun) return { ...base, digest };
     if (!auto && options.confirm !== digest) throw new DomainError("invalid_command", "confirm: what retention would remove has changed since the preview (or confirm was not given); preview again and pass its digest", { field: "confirm" });
@@ -250,6 +270,19 @@ export class RetentionService {
         if (why !== undefined) { if (retained.length < 200) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
         const done = await this.#removeOne(by, c, values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
+      }
+    }
+    let versionsRemoved = 0;
+    if (versions !== undefined && keepVersions !== null && this.#deps.catalog !== undefined) {
+      for (let i = 0; i < versions.items.length; i += REMOVE_BATCH) {
+        await this.#deps.beforeBatch?.(i / REMOVE_BATCH);
+        // A task can resume, or use a version, while the run goes: the holds are read again before each batch.
+        const material = await RetainedMaterial.build(this.#runner.storage);
+        for (const v of versions.items.slice(i, i + REMOVE_BATCH)) {
+          const why = material.why("catalog-version", v.versionId);
+          if (why !== undefined) { if (versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); continue; }
+          if (await this.#deps.catalog.dropVersion(by, { name: v.name, version: v.version, revision: v.revision, keep: keepVersions })) { versionsRemoved += 1; removedIds.push(`catalog-version/${v.versionId}`); }
+        }
       }
     }
     let deleted: string[] | undefined;
@@ -275,6 +308,7 @@ export class RetentionService {
     }));
     return {
       ...base, dryRun: false, removed: removedIds.length, runId,
+      ...(versions === undefined ? {} : { catalogVersions: { ...base.catalogVersions!, retained: versionsRetained, removed: versionsRemoved } }),
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length, deleted: deleted ?? [], counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(archived === undefined ? {} : { archived }), ...(purged === undefined ? {} : { purged }) } }),
     };

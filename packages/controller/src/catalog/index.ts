@@ -1,1 +1,2 @@
 export { ARCHITECTURES, CATALOG_LIMITS, CatalogService, OPERATING_SYSTEMS, checkHost, checkManifest, personalNamespace, runAction, type ArtifactKind, type EntryBody, type HostCheck, type HostFacts, type Manifest, type RegisterCommand, type RevocationBody, type RunningCallsChoice, type SourceRef, type UsageBody, type VersionBody } from "./catalog.js";
+export { CatalogPolicyService, RUNNING_CALL_POLICIES, type CatalogPolicyView } from "./policy.js";

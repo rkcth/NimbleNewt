@@ -79,10 +79,15 @@ export interface ToolExecutionDeps {
   readonly assignments: Pick<AssignmentService, "getAssignment">;
   readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked">>;
   /**
+   * The `pause` policy (card T02c): pauses the task of a running call when its version is revoked (the owner who revoked is the actor). The call itself is not aborted; the pause stops what the agent writes until the owner resumes.
+   * Absent: `pause` falls back to `cancel` (a revocation is a safety act and the owner must not be left with a call nobody holds).
+   */
+  readonly pauseTask?: (owner: Principal, taskId: string, reason: string, commandId: string) => Promise<unknown>;
+  /**
    * What happens to a catalogue tool call already running when its version is revoked (card T02b): `finish` (the provisional default: the run ends on the bytes it started with; new runs are refused either way)
    * or `cancel` (the run's signal is aborted and the call ends as failed). Read at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
    */
-  readonly revocationPolicy?: () => "finish" | "cancel" | Promise<"finish" | "cancel">;
+  readonly revocationPolicy?: () => "finish" | "cancel" | "pause" | Promise<"finish" | "cancel" | "pause">;
   readonly hosts: Pick<HostService, "status">;
   readonly admission: Pick<AdmissionService, "snapshot">;
   readonly runner: ScriptRunner;
@@ -172,7 +177,7 @@ export class ToolExecutionService {
   constructor(deps: ToolExecutionDeps) {
     this.#deps = deps;
     // The listener never rejects: a failure while cancelling must not become an unhandled rejection that ends the process.
-    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls) => { this.#revoked(name, version, runningCalls).catch(() => undefined); });
+    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls, owner) => { this.#revoked(name, version, runningCalls, owner).catch(() => undefined); });
   }
 
   /** Stops listening for revocations. The service subscribes in its constructor, so whoever builds it once also disposes it once. */
@@ -193,12 +198,22 @@ export class ToolExecutionService {
    * What the owner chose on the revoke command decides; with no choice (nobody could be asked) the dependency `revocationPolicy` answers, and without one the run finishes. A policy that cannot be read, or answers
    * anything else, cancels (a revocation is a safety act).
    */
-  async #revoked(name: string, version: string, choice: "finish" | "cancel" | undefined): Promise<void> {
+  async #revoked(name: string, version: string, choice: "finish" | "cancel" | "pause" | undefined, owner: Principal): Promise<void> {
     const live = this.#running.get(`${name}|${version}`);
     if (live === undefined || live.size === 0) return;
     let policy: unknown = choice;
     if (policy === undefined) { try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; } }
     if (policy === "finish") return;
+    if (policy === "pause" && this.#deps.pauseTask !== undefined) {
+      // Each task once. A task that cannot be paused (gone, not allowed) has its call cancelled: nothing is left running under a revoked version with nobody holding it.
+      const tasks = new Set([...live].map((r) => r.taskId));
+      const failed = new Set<string>();
+      for (const taskId of tasks) {
+        try { await this.#deps.pauseTask(owner, taskId, `${name} ${version} was revoked while a call of it ran; resume the task when you have decided`.slice(0, 300), `rvp-${createHash("sha256").update(`${name}|${version}|${taskId}`).digest("hex").slice(0, 40)}`); } catch { failed.add(taskId); }
+      }
+      for (const run of [...live]) if (failed.has(run.taskId)) run.ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
+      return;
+    }
     for (const run of [...live]) run.ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
   }
 

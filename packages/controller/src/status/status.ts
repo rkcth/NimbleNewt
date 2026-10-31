@@ -3,6 +3,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
 import { taskEventId } from "../domain/events.js";
 import { TASK_STATES, onlyKnown, projectId as checkProjectId, taskId as checkTaskId, type TaskBody, type TaskState, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -212,6 +213,7 @@ export type StatusRequest =
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
+  | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string }
@@ -219,6 +221,8 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
 export interface StatusDeps {
+  /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
+  readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number }> };
   readonly assignments: AssignmentService;
   readonly waits: WaitService;
   readonly blockers: BlockerService;
@@ -354,6 +358,7 @@ export class StatusService {
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
+      case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
@@ -410,6 +415,22 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
     else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity (usually the most recently active tasks).", cite("project", request.projectId)));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** The tool versions the owner withdrew, newest first: which, why, by whom, when. Owner only; nothing of the tool itself. */
+  async revocationLines(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.revocations === undefined || by.kind !== "owner") return undefined;
+    const limit = query.limit === undefined ? 20 : Number.isSafeInteger(query.limit) && query.limit >= 1 && query.limit <= 50 ? query.limit : invalid("limit", "must be 1 to 50");
+    let found;
+    try { found = await this.#deps.revocations.list(by, { ...(query.name === undefined ? {} : { name: query.name }), limit }); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const at = this.#runner.now();
+    if (found.total === 0) return { observedAt: at, lines: [line(query.name === undefined ? "No tool version has been revoked." : `No version of ${shown(query.name, 80)} has been revoked.`, cite("installation", "installation"))] };
+    const lines: Line[] = found.items.map((r) => line(`${shown(r.name, 80)} ${shown(r.version, 20)} was revoked at ${shown(r.at, 40)} by ${shown(r.revokedBy, 80)}: ${shown(r.reason, 200)}.`, cite("catalog-revocation", derivedId("cav", `${r.name}|${r.version}`))));
+    if (found.total > found.items.length) lines.push(line(`${found.total - found.items.length} more revocation(s) are not shown.`, cite("installation", "installation")));
+    return { observedAt: at, lines };
   }
 
   async shutdownLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {

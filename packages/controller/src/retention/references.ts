@@ -82,6 +82,13 @@ export class RetainedMaterial {
       for (const id of strings(b.manifest?.summaryLineage)) { out.#add("ctx-compaction", id, why); out.#add("summary-record", id, why); }
       for (const r of Array.isArray(b.manifest?.sourceRanges) ? (b.manifest.sourceRanges as { source?: unknown }[]) : []) if (typeof r?.source === "string") { out.#add("history-scope", r.source, why); out.#add("desk-record", r.source, why); }
     });
+    // A tool version a resumable task ran stays (card T02c): the task may resume on, or replay, what it used. Usage records are per project; only projects with a resumable task are read.
+    for (const projectId of new Set(out.tasks.values())) {
+      await scan(`catalog-usage-${projectId}`, (a) => {
+        const b = a.body as { taskId?: unknown; versionId?: unknown; name?: unknown; version?: unknown };
+        if (live(b.taskId) && typeof b.versionId === "string") out.#add("catalog-version", b.versionId, `tool ${String(b.name).slice(0, 80)} ${String(b.version).slice(0, 20)} was run by task ${b.taskId}, which can still resume or be replayed`);
+      });
+    }
     return out;
   }
 }

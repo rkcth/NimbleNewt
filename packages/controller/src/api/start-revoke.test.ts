@@ -42,7 +42,7 @@ interface Run {
 async function scenario(act: (x: {
   c: Awaited<ReturnType<typeof startController>>; name: string; owner: string; agent: string; call: (token: string, op: string, args: Record<string, unknown>, commandId?: string) => Promise<Reply>;
   say: (id: string, text: string, intents: unknown[]) => Promise<{ turnId: string; outcomes: any[] }>; ownerPrincipal: any; callsBefore: () => Promise<any[]>;
-}) => Promise<void>, extra: { revocationPolicy?: "finish" | "cancel"; run?: Run; second?: boolean } = {}) {
+}) => Promise<void>, extra: { revocationPolicy?: "finish" | "cancel" | "pause"; run?: Run; second?: boolean } = {}) {
   const d = mkdtempSync(join(tmpdir(), "nn-revoke-"));
   const out: { aborted: boolean; running?: Record<string, any>; later?: BridgeResponse; failure?: unknown; name?: string } = { aborted: false };
   const sayText: Record<string, unknown[]> = {};
@@ -129,7 +129,7 @@ test("the owner revokes a version through the API and says what happens to runni
     // Owner only: neither the list nor the revocation is open to an agent, and nothing is revoked by the refused attempt.
     seen.agentRead = (await call(agent, "catalog.running", { name, version: "1.0.0" })).error?.code;
     seen.agentRevoke = (await call(agent, "catalog.revoke", { name, version: "1.0.0", reason: "no", runningCalls: "cancel" }, "x1")).error?.code;
-    seen.badChoice = (await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "pause" }, "x2")).error?.code;
+    seen.badChoice = (await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "stop" }, "x2")).error?.code;
     seen.noId = (await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "cancel" })).error?.code;
     seen.unknown = (await call(owner, "catalog.revoke", { name, version: "9.9.9", reason: "bad", runningCalls: "cancel" }, "x3")).error?.code;
     await sleep(20);
@@ -242,7 +242,7 @@ test("in chat the revoke lists the running calls and asks whether they finish or
   assert.equal(seen.askedStatus, "asked", JSON.stringify(seen));
   assert.match(String(seen.question), /1 running call/);
   assert.match(String(seen.question), /long-call/);
-  assert.deepEqual([...seen.awaiting.choices].sort(), ["cancel", "finish"]);
+  assert.deepEqual([...seen.awaiting.choices].sort(), ["cancel", "finish", "pause"]);
   assert.equal(seen.runningWhileAsked, 1, "asking changed nothing");
   assert.equal(seen.proposedStatus, "proposed", JSON.stringify(seen));
   assert.match(seen.preview.join("\n"), /runningCalls=cancel/);
@@ -320,4 +320,105 @@ test("startController refuses tools without dispatch, with a clear message (card
   try {
     await assert.rejects(startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], tools: { runner: { run: async () => ({ text: "{}", cpuMs: 1 }) }, isLocalHost: () => true } }), /options\.tools needs options\.dispatch/);
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+const reasonOf = (r: Reply): string => JSON.stringify(r);
+
+test("pause is a third choice for running calls: the task of each is paused, the call is not aborted, and the pause stays until the owner resumes (card T02c)", async () => {
+  const seen: Record<string, any> = {};
+  const out = await scenario(async ({ c, name, owner, call, callsBefore }) => {
+    const [running] = await callsBefore();
+    seen.taskId = running.taskId;
+    assert.deepEqual((await c.services.pauses.guard(running.taskId)).blockedBy, [], "not paused before");
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "pause" }, "rv-pause")).ok);
+    await sleep(30);
+    seen.blockedBy = (await c.services.pauses.guard(running.taskId)).blockedBy;
+  });
+  assert.equal(out.aborted, false, "a paused call is not aborted");
+  assert.equal(out.running["state"], "confirmed", JSON.stringify(out.running));
+  assert.deepEqual(seen.blockedBy.map((b: any) => [b.kind, b.id]), [["task", seen.taskId]]);
+  assert.equal(out.later.ok, false, "a later call of the revoked version is refused");
+});
+
+test("the standing policy for running calls is a setting: owner only, race-safe, chat-settable; a revoke with no choice follows it and an explicit choice beats it (card T02c)", async () => {
+  const seen: Record<string, any> = {};
+  const cancelled = await scenario(async ({ owner, agent, name, call }) => {
+    seen.initial = (await call(owner, "catalog.policy.get", {})).result.item;
+    seen.agentGet = (await call(agent, "catalog.policy.get", {})).error?.code;
+    seen.agentSet = (await call(agent, "catalog.policy.change", { runningCalls: "cancel" }, "ap")).error?.code;
+    seen.bad = (await call(owner, "catalog.policy.change", { runningCalls: "stop" }, "bad")).error?.code;
+    seen.set = (await call(owner, "catalog.policy.change", { runningCalls: "cancel", expectedRevision: 0 }, "p1")).result;
+    seen.stale = (await call(owner, "catalog.policy.change", { runningCalls: "pause", expectedRevision: 0 }, "p2")).error?.code;
+    seen.replay = (await call(owner, "catalog.policy.change", { runningCalls: "cancel", expectedRevision: 0 }, "p1")).result;
+    seen.after = (await call(owner, "catalog.policy.get", {})).result.item;
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad" }, "rv-follow")).ok);
+  });
+  assert.deepEqual([seen.initial.revision, seen.initial.runningCalls, seen.initial.effective, seen.initial.default], [0, null, "finish", "finish"]);
+  assert.deepEqual([seen.agentGet, seen.agentSet, seen.bad, seen.stale], ["forbidden", "forbidden", "invalid_command", "stale_revision"]);
+  assert.deepEqual([seen.set.revision, seen.set.old, seen.set.new, seen.after.effective, seen.after.revision], [1, null, "cancel", "cancel", 1]);
+  assert.equal(seen.replay.revision, 1, "the same command answers again");
+  assert.equal(cancelled.aborted, true, "no choice named: the standing policy cancels");
+  assert.equal(cancelled.running["state"], "failed");
+
+  const paused = await scenario(async ({ c, owner, name, call, callsBefore }) => {
+    const [running] = await callsBefore();
+    assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "pause" }, "pp")).ok);
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad" }, "rv-pp")).ok);
+    await sleep(30);
+    seen.pausedBy = (await c.services.pauses.guard(running.taskId)).blockedBy.length;
+  });
+  assert.equal(seen.pausedBy, 1);
+  assert.equal(paused.aborted, false);
+
+  const explicit = await scenario(async ({ owner, name, call }) => {
+    assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "cancel" }, "pc")).ok);
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "finish" }, "rv-ex")).ok);
+    assert.ok((await call(owner, "catalog.policy.change", { runningCalls: null }, "pn")).ok);
+    seen.cleared = (await call(owner, "catalog.policy.get", {})).result.item;
+  });
+  assert.equal(explicit.aborted, false, "the explicit finish beats the standing cancel");
+  assert.deepEqual([seen.cleared.runningCalls, seen.cleared.effective], [null, "finish"]);
+});
+
+test("past revocations are read by the owner through the API and in chat; the policy is changed in chat with the revision read for the owner (card T02c)", async () => {
+  const seen: Record<string, any> = {};
+  await scenario(async ({ c, name, owner, agent, call, say, ownerPrincipal }) => {
+    seen.empty = (await call(owner, "catalog.revocations", {})).result;
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "leaks tokens", runningCalls: "finish" }, "rv-list")).ok);
+    seen.list = (await call(owner, "catalog.revocations", {})).result;
+    seen.byName = (await call(owner, "catalog.revocations", { name })).result.total;
+    seen.other = (await call(owner, "catalog.revocations", { name: "toolbox.other" })).result.total;
+    seen.agent = (await call(agent, "catalog.revocations", {})).error?.code;
+    seen.badLimit = (await call(owner, "catalog.revocations", { limit: 0 })).error?.code;
+    const text = "which tool versions were revoked";
+    const asked = await say("s1", text, [{ kind: "status", request: { kind: "revocations" }, evidence: text, basis: "owner" }]);
+    seen.chat = asked.outcomes[0];
+    // Policy by chat: shown first with the revision filled in; a change made meanwhile makes the stale proposal fail instead of overwriting it.
+    const say2 = "from now on pause the tasks of running calls when I revoke a tool";
+    const proposed = await say("s2", say2, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "pause" }, evidence: say2, basis: "owner" }]);
+    seen.proposed = proposed.outcomes[0];
+    seen.beforeAccept = (await call(owner, "catalog.policy.get", {})).result.item.runningCalls;
+    const applied = await say("s3", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
+    seen.applied = applied.outcomes[0].status;
+    seen.afterAccept = (await call(owner, "catalog.policy.get", {})).result.item;
+    void c; void ownerPrincipal;
+    const again = "now let them cancel";
+    const p2 = await say("s4", again, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "cancel" }, evidence: again, basis: "owner" }]);
+    assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "finish" }, "meanwhile")).ok);
+    const a2 = await say("s5", "yes", [{ kind: "apply_proposal", proposalId: p2.outcomes[0].proposalId, evidence: "yes", basis: "owner" }]);
+    seen.stale = a2.outcomes[0];
+    seen.final = (await call(owner, "catalog.policy.get", {})).result.item.runningCalls;
+  });
+  assert.deepEqual([seen.empty.total, seen.empty.items], [0, []]);
+  assert.deepEqual([seen.list.total, seen.list.items[0].version, seen.list.items[0].reason, seen.list.items[0].revokedBy.startsWith("owner:")], [1, "1.0.0", "leaks tokens", true]);
+  assert.deepEqual([seen.byName, seen.other, seen.agent, seen.badLimit], [1, 0, "forbidden", "invalid_command"]);
+  assert.equal(seen.chat.status, "answered", JSON.stringify(seen.chat));
+  assert.match(seen.chat.lines.map((l: any) => l.text).join("\n"), /1\.0\.0 was revoked at .* by owner:.*: leaks tokens/);
+  assert.ok(seen.chat.lines.every((l: any) => l.cites.length > 0));
+  assert.equal(seen.proposed.status, "proposed", JSON.stringify(seen.proposed));
+  assert.equal(seen.beforeAccept, null, "nothing changed before the owner accepted");
+  assert.equal(seen.applied, "applied");
+  assert.deepEqual([seen.afterAccept.runningCalls, seen.afterAccept.revision], ["pause", 1]);
+  assert.notEqual(seen.stale.status, "applied", reasonOf(seen.stale));
+  assert.equal(seen.final, "finish", "the stale proposal did not overwrite the owner's later change");
 });

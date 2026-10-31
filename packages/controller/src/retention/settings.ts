@@ -23,6 +23,8 @@ export interface RetentionValues {
   /** Resolved incidents are soft-archived after this many days, and removed this many days after being archived. `null`: never. */
   readonly incidentArchiveDays: number | null;
   readonly incidentPurgeDays: number | null;
+  /** Catalogue tool versions: keep only the newest this many published versions of each tool (the latest, revoked versions and any a resumable task used are always kept); older ones are dropped by the runner. `null`: keep every version (card T02c). */
+  readonly catalogVersionsKept: number | null;
   /** Optional storage quotas in bytes of records written (desk records, notes, summaries, artifacts): per project and per agent. `null`: no quota. */
   readonly quotaProjectBytes: number | null;
   readonly quotaAgentBytes: number | null;
@@ -33,7 +35,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null,
+  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -47,6 +49,7 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   backupWeekly: { kind: "count", min: 0, max: 520, nullable: false },
   incidentArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
   incidentPurgeDays: { kind: "days", min: 30, max: 3650, nullable: true },
+  catalogVersionsKept: { kind: "count", min: 1, max: 500, nullable: true },
   quotaProjectBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
   quotaAgentBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
   quotaWarnPercent: { kind: "percent", min: 50, max: 99, nullable: false },

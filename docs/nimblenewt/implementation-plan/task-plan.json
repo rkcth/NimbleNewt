@@ -6595,12 +6595,29 @@
       "id": "T02c",
       "parent": "N13",
       "existing_issue": "AII-263",
-      "title": "Finish catalog promotion: retention of old versions, pause policy, runs on other processes",
+      "title": "Finish catalog promotion: retention of old versions, pause policy, chat view of past revocations",
       "depends_on": [
         "T02b"
       ],
-      "deliverable": "Split from T02b (2026-10-30): retention of old and stale referenced versions (K06), pause as a third in-flight policy, cancellation of runs on other hosts and processes (remote workers cannot run catalogue tools yet), a production launcher passed to the tool bridge, a chat view of past revocations",
-      "acceptance_and_verification": "Old versions are kept or dropped by the retention rule and a revocation reaches calls on every host",
+      "deliverable": "Split from T02b (2026-10-30), built 2026-10-31: retention of old and stale referenced tool versions as a K06 setting (catalogVersionsKept, off by default; the latest, revoked versions and any a resumable task ran stay), pause as a third in-flight policy plus a chat-settable standing policy for revokes that name no choice, and a chat view of past revocations",
+      "acceptance_and_verification": "Old versions are kept or dropped by the retention rule, a revocation can pause the tasks of running calls, and the owner reads past revocations in chat",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "T02d",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Finish catalog promotion: revocation reaching other processes and hosts, production script launcher",
+      "depends_on": [
+        "T02c"
+      ],
+      "deliverable": "Split from T02c (2026-10-31): cancellation or pause of catalogue tool calls running in another controller process or on a remote worker host (the revoke listener is in-process and remote workers cannot run catalogue tools yet, H02), and a production script launcher (the worker package's scriptRunner over the host's sandbox launcher) passed to the tool bridge by the shipped entry point once one exists",
+      "acceptance_and_verification": "A revocation reaches running calls on every host and process, and the shipped controller runs catalogue tools through the sandbox launcher",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8519,6 +8536,7 @@
         "M04g",
         "L03i",
         "T02c",
+        "T02d",
         "U11c",
         "K06c",
         "P03b"

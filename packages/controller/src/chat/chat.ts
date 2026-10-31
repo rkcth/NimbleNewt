@@ -777,7 +777,7 @@ export class ChatService {
       if (total > 0) notes.push(`${total} running ${total === 1 ? "call" : "calls"} of ${args["name"].slice(0, 80)} ${args["version"].slice(0, 20)}: ${listed.join("; ")}${more}.`.slice(0, CHAT_LIMITS.line - 10));
       notes.push("A version is revoked once: choosing finish cannot be changed to cancel later. Cancel reaches every running call when it is carried out, including calls that start before you accept.");
       if (args["runningCalls"] === undefined) {
-        if (total > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, or be cancelled? (A cancelled call ends as failed.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed"], field: "runningCalls", choices: ["finish", "cancel"] };
+        if (total > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, be cancelled, or should their tasks be paused? (A cancelled call ends as failed; a pause leaves the call running and stops what the agent writes until you resume the task.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed", "pause: pause the task of each; you decide when to resume"], field: "runningCalls", choices: ["finish", "cancel", "pause"] };
         // Nothing is running now: the choice is recorded as finish, so a call that slips in before the owner accepts is not cancelled without being asked.
         args["runningCalls"] = "finish";
       }
@@ -979,6 +979,11 @@ export class ChatService {
         // Never set: the operation takes 0.
         const item = await this.#get(token, "retention.settings.get", {});
         return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("retention") };
+      }
+      case "catalog-policy": {
+        // Never set: the operation takes 0.
+        const item = await this.#get(token, "catalog.policy.get", {});
+        return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("catalog-policy") };
       }
       case "difficulty-profiles": {
         // Never set: the operation takes 0.
@@ -1544,6 +1549,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     case "notifications.configure": return "notifications";
     case "retention.settings.set": return "retention";
+    case "catalog.policy.change": return "catalog-policy";
     default: return undefined;
   }
 }
