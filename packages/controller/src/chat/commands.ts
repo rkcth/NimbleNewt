@@ -78,6 +78,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "workers.limits.besteffort": { verb: "Allow or forbid local agents to start when a limit cannot be fully enforced on this system (enable or disable best effort)", mode: "propose" },
+  // Whether each model call is recorded against its generation and a late reply held back (card L05b): neither is a limit; both are on unless the owner turns them off.
+  "generation.stream.change": { verb: "Turn recording of the model stream, or holding back a late reply, on or off", mode: "propose" },
   // How many attempts may run at once for one project, one agent or one supervisor is a resource decision: shown first in every profile; all caps are off unless the owner turns them on.
   "capacity.limits.change": { verb: "Change the capacity caps (per project, per agent, fan-in)", mode: "propose" },
   // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.

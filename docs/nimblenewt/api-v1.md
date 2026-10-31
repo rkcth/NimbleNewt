@@ -231,6 +231,18 @@ Result: `{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value?
 
 Completion: finished when accepted (`completed: true`).
 
+#### `generation.stream.get`
+
+The switches for feeding the model stream into revision-bound generation (owner only): `record` (each model call's stream is recorded against the generation it began under) and `cut` (a reply whose generation was interrupted, by a cancel, a correction or a newer generation, is held back from the worker, with the reason). Both are on unless the owner turns them off; neither is a limit.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `record`, `cut`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `capacity.limits.get`
 
 The optional capacity caps (owner only): the owner's entries (on or off, with the kept figure) and what applies now. All are off (no cap) unless set.
@@ -2111,6 +2123,18 @@ Arguments:
 Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
+
+#### `generation.stream.change`
+
+The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record` or `cut`. With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
+
+Arguments:
+
+- `enable` (optional): settings to turn on: record, cut
+- `disable` (optional): settings to turn off: record, cut
+- `expectedRevision` (optional): the revision read with generation.stream.get; a different current one refuses the change
+
+Result: `{ revision }`.
 
 #### `capacity.limits.change`
 

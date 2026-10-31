@@ -37,6 +37,7 @@ import type { SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
+import type { StreamSettingsService } from "../generation/index.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
@@ -156,6 +157,7 @@ export interface StateApiDeps {
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly maintenance?: Pick<MaintenanceService, "request" | "get" | "list" | "decide" | "revoke" | "apply" | "settings" | "change" | "toggle" | "site" | "catalogue">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
+  readonly streamSettings?: Pick<StreamSettingsService, "get" | "change">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** Which event sources are watched (card H13f). */
@@ -302,6 +304,7 @@ export class StateApi {
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.maintenance === undefined ? {} : { maintenance: this.#deps.maintenance }),
         ...(this.#deps.capacityLimits === undefined ? {} : { capacityLimits: this.#deps.capacityLimits }),
+        ...(this.#deps.streamSettings === undefined ? {} : { streamSettings: this.#deps.streamSettings }),
         ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),

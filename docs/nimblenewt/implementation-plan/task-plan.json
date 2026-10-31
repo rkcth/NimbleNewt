@@ -2297,8 +2297,26 @@
         "L05",
         "H12"
       ],
-      "deliverable": "Split from L05: the worker reports the model stream's events (partial text, tool-call fragments, the end) to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held, never applied",
+      "deliverable": "Split from L05; narrowed 2026-10-31 (remote workers and the check of a tool call against the recorded generation are L05c): on the local worker host the model relay, which carries every model reply to the worker process, reads the stream's events (partial text, tool-call fragments, the end) and reports them to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held back from the worker, never applied; the owner can turn recording and holding back on or off in chat",
       "acceptance_and_verification": "A partial tool call never runs and a late response cannot override a correction, shown with a real worker process: the owner corrects a task mid-generation, the earlier stream is held with a visible reason, and the next generation starts under the new revision",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "L05c",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Feed remote workers' model streams and check tool calls against the recorded generation",
+      "depends_on": [
+        "L05b",
+        "H02"
+      ],
+      "deliverable": "Split from L05b (2026-10-31): a remote worker makes its own model calls, so its stream reaches the generation service through the worker protocol (events with the attempt's fence, held replies reported back); the tool bridge refuses a call that does not belong to a complete, current generation of the task, and an interrupted generation's calls are withdrawn; a task that is paused when a call begins is recorded too",
+      "acceptance_and_verification": "A remote worker's late reply is held and shown like a local one; a tool call whose generation was corrected is refused at the bridge with the reason, shown with a real remote worker",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8547,6 +8565,7 @@
         "H12q",
         "H12r",
         "H12s",
+        "L05c",
         "U14",
         "M02g",
         "M03g",

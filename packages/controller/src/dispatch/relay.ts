@@ -1,5 +1,6 @@
 import { redactText } from "../security/redact.js";
 import type { PiCachePolicy } from "../inference-cache/index.js";
+import { ModelStreamDecoder, ModelStreamRefused, type ModelStreamCall, type ModelStreamTap } from "./model-stream.js";
 
 /**
  * The model relay (card H12b). The worker process runs in a sandbox with no network, so the model calls of its Pi conversation are made here, on its behalf, by the controller's side of the channel. The relay is a narrow pipe, not a proxy: a call is
@@ -81,6 +82,8 @@ export class ModelRelay {
     readonly progressMs?: number;
     /** Asked before every call is sent: a text is the reason the call is refused (the owner's spending cap is reached), undefined lets it go. A gate that throws refuses the call too (fail closed). */
     readonly gate?: () => Promise<string | undefined>;
+    /** Records the reply's stream against the generation it began under, and holds back the reply of a generation that was interrupted or superseded (card L05b). Absent: replies are passed on and not recorded. */
+    readonly stream?: ModelStreamTap;
   }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
     const route = attempt.route;
     const maxBody = this.#options.maxBodyBytes ?? 8 * 1024 * 1024;
@@ -132,6 +135,14 @@ export class ModelRelay {
         const wrapped = cache?.fetch === undefined ? inner : cache.fetch(inner);
         const monitor = rest === "messages/count_tokens" ? undefined : attempt.monitor;
         const tell = (f: () => void): void => { try { f(); } catch { /* the call is not affected */ } };
+        // The generation begins before the call is sent: a task that is held starts no generation (the call is refused), and the revision it is bound to is the one in force now.
+        let feed: ModelStreamCall | undefined;
+        if (attempt.stream !== undefined && rest !== "messages/count_tokens") {
+          try { feed = await attempt.stream.started({ requestChars: body?.length ?? 0 }); } catch (error) {
+            if (error instanceof ModelStreamRefused) refuse(redactText(error.message).slice(0, 300));
+            this.#options.onError?.(route, redactText(error instanceof Error ? error.message : String(error)).slice(0, 300));
+          }
+        }
         let call: CallMonitor | undefined;
         if (monitor !== undefined) { try { call = monitor.started({ requestChars: body?.length ?? 0 }); } catch { /* the call is not affected */ } }
         let response: Response;
@@ -141,23 +152,57 @@ export class ModelRelay {
           const text = redactText(error instanceof Error ? error.message : String(error)).slice(0, 300);
           this.#options.onError?.(route, text);
           if (call !== undefined) tell(() => call!.finished({ ok: false }));
+          await feed?.ended({ ok: false }).catch(() => undefined);
           throw new Error(`the model endpoint could not be reached: ${text}`);
         }
         if (call !== undefined && (!response.ok || response.body === null)) tell(() => call!.finished({ ok: response.ok }));
+        if (feed !== undefined && (!response.ok || response.body === null)) { await feed.ended({ ok: false }).catch(() => undefined); feed = undefined; }
         const watch = firstCall && response.ok && response.body !== null && rest !== "messages/count_tokens";
         if (watch) firstCall = false;
         const requestChars = body?.length ?? 0;
         const out: [string, string][] = [];
         response.headers.forEach((value, name) => { if (KEEP.has(name.toLowerCase())) out.push([name, value]); });
         const watching = call !== undefined && response.ok && response.body !== null;
-        if (!watch && !watching) return { status: response.status, statusText: response.statusText, headers: out, body: response.body === null ? null : (response.body as unknown as AsyncIterable<Uint8Array>) };
+        const recording = feed;
+        const held = (body: AsyncIterable<Uint8Array> | null): AsyncIterable<Uint8Array> | null => (body === null || recording === undefined ? body : feeding(body, recording));
+        if (!watch && !watching) return { status: response.status, statusText: response.statusText, headers: out, body: held(response.body === null ? null : (response.body as unknown as AsyncIterable<Uint8Array>)) };
         const hooks: ReplyHooks = {
           ...(watch ? { inputTokens: (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } } } : {}),
           ...(watching ? { monitor: { first: () => tell(() => call!.firstOutput()), progress: (bytes) => tell(() => call!.progress(bytes)), finished: (done) => tell(() => call!.finished(done)) }, progressMs: attempt.progressMs ?? 15_000 } : {}),
         };
-        return { status: response.status, statusText: response.statusText, headers: out, body: reporting(response.body as unknown as AsyncIterable<Uint8Array>, hooks) };
+        return { status: response.status, statusText: response.statusText, headers: out, body: held(reporting(response.body as unknown as AsyncIterable<Uint8Array>, hooks)) };
       },
     };
+  }
+}
+
+/**
+ * Passes the reply on piece by piece, but each piece only after it has been recorded as applied to its generation (card L05b). A reply whose generation was interrupted (cancel, correction, a newer generation) is not passed on: the iteration
+ * fails with the reason, and the worker's call fails with it, so the worker never acts on a response that came too late. A reply that is not streamed is read whole before any of it is passed on. The recording is awaited, which is the
+ * back-pressure of this card: a slow store slows the reply, and nothing that was not recorded as applied reaches the worker.
+ */
+async function* feeding(body: AsyncIterable<Uint8Array>, feed: ModelStreamCall): AsyncGenerator<Uint8Array> {
+  const decoder = new ModelStreamDecoder();
+  const held: Uint8Array[] = [];
+  let ok = false;
+  const check = async (events: ReturnType<ModelStreamDecoder["push"]>): Promise<void> => {
+    if (events.length === 0) return;
+    const result = await feed.events(events);
+    if (result.held !== undefined) throw new Error(`the model reply was held back: ${result.held}`);
+  };
+  try {
+    for await (const piece of body) {
+      await check(decoder.push(piece));
+      // A reply that is not a stream is held until it has been read whole and recorded.
+      if (!decoder.streaming) { held.push(piece); continue; }
+      for (const h of held.splice(0)) yield h;
+      yield piece;
+    }
+    await check(decoder.finish());
+    ok = true;
+    for (const h of held.splice(0)) yield h;
+  } finally {
+    await feed.ended({ ok }).catch(() => undefined);
   }
 }
 

@@ -32,7 +32,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L04, L04b, L04c, L06, L06b, H08, H08b |
+| N05 / AII-255 | L05, L05b, L05c, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L04, L04b, L04c, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
@@ -850,8 +850,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N05 / AII-255.
 - **Blockers:** L05, H12.
-- **Deliverable:** Split from L05: the worker reports the model stream's events (partial text, tool-call fragments, the end) to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held, never applied.
+- **Deliverable:** Split from L05; narrowed 2026-10-31 (remote workers and the check of a tool call against the recorded generation are L05c): on the local worker host the model relay, which carries every model reply to the worker process, reads the stream's events (partial text, tool-call fragments, the end) and reports them to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held back from the worker, never applied; the owner can turn recording and holding back on or off in chat.
 - **Acceptance and verification:** A partial tool call never runs and a late response cannot override a correction, shown with a real worker process: the owner corrects a task mid-generation, the earlier stream is held with a visible reason, and the next generation starts under the new revision.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L05c — Feed remote workers' model streams and check tool calls against the recorded generation
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L05b, H02.
+- **Deliverable:** Split from L05b (2026-10-31): a remote worker makes its own model calls, so its stream reaches the generation service through the worker protocol (events with the attempt's fence, held replies reported back); the tool bridge refuses a call that does not belong to a complete, current generation of the task, and an interrupted generation's calls are withdrawn; a task that is paused when a call begins is recorded too.
+- **Acceptance and verification:** A remote worker's late reply is held and shown like a local one; a tool call whose generation was corrected is refused at the bridge with the reason, shown with a real remote worker.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L01 — Implement Pause and background settlement
@@ -3015,7 +3023,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, U14, M02g, M03g, M04g, L03i, T02c, T02d, U11c, U11d, K06c, P03b.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, L05c, U14, M02g, M03g, M04g, L03i, T02c, T02d, U11c, U11d, K06c, P03b.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

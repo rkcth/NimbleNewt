@@ -31,7 +31,7 @@ import type { WaitService } from "../domain/waits.js";
 import { EventService, SourceService, noticeThroughNotifications, type EventSource } from "../events/index.js";
 import { WatchService } from "../events/handling.js";
 import { InboxService } from "../domain/inbox.js";
-import { GenerationService } from "../generation/index.js";
+import { GenerationService, streamTapFor, type StreamSettingsService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import { HostService } from "../hosts/index.js";
 import { McpService, RemoteMcpConnector } from "../mcp/index.js";
@@ -232,6 +232,8 @@ export interface ComposeInput {
   /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
   readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
+  /** The owner's switches for recording the model stream and holding back a late reply (card L05b); absent: both on. */
+  readonly streamSettings?: Pick<StreamSettingsService, "effective">;
   readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay" | "holdWithOwner">>; readonly reconciler: { runPass(): Promise<unknown> } };
   /** The owner's quiet-host figures (grace hours, automatic moves): given, the dispatcher's tick warns the owner about a host that stopped reporting and re-places its work as the figures say (needs remote hosts). */
   readonly quietHosts?: { readonly settings: Pick<QuietHostSettingsService, "effective">; /** The pass's own timing (tests, operators): see `QuietHostOptions`. */ readonly options?: Pick<QuietHostOptions, "quietAfterMs" | "maxGapMs"> };
@@ -447,7 +449,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       relayEnded.forget(relays, clock());
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }), stream: streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, { attemptId: order.attemptId, taskId: order.taskId, generation: order.generation }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
         relays.set(order.attemptId, found);
       }
       return found.relay;

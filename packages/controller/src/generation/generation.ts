@@ -175,7 +175,7 @@ export class GenerationService {
     const bound = whole(command.contextRevision, "contextRevision");
     const fence = command.fence === undefined ? undefined : checkFence(command.fence);
     if (fence !== undefined && this.#assignments === undefined) invalid("fence", "cannot be checked: this service has no assignment service");
-    const task = await this.#task(principal, "attempt.work", taskId);
+    const task = await this.#task(principal, "attempt.work", taskId, isDispatcher(principal));
     const scoped = scopedCommandId(principal.id, command.commandId);
     return this.#retrying(async () => {
       const result = await this.#runner.command("generation.begin", { commandId: scoped, actor: principal.id }, async () => ({
@@ -568,7 +568,7 @@ export class GenerationService {
   // ---- internals -------------------------------------------------------------------------------------------------------------
 
   #mayRead(viewer: Principal, run: { projectId: string; taskId: string; owner: string }): boolean {
-    if (viewer.kind === "owner" || (isDispatcher(viewer) && run.owner === "")) return true;
+    if (viewer.kind === "owner" || (isDispatcher(viewer) && (run.owner === "" || run.owner === viewer.id))) return true;
     if (!inTaskScope(viewer, run.projectId)) return false;
     const resource = { resource: { kind: "task", id: run.taskId } } as const;
     return viewer.id === run.owner ? allows(viewer, "attempt.work", run.projectId, resource) : allows(viewer, "assignment.read", run.projectId, resource);
@@ -611,7 +611,7 @@ export class GenerationService {
   async #mine(principal: Principal, runId: unknown, action: string): Promise<Aggregate> {
     const found = typeof runId === "string" && RUN_ID.test(runId) ? await this.#runner.get("generation-run", runId) : undefined;
     const run = found?.body as unknown as RunBody | undefined;
-    const ok = run !== undefined && (principal.kind === "owner" || (principal.id === run.owner && inTaskScope(principal, run.projectId) && allows(principal, action, run.projectId, { resource: { kind: "task", id: run.taskId } })));
+    const ok = run !== undefined && (principal.kind === "owner" || (isDispatcher(principal) && principal.id === run.owner) || (principal.id === run.owner && inTaskScope(principal, run.projectId) && allows(principal, action, run.projectId, { resource: { kind: "task", id: run.taskId } })));
     if (found === undefined || !ok) throw new DomainError("forbidden", `${principal.id} may not use that generation`);
     return found;
   }
