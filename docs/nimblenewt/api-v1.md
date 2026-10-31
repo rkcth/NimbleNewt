@@ -100,6 +100,18 @@ Result: `{ item }`: `revision`, `hours` (the owner's hours for level 0, 1, 2 ...
 
 Completion: finished when accepted (`completed: true`).
 
+#### `agreed.limits.get`
+
+The optional ceilings on what a decision may carry out (owner only). None is set by default: an agreed raise or grant goes through as agreed.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision` and `limits`, which has any of `raiseMaxCostMicros`, `raiseMaxComputeMs`, `grantMaxDays`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `workers.limits.get`
 
 What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).
@@ -1428,6 +1440,20 @@ Arguments:
 
 - `hours`: for example `[24, 48]`
 - `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `agreed.limits.change`
+
+The owner sets or clears ceilings on agreed raises and grants (owner only; none by default). `set` has any of `raiseMaxCostMicros` (most money one raise carried out by the approval policy may add, in millionths, 1 to 1e15), `raiseMaxComputeMs` (most compute time one such raise may add, 1 to 1e12 ms) and `grantMaxDays` (longest a right granted by a decision may last, 1 to 3650); `unset` lists ceilings to remove. A ceiling counts from the next carry-out; the rights re-check at carry-out and every other check stay.
+
+Arguments:
+
+- `set` (optional): for example `{ "grantMaxDays": 90 }`
+- `unset` (optional): ceiling names to remove
+- `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
 
