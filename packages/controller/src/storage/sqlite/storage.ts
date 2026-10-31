@@ -4,6 +4,7 @@ import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlit
 import { StorageError } from "../errors.js";
 import { operationHash } from "../hash.js";
 import { canonicalJson, parseJson } from "../json.js";
+import { TOMBSTONE_KIND, tombstoneBody, tombstoneId, tombstoneRevision } from "../tombstone.js";
 import { checkBody, checkCount, checkId, checkKind, checkLease, checkPage, checkRef, checkText, checkTimestamp, validateOperation } from "../validate.js";
 import type {
   Aggregate, AggregateRef, AuditRecord, ControllerStorage, DeliveryClaim, DeliveryRecord, EffectRecord, EffectStatus, Id, JsonObject, OperationInput,
@@ -340,7 +341,8 @@ export class SqliteStorage implements ControllerStorage {
       const label = `${change.ref.kind}/${change.ref.id}`;
       if (change.type === "create") {
         if (current !== undefined) throw new StorageError("revision_conflict", `${label} already exists (changes[${i}])`);
-        revisions.push({ ref: change.ref, revision: 1 });
+        const tomb = this.#get("SELECT body FROM aggregates WHERE kind = ? AND id = ?", TOMBSTONE_KIND, tombstoneId(change.ref));
+        revisions.push({ ref: change.ref, revision: tomb === undefined ? 1 : tombstoneRevision(text(tomb, "body")) + 1 });
       } else {
         if (current === undefined) throw new StorageError("not_found", `${label} does not exist (changes[${i}])`);
         if (count(current, "revision") !== change.expectedRevision) throw new StorageError("revision_conflict", `${label} is at revision ${count(current, "revision")}, expected ${change.expectedRevision} (changes[${i}])`);
@@ -391,7 +393,12 @@ export class SqliteStorage implements ControllerStorage {
 
     for (const [i, change] of input.changes.entries()) {
       if (change.type === "check") continue;
-      if (change.type === "delete") { this.#run("DELETE FROM aggregates WHERE kind = ? AND id = ? AND revision = ?", change.ref.kind, change.ref.id, change.expectedRevision); continue; }
+      if (change.type === "delete") {
+        this.#run("DELETE FROM aggregates WHERE kind = ? AND id = ? AND revision = ?", change.ref.kind, change.ref.id, change.expectedRevision);
+        // The record of the removal (see tombstone.ts): a later create of the same ref continues from this revision.
+        this.#run("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT (kind, id) DO UPDATE SET revision = revision + 1, body = excluded.body, updated_at = excluded.updated_at", TOMBSTONE_KIND, tombstoneId(change.ref), tombstoneBody(change.ref, change.expectedRevision), input.at, input.at);
+        continue;
+      }
       const revision = revisions[i]!.revision;
       if (change.type === "create") {
         this.#run("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", change.ref.kind, change.ref.id, revision, canonicalJson(change.body), input.at, input.at);

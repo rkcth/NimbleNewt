@@ -86,8 +86,8 @@ export type Change =
    * is never removed. The operation must carry an audit entry whose `subject` is this aggregate (the removal is always on
    * the record), and no outbox message may announce it. The result lists the revision that was removed. A repeat of the
    * operation is answered from the stored result like any other, and is never a second removal. Removing does not reset the
-   * aggregate's identity: a later `create` of the same ref starts at revision 1 again, so callers that expire a kind must not
-   * reuse its IDs. Deliveries, timers and effects that name the aggregate are not touched.
+   * aggregate's history: the storage keeps a tombstone (kind `tombstone`, see tombstone.ts) with the removed revision, and a later `create` of the same
+   * ref starts at that revision plus one, so a holder of an older revision is still refused with `revision_conflict`. Deliveries, timers and effects that name the aggregate are not touched.
    */
   | { readonly type: "delete"; readonly ref: AggregateRef; readonly expectedRevision: number };
 

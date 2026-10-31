@@ -92,6 +92,22 @@ for (const backend of backends) {
     } finally { await a.close(); await b.close(); await reference.close(); }
   });
 
+  test(`${backend.name}: a snapshot carries the tombstone a removal left, so a restored store still continues the removed revisions (K06b)`, async () => {
+    const a = await backend.open();
+    const b = await backend.open();
+    try {
+      await populate(a.storage);
+      const base = { epoch: 1, actor: "owner:rob", at: AT, outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] };
+      await a.storage.applyOperation({ ...base, operationId: "op-del", correlationId: "co-del", changes: [{ type: "delete", ref: { kind: "task", id: "task-b" }, expectedRevision: 1 }], audit: [{ type: "task.expired", subject: { kind: "task", id: "task-b" }, detail: {} }] });
+      assert.equal((await dump(a.storage)).aggregates.filter((r) => r["kind"] === "tombstone").length, 1);
+      await restore(a.storage, b.storage);
+      assert.equal((await dump(b.storage)).aggregates.filter((r) => r["kind"] === "tombstone").length, 1);
+      await b.storage.acquireEpoch({ holder: "c2", at: AT });
+      const r = await b.storage.applyOperation({ ...base, epoch: 2, operationId: "op-again", correlationId: "co-again", changes: [{ type: "create", ref: { kind: "task", id: "task-b" }, body: {} }], audit: [] });
+      assert.equal(r.revisions[0]!.revision, 2);
+    } finally { await a.close(); await b.close(); }
+  });
+
   test(`${backend.name}: a restore refuses a store a controller has owned, rows that are not the table's, and a key that is already there (card K01)`, async () => {
     const used: World = await backend.open();
     const fresh: World = await backend.open();

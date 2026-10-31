@@ -208,7 +208,8 @@ export class IncidentService {
           const next: IncidentBody = { ...cur, archivedAt: this.#runner.now() };
           return { ref: { kind: INCIDENT, id: a.id }, creates: false, changes: [{ type: "update", ref: { kind: INCIDENT, id: a.id }, expectedRevision: fresh.revision, body: next as unknown as JsonObject }], detail: {} };
         },
-      })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "stale_revision") return undefined; throw error; });
+      })).catch((error: unknown) => { // Another purge or a person got there first: the record is gone or changed, which is what was wanted; carry on with the rest.
+        if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return undefined; throw error; });
       if (result !== undefined && !result.replayed) done++;
     }
     return done;
@@ -239,7 +240,8 @@ export class IncidentService {
           if (fresh === undefined || cur === undefined || !expired(cur)) throw new DomainError("stale_revision", "already handled");
           return { ref: { kind: INCIDENT, id: a.id }, creates: false, changes: [{ type: "delete", ref: { kind: INCIDENT, id: a.id }, expectedRevision: fresh.revision }], detail: { projectId: cur.projectId, signature: cur.signature, archivedAt: cur.archivedAt ?? "" } };
         },
-      })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "stale_revision") return undefined; throw error; });
+      })).catch((error: unknown) => { // Another purge or a person got there first: the record is gone or changed, which is what was wanted; carry on with the rest.
+        if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return undefined; throw error; });
       if (result !== undefined && !result.replayed) done++;
     }
     return done;

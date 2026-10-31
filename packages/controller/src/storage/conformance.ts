@@ -330,6 +330,57 @@ export function runStorageConformance(harness: StorageHarness): void {
         assert.equal((await s.getAggregate(ref("task", "t2")))?.revision, 2);
       });
 
+      withStore("a removal leaves a tombstone: a later create of the same ref continues the revisions, so a stale holder is still refused (K06b)", async (s) => {
+        const del = (id: string, rev: number): Change => ({ type: "delete", ref: ref("task", id), expectedRevision: rev });
+        const gone = (id: string) => ({ type: "task.expired", subject: ref("task", id), detail: {} });
+        await s.applyOperation(op("c", { changes: [create("task", "t1")] }));
+        await s.applyOperation(op("u", { changes: [update("task", "t1", 1, { n: 1 })] }));
+        await s.applyOperation(op("d", { changes: [del("t1", 2)], audit: [gone("t1")] }));
+        // The ref is free again, but its history is not: the new record is at revision 3, not 1.
+        const again = await s.applyOperation(op("c2", { changes: [create("task", "t1", { n: 7 })] }));
+        assert.deepEqual(again.revisions, [{ ref: ref("task", "t1"), revision: 3 }]);
+        assert.equal((await s.getAggregate(ref("task", "t1")))?.revision, 3);
+        // A holder of the old revisions (1 or 2) cannot update, check or delete the new record.
+        for (const stale of [1, 2]) {
+          await expectKind(s.applyOperation(op(`su${stale}`, { changes: [update("task", "t1", stale, { n: 9 })] })), "revision_conflict");
+          await expectKind(s.applyOperation(op(`sd${stale}`, { changes: [del("t1", stale)], audit: [gone("t1")] })), "revision_conflict");
+        }
+        // A second removal and re-creation continues from the latest revision; other refs are untouched.
+        await s.applyOperation(op("d2", { changes: [del("t1", 3)], audit: [gone("t1")] }));
+        assert.equal((await s.applyOperation(op("c3", { changes: [create("task", "t1")] }))).revisions[0]!.revision, 4);
+        assert.equal((await s.applyOperation(op("c4", { changes: [create("task", "t2")] }))).revisions[0]!.revision, 1);
+        // The tombstone is the storage's own: no operation may name its kind, and it is a stored record (so snapshots carry it).
+        await expectKind(s.applyOperation(op("bad", { changes: [create("tombstone", "x")] })), "invalid_input");
+        assert.equal((await s.listAggregates("tombstone", { limit: 10 })).length, 1);
+      });
+
+      withStore("a removal racing an update, and a removal racing a create of the same ref, leave one consistent outcome (K06b)", async (s) => {
+        const gone = { type: "task.expired", subject: ref("task", "t1"), detail: {} };
+        await s.applyOperation(op("c", { changes: [create("task", "t1")] }));
+        for (let round = 0; round < 6; round++) {
+          const rev = (await s.getAggregate(ref("task", "t1")))!.revision;
+          const [removed, updated, created] = await Promise.all([
+            kindOf(commitOperation(s, op(`rd${round}`, { changes: [{ type: "delete", ref: ref("task", "t1"), expectedRevision: rev }], audit: [gone] }), { attempts: 20 })),
+            kindOf(commitOperation(s, op(`ru${round}`, { changes: [update("task", "t1", rev, { n: round })] }), { attempts: 20 })),
+            kindOf(commitOperation(s, op(`rc${round}`, { changes: [create("task", "t1", { fresh: round })] }), { attempts: 20 })),
+          ]);
+          const now = await s.getAggregate(ref("task", "t1"));
+          // The removal and the update both expected the same revision, so exactly one of them wins.
+          assert.equal([removed, updated].filter((k) => k === "ok").length, 1, `${removed} ${updated}`);
+          if (removed === "ok") {
+            assert.ok(updated === "revision_conflict" || updated === "not_found", updated);
+            // A create after the removal continues from the removed revision, never from 1; one before it found the record there.
+            if (created === "ok") assert.equal(now?.revision, rev + 1, "recreated below the removed revision");
+            else { assert.equal(created, "revision_conflict"); assert.equal(now, undefined); }
+          } else {
+            assert.equal(removed, "revision_conflict");
+            assert.equal(created, "revision_conflict");
+            assert.equal(now?.revision, rev + 1);
+          }
+          if (now === undefined) assert.equal((await s.applyOperation(op(`rr${round}`, { changes: [create("task", "t1")] }))).revisions[0]!.revision, rev + 1);
+        }
+      });
+
       withStore("let exactly one of many concurrent writers win on the same expected revision", async (s) => {
         await s.applyOperation(op("c", { changes: [create("task", "t1", { n: 0 })] }));
         const outcomes = await Promise.all(Array.from({ length: 10 }, (_, i) =>

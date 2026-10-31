@@ -1,6 +1,7 @@
 import { StorageError } from "./errors.js";
 import { operationHash } from "./hash.js";
 import { canonicalJson, compareCodePoints, parseJson } from "./json.js";
+import { TOMBSTONE_KIND, tombstoneBody, tombstoneId, tombstoneRevision } from "./tombstone.js";
 import {
   checkBody, checkCount, checkId, checkKind, checkLease, checkPage, checkRef, checkText, checkTimestamp, validateOperation,
 } from "./validate.js";
@@ -86,7 +87,8 @@ export class MemoryStorage implements ControllerStorage {
       const current = this.#aggregates.get(key(change.ref));
       if (change.type === "create") {
         if (current !== undefined) throw new StorageError("revision_conflict", `${key(change.ref)} already exists (changes[${i}])`);
-        revisions.push({ ref: change.ref, revision: 1 });
+        const tomb = this.#aggregates.get(key({ kind: TOMBSTONE_KIND, id: tombstoneId(change.ref) }));
+        revisions.push({ ref: change.ref, revision: tomb === undefined ? 1 : tombstoneRevision(tomb.body) + 1 });
       } else {
         if (current === undefined) throw new StorageError("not_found", `${key(change.ref)} does not exist (changes[${i}])`);
         if (current.revision !== change.expectedRevision) {
@@ -119,7 +121,13 @@ export class MemoryStorage implements ControllerStorage {
 
     for (const [i, change] of input.changes.entries()) {
       if (change.type === "check") continue;
-      if (change.type === "delete") { this.#aggregates.delete(key(change.ref)); continue; }
+      if (change.type === "delete") {
+        this.#aggregates.delete(key(change.ref));
+        const tref = { kind: TOMBSTONE_KIND, id: tombstoneId(change.ref) };
+        const tomb = this.#aggregates.get(key(tref));
+        this.#aggregates.set(key(tref), { ...tref, revision: (tomb?.revision ?? 0) + 1, body: tombstoneBody(change.ref, change.expectedRevision), createdAt: tomb?.createdAt ?? input.at, updatedAt: input.at });
+        continue;
+      }
       const body = canonicalJson(change.body);
       const old = this.#aggregates.get(key(change.ref));
       this.#aggregates.set(key(change.ref), { kind: change.ref.kind, id: change.ref.id, revision: revisions[i]!.revision, body, createdAt: old?.createdAt ?? input.at, updatedAt: input.at });

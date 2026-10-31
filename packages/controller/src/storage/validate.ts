@@ -1,5 +1,6 @@
 import { StorageError } from "./errors.js";
 import { canonicalJson } from "./json.js";
+import { TOMBSTONE_KIND } from "./tombstone.js";
 import {
   ID_PATTERN, KIND_PATTERN, LIMITS, TIMESTAMP_PATTERN,
   type AggregateRef, type JsonObject, type OperationInput, type Page, type Timestamp,
@@ -80,6 +81,7 @@ export function validateOperation(input: OperationInput): void {
     const p = `changes[${i}]`;
     if (c === null || typeof c !== "object") return bad(p, "must be an object");
     checkRef(c.ref, `${p}.ref`);
+    if (c.ref.kind === TOMBSTONE_KIND) bad(`${p}.ref.kind`, `${TOMBSTONE_KIND} is reserved for the records the storage keeps of removed aggregates`);
     if (changed.has(refKey(c.ref))) bad(`${p}.ref`, "the same aggregate appears twice in one operation");
     changed.add(refKey(c.ref));
     if (c.type === "create") { only(c, ["type", "ref", "body"], p); checkBody(c.body, `${p}.body`); }

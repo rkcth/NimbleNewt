@@ -4,6 +4,7 @@ import { checkEnvironment, detectEnvironment, refusalMessage, type Problem } fro
 import { StorageError } from "../errors.js";
 import { operationHash } from "../hash.js";
 import { canonicalJson, compareCodePoints, parseJson } from "../json.js";
+import { TOMBSTONE_KIND, tombstoneBody, tombstoneId, tombstoneRevision } from "../tombstone.js";
 import { checkBody, checkCount, checkId, checkKind, checkLease, checkPage, checkRef, checkText, checkTimestamp, validateOperation } from "../validate.js";
 import type {
   Aggregate, AggregateRef, AuditRecord, ControllerStorage, DeliveryClaim, DeliveryRecord, EffectRecord, EffectStatus, Id, JsonObject, OperationInput,
@@ -458,9 +459,13 @@ export class PostgresStorage implements ControllerStorage {
     for (const { change, i } of order) {
       const label = `${key(change.ref)} (changes[${i}])`;
       if (change.type === "create") {
-        const created = await tx.q("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES ($1, $2, 1, $3, $4, $4) ON CONFLICT (kind, id) DO NOTHING RETURNING revision", [change.ref.kind, change.ref.id, canonicalJson(change.body), input.at]);
+        // Serialised with a removal of the same ref, so the tombstone read below is the committed one (a create racing a delete otherwise starts at revision 1).
+        await tx.q("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [key(change.ref)]);
+        const tomb = (await tx.q("SELECT body FROM aggregates WHERE kind = $1 AND id = $2", [TOMBSTONE_KIND, tombstoneId(change.ref)]))[0];
+        const first = tomb === undefined ? 1 : tombstoneRevision(text(tomb, "body")) + 1;
+        const created = await tx.q("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES ($1, $2, $5, $3, $4, $4) ON CONFLICT (kind, id) DO NOTHING RETURNING revision", [change.ref.kind, change.ref.id, canonicalJson(change.body), input.at, first]);
         if (created.length === 0) refuse(0, i, "revision_conflict", `${label} already exists`);
-        else revisions[i]!.revision = 1;
+        else revisions[i]!.revision = first;
       } else if (change.type === "update") {
         const updated = await tx.q("UPDATE aggregates SET revision = revision + 1, body = $3, updated_at = $4 WHERE kind = $1 AND id = $2 AND revision = $5 RETURNING revision", [change.ref.kind, change.ref.id, canonicalJson(change.body), input.at, change.expectedRevision]);
         if (updated.length === 0) {
@@ -469,12 +474,17 @@ export class PostgresStorage implements ControllerStorage {
           else refuse(0, i, "revision_conflict", `${label} is at revision ${count(now, "revision")}, expected ${change.expectedRevision}`);
         } else revisions[i]!.revision = count(updated[0]!, "revision");
       } else if (change.type === "delete") {
+        await tx.q("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [key(change.ref)]);
         const removed = await tx.q("DELETE FROM aggregates WHERE kind = $1 AND id = $2 AND revision = $3 RETURNING revision", [change.ref.kind, change.ref.id, change.expectedRevision]);
         if (removed.length === 0) {
           const now = (await tx.q("SELECT revision FROM aggregates WHERE kind = $1 AND id = $2", [change.ref.kind, change.ref.id]))[0];
           if (now === undefined) refuse(0, i, "not_found", `${label} does not exist`);
           else refuse(0, i, "revision_conflict", `${label} is at revision ${count(now, "revision")}, expected ${change.expectedRevision}`);
-        } else revisions[i]!.revision = change.expectedRevision;
+        } else {
+          revisions[i]!.revision = change.expectedRevision;
+          // The record of the removal (see tombstone.ts): a later create of the same ref continues from this revision.
+          await tx.q("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES ($1, $2, 1, $3, $4, $4) ON CONFLICT (kind, id) DO UPDATE SET revision = aggregates.revision + 1, body = EXCLUDED.body, updated_at = EXCLUDED.updated_at", [TOMBSTONE_KIND, tombstoneId(change.ref), tombstoneBody(change.ref, change.expectedRevision), input.at]);
+        }
       } else {
         const row = (await tx.q("SELECT revision FROM aggregates WHERE kind = $1 AND id = $2 FOR SHARE", [change.ref.kind, change.ref.id]))[0];
         if (row === undefined) refuse(0, i, "not_found", `${label} does not exist`);
