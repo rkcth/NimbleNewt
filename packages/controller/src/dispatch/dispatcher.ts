@@ -940,12 +940,16 @@ export class DispatcherService {
     return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host };
   }
 
+  /**
+   * The rights the attempt cannot run without, as the agent holds them now: `attempt.work` and `task.read` on the task (a task can be handed to an agent that lacks them, e.g. by a meeting decision, and the owner is only warned),
+   * and the tools the task's contract names. An agent missing any is not admitted: the normal grant blocker names what is missing, and once the owner grants it the next tick dispatches.
+   */
   async #missingGrants(agentId: string, projectId: string, taskId: string, tools: readonly string[]): Promise<string[]> {
-    if (tools.length === 0) return [];
+    const needed = ["attempt.work", "task.read", ...tools.filter((t) => t !== "attempt.work" && t !== "task.read")];
     const stored = (await this.#runner.get("principal", agentId))?.body as unknown as { grants: readonly { action: string; project: string; resource?: { kind: string; id: string }; expiresAt?: string }[]; kind: string; state: string } | undefined;
-    if (stored === undefined || stored.state !== "active") return tools.slice();
+    if (stored === undefined || stored.state !== "active") return needed;
     const held = await this.#agentGrants(agentId);
-    return tools.filter((t) => !held(t, projectId, taskId));
+    return needed.filter((t) => !held(t, projectId, taskId));
   }
 
   /** Whether an action is covered by what the agent holds now: its enrolment grants and its grant records (the same snapshot the credential would carry). */

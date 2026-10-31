@@ -712,11 +712,12 @@ for (const backend of backends) {
       return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, project, { resource: { kind: "task", id: taskId } }));
     };
     const warnings: { commandId: string; agent: string; taskId: string; missing: readonly string[] }[] = [];
+    let failWarning = false;
     // The real notification service and the real warning sink: the owner's inbox shows what was recorded.
     const notifications = NotificationService.withEpoch(c.storage, c.projects.epoch, options);
     const chairNotes: { commandId: string; to: string; text: string }[] = [];
     const sink = reassignWarningSink({ notifications, storage: c.storage, messages: { noticeFromController: async (n) => { chairNotes.push(n); } } });
-    const reassign = c.reopen({ appliers: { "task.reassign": taskReassignApplier(assignments, c.projects, c.principals, missingRights, async (w) => { warnings.push(w); await sink(w); }) } });
+    const reassign = c.reopen({ appliers: { "task.reassign": taskReassignApplier(assignments, c.projects, c.principals, missingRights, async (w) => { if (failWarning) { failWarning = false; throw new Error("notification write failed"); } warnings.push(w); await sink(w); }) } });
     const idOf = (p: string): string => p.slice("agent:".length);
     const mk = async (title: string) => { const t = await c.task(title); await assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: t.id, owner: { kind: "agent", id: idOf(c.pD) } }); return t; };
     const vote = async (t: { id: string; revision: number }, carrier: string, to: string) => {
@@ -757,12 +758,19 @@ for (const backend of backends) {
     // A target without attempt.work gets the task at once (no accept-first step) and one warning names what it lacks.
     const t6 = await mk("Task six");
     const six = await vote(t6, c.pA, c.pE);
+    // The owner's warning fails to be recorded (a notification write fault) right after the move: the failure is not swallowed, the change stays "applying", and the replay (the real replay branch: the move is already done) warns.
+    failWarning = true;
+    await assert.rejects(() => reassign.apply(c.host, { decisionId: six.d.id }), /notification write failed/);
+    assert.equal(await ownerOf(t6.id), idOf(c.pE), "the move was made at once");
+    assert.equal(warnings.length, 0);
+    assert.equal((await notifications.inbox(c.owner)).items.length, 0, "no warning reached the owner yet");
+    assert.equal(((await reassign.decision(c.owner, six.d.id)) as unknown as DecisionRecordBody).changes[0]!.state, "applying", "the change is left to be replayed");
     const r6 = await reassign.apply(c.host, { decisionId: six.d.id });
     assert.deepEqual([r6.applied, r6.notApplied], [1, 0]);
     assert.equal(await ownerOf(t6.id), idOf(c.pE));
     assert.deepEqual(warnings.map((w) => [w.agent, w.taskId, [...w.missing]]), [[c.pE, t6.id, ["attempt.work", "task.read"]]]);
     await reassign.apply(c.host, { decisionId: six.d.id });
-    assert.equal(warnings.length, 1, "a repeat of the apply does not warn again");
+    assert.equal(warnings.length, 1, "once applied, a repeat of the apply does not warn again");
     const inbox = (await notifications.inbox(c.owner)).items;
     assert.equal(inbox.length, 1, "exactly one warning reaches the owner");
     assert.equal(inbox[0]!.level, "needs-you");
@@ -1344,10 +1352,12 @@ for (const backend of backends) {
 test("a reassignment decided in a meeting names one active agent and the assignment it observed, goes through the assignment service, and is repeatable (card M02e)", async () => {
   const calls: [string, Record<string, unknown>][] = [];
   let current: Record<string, unknown> | undefined;
+  const log: { generation: number; owner: unknown; reason: unknown }[] = [];
   const assignments = {
     getAssignment: async () => current,
-    transferTask: async (c: Record<string, unknown>) => { calls.push(["transfer", c]); current = { ...current, owner: c["to"], generation: (current!["generation"] as number) + 1 }; return { revision: 50 }; },
-    assignTask: async (c: Record<string, unknown>) => { calls.push(["assign", c]); current = { state: "assigned", revision: 60, generation: ((current?.["generation"] as number | undefined) ?? 0) + 1, owner: c["owner"] }; return { revision: 60 }; },
+    history: async () => log,
+    transferTask: async (c: Record<string, unknown>) => { calls.push(["transfer", c]); log.push({ generation: (current!["generation"] as number) + 1, owner: c["to"], reason: c["reason"] }); current = { ...current, owner: c["to"], generation: (current!["generation"] as number) + 1 }; return { revision: 50 }; },
+    assignTask: async (c: Record<string, unknown>) => { calls.push(["assign", c]); log.push({ generation: ((current?.["generation"] as number | undefined) ?? 0) + 1, owner: c["owner"], reason: c["reason"] }); current = { state: "assigned", revision: 60, generation: ((current?.["generation"] as number | undefined) ?? 0) + 1, owner: c["owner"] }; return { revision: 60 }; },
   };
   const states: Record<string, string> = { "agent:ann": "active", "agent:bob": "active", "agent:old": "disabled" };
   const works = new Set(["agent:ann", "agent:bob"]);
@@ -1387,12 +1397,27 @@ test("a reassignment decided in a meeting names one active agent and the assignm
   await assert.rejects(() => applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /hand-off/.test(e.message));
   current = { state: "assigned", revision: 8, generation: 3, owner: { kind: "agent", id: "ann" } };
   works.delete("agent:bob");
-  assert.equal(warned.length, 0);
-  await applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never });
+  assert.equal(warned.length, 0, "nothing warned so far: every holder so far had the rights");
+  const move = { ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never };
+  await applier.apply(move);
   assert.equal(calls.length, 4, "a target without the rights still gets the task at once");
   assert.deepEqual(warned.map((w) => [w["commandId"], w["agent"], w["taskId"], w["projectId"], w["missing"]]), [["mtg:d1:c1", "agent:bob", "task-a", "proj-a", ["attempt.work"]]]);
-  await applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never });
+  // A replay that finds this decision's own move done warns again (a crash may have cut the first warning off; the sink records it once under the change's own ID) and moves nothing.
+  await applier.apply(move);
   assert.equal(calls.length, 4);
+  assert.equal(warned.length, 2, "the replay of the decision's own move re-warns");
+  // ... and succeeds although the new holder has meanwhile been disabled: a move that is done is not judged again.
+  states["agent:bob"] = "disabled";
+  await applier.apply(move);
+  assert.equal(calls.length, 4, "a replay of a completed move succeeds for a holder that is no longer active");
+  assert.equal(warned.length, 3);
+  states["agent:bob"] = "active";
+  // The owner later moved the task to bob by hand (a generation this decision did not make): the replay finds the holder and does not re-warn.
+  log.length = 0;
+  current = { state: "assigned", revision: 90, generation: 9, owner: { kind: "agent", id: "bob" } };
+  log.push({ generation: 4, owner: { kind: "agent", id: "bob" }, reason: "the owner moved it by hand" });
+  await applier.apply(move);
+  assert.equal(warned.length, 3, "a hand move of the owner to the same agent is not this decision's: no warning");
 });
 
 test("a budget raise decided in a meeting widens spend, names a task and positive amounts only, and is carried out as the controller with who allowed it (card M02e)", async () => {

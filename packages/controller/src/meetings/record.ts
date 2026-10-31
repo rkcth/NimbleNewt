@@ -86,14 +86,14 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
 /**
  * An ownership change decided in a meeting (card M02e): the task goes to another agent through the assignment service (a transfer when it is assigned, an assignment when it is released or never was). The carrying agent must
  * hold `assignment.manage` for the task. An assignee does receive things: automatic admission of attempts, the task's title and description in the work order, the task's budget draw and the coordinator's inquiries. So the new
- * owner must be an active agent. If it lacks `attempt.work` or `task.read` on the task the move is still made at once (owner decision 2026-10-30, no accept-first step) and a warning names the missing rights. It is not a widening of rights: what an agent may touch is still decided by its own grants and per-attempt credentials.
+ * owner must be an active agent. If it lacks `attempt.work` or `task.read` on the task the move is still made at once (owner decision 2026-10-30, no accept-first step) and a warning names the missing rights. The move is not a grant of rights: the new holder gets none by it. The dispatcher does not run an attempt for an agent that lacks `attempt.work` or `task.read` on the task (it opens the normal grant blocker naming what is missing), so the work waits until the owner grants them.
  *
  * The patch carries the assignment as it stood when the decision was made: `from` (the owner's agent id, or null when the task was released or never assigned) and, when an assignment record exists, its `generation` and `revision`.
  * The move is refused unless the assignment still matches (a later transfer or release by the owner stands); if it already shows the new owner at a later generation this very change was carried out and nothing is done.
  * The transfer command is built from these decision-time values only, so a replay has the same payload. A task with a running attempt is refused: the hand-off service is the way to move it (a later card).
  */
 export function taskReassignApplier(
-  assignments: Pick<AssignmentService, "getAssignment" | "assignTask" | "transferTask">, projects: Pick<ProjectService, "getTask">,
+  assignments: Pick<AssignmentService, "getAssignment" | "assignTask" | "transferTask" | "history">, projects: Pick<ProjectService, "getTask">,
   principals: { get(id: string): Promise<{ state: string } | undefined> },
   missingRights: (agentPrincipalId: string, projectId: string, taskId: string) => Promise<readonly string[]>,
   warn?: (event: { readonly commandId: string; readonly agent: string; readonly taskId: string; readonly projectId: string; readonly missing: readonly string[] }) => Promise<void>,
@@ -114,22 +114,32 @@ export function taskReassignApplier(
       const from = patch.from as string | null;
       const observed = (patch.generation as number | undefined) ?? 0;
       const observedRevision = patch.revision as number | undefined;
-      const principal = await principals.get(toAgent);
-      if (principal === undefined || principal.state !== "active") bad(`${toAgent} is not an active agent`);
       const to = { kind: "agent", id: toAgent.slice("agent:".length) };
       const taskId = change.target.id;
       const current = await assignments.getAssignment(taskId);
-      const reason = `agreed in a meeting (${change.agreedBy})`;
+      const reason = `agreed in a meeting (${change.agreedBy}); ${change.commandId}`.slice(0, 500);
       const holder = current !== undefined && current.state === "assigned" && current.owner !== undefined ? `${current.owner.kind}:${current.owner.id}` : null;
       const generation = current === undefined ? 0 : current.generation;
-      // This very change, already carried out (or the same owner is in place): nothing to do.
-      // The warning is repeated on a replay that finds the move done (a crash may have come between the move and the warning); its command ID is the change's own, so it is recorded once.
+      // The owner's warning is part of the change: a failure to record it propagates, the change stays "applying" and is replayed (the move is already done then, and the warning is made again under its own stable command ID).
+      // Only the chair's notice is best effort (inside the sink). A refusal from the notification service is turned into "unavailable" so the change is retried, not marked failed after the move was made.
       const warnOnce = async (): Promise<void> => {
         const projectId = (await projects.getTask(taskId))?.projectId ?? "";
         const missing = await missingRights(toAgent, projectId, taskId).catch(() => ["task.read", "attempt.work"]);
-        if (missing.length > 0 && warn !== undefined) await warn({ commandId: change.commandId, agent: toAgent, taskId, projectId, missing: [...missing].slice(0, 10) }).catch(() => undefined);
+        if (missing.length === 0 || warn === undefined) return;
+        try { await warn({ commandId: change.commandId, agent: toAgent, taskId, projectId, missing: [...missing].slice(0, 10) }); }
+        catch (error) { throw error instanceof DomainError ? new DomainError("unavailable", `the warning about ${toAgent} could not be recorded yet: ${error.message}`, { cause: error }) : error; }
       };
-      if (holder === toAgent && generation >= observed) { if (generation > observed) await warnOnce(); return {}; }
+      // This very change, already carried out (or the same owner is in place): nothing to do beyond a warning a crash may have cut off. That is repeated only when the holder's generation is the one this decision's own move began
+      // (its reason carries the change's command ID); a later move of the owner to the same agent by hand is not this decision's and warns nothing.
+      if (holder === toAgent && generation >= observed) {
+        if (generation > observed) {
+          const own = (await assignments.history(taskId)).find((g) => g.generation === observed + 1);
+          if (own !== undefined && own.owner.kind === "agent" && `agent:${own.owner.id}` === toAgent && typeof own.reason === "string" && own.reason.includes(change.commandId)) await warnOnce();
+        }
+        return {};
+      }
+      const principal = await principals.get(toAgent);
+      if (principal === undefined || principal.state !== "active") bad(`${toAgent} is not an active agent`);
       if (holder !== from || generation !== observed) throw new DomainError("stale_revision", `the assignment of ${taskId} changed since the decision (now ${holder ?? "unassigned"} at generation ${generation}, was ${from ?? "unassigned"} at generation ${observed})`);
       if (current !== undefined && current.activeAttemptId !== undefined) bad("the task has a running attempt: use a hand-off");
       // Owner decision 2026-10-30: the move is made at once, with no accept-first step; a new holder that lacks rights for the work is reported in a warning after the move.

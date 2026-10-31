@@ -713,6 +713,21 @@ for (const backend of backends) {
     assert.equal(r.started.length, 1);
   });
 
+  suite("an agent that lacks attempt.work or task.read on the task (for example one a meeting handed it to) is not run on it: the grant blocker names what is missing, and once the owner grants it the task is started", async (c) => {
+    const bob = await c.agent("bob", []);
+    const { taskId } = await c.task("t", bob);
+    const r = await c.run();
+    assert.equal(r.started.length, 0, "no attempt is run, no task credential or work order is issued");
+    assert.equal(r.blocked[0]?.check, "grant");
+    const [b] = (await openBlockers(c)).filter((x) => x.type === "grant_needed");
+    assert.equal(b!.resolver, "owner");
+    assert.match(b!.summary, /attempt\.work/);
+    assert.match(b!.summary, /task\.read/);
+    assert.equal(taskId.length > 0, true);
+    await setGrants(c, "bob", workGrants(c.project, []));
+    assert.equal((await c.run()).started.length, 1, "with the rights granted the next tick starts it");
+  });
+
   suite("a task whose budget is used up is not started", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, []));
     const { taskId } = await c.task("t", ann);
