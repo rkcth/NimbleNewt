@@ -7,7 +7,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { CELL_KEYS, PROFILE_TABLES, PolicyService } from "../policy/index.js";
 import { ReviewService } from "../review/index.js";
 import { GrantService } from "../security/index.js";
-import { GRANT_LENGTH_OPTIONS, PolicyEditService, chooseGrantLength, lengthInWords, ownerOrders, targetsOf, POLICY_EDIT_LIMITS, checkIntents, type Outcome } from "./index.js";
+import { GRANT_LENGTH_OPTIONS, PolicyEditService, chooseGrantLength, saysWords, lengthInWords, ownerOrders, targetsOf, POLICY_EDIT_LIMITS, checkIntents, type Outcome } from "./index.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 after(stopServer);
@@ -947,5 +947,43 @@ for (const backend of backends) {
     // without saying anything about the limit it is still refused
     script[`Let ${ann} spend money.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" } }, "spend money")];
     assert.equal(only((await c.say(`Let ${ann} spend money.`)).outcomes).code, "needs_limit");
+  });
+
+  suite("a large finite length cannot stand in for 'no end': the number must be in the owner's words and under the ceiling, and a date that cannot be held is a refusal, not a crash", async (c, script) => {
+    const ann = "agent:ann";
+    script[`Let ${ann} commit in development.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 36000 }, "commit in development")];
+    assert.equal(only((await c.say(`Let ${ann} commit in development.`)).outcomes).code, "unsupported_value", "a number the owner never said");
+    script[`Let ${ann} commit in development for 1000000000000 days.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 1_000_000_000_000 }, "commit in development for 1000000000000 days")];
+    assert.equal(only((await c.say(`Let ${ann} commit in development for 1000000000000 days.`)).outcomes).code, "invalid_length", "over the ceiling, no RangeError");
+    script[`Let ${ann} commit in development for 36500 days.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 36500 }, "commit in development for 36500 days")];
+    assert.equal(only((await c.say(`Let ${ann} commit in development for 36500 days.`)).outcomes).status, "proposed", "the ceiling itself is allowed");
+    assert.equal(chooseGrantLength({ now: NOW, lengthDays: 36501 }).ok, false);
+    assert.equal(chooseGrantLength({ now: NOW, until: "+275760-09-13T00:00:00Z" }).ok, false);
+  });
+
+  suite("'no end' and 'no limit' words are read per sentence with negation: 'don't make it permanent', 'this is taking forever' and 'not unlimited' do not count", async (c, script) => {
+    const ann = "agent:ann";
+    for (const said of [`Let ${ann} commit in development, don't make it permanent.`, `This is taking forever, let ${ann} commit in development.`, `Let ${ann} commit in development. It should not never expire? Maybe permanent.`]) {
+      script[said] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development")];
+      assert.equal(only((await c.say(said)).outcomes).code, "unsupported_value", said);
+    }
+    const nolimit = `Let ${ann} spend in staging for a week, but not unlimited.`;
+    script[nolimit] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" }, spendLimit: null, environments: ["staging"], lengthDays: 7 }, "spend in staging for a week")];
+    assert.equal(only((await c.say(nolimit)).outcomes).code, "unsupported_value");
+    assert.equal(saysWords(/\b(permanent(ly)?|forever)\b/i, "Make it permanent."), true);
+    assert.equal(saysWords(/\b(permanent(ly)?|forever)\b/i, "Keep it forever, please."), true);
+    assert.equal(saysWords(/\b(permanent(ly)?|forever)\b/i, "Is it permanent?"), false);
+  });
+
+  suite("a grant whose decision fixed neither an end time nor permanence is not made", async (c, script) => {
+    const ann = "agent:ann";
+    script[`Let ${ann} commit in development for a week.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 7 }, "commit in development for a week")];
+    const o = only((await c.say(`Let ${ann} commit in development for a week.`)).outcomes);
+    const ref = { kind: "policy-edit", id: o.editId! };
+    const stored = (await c.w.world.storage.getAggregate(ref))!;
+    const { decided: _d, ...rest } = stored.body as Record<string, unknown>; void _d;
+    await c.w.world.storage.applyOperation({ operationId: "tamper-1", epoch: c.w.projects.epoch, actor: "owner:test", correlationId: "tamper-1", at: NOW, changes: [{ type: "update", ref, expectedRevision: stored.revision, body: { ...rest, status: "applying" } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId! }).catch(() => undefined);
+    assert.deepEqual(await c.grants.held(ann, NOW), [], "no permanent grant came out of a missing end");
   });
 }

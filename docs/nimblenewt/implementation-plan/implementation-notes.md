@@ -3550,3 +3550,11 @@ Owner rule: limits are optional and every setting can be changed and switched of
 - `model-budget.set` (routing/fallback.ts): a field given as null removes that limit, others stay (chat: "remove the limit"; always shown first because it is a raise).
 - `notifications.configure`: `escalateAfterHours: null` turns escalation off; a number turns it on again.
 - Why no more: no typed per-field "enable/disable" flag beyond null/unset; each limit is simply absent when off.
+
+### Optional grant length: review fixes
+- A large finite `lengthDays` can no longer stand in for "no end": a number must appear in the owner's own words (`lengthInWords`), else the edit is refused as `unsupported_value` like the spend limit; and there is a hard ceiling of 36500 days (`GRANT_DAYS_CEILING`, about 100 years) on a length, an `until` date and a length picked at apply time. The end-time arithmetic is also caught: a `RangeError` becomes a `Refusal` (`invalid_length`), never a crash.
+- The "no end" and "no limit" owner words (`NO_END_WORDS`, `NO_LIMIT_WORDS`) are read per sentence with negation (`saysWords`): a negation, question or musing in the rest of the sentence rules the match out ("don't make it permanent", "not unlimited"), and "taking forever" is a complaint, not an order. The words that are themselves negations ("no end", "doesn't expire") are removed before the negation check.
+- `#run` for a grant fails closed: when the decision has neither `expiresAt` nor `permanent: true` it refuses (`invalid_transition`) instead of making a grant with no end.
+- `grants.maxDays` scope: it binds chat policy edits (the owner's setting is read on prepare and again on apply) and now the standing-rule proposal path too: `ApprovalLoadService.accept` takes an optional `maxDays` reader; a length the owner picked or stated beyond it is refused, the usual default is cut to it and says so. Provisional: the reader is an option only; no production code constructs `ApprovalLoadService` yet, so wire it to `configuration.effective` when it is composed.
+- `describe("grant.create", ...)` now puts the end ("ends ..." or "permanent: no end time") before the long basis and terms, so line truncation cannot drop it.
+- Merge note: rebased onto main; both sides of the notes conflict kept.

@@ -20,7 +20,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 const context = { toolVersion: "1.0", authoritySource: "task grant", expectedEffects: ["does the thing"] };
 
 for (const backend of backends) {
-  interface Ctx { rewrite(id: string, edit: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>; load: ApprovalLoadService; policy: PolicyService; review: ReviewService; grants: GrantService; owner: Principal; ann: Principal; ben: Principal; rev: Principal; a: string; task: string; approve(who: Principal, tool: string, by?: Principal, args?: object): Promise<string> }
+  interface Ctx { limited(maxDays: number): ApprovalLoadService; rewrite(id: string, edit: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>; load: ApprovalLoadService; policy: PolicyService; review: ReviewService; grants: GrantService; owner: Principal; ann: Principal; ben: Principal; rev: Principal; a: string; task: string; approve(who: Principal, tool: string, by?: Principal, args?: object): Promise<string> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-10-21T09:00:00.000Z");
@@ -45,6 +45,7 @@ for (const backend of backends) {
           return r.id;
         };
         await body({
+          limited: (maxDays) => ApprovalLoadService.withEpoch(world.storage, projects.epoch, grants, { ...options, maxDays: async () => maxDays }),
           load: ApprovalLoadService.withEpoch(world.storage, projects.epoch, grants, { ...options, profile: ProfileSuggestionService.withEpoch(world.storage, projects.epoch, PolicyService.withEpoch(world.storage, projects.epoch, grants, options), options) }), policy: PolicyService.withEpoch(world.storage, projects.epoch, grants, options), review, grants, owner, ann, ben, rev, a, task, approve,
           rewrite: async (id, edit) => {
             const ref = { kind: "standing-proposal", id };
@@ -493,5 +494,15 @@ for (const backend of backends) {
     const q = (await c.load.proposals(c.owner, "open"))[0]!;
     await refuses("invalid_command", () => c.load.acceptBySwitching(c.owner, { commandId: cid("sw"), proposalId: q.id, expectedRevision: q.revision, mode: "trial" }));
     assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-commit" })).via !== "grant", true);
+  });
+
+  suite("the owner setting grants.maxDays binds a standing-rule proposal too: a length picked or stated beyond it is refused, the usual length is cut to it", async (c) => {
+    const p1 = await proposal(c, 0);
+    const limited = c.limited(10);
+    await refuses("invalid_command", () => limited.accept(c.owner, { commandId: cid("ac"), proposalId: p1.id, expectedRevision: p1.revision, days: 30 } as never), (e) => assert.equal(e.field, "days"));
+    await refuses("invalid_command", () => limited.accept(c.owner, { commandId: cid("ac"), proposalId: p1.id, expectedRevision: p1.revision, statedDays: 60 } as never));
+    const cutDefault = await limited.accept(c.owner, { commandId: cid("ac"), proposalId: p1.id, expectedRevision: p1.revision } as never);
+    assert.equal(cutDefault.days, 10, "the 30-day default is cut to the maximum");
+    assert.match(cutDefault.why, /cut to the 10 days the owner setting grants\.maxDays allows/);
   });
 }

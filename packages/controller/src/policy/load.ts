@@ -134,11 +134,12 @@ export class ApprovalLoadService {
   readonly #catalog: ActionCatalog;
 
   readonly #profile: ProfileSuggestionService | undefined;
+  readonly #maxDays: (() => Promise<number | undefined>) | undefined;
 
-  private constructor(runner: CommandRunner, grants: GrantService, catalog: ActionCatalog, profile: ProfileSuggestionService | undefined) { this.#runner = runner; this.#grants = grants; this.#catalog = catalog; this.#profile = profile; }
+  private constructor(runner: CommandRunner, grants: GrantService, catalog: ActionCatalog, profile: ProfileSuggestionService | undefined, maxDays?: () => Promise<number | undefined>) { this.#maxDays = maxDays; this.#runner = runner; this.#grants = grants; this.#catalog = catalog; this.#profile = profile; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, grants: GrantService, options: RunnerOptions & { catalog?: ActionCatalog; profile?: ProfileSuggestionService } = {}): ApprovalLoadService {
-    return new ApprovalLoadService(new CommandRunner(storage, epoch, options), grants, options.catalog ?? ActionCatalog.default, options.profile);
+  static withEpoch(storage: ControllerStorage, epoch: number, grants: GrantService, options: RunnerOptions & { catalog?: ActionCatalog; profile?: ProfileSuggestionService; /** The owner setting grants.maxDays (the longest a grant may last), read when a proposal is accepted; absent or `undefined` is no maximum. */ maxDays?: () => Promise<number | undefined> } = {}): ApprovalLoadService {
+    return new ApprovalLoadService(new CommandRunner(storage, epoch, options), grants, options.catalog ?? ActionCatalog.default, options.profile, options.maxDays);
   }
 
   /**
@@ -266,11 +267,17 @@ export class ApprovalLoadService {
         const ref: AggregateRef = { kind: "standing-proposal", id: current.id };
         const at = this.#runner.now();
         // The length is fixed in the same step that accepts, so a retry makes the same grant. The owner's own length is used exactly; their words are used as stated; with nothing said it is the length that was shown.
-        const length: NonNullable<ProposalBody["chosenLength"]> = days !== undefined
+        let length: NonNullable<ProposalBody["chosenLength"]> = days !== undefined
           ? { days, source: "owner", why: `you picked ${dayWord(days)}` }
           : statedDays === undefined && command.oneOff !== true
             ? { ...(body.defaultLength ?? { days: body.suggestion.days, why: "the usual length" }), source: "default" }
             : chooseStandingLength({ spanDays: 0, earlier: [], ...(statedDays === undefined ? {} : { statedDays }), ...(command.oneOff === true ? { oneOff: true } : {}) });
+        // The owner setting grants.maxDays binds here too: a length the owner picked or stated beyond it is refused, and the usual length is cut to it.
+        const max = this.#maxDays === undefined ? undefined : await this.#maxDays();
+        if (max !== undefined && length.days > max) {
+          if (length.source !== "default") throw new DomainError("invalid_command", `the owner setting grants.maxDays allows a grant at most ${max} day${max === 1 ? "" : "s"}, not ${length.days}`, { field: "days" });
+          length = { ...length, days: max, why: `${length.why}, cut to the ${max} day${max === 1 ? "" : "s"} the owner setting grants.maxDays allows` };
+        }
         const next: ProposalBody = { ...body, state: "accepted", decidedBy: owner.id, decidedAt: at, chosenLength: length, suggestion: { ...body.suggestion, days: length.days } };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { days: length.days } };
       },

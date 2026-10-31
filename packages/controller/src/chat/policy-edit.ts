@@ -185,6 +185,18 @@ const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const line = (s: string): string => (s.length > POLICY_EDIT_LIMITS.line ? `${s.slice(0, POLICY_EDIT_LIMITS.line - 3)}...` : s);
 const NO_LIMIT_WORDS = /\b(no\s+(spend(ing)?\s+|money\s+)?(limit|cap|ceiling|maximum)|unlimited|without\s+(a\s+|any\s+)?(spend(ing)?\s+)?(limit|cap)|no\s+upper\s+limit)\b/i;
 const NO_END_WORDS = /\b(permanent(ly)?|no\s+(end|expir\w*|time\s+limit)|never\s+expires?|(does\s*n[o']?t|doesn't|do\s+not)\s+expire|without\s+(an\s+)?(end|expir\w*)|indefinite(ly)?|forever|open[- ]ended)\b/i;
+/** The words of a sentence that say what the owner means, with a negation in the rest of the sentence ("don't make it permanent", "not unlimited"), a question or a musing ruled out; "taking forever" is a complaint, not an order. */
+const WORD_NEGATION = /\b(don'?t|do\s+not|doesn'?t|does\s+not|didn'?t|never|not|isn'?t|aren'?t|won'?t|can'?t|cannot|no\s+longer|stop|avoid|rather\s+than|instead\s+of)\b/i;
+const FOREVER_COMPLAINT = /\b(tak(es?|ing)|took|wait(ed|ing|s)?|seems?|feels?|felt)\b[^.!?;]*\bforever\b/i;
+export function saysWords(words: RegExp, wording: string): boolean {
+  const sentences = (wording.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((x) => !x.trimEnd().endsWith("?"));
+  const global = new RegExp(words.source, "gi");
+  return sentences.some((x) => {
+    const s = FOREVER_COMPLAINT.test(x) ? x.replace(/\bforever\b/gi, " ") : x;
+    if (!words.test(s)) return false;
+    return !WORD_NEGATION.test(s.replace(global, " ")) && !MUSING.test(s);
+  });
+}
 const freedom = (profile: string): number => (profile === "strict" ? 0 : profile === "derived" ? 1 : 2);
 const refuseDraft = (change: PolicyEditChange, evidence: string, code: string, message: string, conditions: readonly string[] = [], wording = ""): PolicyEditPrepared => ({
   ok: true, draft: { change: asJson(change), evidence, summary: [], explanation: [], unapplied: unappliedOf(conditions, wording), direction: "unknown", direct: false, status: "refused", reason: message, refusal: { code, message } },
@@ -196,13 +208,17 @@ export interface GrantLengthRules { readonly maxDays?: number; readonly defaultD
 const noMore = (max: number, what: string): string => `the owner setting grants.maxDays allows a standing grant at most ${max} day${max === 1 ? "" : "s"}; ${what}`;
 
 /** The length of a standing grant, from what the owner said, else the default. `lengthDays: null` is a grant with no end, which is allowed only while no maximum is set. The explanation is in plain words and is kept with the edit and the grant (card A07d adds the pattern of earlier approvals as an input). */
+/** The hard ceiling on a grant's length in days (about a hundred years): beyond it a date cannot be held, and no one means it. */
+export const GRANT_DAYS_CEILING = 36_500;
 export function chooseGrantLength(input: { lengthDays?: number | null; until?: string; now: string; rules?: GrantLengthRules }): { ok: true; days?: number; permanent?: true; why: string; until?: string } | { ok: false; message: string } {
   const now = Date.parse(input.now);
   const max = input.rules?.maxDays;
   if (input.until !== undefined) {
-    const until = input.until.length === 10 ? `${input.until}T23:59:59.000Z` : new Date(input.until).toISOString();
-    const days = Math.ceil((Date.parse(until) - now) / DAY_MS);
-    if (!(Date.parse(until) > now)) return { ok: false, message: `${input.until} is not in the future` };
+    const parsed = Date.parse(input.until.length === 10 ? `${input.until}T23:59:59.000Z` : input.until);
+    if (!Number.isFinite(parsed) || parsed > now + GRANT_DAYS_CEILING * DAY_MS) return { ok: false, message: `${input.until} is further away than a grant can last (${GRANT_DAYS_CEILING} days)` };
+    const until = new Date(parsed).toISOString();
+    const days = Math.ceil((parsed - now) / DAY_MS);
+    if (!(parsed > now)) return { ok: false, message: `${input.until} is not in the future` };
     if (max !== undefined && days > max) return { ok: false, message: noMore(max, `${input.until} is further away`) };
     return { ok: true, days, until, why: `you asked for it to last until ${input.until}` };
   }
@@ -211,6 +227,7 @@ export function chooseGrantLength(input: { lengthDays?: number | null; until?: s
     return { ok: true, permanent: true, why: "you asked for it to have no end" };
   }
   if (input.lengthDays !== undefined) {
+    if (input.lengthDays > GRANT_DAYS_CEILING) return { ok: false, message: `${input.lengthDays} days is more than a grant can last (${GRANT_DAYS_CEILING} days)` };
     if (max !== undefined && input.lengthDays > max) return { ok: false, message: noMore(max, `not ${input.lengthDays}`) };
     return { ok: true, days: input.lengthDays, why: `you asked for ${input.lengthDays} day${input.lengthDays === 1 ? "" : "s"}` };
   }
@@ -272,8 +289,9 @@ export class PolicyEditService {
     if (change.type === "grant") {
       const bad = (change.environments ?? []).find((e) => !(ENV_WORDS[e] as RegExp).test(wording));
       if (bad !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${bad} is not in your message, so it was not done. Say which environments.` };
-      if (change.spendLimit === null && !NO_LIMIT_WORDS.test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say there is no spending limit, so it was not done. Say the limit, or say there is none." };
-      if (change.lengthDays === null && !NO_END_WORDS.test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say the grant has no end, so it was not done. Say how long, or say it has no end." };
+      if (change.spendLimit === null && !saysWords(NO_LIMIT_WORDS, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say there is no spending limit, so it was not done. Say the limit, or say there is none." };
+      if (change.lengthDays === null && !saysWords(NO_END_WORDS, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say the grant has no end, so it was not done. Say how long, or say it has no end." };
+      if (typeof change.lengthDays === "number" && !lengthInWords(change.lengthDays, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.lengthDays} days is not in your message, so it was not done. Say how long.` };
       if (typeof change.spendLimit === "number" && !new RegExp(`(^|[^0-9.])${String(change.spendLimit).replace(".", "\\.")}([^0-9]|$)`).test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.spendLimit} is not in your message, so it was not done. Say the limit.` };
     }
     let built: Built | { ask: PolicyEditPrepared & { ok: false } };
@@ -621,7 +639,11 @@ export class PolicyEditService {
     const chosen = chooseGrantLength({ ...(change.lengthDays === undefined ? {} : { lengthDays: change.lengthDays }), ...(change.until === undefined ? {} : { until: change.until }), now: this.#runner.now(), rules });
     if (!chosen.ok) throw new Refusal("invalid_length", chosen.message);
     const now = this.#runner.now();
-    const ends = chosen.permanent === true ? "permanent: it has no end time" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`;
+    let ends: string;
+    try { ends = chosen.permanent === true ? "permanent: it has no end time" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`; } catch (error) {
+      if (error instanceof RangeError) throw new Refusal("invalid_length", "that length puts the end of the grant beyond any date a record can hold");
+      throw error;
+    }
     const environments = change.environments ?? ["development", "testing"];
     const options = lengthOptions(typeof change.lengthDays === "number" ? change.lengthDays : change.until === undefined ? undefined : chosen.days, rules.maxDays);
     const explanation = [
@@ -743,6 +765,7 @@ export class PolicyEditService {
       return { days, expiresAt: until };
     }
     const days = override ?? op.lengthDays ?? rules.defaultDays ?? DEFAULT_GRANT_DAYS;
+    if (days > GRANT_DAYS_CEILING) return { message: `${days} days is more than a grant can last (${GRANT_DAYS_CEILING} days)` };
     if (max !== undefined && days > max) return { message: noMore(max, `not ${days}`) };
     return { days, expiresAt: new Date(Date.parse(at) + days * DAY_MS).toISOString() };
   }
@@ -760,6 +783,8 @@ export class PolicyEditService {
         return { applied: [{ kind: "review-policy", id: op.projectId, revision: (op.expectedRevision ?? 0) + 1 }], takesEffect: "at the next review request" };
       }
       case "grant": {
+        // A grant with no end is made only when the decision says so; a decision that fixed neither an end nor permanence is damaged, and nothing is granted from it.
+        if (body.decided?.permanent !== true && body.decided?.expiresAt === undefined) throw new DomainError("invalid_transition", `edit ${id} fixed no end time for this grant and did not say it is permanent, so no grant was made`);
         const g = await d.grants.grant(owner, {
           commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", ...(body.decided?.expiresAt === undefined ? {} : { expiresAt: body.decided.expiresAt }),
           basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.permanent === true ? "no end" : `${body.decided?.lengthDays ?? "?"} days`} (${op.lengthWhy}).`.slice(0, 900),
