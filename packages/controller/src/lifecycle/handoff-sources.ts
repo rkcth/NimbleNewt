@@ -69,7 +69,7 @@ export function controllerHandoffSources(deps: {
         const drafts = await deps.drafts?.({ taskId, projectId, from }).catch(() => undefined);
         if (drafts !== undefined && drafts.length > 0) sections["drafts"] = drafts.map((d) => `${d.id} "${d.title}": ${d.body.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
         const owned = await deps.responsibilities?.({ projectId, from }).catch(() => undefined);
-        if (owned !== undefined && owned.length > 0) sections["responsibilities"] = `${from.id} answers for these in the project; they stay with ${from.id} until reassigned, and the recipient should know of them:\n${owned.map((r) => `${r.id} "${r.title}" (${r.state}): ${r.desiredCondition.replace(/\s+/g, " ").slice(0, 200)}`).join("\n")}`;
+        if (owned !== undefined && owned.length > 0) sections["responsibilities"] = `${from.id} answers for these in the project; they stay with ${from.id} unless moved with the hand-off (complete it with reassignResponsibilities listing the IDs to move; the owner or anyone who may assign responsibilities decides), and the recipient should know of them:\n${owned.map((r) => `${r.id} "${r.title}" (${r.state}): ${r.desiredCondition.replace(/\s+/g, " ").slice(0, 200)}`).join("\n")}`;
         const held = await deps.locks?.({ taskId, projectId, from, to }).catch(() => undefined);
         if (held !== undefined && held.length > 0) sections["locks"] = held.join("\n");
       }

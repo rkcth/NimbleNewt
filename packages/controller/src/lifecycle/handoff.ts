@@ -28,6 +28,16 @@ export type HandoffPhase = "preparing" | "blocked" | "ready" | "transferring" | 
 const TERMINAL: readonly HandoffPhase[] = ["transferred", "failed", "cancelled"];
 const LIVE: readonly HandoffPhase[] = ["preparing", "blocked", "ready", "transferring"];
 
+/**
+ * Moving the sender's responsibilities along with the task (card L03i). Both steps run as the one who asked, so the right to assign responsibilities is theirs and is checked again when it is carried out.
+ * `check` throws a typed refusal when an entry cannot be moved (not the sender's, unknown, retired, the recipient cannot answer for it); `apply` moves each entry independently and reports what happened.
+ */
+export interface ResponsibilityHandover {
+  check(by: Principal, request: { taskId: string; ids: readonly string[]; from: Owner; to: Owner }): Promise<void>;
+  /** Repeatable: an entry already answered for by the recipient counts as moved. `by` is undefined when the asker is gone or no longer active. */
+  apply(by: Principal | undefined, request: { handoffId: string; ids: readonly string[]; from: Owner; to: Owner }): Promise<{ moved: readonly string[]; failed: readonly { id: string; reason: string }[] }>;
+}
+
 /** What the controller reads from the rest of the system to build the package. Reading must be repeatable and must return only what the recipient may see. */
 export interface HandoffSources {
   collect(request: { taskId: string; from: Owner; to: Owner }): Promise<{ sections: Readonly<Record<string, string>> }>;
@@ -59,6 +69,10 @@ export interface TaskHandoffBody {
   /** A forced takeover is a visible exception: what was missing and what may be uncertain. */
   readonly exception?: { readonly by: string; readonly reason: string; readonly at: string; readonly missingCleanup: readonly string[]; readonly uncertainEffects: readonly string[] };
   readonly transferredAt?: string;
+  /** The responsibilities the one who completed the hand-off chose to move to the recipient with the task (card L03i); carried out right after the move of the task, once. */
+  readonly reassign?: { readonly ids: readonly string[]; readonly by: string; readonly at: string };
+  /** What came of it: each entry moved or failed with a reason. A failure leaves that responsibility with the sender; it never undoes the move of the task. */
+  readonly reassigned?: { readonly at: string; readonly moved: readonly string[]; readonly failed: readonly { readonly id: string; readonly reason: string }[] };
   /** A temporary reassignment: when the task goes back to `from` (card L03e). The return is a hand-off of its own, made on this time, as the one who asked, if they still hold the right. */
   readonly returnAt?: string;
   /** This hand-off is a return: when it is ready the controller completes it (accepting gaps, which are recorded) for the one who asked, if they still hold the right. */
@@ -73,7 +87,7 @@ export interface TaskHandoffBody {
   readonly history: readonly { readonly phase: HandoffPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
-export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30 } as const;
+export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30, reassign: 50 } as const;
 const KIND = "handoff";
 const ACTIVE = "handoff-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -106,19 +120,21 @@ export class HandoffService {
   readonly #stops: Pick<StopService, "request" | "advance" | "force" | "get">;
   readonly #assignments: Pick<AssignmentService, "getAssignment" | "transferTask">;
   readonly #sources: HandoffSources;
+  readonly #responsibilities: ResponsibilityHandover | undefined;
   readonly #asker: ((principalId: string) => Promise<Principal | undefined>) | undefined;
   readonly #onTransferred: ((by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>) | undefined;
   readonly #onReturnGivenUp: ((by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>) | undefined;
 
-  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>, onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>) {
+  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>, onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>, responsibilities?: ResponsibilityHandover) {
+    this.#responsibilities = responsibilities;
     this.#onReturnGivenUp = onReturnGivenUp;
     this.#onTransferred = onTransferred;
     this.#asker = asker;
     this.#runner = runner; this.#pauses = pauses; this.#stops = stops; this.#assignments = assignments; this.#sources = sources;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined>; /** Told once when a temporary reassignment could not be returned (the asker lost the right, the task moved on, the hand-off back failed): best effort, so the task's activity can say why it stayed. */ onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void> }, options: RunnerOptions = {}): HandoffService {
-    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker, deps.onReturnGivenUp);
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined>; /** Told once when a temporary reassignment could not be returned (the asker lost the right, the task moved on, the hand-off back failed): best effort, so the task's activity can say why it stayed. */ onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>; /** Moves the sender's chosen responsibilities to the recipient with the task (card L03i); without it a hand-off that asks for this is refused. */ responsibilities?: ResponsibilityHandover }, options: RunnerOptions = {}): HandoffService {
+    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker, deps.onReturnGivenUp, deps.responsibilities);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
@@ -161,17 +177,24 @@ export class HandoffService {
   }
 
   /** The caller accepts the package as it is and the task moves. Refused unless ready; an incomplete package needs `acceptGaps`, which is recorded. */
-  async complete(by: Principal, command: NoActor & { handoffId: string; acceptGaps?: boolean }): Promise<View<TaskHandoffBody>> {
-    onlyKnown(command, ["commandId", "handoffId", "acceptGaps"]);
+  async complete(by: Principal, command: NoActor & { handoffId: string; acceptGaps?: boolean; reassignResponsibilities?: unknown }): Promise<View<TaskHandoffBody>> {
+    onlyKnown(command, ["commandId", "handoffId", "acceptGaps", "reassignResponsibilities"]);
+    const ids = command.reassignResponsibilities === undefined ? [] : this.#responsibilityIds(command.reassignResponsibilities);
     const found = await this.#get(command.handoffId);
     const b = found.body as unknown as TaskHandoffBody;
     await this.#mayControl(by, b.taskId);
     if (b.phase === "transferring" || b.phase === "transferred") return this.advance(by, { handoffId: command.handoffId });
     if (b.phase !== "ready") throw new DomainError("invalid_command", `the hand-off is ${b.phase}; it can be completed when it is ready`, { field: "handoffId" });
+    if (ids.length > 0) {
+      if (this.#responsibilities === undefined) invalid("reassignResponsibilities", "cannot be used here: this service cannot move responsibilities");
+      if (b.returnAt !== undefined || b.autoComplete === true) invalid("reassignResponsibilities", "cannot be used with a temporary reassignment or its return: responsibilities are not handed back with the task");
+      // Refused now, before anything moves, when an entry is not the sender's or the asker may not assign it; the right is checked again when the move is made.
+      await this.#responsibilities!.check(by, { taskId: b.taskId, ids, from: b.from, to: b.to });
+    }
     const missing = b.package?.missing ?? [...REQUIRED_SECTIONS];
     if (missing.length > 0 && command.acceptGaps !== true) throw new DomainError("invalid_command", `the package is missing ${missing.join(", ")}; complete it with acceptGaps to hand it over anyway`, { field: "acceptGaps" });
     const at = this.#runner.now();
-    await this.#update(command.handoffId, (x) => ({ ...x, phase: "transferring", ...(missing.length === 0 ? {} : { acceptedGaps: { by: by.id, missing, at } }), history: this.#push(x, "transferring", by.id, missing.length === 0 ? "package accepted" : `package accepted with gaps: ${missing.join(", ")}`) }), ["ready"]);
+    await this.#update(command.handoffId, (x) => ({ ...x, phase: "transferring", ...(ids.length === 0 ? {} : { reassign: { ids, by: by.id, at } }), ...(missing.length === 0 ? {} : { acceptedGaps: { by: by.id, missing, at } }), history: this.#push(x, "transferring", by.id, missing.length === 0 ? "package accepted" : `package accepted with gaps: ${missing.join(", ")}`) }), ["ready"]);
     return this.advance(by, { handoffId: command.handoffId });
   }
 
@@ -273,6 +296,7 @@ export class HandoffService {
       if (b.phase === "transferring") {
         const { assignment } = await this.#currentOwner(b.taskId).catch(() => ({ assignment: undefined, from: undefined }));
         if (assignment !== undefined && assignment.state === "assigned" && sameOwner(assignment.owner, b.to) && assignment.generation > b.generation) {
+          await this.#moveResponsibilities(by, id, b);
           await this.#finish(by, id, b);
           continue;
         }
@@ -533,6 +557,22 @@ export class HandoffService {
   }
 
   /** The task moved: the new owner may run, so a hold this hand-off added is lifted. */
+  #responsibilityIds(value: unknown): string[] {
+    if (!Array.isArray(value) || value.length > HANDOFF_LIMITS.reassign) return invalid("reassignResponsibilities", `must be a list of at most ${HANDOFF_LIMITS.reassign} responsibility IDs`);
+    return [...new Set(value.map((v, i) => text(v, `reassignResponsibilities[${i}]`, { min: 1, max: 100 })))];
+  }
+
+  /** Carried out once the task has moved and before the hand-off is marked done, so a restart in between repeats it (it is repeatable) and the result is recorded in the hand-off. */
+  async #moveResponsibilities(by: Principal, id: string, b: TaskHandoffBody): Promise<void> {
+    if (b.reassign === undefined || b.reassigned !== undefined || this.#responsibilities === undefined) return;
+    const asker = this.#asker === undefined ? by : await this.#asker(b.reassign.by);
+    let result: { moved: readonly string[]; failed: readonly { id: string; reason: string }[] };
+    try { result = await this.#responsibilities.apply(asker, { handoffId: id, ids: b.reassign.ids, from: b.from, to: b.to }); }
+    catch (error) { const why = error instanceof DomainError ? error.message : "the move failed unexpectedly"; result = { moved: [], failed: b.reassign.ids.map((rid) => ({ id: rid, reason: why.slice(0, 200) })) }; }
+    const at = this.#runner.now();
+    await this.#update(id, (x) => ({ ...x, reassigned: { at, moved: [...result.moved], failed: result.failed.map((f) => ({ id: f.id, reason: redactText(f.reason).slice(0, 200) })) }, history: this.#push(x, "transferring", by.id, `responsibilities moved with the task: ${result.moved.length} moved, ${result.failed.length} left with ${b.from.id}`) }), ["transferring"]);
+  }
+
   async #finish(by: Principal, id: string, b: TaskHandoffBody): Promise<void> {
     await this.#update(id, (x) => ({ ...x, phase: "transferred", transferredAt: this.#runner.now(), history: this.#push(x, "transferred", by.id, `now owned by ${b.to.kind}:${b.to.id}`) }), ["transferring"]);
     try { await this.#onTransferred?.(by, { handoffId: id, taskId: b.taskId, from: b.from, to: b.to }); } catch { /* the record of the move is best effort */ }

@@ -5,5 +5,6 @@ export {
 } from "./pause.js";
 export { STOP_CHOICES, STOP_LIMITS, StopService, type InventoryItem, type StopChoice, type StopIntentBody, type StopMode, type StopOutcome, type StopPhase, type StopPorts, type CleanupCost } from "./stop.js";
 export { agentsUnder, dispatchStopPorts, hostLocalWork, swarmDescendants, swarmDescendantsInfo, type LocalWork } from "./dispatch-ports.js";
-export { HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, REQUIRED_SECTIONS, type TaskHandoffBody, type HandoffPhase, type HandoffSection, type HandoffSources } from "./handoff.js";
+export { HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, REQUIRED_SECTIONS, type TaskHandoffBody, type HandoffPhase, type HandoffSection, type HandoffSources, type ResponsibilityHandover } from "./handoff.js";
 export { controllerHandoffSources } from "./handoff-sources.js";
+export { responsibilityHandover } from "./handoff-responsibilities.js";

@@ -214,7 +214,7 @@ export const AUTHORITY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   // A time to return the task, and handing over an incomplete package, change what the move does: shown first.
   "handoff.prepare": ["returnAt"],
   "handoff.takeover": ["returnAt"],
-  "handoff.complete": ["acceptGaps"],
+  "handoff.complete": ["acceptGaps", "reassignResponsibilities"],
 };
 
 /**

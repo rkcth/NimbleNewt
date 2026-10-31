@@ -32,7 +32,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L05c, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L04, L04b, L04c, L06, L06b, H08, H08b |
+| N05 / AII-255 | L05, L05b, L05c, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C07g, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
@@ -1008,12 +1008,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A hand-off package lists the real locks the recipient may see and tells a gap as a gap.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### L03i — Finish hand-off: offering to reassign responsibilities, integrator and workspace lock sources
+### L03i — Finish hand-off: offering to reassign responsibilities with the hand-off package
 
 - **Parent:** N05 / AII-255.
 - **Blockers:** L03h.
-- **Deliverable:** Split from L03h (2026-10-30): offering to reassign the sender's responsibilities with the hand-off (an owner question surfaced with the package; nothing is transferred by a hand-off today), the integrator lease (P10) and workspace holds (H12m) as lock sources once they exist.
-- **Acceptance and verification:** The owner can reassign responsibilities with the hand-off package and the package lists every kind of lock.
+- **Deliverable:** Split from L03h (2026-10-30); narrowed 2026-10-31 (the integrator lease and workspace holds as lock sources moved to L03j): the owner can move chosen responsibilities of the sender to the recipient when completing a hand-off (checked before anything moves, carried out as the one who asked, per-entry results recorded).
+- **Acceptance and verification:** The owner can reassign responsibilities with the hand-off package.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L03j — Hand-off lock sources for the integrator lease and workspace holds
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L03i, P10, H12m.
+- **Deliverable:** Split from L03i (2026-10-31): the integrator lease (P10) and workspace holds (H12m) listed as lock sources of the hand-off package, limited to what the recipient may see, replacing the 'not tracked yet' gap line the package carries today.
+- **Acceptance and verification:** The package lists every kind of lock and no longer tells the integrator lease and workspace holds as a gap.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L04 — Implement checked resume and evidence invalidation
@@ -3063,7 +3071,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

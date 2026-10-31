@@ -72,7 +72,7 @@ import { ContinuationService, ResumeCheckService, ResumeSettingsService, control
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService, ReplayLimitsService, ReplayService } from "../activity/index.js";
 import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
-import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, hostLocalWork, swarmDescendantsInfo, type LocalWork } from "../lifecycle/index.js";
+import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, hostLocalWork, swarmDescendantsInfo, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
@@ -276,6 +276,8 @@ async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<st
  * 4. Build the services and the state API on that epoch.
  * Nothing else about behaviour changes under the override.
  */
+const UNTRACKED_LOCKS = "integrator lease and workspace holds: not tracked by this installation yet, so any the sender holds are missing from this section, not absent";
+
 export async function startController(options: StartOptions): Promise<Controller> {
   const dir = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
   // One controller owns a data directory at a time (card K01h): a second start, or a restore swap under a running one, is refused with the holder named. The lock is taken once the environment checks have passed (a refused start creates nothing).
@@ -594,10 +596,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const cutover = CutoverService.withEpoch(storage, epoch, routing, {});
     const fallback = FallbackService.withEpoch(storage, epoch, routing, {}, cutover.gate());
     cutover.bind(fallback);
-    const handoffs = HandoffService.withEpoch(storage, epoch, { asker: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); }, onReturnGivenUp: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-ret-${createHash("sha256").update(e.reason).digest("hex").slice(0, 12)}`, taskId: e.taskId, kind: "ownership", summary: `The temporary reassignment was not returned: ${e.reason}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, onTransferred: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-act`, taskId: e.taskId, kind: "ownership", summary: `Handed over from ${e.from.kind} ${e.from.id} to ${e.to.kind} ${e.to.id}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, pauses, stops, assignments, sources: controllerHandoffSources({ getTask: (id) => projects.getTask(id), contracts,
+    const handoffs = HandoffService.withEpoch(storage, epoch, { asker: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); }, onReturnGivenUp: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-ret-${createHash("sha256").update(e.reason).digest("hex").slice(0, 12)}`, taskId: e.taskId, kind: "ownership", summary: `The temporary reassignment was not returned: ${e.reason}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, onTransferred: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-act`, taskId: e.taskId, kind: "ownership", summary: `Handed over from ${e.from.kind} ${e.from.id} to ${e.to.kind} ${e.to.id}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, pauses, stops, assignments, responsibilities: responsibilityHandover({ responsibilities, projectOf: async (taskId) => (await projects.getTask(taskId))?.projectId }), sources: controllerHandoffSources({ getTask: (id) => projects.getTask(id), contracts,
       // The sender's own shared drafts and the responsibilities it answers for travel with the task (card L03g), read as the sender.
       drafts: async ({ taskId, projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); const all: Awaited<ReturnType<typeof desks.list>>["items"] = []; for (let after: string | undefined, i = 0; i < 20; i++) { const page = await desks.list(eff as never, { ownerId: p.id, projectId, limit: 200, ...(after === undefined ? {} : { afterId: after }) }); all.push(...page.items); after = page.next; if (after === undefined) break; } return all.filter((r) => r.taskId === taskId && r.status === "draft" && r.visibility === "shared").map((r) => ({ id: r.id, title: r.title, body: r.body })); },
       responsibilities: async ({ projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ((await responsibilities.list(eff as never, projectId, { state: "active" })) ?? []).filter((r) => r.ownerId === p.id).map((r) => ({ id: r.id, title: r.title, desiredCondition: r.desiredCondition, state: r.state })); },
+      // Two kinds of hold are not kept anywhere yet (the integrator lease of landing and workspace holds); the section says so rather than read as complete (card L03i, remaining: L03j).
       locks: async ({ taskId, projectId, from, to }) => {
         const p = await principals.get(`agent:${from.id}`); if (p === undefined) return [];
         const out: string[] = [];
@@ -609,7 +612,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         const eff = await rightsOf(p as never);
         const mine = await responsibilities.list(eff as never, projectId, { state: "active" });
         // The sender being unable to read responsibilities is a gap in what is known, not the absence of claims: say so rather than show only the checkout line as if complete.
-        if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return out; }
+        if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return [...out, UNTRACKED_LOCKS]; }
         const claims: { resourceId: string; responsibilityId: string }[] = [];
         let unchecked = 0;
         for (const r of mine) {
@@ -631,7 +634,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
         }
         if (hidden > 0) out.push(`resource claims: ${hidden} held by the sender's responsibilities (${[...kinds].map(([k, n]) => `${k} x${n}`).join(", ")}); details withheld, the recipient may not read them`);
-        return out;
+        return [...out, UNTRACKED_LOCKS];
       },
       agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state, canWork: async (agentId, projectId) => { const p = await principals.get(`agent:${agentId}`); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId); } }) });
     const continuations = ContinuationService.withEpoch(storage, epoch);

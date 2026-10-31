@@ -2751,12 +2751,31 @@
       "id": "L03i",
       "parent": "N05",
       "existing_issue": "AII-255",
-      "title": "Finish hand-off: offering to reassign responsibilities, integrator and workspace lock sources",
+      "title": "Finish hand-off: offering to reassign responsibilities with the hand-off package",
       "depends_on": [
         "L03h"
       ],
-      "deliverable": "Split from L03h (2026-10-30): offering to reassign the sender's responsibilities with the hand-off (an owner question surfaced with the package; nothing is transferred by a hand-off today), the integrator lease (P10) and workspace holds (H12m) as lock sources once they exist",
-      "acceptance_and_verification": "The owner can reassign responsibilities with the hand-off package and the package lists every kind of lock",
+      "deliverable": "Split from L03h (2026-10-30); narrowed 2026-10-31 (the integrator lease and workspace holds as lock sources moved to L03j): the owner can move chosen responsibilities of the sender to the recipient when completing a hand-off (checked before anything moves, carried out as the one who asked, per-entry results recorded)",
+      "acceptance_and_verification": "The owner can reassign responsibilities with the hand-off package",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "L03j",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Hand-off lock sources for the integrator lease and workspace holds",
+      "depends_on": [
+        "L03i",
+        "P10",
+        "H12m"
+      ],
+      "deliverable": "Split from L03i (2026-10-31): the integrator lease (P10) and workspace holds (H12m) listed as lock sources of the hand-off package, limited to what the recipient may see, replacing the 'not tracked yet' gap line the package carries today",
+      "acceptance_and_verification": "The package lists every kind of lock and no longer tells the integrator lease and workspace holds as a gap",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8663,6 +8682,7 @@
         "M04g",
         "M04h",
         "L03i",
+        "L03j",
         "T02c",
         "T02d",
         "U11c",

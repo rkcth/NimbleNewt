@@ -7,9 +7,11 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { WorkerHost } from "../dispatch/index.js";
 import { PI } from "../dispatch/testing/world.js";
+import { responsibilityHandover } from "../lifecycle/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
+const UNTRACKED = "integrator lease and workspace holds: not tracked by this installation yet, so any the sender holds are missing from this section, not absent";
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
 test("a task is handed to another agent through the state API: prepared, package from the contract, incomplete until the gap is accepted, then moved once (card L03b)", async () => {
@@ -128,7 +130,7 @@ test("the package carries the sender's shared drafts on the task and the respons
     assert.ok(!/Private thought|do not share|Other task draft|Accepted note/.test(sections.drafts), sections.drafts);
     assert.match(sections.responsibilities, /Keep the compost turned/);
     assert.ok(!/Someone else's/.test(sections.responsibilities));
-    assert.equal(sections.locks, undefined, "nothing keeps locks yet, so none is claimed");
+    assert.equal(sections.locks, UNTRACKED, "no hold is known, but the two kinds nobody keeps yet are named as a gap and not claimed absent");
     // Someone who only controls the task does not see the sender's drafts or responsibilities; the owner and the sender do.
     await c.services.grants.grant(rob, { commandId: "g-mgr", grantee: `agent:${b}`, action: "lifecycle.pause", project, source: "direct", basis: "test" });
     const bToken = (await c.services.principals.issueCredential(rob, `agent:${b}`)).token;
@@ -178,9 +180,79 @@ test("the real hand-off locks source: checkout holds whoever started them, claim
     // Claim match with a recipient who may read both: named. The refresh is over, so no checkout line. A malformed managed entry skips only itself.
     await corrupt();
     const full = await sections(t2, sees, "h2");
-    assert.equal(full["locks"], `resource claims: 1 managed entry of the sender's responsibilities could not be checked and is missing from this section\nresource ${res.id}: claimed by responsibility ${duty.id}; the claim stays with ${duty.id} until it is reassigned`);
+    assert.equal(full["locks"], `resource claims: 1 managed entry of the sender's responsibilities could not be checked and is missing from this section\nresource ${res.id}: claimed by responsibility ${duty.id}; the claim stays with ${duty.id} until it is reassigned\n${UNTRACKED}`);
     // Gap versus none: a sender who cannot read responsibilities is reported as unknown; one who can and holds nothing leaves the section empty.
     assert.match((await sections(t3, sees, "h3"))["locks"] ?? "", /not known; the sender may not read/);
-    assert.equal((await sections(t4, sees, "h4"))["locks"], undefined);
+    assert.equal((await sections(t4, sees, "h4"))["locks"], UNTRACKED, "nothing held, but the two kinds of lock nobody keeps yet are named as a gap");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the owner moves chosen responsibilities of the sender to the recipient with the task: checked before anything moves, claims travel with them, per-entry failures reported (card L03i)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-handoff-reassign-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    const agent = async (n: string) => { const id = (await c.services.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id; for (const action of ["attempt.work", "responsibility.read"]) await c.services.grants.grant(rob, { commandId: `g-${n}-${action}`, grantee: `agent:${id}`, action, project, source: "direct", basis: "test" } as never); return id; };
+    const a = await agent("A"), b = await agent("B"), other = await agent("Other");
+    const mkTask = async (n: string) => { const t = (await call("task.create", { projectId: project, title: n, description: n }, `t-${n}`)).result.id as string; await call("task.transition", { taskId: t, to: "ready", expectedRevision: 1 }, `tr-${n}`); assert.ok((await call("task.assign", { taskId: t, owner: { kind: "agent", id: a } }, `as-${n}`)).ok); return t; };
+    const t1 = await mkTask("one"), t2 = await mkTask("two");
+    const res = await c.services.resources.bindResource(rob, { commandId: "b1", projectId: project, kind: "repository", label: "plot", locator: "/r/plot" } as never);
+    const mk = (n: string, ownerId: string, extra: Record<string, unknown> = {}) => c.services.responsibilities.create(rob, { commandId: `r-${n}`, projectId: project, title: `Duty ${n}`, objective: "o", desiredCondition: "tidy", ownerId, ...extra } as never);
+    const r1 = await mk("1", `agent:${a}`, { managed: [res.id] }), r2 = await mk("2", `agent:${a}`), r3 = await mk("3", `agent:${other}`);
+    const ownerOf = async (id: string) => (await c.services.responsibilities.get(rob, id))?.ownerId;
+
+    // The package tells the owner how to move them.
+    const prepared = await call("handoff.prepare", { taskId: t1, to: { kind: "agent", id: b }, reason: "leave" }, "h1");
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    const item = prepared.result.item;
+    assert.match(item.package.sections.responsibilities, /reassignResponsibilities/);
+    assert.match(item.package.sections.responsibilities, new RegExp(r1.id));
+
+    // Refused before anything moves: someone else's responsibility, an unknown ID, a bad shape.
+    for (const [ids, id] of [[[r1.id, r3.id], "c1"], [["rsp-aaaaaaaaaaaaaaaaaaaa"], "c2"]] as const) {
+      const refused = await call("handoff.complete", { handoffId: item.id, acceptGaps: true, reassignResponsibilities: ids }, id);
+      assert.equal(refused.error.code, "invalid_command", JSON.stringify(refused));
+    }
+    assert.equal((await call("handoff.complete", { handoffId: item.id, acceptGaps: true, reassignResponsibilities: "all" }, "c3")).error.code, "invalid_command");
+    assert.equal((await call("handoff.get", { handoffId: item.id })).result.item.phase, "ready", "a refused request moved nothing");
+    assert.equal(await ownerOf(r1.id), `agent:${a}`);
+
+    // Chosen ones move with the task; the claim on the managed resource stays with the responsibility; the unchosen one stays.
+    const done = await call("handoff.complete", { handoffId: item.id, acceptGaps: true, reassignResponsibilities: [r1.id] }, "c4");
+    assert.ok(done.ok, JSON.stringify(done));
+    assert.equal(done.result.item.phase, "transferred");
+    assert.deepEqual(done.result.item.reassigned.moved, [r1.id]);
+    assert.deepEqual(done.result.item.reassigned.failed, []);
+    assert.equal(await ownerOf(r1.id), `agent:${b}`);
+    assert.equal(await ownerOf(r2.id), `agent:${a}`, "not chosen, so it stays with the sender");
+    assert.equal(await ownerOf(r3.id), `agent:${other}`);
+    assert.equal((await c.services.resources.heldClaim(res.id))?.responsibilityId, r1.id);
+
+    // A hand-off that does not ask for it moves none; a temporary reassignment cannot carry them.
+    const t2h = await call("handoff.prepare", { taskId: t2, to: { kind: "agent", id: b }, reason: "back soon", returnAt: new Date(Date.now() + 3_600_000).toISOString() }, "h2");
+    assert.ok(t2h.ok, JSON.stringify(t2h));
+    assert.equal((await call("handoff.complete", { handoffId: t2h.result.item.id, acceptGaps: true, reassignResponsibilities: [r2.id] }, "c5")).error.code, "invalid_command");
+    assert.ok((await call("handoff.complete", { handoffId: t2h.result.item.id, acceptGaps: true }, "c6")).ok);
+    assert.equal(await ownerOf(r2.id), `agent:${a}`);
+
+    // Per-entry failure and a gone asker, through the mover itself.
+    const mover = responsibilityHandover({ responsibilities: c.services.responsibilities, projectOf: async () => project });
+    const r4 = await mk("4", `agent:${a}`);
+    const partial = await mover.apply(rob, { handoffId: "hnd-x", ids: [r4.id, r3.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
+    assert.deepEqual(partial.moved, [r4.id]);
+    assert.deepEqual(partial.failed.map((f) => f.id), [r3.id]);
+    assert.match(partial.failed[0]!.reason, /no longer answered for by the sender/);
+    const again = await mover.apply(rob, { handoffId: "hnd-x", ids: [r4.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
+    assert.deepEqual(again.moved, [r4.id], "repeating it is harmless");
+    const gone = await mover.apply(undefined, { handoffId: "hnd-y", ids: [r2.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } });
+    assert.deepEqual(gone.moved, []);
+    assert.match(gone.failed[0]!.reason, /gone or no longer active/);
+    assert.equal(await ownerOf(r2.id), `agent:${a}`);
+    // Without the right to assign, nothing is accepted.
+    const nobody = { id: "agent:zzz", kind: "agent", name: "zzz", grants: [] } as never;
+    await assert.rejects(mover.check(nobody, { taskId: t1, ids: [r2.id], from: { kind: "agent", id: a }, to: { kind: "agent", id: b } }), /may not assign/);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

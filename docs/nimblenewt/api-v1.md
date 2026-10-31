@@ -2598,7 +2598,8 @@ Moves the task to the recipient in one fenced step. A package with required sect
 Arguments:
 
 - `handoffId`: the hand-off
-- `acceptGaps`: true to hand over an incomplete package
+- `acceptGaps` (optional): true to hand over an incomplete package
+- `reassignResponsibilities` (optional): IDs of the sender's responsibilities (listed in the package) to move to the recipient with the task; needs the right to assign responsibilities; not with a temporary reassignment; a failure for one leaves it with the sender and is reported in `reassigned`
 - `commandId`: required
 
 Result: `{ item: { id, phase, … } }`.
