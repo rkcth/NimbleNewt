@@ -293,14 +293,14 @@ export class ToolExecutionService {
     let mode = { check: true, require: false };
     try { if (this.#deps.callCheck !== undefined) mode = await this.#deps.callCheck(); } catch { /* the defaults stay */ }
     if (!mode.check && !mode.require) return undefined;
-    // The extension's own declaration reads are not a model's tool call.
-    if (request.op === "tool.discover" && request.callId.startsWith("decl-")) return undefined;
     let verdict: Awaited<ReturnType<GenerationService["checkCall"]>>;
     try { verdict = await this.#deps.generations.checkCall(this.#deps.principal, { taskId: c.taskId, callId: request.callId }); } catch (error) {
       // The check could not be made: fail closed (a call is not run on a guess), and say so.
       return refusal("unavailable", `the call could not be checked against the task's generation (${error instanceof DomainError ? error.message.slice(0, 160) : "the generation record could not be read"}); ask again`);
     }
-    if (!verdict.recorded) return mode.require ? refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) : undefined;
+    // A held task runs nothing, recorded or not. The extension's own declaration reads (`tool.discover`, whose call IDs the extension makes up and may rewrite) are not a model's tool call: they need no generation under `requireRecorded`.
+    if (!verdict.recorded && verdict.held !== undefined && mode.check) return refusal("generation_refused", `${verdict.held}; the call was not run`);
+    if (!verdict.recorded) return mode.require && request.op !== "tool.discover" ? refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) : undefined;
     if (!verdict.ok && mode.check) return refusal("generation_refused", `${verdict.reason ?? `call ${request.callId.slice(0, 60)} does not belong to a current generation`}; it was not run`);
     return undefined;
   }

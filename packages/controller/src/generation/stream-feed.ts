@@ -73,7 +73,7 @@ export function streamTapFor(deps: StreamFeedDeps, attempt: StreamAttempt): Mode
           const begin = (whilePaused: boolean) => store(() => g.begin(deps.principal, { commandId: `sf-${attempt.attemptId}-${nonce}-${count}-${pass}${whilePaused ? "p" : ""}`.slice(0, 120), taskId: attempt.taskId, contextRevision: bound, fence: { generation: attempt.generation, attemptId: attempt.attemptId }, ...(whilePaused ? { whilePaused: true } : {}) }));
           try { run = await begin(false); } catch (error) {
             // A paused task's call is recorded too (card L05c), unless the owner turned that off.
-            if (error instanceof GenerationRefused && error.reason === "paused" && setting.recordPaused !== false) run = await begin(true); else throw error;
+            if (error instanceof GenerationRefused && error.reason === "paused" && setting.recordPaused === true) run = await begin(true); else throw error;
           }
         } catch (error) {
           if (error instanceof GenerationRefused) {

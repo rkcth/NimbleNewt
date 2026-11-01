@@ -8,8 +8,7 @@ const REF = { kind: "generation-stream-settings", id: "main" } as const;
 /**
  * `record`: the model stream of each call is recorded against its generation. `cut`: a reply whose generation was interrupted is held back from the worker. `failClosed`: when the store cannot answer (it errors or does not
  * answer in time) a call is not sent and a reply being read is cut, with the reason shown; off ("open"): the call and the reply go on unrecorded and the reason is reported.
- * Card L05c: `recordPaused` (on): a model call begun while the task is paused is recorded as a generation (marked as begun paused; nothing it produces can be admitted while the pause stands); off: such a call is refused before it
- * is sent. `checkBridge` (on): the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation. `requireRecorded` (OFF): the bridge also refuses a call that no generation
+ * Card L05c: `recordPaused` (OFF): off, a model call begun while the task is paused is refused before it is sent (model spend is new work, as L05b did); on: such a call is sent and recorded as a generation (marked as begun paused; nothing it produces can be admitted while the pause stands). `checkBridge` (on): the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation. `requireRecorded` (OFF): the bridge also refuses a call that no generation
  * recorded at all; off by default because a stream that was not recorded (recording off, an unknown reply format) says nothing either way.
  */
 export const STREAM_SETTINGS = ["record", "cut", "failClosed", "recordPaused", "checkBridge", "requireRecorded"] as const;
@@ -47,7 +46,7 @@ const valueOf = (body: Stored | undefined, name: StreamValue): number => { const
 export const viewOf = (found: { revision: number; body: unknown } | undefined): StreamSettingsView => {
   const body = found?.body as Stored | undefined;
   const failClosed = body?.failClosed !== false;
-  return { revision: found?.revision ?? 0, record: body?.record !== false, cut: body?.cut !== false, onStoreFailure: failClosed ? "closed" : "open", failClosed, recordPaused: body?.recordPaused !== false, checkBridge: body?.checkBridge !== false, requireRecorded: body?.requireRecorded === true, storeTimeoutMs: valueOf(body, "storeTimeoutMs"), batchMs: valueOf(body, "batchMs"), batchChars: valueOf(body, "batchChars"), heldBufferBytes: valueOf(body, "heldBufferBytes") };
+  return { revision: found?.revision ?? 0, record: body?.record !== false, cut: body?.cut !== false, onStoreFailure: failClosed ? "closed" : "open", failClosed, recordPaused: body?.recordPaused === true, checkBridge: body?.checkBridge !== false, requireRecorded: body?.requireRecorded === true, storeTimeoutMs: valueOf(body, "storeTimeoutMs"), batchMs: valueOf(body, "batchMs"), batchChars: valueOf(body, "batchChars"), heldBufferBytes: valueOf(body, "heldBufferBytes") };
 };
 
 /**

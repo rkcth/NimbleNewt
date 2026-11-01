@@ -6,6 +6,13 @@ import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type M
 import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
 import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
+/** One stream-events message carries at most this many events and about this many bytes of JSON (the controller refuses more; its body limit is 1 MB). */
+const STREAM_MESSAGE_EVENTS = 400;
+const STREAM_MESSAGE_BYTES = 700_000;
+/** A longer string is cut into slices of this many characters (an escaped slice stays under the message size). */
+const STREAM_SLICE_CHARS = 100_000;
+const safeCut = (value: string, n: number): string => (n < value.length && n > 0 && value.charCodeAt(n - 1) >= 0xd800 && value.charCodeAt(n - 1) <= 0xdbff ? value.slice(0, n - 1) : value.slice(0, n));
+
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
 
 /** A refusal from the controller, with the code it gave (`fenced`, `protocol_unsupported`, `unauthenticated`, ...). `supported` is what the controller speaks, when the refusal is about the protocol. */
@@ -230,8 +237,11 @@ export class RemoteAttempt implements ToolGateway {
    * of the reply are sent in order (numbered, so a message sent again is recorded once) and the answer says whether the reply must be held back. A call the controller refuses (the task is held, the attempt is fenced) throws
    * `ModelStreamRefused`, so the request is not sent. If the controller cannot be reached the call is refused, and a reply being read is held back with the reason: nothing is passed on that was not recorded as applied.
    */
-  streamTap(): ModelStreamTap {
+  streamTap(options: { readonly batchMs?: number; readonly batchChars?: number; readonly now?: () => number } = {}): ModelStreamTap {
     const failure = (error: unknown): string => (error instanceof WorkerRequestError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : "the controller could not be reached").slice(0, 200);
+    const batchMs = options.batchMs ?? 250;
+    const batchChars = options.batchChars ?? 4000;
+    const now = options.now ?? ((): number => Date.now());
     return {
       started: async (call): Promise<ModelStreamCall | undefined> => {
         let answer: { recorded?: false; refused?: string; streamId?: string; amend?: string; heldBufferBytes?: number };
@@ -242,15 +252,76 @@ export class RemoteAttempt implements ToolGateway {
         if (answer.streamId === undefined) return undefined;
         const streamId = answer.streamId;
         let n = 0;
+        // Events wait here and go out in few messages (a stream of single tokens would otherwise be one request each, past the transport's rate limits): when `batchChars` are waiting, when `batchMs` have passed since the last send (a timer
+        // sends what waits when the model pauses), and always before a completed tool call or the end of the reply is passed on. Whether the reply must be held back is the answer to the latest message; a piece that was sent in the background
+        // and found late holds the reply at the next piece.
+        let pending: ModelStreamEvent[] = [];
+        let chars = 0;
+        let lastSent = now();
+        let heldWhy: string | undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let chain: Promise<unknown> = Promise.resolve();
+        const serial = <T>(fn: () => Promise<T>): Promise<T> => { const r = chain.then(fn, fn); chain = r.then(() => undefined, () => undefined); return r; };
+        const add = (e: ModelStreamEvent): void => {
+          const last = pending[pending.length - 1];
+          if (e.kind === "text") { chars += e.text.length; if (last?.kind === "text") { pending[pending.length - 1] = { kind: "text", text: last.text + e.text }; return; } }
+          else if (e.kind === "tool") {
+            chars += e.argumentsDelta.length;
+            if (last?.kind === "tool" && last.id === e.id && !last.done) { pending[pending.length - 1] = { kind: "tool", id: last.id, ...(last.name !== undefined ? { name: last.name } : e.name !== undefined ? { name: e.name } : {}), argumentsDelta: last.argumentsDelta + e.argumentsDelta, done: e.done }; return; }
+          }
+          pending.push(e);
+        };
+        /** The next message: at most STREAM_MESSAGE_EVENTS events and STREAM_MESSAGE_BYTES of JSON; a longer string is cut into slices (the controller joins them as it does the network's own pieces). */
+        const take = (): ModelStreamEvent[] => {
+          const out: ModelStreamEvent[] = [];
+          let bytes = 0;
+          while (pending.length > 0 && out.length < STREAM_MESSAGE_EVENTS) {
+            let e = pending[0]!;
+            const text = e.kind === "text" || e.kind === "note" ? e.text : e.kind === "tool" ? e.argumentsDelta : "";
+            if (text.length > STREAM_SLICE_CHARS) {
+              const head = safeCut(text, STREAM_SLICE_CHARS);
+              const rest = text.slice(head.length);
+              const part = e.kind === "tool" ? { ...e, argumentsDelta: head, done: false } : e.kind === "text" ? { ...e, text: head } : { kind: "note" as const, text: head };
+              pending[0] = e.kind === "tool" ? { kind: "tool", id: e.id, argumentsDelta: rest, done: e.done } : e.kind === "text" ? { kind: "text", text: rest } : { kind: "note", text: rest };
+              e = part;
+            } else pending.shift();
+            const size = JSON.stringify(e).length;
+            if (out.length > 0 && bytes + size > STREAM_MESSAGE_BYTES) { pending.unshift(e); break; }
+            out.push(e); bytes += size;
+          }
+          return out;
+        };
+        const flush = (): Promise<void> => serial(async () => {
+          if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+          while (pending.length > 0 && heldWhy === undefined) {
+            const message = take();
+            lastSent = now();
+            try {
+              const r = await this.#post("stream-events", { streamId, n: ++n, events: message as unknown as Json }) as { held?: string };
+              if (r.held !== undefined) heldWhy = r.held;
+            } catch (error) { heldWhy = `the controller could not record this part of the reply (${failure(error)})`; }
+          }
+          chars = 0;
+        });
+        const arm = (): void => {
+          if (timer !== undefined || batchMs <= 0 || pending.length === 0) return;
+          timer = setTimeout(() => { timer = undefined; void flush().catch(() => undefined); }, batchMs);
+          timer.unref?.();
+        };
         return {
           ...(answer.amend === undefined ? {} : { amend: answer.amend }),
           ...(answer.heldBufferBytes === undefined ? {} : { heldBufferBytes: answer.heldBufferBytes }),
           events: async (events: readonly ModelStreamEvent[]): Promise<{ readonly held?: string }> => {
-            try { return await this.#post("stream-events", { streamId, n: ++n, events: events as unknown as Json }) as { held?: string }; } catch (error) {
-              return { held: `the controller could not record this part of the reply (${failure(error)})` };
-            }
+            if (heldWhy !== undefined) return { held: heldWhy };
+            let dangerous = false;
+            for (const e of events) { add(e); if (e.kind === "end" || (e.kind === "tool" && e.done)) dangerous = true; }
+            if (dangerous || batchMs <= 0 || chars >= batchChars || now() - lastSent >= batchMs) await flush(); else arm();
+            return heldWhy === undefined ? {} : { held: heldWhy };
           },
-          ended: async (outcome): Promise<void> => { try { await this.#post("stream-end", { streamId, ok: outcome.ok }); } catch { /* a call left open is ended as failed by the controller when the attempt opens its next ones (at most 4 stay open) */ } },
+          ended: async (outcome): Promise<void> => {
+            try { if (heldWhy === undefined) await flush(); } catch { /* the controller ends a call left open */ }
+            try { await this.#post("stream-end", { streamId, ok: outcome.ok }); } catch { /* a call left open is ended as failed by the controller when the attempt ends or opens its next calls (at most 4 stay open) */ }
+          },
         };
       },
     };

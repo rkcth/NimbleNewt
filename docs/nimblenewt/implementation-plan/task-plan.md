@@ -890,7 +890,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N05 / AII-255.
 - **Blockers:** L05c.
-- **Deliverable:** Split from L05c (2026-10-31): the tool bridge admits a call as an effect through the generation service (so a partial or withdrawn call can never start an effect by that route either); the remote protocol's stream tap is wired into a remote worker host that runs Pi in its sandbox; a tool call ID the Pi extension rewrote (repeated or unsafe IDs) is matched to its recorded call; a remote relay's waits on the store are reported to stall detection.
+- **Deliverable:** Split from L05c (2026-10-31): the tool bridge admits a call as an effect through the generation service (so a partial or withdrawn call can never start an effect by that route either); the remote protocol's stream tap is wired into a remote worker host that runs Pi in its sandbox; a tool call ID the Pi extension rewrote (repeated or unsafe IDs) is matched to its recorded call; a remote relay's waits on the store are reported to stall detection; a remote worker that never opens a stream is detected (its tool calls are then unrecorded, and the bridge cannot bind a call's tool name and arguments to the bridge operation it asks for).
 - **Acceptance and verification:** A remote worker process in its sandbox has a late reply held and a corrected generation's tool call refused at the bridge, shown with a real worker process; a rewritten call ID is checked against its recorded generation.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 

@@ -286,11 +286,14 @@ for (const backend of backends) {
     assert.ok((finished?.outputTokens ?? 0) > 5, "what was received before the reply was held is counted for spend and speed");
   });
 
-  suite("a model call begun while the task is paused is recorded, marked as begun paused, and nothing it produced can be admitted while the pause stands (card L05c)", async (c) => {
+  suite("with recordPaused on, a model call begun while the task is paused is recorded, marked as begun paused, and nothing it produced can be admitted while the pause stands (card L05c)", async (c) => {
     const reply = sse(chunk({ content: "hm" }), chunk({ tool_calls: [{ index: 0, id: "call_p", type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
     const paused = c.mk({ pauses: { guard: async () => ({ blockedBy: [{ kind: "task", id: c.task }], changes: [] }) } });
     const e = endpoint([[reply]]);
-    assert.equal(await drain((await c.relayFor(e, undefined, [], { gen: paused }).relay(request as never)).body), reply);
+    // Off (the default) the call is refused before it is sent and nothing is recorded.
+    await assert.rejects(c.relayFor(e, undefined, [], { gen: paused }).relay(request as never), /refused the call: .*paused/);
+    assert.equal(await c.gen.gate(c.owner, c.task), undefined, "nothing was recorded for the refused call");
+    assert.equal(await drain((await c.relayFor(e, { record: true, cut: true, recordPaused: true, batchMs: 0, batchChars: 0 }, [], { gen: paused }).relay(request as never)).body), reply);
     const r = await run(c, 1);
     assert.equal(r.beganPaused, true);
     assert.equal(r.state, "finished");
@@ -330,6 +333,10 @@ for (const backend of backends) {
     await drain((await c.relayFor(endpoint([[sse(chunk({ tool_calls: [{ index: 0, id: "call_c", type: "function", function: { name: "desk-write", arguments: "{\"body\":\"half" } }] }))]])).relay(request as never)).body);
     const half = await ask("call_c");
     assert.ok(half.recorded && !half.ok && /dropped/.test(half.reason ?? ""), JSON.stringify(half));
+    // A held task is reported even for a call nothing recorded.
+    await c.gen.interrupt(c.owner, { commandId: "hold2", taskId: c.task, mode: "finish_and_hold", reason: "wait again" });
+    const unknownHeld = await ask("call_never_seen");
+    assert.ok(!unknownHeld.recorded && /held/.test((unknownHeld as { held?: string }).held ?? ""), JSON.stringify(unknownHeld));
     // Other principals may not ask.
     await assert.rejects(c.gen.checkCall({ ...c.dispatcher, id: "agent:ann", kind: "agent" } as never, { taskId: c.task, callId: "call_b" }), /may not check/);
   });
@@ -338,10 +345,10 @@ for (const backend of backends) {
     const e = endpoint([[sse(chunk({ content: "x" }))]]);
     await assert.rejects(c.relayFor(e, undefined, [], { attempt: { attemptId: c.attemptId, taskId: c.task, generation: 99 } }).relay(request as never), /refused the call: no generation begins/, "fenced");
     const paused = c.mk({ pauses: { guard: async () => ({ blockedBy: [{ kind: "project", id: "p" }], changes: [] }) } });
-    // Card L05c: a paused task's call is recorded by default; the owner can turn that off, and then the call is refused before it is sent.
-    await assert.rejects(c.relayFor(e, { record: true, cut: true, recordPaused: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused");
+    // A paused task's call is refused before it is sent unless the owner turned `recordPaused` on (card L05c; the default is L05b's behaviour).
+    await assert.rejects(c.relayFor(e, undefined, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused");
     // The store answered: the refusal holds whatever the fail mode is (open only covers a store that cannot answer).
-    await assert.rejects(c.relayFor(e, { record: true, cut: true, failClosed: false, recordPaused: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused, fail mode open");
+    await assert.rejects(c.relayFor(e, { record: true, cut: true, failClosed: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused, fail mode open");
     const waiting = c.mk({ decisions: { guard: async () => ({ blockedBy: ["the owner has not decided"], changes: [] }) } });
     await assert.rejects(c.relayFor(e, undefined, [], { gen: waiting }).relay(request as never), /refused the call: .*not decided/, "decision");
     const t = (await c.projects.getTask(c.task))!;

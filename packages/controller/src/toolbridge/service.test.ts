@@ -262,6 +262,7 @@ for (const backend of backends) {
       call_ok: { recorded: true, ok: true, runId: "r", number: 1 },
       call_old: { recorded: true, ok: false, runId: "r", number: 1, reason: "generation 1 of task T was corrected by owner:rob (use beans); its tool calls are withdrawn" },
       call_none: { recorded: false },
+      call_heldnone: { recorded: false, held: "task T is held (finish_and_hold: wait)" },
     };
     let broken = false;
     let mode = { check: true, require: false };
@@ -279,9 +280,10 @@ for (const backend of backends) {
       out["old"] = await send("call_old");
       out["oldRead"] = await send("call_old", "task.get");
       out["none"] = await send("call_none");
+      out["heldNone"] = await send("call_heldnone");
       mode = { check: true, require: true };
       out["noneRequired"] = await send("call_none");
-      out["declare"] = await svc.handle(order.credential, gateway, { op: "tool.discover", callId: "decl-1-1", args: {} });
+      out["declare"] = await svc.handle(order.credential, gateway, { op: "tool.discover", callId: "h:0123456789abcdef0123456789abcdef01234567", args: {} });
       mode = { check: false, require: false };
       out["oldUnchecked"] = await send("call_old");
       mode = { check: true, require: false };
@@ -295,6 +297,7 @@ for (const backend of backends) {
     assert.match(bad(out["old"]!).message, /corrected by owner:rob \(use beans\).*it was not run/);
     assert.equal(bad(out["oldRead"]!).code, "generation_refused", "reads of a withdrawn call are refused too");
     good(out["none"]!);
+    assert.match(bad(out["heldNone"]!).message, /is held.*not run/, "a held task runs no call, recorded or not");
     assert.match(bad(out["noneRequired"]!).message, /belongs to no recorded generation/);
     assert.notEqual((out["declare"] as { code?: string }).code, "generation_refused", "the extension's own declaration reads are not a model call");
     good(out["oldUnchecked"]!);

@@ -617,7 +617,7 @@ export class GenerationService {
    * did not know). Otherwise `ok` is true only when the newest generation holding the call is the task's current one at the current context revision, was not interrupted, the task is not held and the call's arguments are
    * complete (`complete`, or `admitted` for the same call asked again); `reason` says why not, in words the worker's model can be told. Read by the owner and the dispatcher only; anyone else gets `forbidden`.
    */
-  async checkCall(viewer: Principal, command: { taskId: string; callId: string }): Promise<{ recorded: false } | { recorded: true; ok: boolean; runId: string; number: number; reason?: string }> {
+  async checkCall(viewer: Principal, command: { taskId: string; callId: string }): Promise<{ recorded: false; /** The task is held: even a call no generation holds is not to run. */ held?: string } | { recorded: true; ok: boolean; runId: string; number: number; reason?: string }> {
     onlyKnown(command, ["taskId", "callId"]);
     const taskId = checkTaskId(command.taskId);
     if (typeof command.callId !== "string" || !CALL_ID.test(command.callId)) invalid("callId", "is not a tool call ID");
@@ -625,12 +625,14 @@ export class GenerationService {
     const gateRow = await this.#runner.get("generation-gate", gateIdOf(taskId));
     const gate = gateRow?.body as unknown as GateBody | undefined;
     if (gate === undefined || gate.current === undefined) return { recorded: false };
+    const unrecorded = { recorded: false as const, ...(gate.hold === undefined ? {} : { held: `task ${taskId} is held (${gate.hold.mode}: ${gate.hold.reason})` }) };
     for (let n = gate.current; n >= 1 && n > gate.current - GENERATION_CHECK_RUNS; n--) {
       const row = await this.#runner.get("generation-run", runIdOf(taskId, n));
       if (row === undefined) continue;
       const run = row.body as unknown as RunBody;
       const call = run.toolCalls.find((c) => c.id === command.callId);
-      if (call === undefined) continue;
+      // Runs are read newest first and each can be large: the search ends at the first run begun under an older context revision (after reading that one, so the latest corrected generation's calls are still refused).
+      if (call === undefined) { if (run.contextRevision < gate.contextRevision) break; continue; }
       const base = { recorded: true as const, runId: row.id, number: run.number };
       const no = (reason: string): { recorded: true; ok: false; runId: string; number: number; reason: string } => ({ ...base, ok: false, reason });
       if (run.interrupted !== undefined) return no(`generation ${run.number} of task ${taskId} was ${run.interrupted.kind} by ${run.interrupted.by} (${run.interrupted.reason}); its tool calls are withdrawn`);
@@ -640,7 +642,7 @@ export class GenerationService {
       if (call.state === "complete" || call.state === "admitted") return { ...base, ok: true };
       return no(`tool call ${call.id} of generation ${run.number} is ${call.state}${call.reason === undefined ? "" : ` (${call.reason})`}: only a complete call of a current generation runs`);
     }
-    return { recorded: false };
+    return unrecorded;
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------

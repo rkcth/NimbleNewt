@@ -19,7 +19,7 @@ test("the model stream settings: both on by default, owner-only, changed by the 
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
-    const base = { record: true, cut: true, onStoreFailure: "closed", failClosed: true, recordPaused: true, checkBridge: true, requireRecorded: false, storeTimeoutMs: 20_000, batchMs: 250, batchChars: 2000, heldBufferBytes: 16 * 1024 * 1024 };
+    const base = { record: true, cut: true, onStoreFailure: "closed", failClosed: true, recordPaused: false, checkBridge: true, requireRecorded: false, storeTimeoutMs: 20_000, batchMs: 250, batchChars: 2000, heldBufferBytes: 16 * 1024 * 1024 };
     assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 0, ...base });
     const off = await call("generation.stream.change", { disable: ["cut"], expectedRevision: 0 }, "s1");
     assert.ok(off.ok, JSON.stringify(off));
@@ -42,10 +42,10 @@ test("the model stream settings: both on by default, owner-only, changed by the 
     assert.ok((await call("generation.stream.change", { disable: ["failClosed"], set: { storeTimeoutMs: 0, heldBufferBytes: 1000, batchMs: 5 } }, "s6")).ok);
     assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 3, ...base, onStoreFailure: "open", failClosed: false, storeTimeoutMs: 0, heldBufferBytes: 1000, batchMs: 5 });
     // Card L05c switches: the bridge check and recording of a paused task are on, requiring a recorded call is off, and each can be turned the other way.
-    assert.ok((await call("generation.stream.change", { enable: ["requireRecorded"], disable: ["checkBridge", "recordPaused"] }, "s10")).ok);
+    assert.ok((await call("generation.stream.change", { enable: ["requireRecorded", "recordPaused"], disable: ["checkBridge"] }, "s10")).ok);
     const l05c = (await call("generation.stream.get", {})).result.item;
-    assert.deepEqual([l05c.requireRecorded, l05c.checkBridge, l05c.recordPaused], [true, false, false]);
-    assert.ok((await call("generation.stream.change", { disable: ["requireRecorded"], enable: ["checkBridge", "recordPaused"] }, "s11")).ok);
+    assert.deepEqual([l05c.requireRecorded, l05c.checkBridge, l05c.recordPaused], [true, false, true]);
+    assert.ok((await call("generation.stream.change", { disable: ["requireRecorded", "recordPaused"], enable: ["checkBridge"] }, "s11")).ok);
     assert.equal((await call("generation.stream.change", { set: { nope: 1 } }, "s7")).ok, false);
     assert.equal((await call("generation.stream.change", { set: { batchMs: -1 } }, "s8")).ok, false);
     assert.ok((await call("generation.stream.change", { enable: ["failClosed"] }, "s9")).ok);

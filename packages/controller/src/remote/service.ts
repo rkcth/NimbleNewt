@@ -21,6 +21,9 @@ import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
 import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
+/** The latest events message of a model call: its number, a digest of its content and its (possibly still pending) answer. */
+interface LastMessage { readonly n: number; readonly digest: string; readonly answer: Promise<{ readonly held?: string }> }
+
 export const SESSION_KIND = "remote-session";
 export const PLACEMENT_KIND = "remote-placement";
 export const STORE_KIND = "remote-store";
@@ -299,9 +302,9 @@ export class RemoteWorkerService {
   readonly #asks = new Map<string, WorkspaceAskState>();
   /** The recording taps of attempts and the model calls open on them (card L05c). In memory: a restart loses them, the worker's open call then fails on its next message and the generation stays as the store left it. */
   readonly #taps = new Map<string, ModelStreamTap>();
-  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; last?: { readonly n: number; readonly answer: { readonly held?: string } } }>();
+  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; last?: LastMessage | undefined }>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
-  readonly #starts = new Map<string, Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>();
+  readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
 
   private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number, settleMs: number) {
     this.#settleMs = settleMs;
@@ -391,7 +394,7 @@ export class RemoteWorkerService {
   #endPoll(hostId: string): void { this.#made.set(hostId, (this.#made.get(hostId) ?? 0) + 1); this.#polls.get(hostId)?.end(); }
 
   /** Ends every open poll (the controller is stopping). */
-  close(): void { this.#closed = true; for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
+  close(): void { this.#closed = true; for (const c of this.#calls.values()) void c.call.ended({ ok: false }).catch(() => undefined); this.#calls.clear(); for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
 
   // ---- workspace operations on a remote host (card H12m) -------------------------------------------------------------------------
 
@@ -817,7 +820,18 @@ export class RemoteWorkerService {
     });
   }
 
+  /** Ends, as failed, the model calls still open for an attempt whose placement ended, completed or moved: their generations would otherwise stay streaming. */
+  #endStreams(attemptId: string, placement?: number): void {
+    for (const [id, c] of [...this.#calls.entries()]) {
+      if (c.attemptId !== attemptId || (placement !== undefined && c.placement !== placement)) continue;
+      this.#calls.delete(id);
+      void c.call.ended({ ok: false }).catch(() => undefined);
+    }
+    if (placement === undefined) this.#taps.delete(attemptId);
+  }
+
   #wake(attemptId: string, placement: number, reason: string, result?: StoredResult): void {
+    this.#endStreams(attemptId, placement);
     const set = this.#waiters.get(`${attemptId}#${placement}`);
     if (set === undefined) return;
     for (const done of [...set]) done(result ?? { status: "cancelled", error: reason.slice(0, 300) });
@@ -1178,11 +1192,13 @@ export class RemoteWorkerService {
     const b = await this.#running(host, sessionId, attemptId, placement);
     this.#needsConfirmation(b, "any model call");
     const again = this.#starts.get(`${b.attemptId}\0${requestKey}`);
-    if (again !== undefined) return again;
-    const answer = await this.#streamStart(host, b, call as { requestChars: number; requestDigest?: string });
-    this.#starts.set(`${b.attemptId}\0${requestKey}`, answer);
+    if (again !== undefined) return await again;
+    // The promise is kept before it is awaited, so a copy of the request that overlaps the first (a retry after a timeout) gets the same answer and no second generation begins.
+    const key = `${b.attemptId}\0${requestKey}`;
+    const answer = this.#streamStart(host, b, call as { requestChars: number; requestDigest?: string });
+    this.#starts.set(key, answer);
     while (this.#starts.size > 256) this.#starts.delete(this.#starts.keys().next().value as string);
-    return answer;
+    try { return await answer; } catch (error) { this.#starts.delete(key); throw error; }
   }
 
   async #streamStart(host: Principal, b: PlacementBody, call: { requestChars: number; requestDigest?: string }): Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>> {
@@ -1212,11 +1228,18 @@ export class RemoteWorkerService {
     const entry = (await this.#openCall(host, sessionId, attemptId, placement, streamId))!;
     if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1) invalid("n", "must be a whole number from 1");
     // The same message sent again (its answer was lost) is answered again and recorded once; the next must follow it.
-    if (entry.last !== undefined && n === entry.last.n) return entry.last.answer;
+    const checked = checkStreamEvents(events);
+    const digest = sha256(canonicalJson(checked as unknown as JsonObject[] as never));
+    if (entry.last !== undefined && n === entry.last.n) {
+      if (entry.last.digest !== digest) invalid("n", `message ${n} of this call was already received with other events`);
+      return await entry.last.answer;
+    }
     if (n !== (entry.last?.n ?? 0) + 1) invalid("n", `must be ${(entry.last?.n ?? 0) + 1}, the next message of this call`);
-    const answer = await entry.call.events(checkStreamEvents(events));
-    entry.last = { n: n as number, answer };
-    return answer;
+    // Kept before it is awaited: a copy that overlaps the first gets the first's answer and is recorded once.
+    const previous = entry.last;
+    const answer = entry.call.events(checked);
+    entry.last = { n: n as number, digest, answer };
+    try { return await answer; } catch (error) { entry.last = previous; throw error; }
   }
 
   /** The reply ended (`ok`) or failed or was cancelled part way. The generation is completed; a half-written tool call is dropped for good. */
@@ -1229,7 +1252,7 @@ export class RemoteWorkerService {
     await entry.call.ended({ ok: outcome.ok as boolean });
   }
 
-  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; last?: { readonly n: number; readonly answer: { readonly held?: string } } } | undefined> {
+  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; last?: LastMessage | undefined } | undefined> {
     const b = await this.#running(host, sessionId, attemptId, placement);
     const entry = typeof streamId === "string" ? this.#calls.get(streamId) : undefined;
     if (entry === undefined && tolerateClosed === true && typeof streamId === "string" && /^rs-[0-9a-f-]{36}$/.test(streamId)) return undefined;

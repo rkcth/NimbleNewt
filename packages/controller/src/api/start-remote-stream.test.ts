@@ -50,7 +50,7 @@ test("a remote worker's model stream is recorded against the generation it began
     // First reply: a complete tool call reaches the worker, then the model goes on writing; the owner corrects the task meanwhile.
     const go = gate();
     const first = endpoint([[sse(chunk({ content: "Ordering " }), callChunk("call_a"), chunk({}, "tool_calls")), go.promise, sse(chunk({ content: "tomatoes" })) + "data: [DONE]\n\n"]]);
-    const relay = new ModelRelay({ fetch: first, endpoint: () => ({ url: "http://model.invalid/v1" }) }).forAttempt({ route: "localp/small", model: "local", stream: attempt.streamTap() });
+    const relay = new ModelRelay({ fetch: first, endpoint: () => ({ url: "http://model.invalid/v1" }) }).forAttempt({ route: "localp/small", model: "local", stream: attempt.streamTap({ batchMs: 0 }) });
     const answer = await relay.relay(request as never);
     const seen: string[] = [];
     const reading = (async () => { try { for await (const p of answer.body!) seen.push(Buffer.from(p).toString("utf8")); return undefined; } catch (error) { return error as Error; } })();
@@ -80,7 +80,7 @@ test("a remote worker's model stream is recorded against the generation it began
 
     // The next call begins under the new revision and its tool call passes.
     const second = endpoint([[sse(callChunk("call_b"), chunk({}, "tool_calls")) + "data: [DONE]\n\n"]]);
-    const relay2 = new ModelRelay({ fetch: second, endpoint: () => ({ url: "http://model.invalid/v1" }) }).forAttempt({ route: "localp/small", model: "local", stream: attempt.streamTap() });
+    const relay2 = new ModelRelay({ fetch: second, endpoint: () => ({ url: "http://model.invalid/v1" }) }).forAttempt({ route: "localp/small", model: "local", stream: attempt.streamTap({ batchMs: 0 }) });
     await drain((await relay2.relay(request as never)).body);
     const run2 = (await gen.view(w.rob, GenerationService.runIdOf(t.taskId, 2)))!.run;
     assert.equal(run2.contextRevision, 2);
@@ -92,7 +92,8 @@ test("a remote worker's model stream is recorded against the generation it began
     assert.equal((await bridge("call_unknown")).ok, true);
     const changed = await w.c.api.handle(token, { v: 1, op: "generation.stream.change", commandId: "rq", args: { enable: ["requireRecorded"] } } as never) as { ok: boolean };
     assert.ok(changed.ok, JSON.stringify(changed));
-    const required = await bridge("call_unknown2");
+    const required = await bridge("call_unknown2", "task.get");
+    assert.equal((await bridge("call_unknown3")).ok, true, "the extension's declaration reads (tool.discover) need no generation");
     assert.ok(!required.ok && /belongs to no recorded generation/.test(required.message), JSON.stringify(required));
     assert.ok(changed.ok && (await w.c.api.handle(token, { v: 1, op: "generation.stream.change", commandId: "ck", args: { disable: ["checkBridge", "requireRecorded"] } } as never) as { ok: boolean }).ok);
     assert.equal((await bridge("call_a")).ok, true, "with the check turned off the earlier call passes (the owner's choice)");
@@ -119,4 +120,102 @@ test("a remote worker's model stream is recorded against the generation it began
     await assert.rejects(r1.client.send("POST", `/worker/attempts/${t.attemptId}/stream-events`, { body: { placement: offer.placement, streamId: "rs-00000000-0000-0000-0000-000000000000", n: 1, events: [{ kind: "text", text: "x" }] }, session: true }), (e: unknown) => e instanceof WorkerRequestError && e.code === "not_found");
     await assert.rejects(r1.client.send("POST", `/worker/attempts/${t.attemptId}/stream-start`, { body: { placement: offer.placement, call: { requestChars: 1, taskId: "task-aaaaaaaaaaaaaaaaaaaa" } }, session: true }), (e: unknown) => e instanceof WorkerRequestError && e.code === "invalid_command");
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+/** A controller with two remote hosts and one started attempt (an agent runs one at a time); `open` accepts it, confirming the contract or not. */
+async function twoAttempts(d: string) {
+  const w = await world(d, {} as never);
+  const r1 = await w.host("r1");
+  const r2 = await w.host("r2");
+  const a = await w.task("A");
+  const started = (await w.tick()).started;
+  if (started.length !== 1) { const msg = JSON.stringify(started); await w.c.close(); assert.fail(msg); }
+  const open = async (attemptId: string, confirm: boolean) => {
+    const holder = (await w.c.dispatch!.remote!.placement(w.rob, attemptId))!.hostId === r1.id ? r1 : r2;
+    const offer = (await holder.client.offers()).find((o) => o.order.attemptId === attemptId)!;
+    const attempt = holder.client.attempt(attemptId, offer.placement);
+    await attempt.accept();
+    if (confirm) assert.deepEqual(await attempt.honorContract(offer.order, FULL_ABILITIES, w.now()), { ok: true });
+    return { attempt, offer, holder, post: async (action: string, body: Record<string, unknown>, key?: string) => (await holder.client.send("POST", `/worker/attempts/${attemptId}/${action}`, { body: { placement: offer.placement, ...body } as never, session: true, ...(key === undefined ? {} : { key }) })).body as Record<string, unknown> };
+  };
+  return { w, r1, r2, a, open };
+}
+const rejectsWith = (code: string) => (e: unknown): boolean => e instanceof WorkerRequestError && e.code === code;
+
+test("the worker's tap batches a fast token stream into few messages and splits large ones: 5000 single tokens, 2000 small events and a 3 MB text all arrive without a held reply (card L05c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l05c-"));
+  const x = await twoAttempts(d);
+  try {
+    const A = await x.open(x.a.attemptId, true);
+    const gen = x.w.c.dispatch!.generation;
+    let posts = 0;
+    const send = A.holder.client.send.bind(A.holder.client);
+    A.holder.client.send = (async (method: string, path: string, call: never) => { if (path.endsWith("/stream-events")) posts++; return send(method, path, call); }) as never;
+    const feed = async (events: (call: Awaited<ReturnType<ReturnType<typeof A.attempt.streamTap>["started"]>>) => Promise<void>): Promise<void> => {
+      const call = await A.attempt.streamTap().started({ requestChars: 1 });
+      assert.ok(call !== undefined);
+      await events(call);
+      await call.ended({ ok: true });
+    };
+    // 5000 single-token pieces, one awaited call each as the relay makes them: far more than the transport's per-minute allowance if each were a request.
+    await feed(async (call) => { for (let i = 0; i < 5000; i++) assert.deepEqual(await call!.events([{ kind: "text", text: "t" }]), {}); });
+    assert.ok(posts < 300, `5000 pieces went out in ${posts} messages`);
+    const run1 = (await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 1)))!.run;
+    assert.equal(run1.text, "t".repeat(5000));
+    assert.equal(run1.state, "finished");
+    // 2000 small events that cannot be merged (notes) go out in messages of at most 400 events.
+    posts = 0;
+    await feed(async (call) => { assert.deepEqual(await call!.events(Array.from({ length: 2000 }, () => ({ kind: "note" as const, text: "n" }))), {}); });
+    assert.ok(posts >= 5 && posts < 20, `${posts} messages`);
+    assert.equal((await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 2)))!.run.text, "[n]".repeat(2000).slice(0, 64 * 1024));
+    // One 3 MB text arrives (the generation record keeps 64 KB of text and says where recording stopped; the reply is not held).
+    posts = 0;
+    await feed(async (call) => { assert.deepEqual(await call!.events([{ kind: "text", text: "é\"\n".repeat(750_000) }]), {}); });
+    assert.ok(posts >= 5 && posts < 40, `${posts} messages`);
+    const run3 = (await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 3)))!.run;
+    assert.equal(run3.state, "finished");
+    assert.match(run3.text, /recording stopped here|^é/);
+  } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("stream messages that overlap or repeat are recorded once; a repeated number with other content, another host's stream, the cap of 4 open calls and the end of the attempt (card L05c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l05c-"));
+  const x = await twoAttempts(d);
+  try {
+    const gen = x.w.c.dispatch!.generation;
+    const A = await x.open(x.a.attemptId, true);
+    // Two copies of a start that overlap (a retry after a timeout) give one stream and one generation.
+    const [s1, s2] = await Promise.all([A.post("stream-start", { call: { requestChars: 1 } }, "k1"), A.post("stream-start", { call: { requestChars: 1 } }, "k1")]);
+    assert.equal(s1["streamId"], s2["streamId"]);
+    assert.equal((await gen.gate(x.w.rob, x.a.taskId))!.gate.runs, 1, "one generation");
+    // Two overlapping copies of the same message: recorded once. The same number with other content is refused.
+    const evt = [{ kind: "text", text: "once" }];
+    await Promise.all([A.post("stream-events", { streamId: s1["streamId"], n: 1, events: evt }), A.post("stream-events", { streamId: s1["streamId"], n: 1, events: evt })]);
+    await assert.rejects(A.post("stream-events", { streamId: s1["streamId"], n: 1, events: [{ kind: "text", text: "other" }] }), rejectsWith("invalid_command"));
+    await until(async () => (await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 1)))!.run.text !== "");
+    assert.equal((await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 1)))!.run.text, "once", "recorded once");
+    // A stream belongs to its attempt and its host: another host reads it as missing or fenced.
+    const other = [x.r1, x.r2].find((h) => h.id !== A.holder.id)!;
+    await assert.rejects(other.client.send("POST", `/worker/attempts/${x.a.attemptId}/stream-events`, { body: { placement: A.offer.placement, streamId: s1["streamId"], n: 2, events: evt } as never, session: true }), (e: unknown) => e instanceof WorkerRequestError && (e.code === "not_found" || e.code === "fenced"));
+    // At most 4 calls stay open: opening a fifth ends the oldest as failed.
+    const ids = [s1["streamId"] as string];
+    for (let i = 2; i <= 5; i++) ids.push((await A.post("stream-start", { call: { requestChars: 1 } }, `k${i}`))["streamId"] as string);
+    await assert.rejects(A.post("stream-events", { streamId: ids[0], n: 2, events: evt }), rejectsWith("not_found"));
+    await A.post("stream-events", { streamId: ids[4], n: 1, events: evt });
+    // The end of the attempt ends the calls still open: no generation stays streaming.
+    await A.attempt.complete({ status: "completed" });
+    const runs = (await gen.gate(x.w.rob, x.a.taskId))!.gate.runs;
+    for (let n = 1; n <= runs; n++) await until(async () => (await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, n)))!.run.state !== "streaming");
+  } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+async function until(ok: () => Promise<boolean>): Promise<void> { const end = Date.now() + 20_000; while (!(await ok())) { if (Date.now() > end) assert.fail("timed out"); await new Promise((r) => setTimeout(r, 25)); } }
+
+test("before the contract is confirmed no model call is recorded or allowed (card L05c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l05c-"));
+  const x = await twoAttempts(d);
+  try {
+    const A = await x.open(x.a.attemptId, false);
+    await assert.rejects(A.post("stream-start", { call: { requestChars: 1 } }, "kb"), rejectsWith("invalid_transition"));
+    assert.equal(await x.w.c.dispatch!.generation.gate(x.w.rob, x.a.taskId), undefined, "no generation began");
+  } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
