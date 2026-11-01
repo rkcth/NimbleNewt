@@ -412,6 +412,8 @@ for (const backend of backends) {
     const ev = (type: string, o: object): string => `event: ${type}\ndata: ${JSON.stringify({ type, ...o })}\n\n`;
     const claude = ev("content_block_start", { index: 0, content_block: { type: "tool_use", id: "toolu_e", name: "desk-list", input: {} } }) + ev("content_block_stop", { index: 0 }) + ev("message_stop", {});
     await drain((await c.relayFor(endpoint([[claude]])).relay(request as never)).body);
+    // The recording of the second reply lands after the reply is read (a SQLite worker thread on a slow Windows runner took longer than the read).
+    await until(async () => (await run(c, 2).catch(() => undefined))?.toolCalls[0]?.state === "complete");
     const r2 = await run(c, 2);
     assert.equal(r2.toolCalls[0]!.state, "complete");
     assert.equal(r2.toolCalls[0]!.args, "{}");
