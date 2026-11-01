@@ -110,6 +110,7 @@ test("SQLite to PostgreSQL: every record arrives, claims are released, uncertain
     const authority = await readAuthority(st(f));
     assert.equal(authority?.active.fingerprint, target.fingerprint); assert.equal(authority?.generation, 1);
     assert.equal((await readJournal(st(f)))?.phase, "switched");
+    if (process.platform !== "win32") for (const name of ["database-transfer-journal.json", "storage-authority.json"]) assert.equal(statSync(join(st(f), name)).mode & 0o777, 0o600, name);
     // Only the destination may be started on now.
     await assert.rejects(guardStart(st(f), { fingerprint: await sqliteFingerprint(f.srcPath) }), /moved to pg/);
     await guardStart(st(f), { fingerprint: target.fingerprint });
@@ -163,6 +164,8 @@ test("a failure at any point before the fence leaves the source whole, takes the
       const journal = await readJournal(st(f));
       assert.equal(journal?.phase, "failed", point); assert.match(journal?.failure?.reason ?? "", /injected/);
       assert.equal(journal?.failure?.destinationClean, true);
+      // A failed transfer whose destination was emptied (or never written) does not make that database unusable.
+      await guardStart(st(f), { fingerprint: target.fingerprint });
       // The source still accepts writes with its own epoch.
       await f.src.applyOperation(op(`after-${point}`, f.epoch));
       armed = false;

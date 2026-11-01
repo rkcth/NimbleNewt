@@ -208,7 +208,7 @@ export async function guardStart(stateDirectory: string, configured: Configured,
     }
   }
   if (authority !== undefined && authority.active.fingerprint !== configured.fingerprint) refuse2(undefined, authority);
-  if (current !== undefined && current.to.fingerprint === configured.fingerprint && !(authority !== undefined && authority.active.fingerprint === configured.fingerprint)) {
+  if (current !== undefined && current.to.fingerprint === configured.fingerprint && !(current.phase === "failed" && current.failure?.destinationClean === true) && !(authority !== undefined && authority.active.fingerprint === configured.fingerprint)) {
     return refusal(`this database is the destination of database transfer ${current.id} (${current.phase}), which did not complete; it may hold only part of the data. Empty it, or point controller.storage at ${authority?.active.name ?? current.from.name}.`);
   }
   return result;
@@ -351,7 +351,7 @@ export class DatabaseTransferService {
       try {
         if (probe.schemaVersion !== schemaVersion) findings.push({ severity: "error", text: `the destination has schema version ${probe.schemaVersion} and the source ${schemaVersion}` });
         const state = (await probe.read("state", { limit: 1 }))[0];
-        if (state === undefined || Number(state["epoch"]) !== 0) findings.push({ severity: "error", text: "the destination is not empty: a controller has already owned it. A transfer goes into a new, empty database." });
+        if (state === undefined || Number(state["epoch"]) !== 0) findings.push({ severity: "error", text: (typeof state?.["holder"] === "string" && state["holder"].startsWith("transfer-pending:") ? `the destination holds a copy left by an unfinished transfer (${state["holder"]}); it is not a database in use. Empty it before another transfer` : "the destination is not empty: a controller has already owned it. A transfer goes into a new, empty database.") });
         else for (const table of SNAPSHOT_TABLES) if (table !== "state" && (await probe.read(table, { limit: 1 })).length > 0) { findings.push({ severity: "error", text: `the destination already holds ${table} records (a partial copy?); empty it first` }); break; }
       } finally { await probe.close(); }
     } finally { await destination.close(); }
@@ -476,7 +476,7 @@ export class DatabaseTransferService {
     const probe = await dest.snapshot();
     try {
       const state = (await probe.read("state", { limit: 1 }))[0];
-      if (state === undefined || Number(state["epoch"]) !== 0) return "the destination is not empty: a controller has already owned it. A transfer goes into a new, empty database.";
+      if (state === undefined || Number(state["epoch"]) !== 0) return (typeof state?.["holder"] === "string" && state["holder"].startsWith("transfer-pending:") ? `the destination holds a copy left by an unfinished transfer (${state["holder"]}); it is not a database in use. Empty it before another transfer` : "the destination is not empty: a controller has already owned it. A transfer goes into a new, empty database.");
       for (const table of SNAPSHOT_TABLES) if (table !== "state" && (await probe.read(table, { limit: 1 })).length > 0) return `the destination already holds ${table} records (a partial copy?); empty it first`;
       return undefined;
     } finally { await probe.close(); }
@@ -653,7 +653,7 @@ export class DatabaseTransferService {
     if (journal === undefined || journal.phase !== "switched" || authority === undefined || authority.transferId !== journal.id) throw new DomainError("invalid_transition", "there is no switched transfer to roll back");
     if (authority.active.fingerprint !== journal.to.fingerprint || this.#o.source.fingerprint !== journal.to.fingerprint) throw new DomainError("invalid_transition", "a transfer is rolled back by the controller running on its new database, and only the most recent switch can be rolled back");
     const mark = journal.firstStart;
-    if (mark === undefined) throw new DomainError("invalid_transition", "no clean record of the new database's first start exists (it was started without the transfer state folder, or wrote more than a start does), so nothing can be said about work on it; use a reverse transfer");
+    if (mark === undefined) throw new DomainError("invalid_transition", "no clean record of the new database's first start exists (it was started without the transfer state folder, wrote more than a start does, or the record could not be written), so nothing can be said about work on it; use a reverse transfer");
     this.#running = true;
     let release: (() => Promise<void>) | undefined;
     let fenced = false;

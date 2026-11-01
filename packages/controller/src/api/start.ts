@@ -818,7 +818,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       }
     }
     // The first start on a database a transfer moved to notes its counters now: the epoch is taken and the start-up records are written, and no loop has run yet (card F04e).
-    const noteFirstStart = async (): Promise<void> => { if (stateDirectory !== undefined) await withStateLock(stateDirectory, () => recordFirstStart(stateDirectory, sourcePlace, storage), { wait: true }); };
+    // An unrecorded first start only disables a rollback; it must never keep the controller from starting.
+    const noteFirstStart = async (): Promise<void> => { if (stateDirectory !== undefined) { try { await withStateLock(stateDirectory, () => recordFirstStart(stateDirectory, sourcePlace, storage), { wait: true }); } catch (error) { print(`database transfer: the first start on this database could not be recorded (${error instanceof Error ? error.message.slice(0, 160) : "failed"}); a rollback of the transfer is not available`); } } };
     // The reconciler (card L01b) holds an inbox message for a paused task. No delivery destination or effect bridge is built yet, so it repairs, admits, recovers and settles waits only.
     const reconciler = new Reconciler(storage, epoch, { projects, inbox: InboxService.withEpoch(storage, epoch, assignments), effects: EffectService.withEpoch(storage, epoch, assignments), blockers: BlockerService.withEpoch(storage, epoch), waits, pauses, destinations: [], bridges: {} }, { claimant: "controller" });
     let dispatchProblem: string | undefined;
