@@ -187,6 +187,8 @@ export interface DispatchHandle {
 }
 
 export interface ComposeInput {
+  /** Called once everything is built and nothing is running yet, right before the driver starts (card F04e notes the first-start counters here). */
+  readonly beforeLoops?: () => Promise<void>;
   /** Told once per window when the owner's aggregate spending cap refuses a reservation or stops paid calls (the same function the API's own budget service uses). */
   readonly notifyAggregate?: NotifyAggregate;
   /** Whether an agent can be reached apart from its pause gates (the controller's `availability` option): `suspended` and `stopped` agents are withheld from meetings, the same as in the API's own instance. */
@@ -568,6 +570,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     });
     const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
     // Started last, so a failure above leaves no driver ticking a dispatcher whose host is being closed.
+    await i.beforeLoops?.();
     if (i.options.manual !== true) driver.start();
     return {
       dispatcher, driver, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },

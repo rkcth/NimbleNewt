@@ -90,6 +90,13 @@ test("once the new database has recorded work the transfer cannot be rolled back
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
 
+test("the transfer state folder must be an absolute path (card F04e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfa-"));
+  try {
+    await assert.rejects(startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() }, transfer: { stateDirectory: "state", targets: [] } } as never), /must be an absolute path/);
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
 test("without a configured target the transfer commands say so, and the start-time guard does nothing (card F04e)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-xfn-"));
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() } } as never);

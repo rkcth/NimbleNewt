@@ -89,7 +89,8 @@ import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.j
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
-import { DatabaseTransferService, assertNotFenced, guardStart, postgresFingerprint, recordFirstStart, sqliteFingerprint, type TransferPoint, type TransferSource, type TransferTarget } from "../transfer/index.js";
+import { canon } from "../backup/canon.js";
+import { DatabaseTransferService, assertNotFenced, acquireStateLock, guardStart, withStateLock, postgresFingerprint, recordFirstStart, sqliteFingerprint, type TransferPoint, type TransferSource, type TransferTarget } from "../transfer/index.js";
 import { ConversationTransport, MCP_ENABLED_SETTING, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
@@ -336,37 +337,39 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   const dataLock = takeLock === undefined ? undefined : await takeLock();
   // A database transfer (card F04e) decides which database is the authoritative one: an interrupted transfer is settled and a start on any other database is refused, before anything is opened.
   const sourcePlace: TransferSource = options.storage.kind === "sqlite" ? { kind: "sqlite", fingerprint: await sqliteFingerprint(options.storage.path), name: "the SQLite database" } : { kind: "postgres", fingerprint: postgresFingerprint(options.storage.url, options.storage.schema), name: "the PostgreSQL database" };
-  const stateDirectory = options.transfer?.stateDirectory;
+  const stateInput = options.transfer?.stateDirectory;
+  if (stateInput !== undefined && !isAbsolute(stateInput)) throw new Error("transfer.stateDirectory must be an absolute path (it is the one fixed place of the transfer journal and authority file)");
+  const stateDirectory = stateInput === undefined ? undefined : await canon(stateInput);
   if (options.transfer !== undefined && options.transfer.targets.length > 0 && stateDirectory === undefined) throw new Error("database transfer targets are configured without a transfer state directory (transfer.stateDirectory): the journal and the authority file need one fixed place that does not depend on a database path");
-  if (stateDirectory !== undefined) {
-    const settled = await guardStart(stateDirectory, sourcePlace);
-    if (settled.note !== undefined) print(settled.note);
-  }
   const piState = options.backup?.piState ?? options.dispatch?.local?.piState?.source;
   const piFinal = options.backup?.restore?.piFinal ?? options.dispatch?.local?.piState?.final;
-  if (options.storage.kind === "sqlite" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, resolve(options.storage.path), print, { ...(piFinal === undefined ? {} : { piFinal }), ...(dataLock === undefined || !(await dataLock.isHeld()) ? {} : { lock: dataLock }) });
   // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
   const beforeUpgrade: BeforeUpgrade | undefined = options.backup === undefined ? undefined : async (notice) => {
     await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }), ...(piState === undefined ? {} : { piState }) });
     print(`The database is being upgraded from schema ${notice.from} to ${notice.to}; a backup of it as it was is in ${options.backup!.directory}.`);
   };
-  if (options.storage.kind === "postgres") {
-    const pg = await PostgresStorage.open({ connectionString: options.storage.url, allowUnsupportedServer: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }), ...(options.storage.schema === undefined ? {} : { schema: options.storage.schema }), ...(options.storage.maxConnections === undefined ? {} : { maxConnections: options.storage.maxConnections }), ...(options.storage.minimumServerVersionNum === undefined ? {} : { minimumServerVersionNum: options.storage.minimumServerVersionNum }) }).catch((error: unknown) => { if (error instanceof Error && error.message.startsWith("NimbleNewt will not start")) print(error.message); throw error; });
-    storage = pg;
-    const server = pg.unsupportedServer;
-    if (server !== undefined) {
-      // Only reachable with the override: the adapter refused otherwise. Fold the server into the one decision, so it is printed and audited with the rest (the notice is printed once, covering everything).
-      const full = overriddenCheck([...check.problems, server], check.host ?? host);
-      // When an operating-system or Node.js problem already printed the notice, only the server's own line is new.
-      for (const line of check.output.length === 0 ? full.output : full.output.filter((l) => l.includes(`${server.item}: found ${server.found}`))) print(line);
-      check = full;
+  // Settling the journal and the later holder check are one step under the state folder's lock, so two starts (or a start and a transfer) cannot each see the files before the other changed them.
+  const releaseState = stateDirectory === undefined ? async (): Promise<void> => undefined : await acquireStateLock(stateDirectory, { wait: true });
+  try {
+    if (stateDirectory !== undefined) { const settled = await guardStart(stateDirectory, sourcePlace); if (settled.note !== undefined) print(settled.note); }
+    if (options.storage.kind === "sqlite" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, resolve(options.storage.path), print, { ...(piFinal === undefined ? {} : { piFinal }), ...(dataLock === undefined || !(await dataLock.isHeld()) ? {} : { lock: dataLock }) });
+    if (options.storage.kind === "postgres") {
+      const pg = await PostgresStorage.open({ connectionString: options.storage.url, allowUnsupportedServer: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }), ...(options.storage.schema === undefined ? {} : { schema: options.storage.schema }), ...(options.storage.maxConnections === undefined ? {} : { maxConnections: options.storage.maxConnections }), ...(options.storage.minimumServerVersionNum === undefined ? {} : { minimumServerVersionNum: options.storage.minimumServerVersionNum }) }).catch((error: unknown) => { if (error instanceof Error && error.message.startsWith("NimbleNewt will not start")) print(error.message); throw error; });
+      storage = pg;
+      const server = pg.unsupportedServer;
+      if (server !== undefined) {
+        // Only reachable with the override: the adapter refused otherwise. Fold the server into the one decision, so it is printed and audited with the rest (the notice is printed once, covering everything).
+        const full = overriddenCheck([...check.problems, server], check.host ?? host);
+        // When an operating-system or Node.js problem already printed the notice, only the server's own line is new.
+        for (const line of check.output.length === 0 ? full.output : full.output.filter((l) => l.includes(`${server.item}: found ${server.found}`))) print(line);
+        check = full;
+      }
+    } else {
+      storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
     }
-  } else {
-    storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
-  }
-
-  // A database a transfer left stays fenced inside the database itself: it starts only if the authority file names it for that transfer (checked before the epoch is taken).
-  try { await assertNotFenced(stateDirectory, sourcePlace, storage); } catch (error) { await storage.close().catch(() => undefined); throw error; }
+    // A database a transfer left stays fenced inside the database itself: it starts only if the authority file names it for that transfer (checked before the epoch is taken).
+    try { await assertNotFenced(stateDirectory, sourcePlace, storage); } catch (error) { await storage.close().catch(() => undefined); throw error; }
+  } finally { await releaseState(); }
   // Retention in front of writes (card K06): the disk-full reserve and the optional quotas. The meter reads the unwrapped storage; the settings the guard consults are wired below once the epoch is known.
   const reserve = dataDirectory === undefined ? undefined : new ReserveFile(join(dataDirectory, ".nn-reserve"));
   const quotaMeter = new QuotaMeter(storage);
@@ -814,12 +817,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         });
       }
     }
+    // The first start on a database a transfer moved to notes its counters now: the epoch is taken and the start-up records are written, and no loop has run yet (card F04e).
+    const noteFirstStart = async (): Promise<void> => { if (stateDirectory !== undefined) await withStateLock(stateDirectory, () => recordFirstStart(stateDirectory, sourcePlace, storage), { wait: true }); };
     // The reconciler (card L01b) holds an inbox message for a paused task. No delivery destination or effect bridge is built yet, so it repairs, admits, recovers and settles waits only.
     const reconciler = new Reconciler(storage, epoch, { projects, inbox: InboxService.withEpoch(storage, epoch, assignments), effects: EffectService.withEpoch(storage, epoch, assignments), blockers: BlockerService.withEpoch(storage, epoch), waits, pauses, destinations: [], bridges: {} }, { claimant: "controller" });
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ hold: () => barrier.held, installationSettings: (keys) => configuration.installationSettings(keys), streamSettings, contextRouteSettings, retention: { sweep: (by) => retention.sweep(by), restoreReserve: async () => { await reserve?.restore(); } }, release: releaseService, quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, bindWorkspacePort: (f) => { workspacePort = f; }, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
+        dispatch = await composeDispatch({ beforeLoops: noteFirstStart, hold: () => barrier.held, installationSettings: (keys) => configuration.installationSettings(keys), streamSettings, contextRouteSettings, retention: { sweep: (by) => retention.sweep(by), restoreReserve: async () => { await reserve?.restore(); } }, release: releaseService, quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, bindWorkspacePort: (f) => { workspacePort = f; }, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
           // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
           const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });
@@ -849,6 +854,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks, pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, revocationPolicy: () => catalogPolicy.effective(),
       });
     }
+    await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
     // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
     maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
@@ -862,7 +868,6 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       void (options.maintenance?.tickMs !== undefined ? Promise.resolve(options.maintenance.tickMs) : maintenance.tickMs()).catch(() => 30_000).then((ms) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, ms); maintenanceTimer.unref(); } });
     };
     void maintenance.tickMs().catch(() => 30_000).then((first) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, options.maintenance?.tickMs ?? first); maintenanceTimer.unref(); } });
-    if (stateDirectory !== undefined) await recordFirstStart(stateDirectory, sourcePlace, storage);
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),

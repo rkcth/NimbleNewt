@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -9,7 +9,7 @@ import { startTestServer, withClient, type TestServer } from "../storage/postgre
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
-import { DatabaseTransferService, assertNotFenced, guardStart, postgresFingerprint, readAuthority, readJournal, recordFirstStart, sqliteFingerprint, sqliteTarget, type TransferOptions, type TransferPoint, type TransferTarget } from "./index.js";
+import { DatabaseTransferService, acquireStateLock, withStateLock, assertNotFenced, guardStart, postgresFingerprint, readAuthority, readJournal, recordFirstStart, sqliteFingerprint, sqliteTarget, type TransferOptions, type TransferPoint, type TransferTarget } from "./index.js";
 
 const AT = "2026-10-31T10:00:00.000Z";
 let serverPromise: Promise<TestServer> | undefined;
@@ -175,8 +175,10 @@ test("a failure at any point before the fence leaves the source whole, takes the
   }
 });
 
-test("a failure after the fence is settled at the next start: on the destination it finishes, on the source it is abandoned or refused by the authority (card F04e)", async () => {
-  for (const [point, configured, resolved, refused] of [["fenced", "destination", "finished", false], ["fenced", "source", "abandoned", false], ["authority-written", "source", "finished", true], ["authority-written", "destination", "finished", false]] as const) {
+test("a crash after the fence is settled at the next start: fenced first and journalled second, so only a journalled fence lets the destination finish; the source of an unjournalled one is abandoned and admitted (card F04e)", async () => {
+  type Case = readonly [TransferPoint, "source" | "destination", "journal" | "finish" | "abandon" | "moved" | "incomplete"];
+  const cases: Case[] = [["fenced", "destination", "incomplete"], ["fenced", "source", "abandon"], ["fencing-recorded", "destination", "finish"], ["fencing-recorded", "source", "abandon"], ["authority-written", "source", "moved"], ["authority-written", "destination", "finish"]];
+  for (const [point, configured, expect] of cases) {
     const f = await fixture();
     try {
       const target = await sqlTarget(f, "dest.sqlite");
@@ -184,21 +186,174 @@ test("a failure after the fence is settled at the next start: on the destination
       const plan = await svc.preview("sqlite2");
       await assert.rejects(svc.apply("sqlite2", plan.token), /fenced/);
       assert.equal(f.barrier.held, true, "fenced and not switched: the controller stays down");
-      assert.equal((await readJournal(st(f)))?.phase, "fencing");
-      const place = configured === "source" ? { fingerprint: await sqliteFingerprint(f.srcPath) } : { fingerprint: target.fingerprint };
+      assert.equal((await readJournal(st(f)))?.phase, point === "fenced" ? "copying" : "fencing", point);
+      const source = { fingerprint: await sqliteFingerprint(f.srcPath) }, dest = { fingerprint: target.fingerprint };
+      const place = configured === "source" ? source : dest;
       const start = guardStart(st(f), place, () => new Date(AT));
-      if (refused) await assert.rejects(start, /moved to/); else assert.equal((await start).resolved, resolved, `${point} on ${configured}`);
-      if (resolved === "finished") { assert.equal((await readAuthority(st(f)))?.active.fingerprint, target.fingerprint); assert.equal((await readJournal(st(f)))?.phase, "switched"); await assert.rejects(guardStart(st(f), { fingerprint: await sqliteFingerprint(f.srcPath) }), /will not start/); }
-      else {
+      if (expect === "incomplete") await assert.rejects(start, /did not complete/);
+      else if (expect === "moved") await assert.rejects(start, /moved to/);
+      else assert.equal((await start).resolved, expect === "finish" ? "finished" : "abandoned", `${point} on ${configured}`);
+      if (expect === "finish") { assert.equal((await readAuthority(st(f)))?.active.fingerprint, target.fingerprint); assert.equal((await readJournal(st(f)))?.phase, "switched"); await assert.rejects(guardStart(st(f), source), /will not start/); const d = await target.open(); try { await assertNotFenced(st(f), dest, d); } finally { await d.close(); } }
+      if (expect === "abandon") {
         assert.equal(await readAuthority(st(f)), undefined); assert.equal((await readJournal(st(f)))?.phase, "abandoned");
-        await guardStart(st(f), place);
-        // The abandoned source was fenced in its own database, and may start again because the transfer says it was abandoned.
-        await assertNotFenced(st(f), place, f.src);
-        // The verified but never-switched destination may not start.
-        await assert.rejects(guardStart(st(f), { fingerprint: target.fingerprint }), /did not complete/);
+        await assertNotFenced(st(f), source, f.src); // admitted although the holder says transferred-out
+        // An authority file that names another database withdraws the admission (the files are read again under the lock).
+        const authorityFile = join(st(f), "storage-authority.json");
+        writeFileSync(authorityFile, JSON.stringify({ format: 1, generation: 9, active: { kind: "sqlite", fingerprint: target.fingerprint, name: "elsewhere" }, transferId: "xfer-other", since: AT }));
+        await assert.rejects(assertNotFenced(st(f), source, f.src), /not the authoritative one/);
+        rmSync(authorityFile);
+        // ... and the normal epoch take puts a normal holder back.
+        await f.src.acquireEpoch({ holder: "controller", at: AT });
+        await assertNotFenced(undefined, source, f.src);
+        await assert.rejects(guardStart(st(f), dest), /did not complete/);
       }
+      if (expect === "incomplete" || expect === "moved") { /* nothing admitted */ }
     } finally { await finish(f); }
   }
+});
+
+test("two starts at once on a fenced source and its verified destination: the state folder's lock lets exactly one be admitted (card F04e)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const svc = await service(f, [target], { inject: (p) => { if (p === "fencing-recorded") throw new Error("boom"); } });
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), /fenced/);
+    const source = { fingerprint: await sqliteFingerprint(f.srcPath) }, dest = { fingerprint: target.fingerprint };
+    const d = await target.open();
+    try {
+      const attempt = (place: { fingerprint: string }, storage: ControllerStorage): Promise<void> => withStateLock(st(f), async () => { await guardStart(st(f), place); await assertNotFenced(st(f), place, storage); await new Promise((r) => setTimeout(r, 300)); }, { wait: true });
+      const outcomes = await Promise.allSettled([attempt(source, f.src), attempt(dest, d)]);
+      assert.equal(outcomes.filter((o) => o.status === "fulfilled").length, 1, JSON.stringify(outcomes.map((o) => o.status)));
+      const authority = await readAuthority(st(f));
+      // The admitted one agrees with the files: the destination only if the authority names it.
+      assert.equal(outcomes[1]!.status === "fulfilled", authority?.active.fingerprint === target.fingerprint);
+    } finally { await d.close(); }
+    // A second apply while the folder is locked is refused at once.
+    const release = await acquireStateLock(st(f), { wait: false });
+    try { await assert.rejects(withStateLock(st(f), async () => undefined, { wait: false }), /using the transfer state folder/); } finally { await release(); }
+  } finally { await finish(f); }
+});
+
+test("a full copy left by a failed transfer (no discard, state row written) carries a pending holder and never starts as a normal database; files are private (card F04e)", async () => {
+  const f = await fixture();
+  try {
+    const inner = await sqlTarget(f, "dest.sqlite");
+    const target: TransferTarget = { name: inner.name, kind: inner.kind, fingerprint: inner.fingerprint, open: inner.open, ...(inner.freeBytes === undefined ? {} : { freeBytes: inner.freeBytes }) };
+    const svc = await service(f, [target], { inject: (p) => { if (p === "verified") throw new Error("lost the network"); } });
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), /lost the network/);
+    const d = await target.open();
+    try {
+      await assert.rejects(assertNotFenced(undefined, { fingerprint: target.fingerprint }, d), /left by database transfer .*transfer-pending/);
+      await assert.rejects(assertNotFenced(st(f), { fingerprint: target.fingerprint }, d), /not the authoritative one/);
+    } finally { await d.close(); }
+    if (process.platform !== "win32") for (const name of ["database-transfer-journal.json"]) assert.equal(statSync(join(st(f), name)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(statSync(st(f)).mode & 0o777, 0o700);
+  } finally { await finish(f); }
+});
+
+test("a rollback stopped at any point is finished by the next start; nothing is left that only a hand edit could repair (card F04e)", async () => {
+  for (const point of ["rollback:journal", "rollback:fenced", "rollback:authority"] as const) {
+    const f = await fixture();
+    try {
+      const target = await sqlTarget(f, "dest.sqlite");
+      await (await service(f, [target])).apply("sqlite2", (await (await service(f, [target])).preview("sqlite2")).token);
+      const started = await startOnDestination(f, target, { inject: (p) => { if (p === point) throw new Error("crash"); } });
+      await assert.rejects(started.svc.rollback(), /crash/);
+      assert.equal((await readJournal(st(f)))?.phase, "rolling-back");
+      const source = { fingerprint: await sqliteFingerprint(f.srcPath) }, dest = { fingerprint: target.fingerprint };
+      await assert.rejects(guardStart(st(f), dest), /moved to/);
+      assert.equal((await readJournal(st(f)))?.phase, "rolled-back", point);
+      assert.equal((await readAuthority(st(f)))?.active.fingerprint, source.fingerprint, point);
+      await guardStart(st(f), source);
+      await assertNotFenced(st(f), source, f.src);
+    } finally { await finish(f); }
+  }
+});
+
+test("a write that slips in between the last check and the fence is found after the fence, the fence is lifted and nothing is switched; the same for a rollback (card F04e)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const svc = await service(f, [target], { inject: async (p) => { if (p === "before-fence") await f.src.applyOperation(op("slipped", f.epoch, { audit: [{ type: "x", detail: {} }] })); } });
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), /changed between the last check and the fence \(records were written\)/);
+    assert.equal(await readAuthority(st(f)), undefined); assert.equal((await readJournal(st(f)))?.phase, "failed");
+    assert.equal(f.barrier.held, true, "deposed: the controller must be restarted");
+    const state = (await rows(f.src))["state"]![0]!;
+    assert.equal(state["holder"], "c1", "the original holder is back, not a fence");
+    await assertNotFenced(undefined, { fingerprint: await sqliteFingerprint(f.srcPath) }, f.src);
+  } finally { await finish(f); }
+  const g = await fixture();
+  try {
+    const target = await sqlTarget(g, "dest.sqlite");
+    await (await service(g, [target])).apply("sqlite2", (await (await service(g, [target])).preview("sqlite2")).token);
+    let live: ControllerStorage | undefined, liveEpoch = 0;
+    const started = await startOnDestination(g, target, { inject: async (p) => { if (p === "rollback:journal" && live !== undefined) await live.applyOperation(op("slip", liveEpoch, { audit: [{ type: "x", detail: {} }] })); } });
+    live = started.live; liveEpoch = started.epoch;
+    await assert.rejects(started.svc.rollback(), /work was recorded on the new database while the rollback was being made/);
+    assert.equal((await readJournal(st(g)))?.phase, "switched");
+    assert.equal((await readAuthority(st(g)))?.active.fingerprint, target.fingerprint);
+    assert.equal((await rows(live))["state"]![0]!["holder"], "c2", "the fence on the new database was lifted");
+  } finally { await finish(g); }
+});
+
+test("the first start is noted only when it is the first and wrote no more than a start does; a start without the state folder in between blocks rollback (card F04e)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    await (await service(f, [target])).apply("sqlite2", (await (await service(f, [target])).preview("sqlite2")).token);
+    // A start that did not know the state folder takes the epoch and works.
+    const blind = await target.open();
+    try {
+      const { epoch } = await blind.acquireEpoch({ holder: "c2", at: AT });
+      await blind.applyOperation(op("blind-work", epoch, { audit: [{ type: "x", detail: {} }] }));
+      const { epoch: second } = await blind.acquireEpoch({ holder: "c3", at: AT });
+      assert.equal(second, epoch + 1);
+      assert.equal(await recordFirstStart(st(f), { fingerprint: target.fingerprint }, blind), false, "not the first start any more");
+      assert.equal((await readJournal(st(f)))?.firstStart, undefined);
+      const svc = new DatabaseTransferService({ storage: blind, source: { kind: "sqlite", fingerprint: target.fingerprint, name: "dest" }, targets: () => [], stateDirectory: st(f), barrier: new MaintenanceBarrier(), now: () => new Date(AT) });
+      await assert.rejects(svc.rollback(), /no clean record of the new database's first start/);
+    } finally { await blind.close(); }
+  } finally { await finish(f); }
+  const g = await fixture();
+  try {
+    const target = await sqlTarget(g, "dest.sqlite");
+    await (await service(g, [target])).apply("sqlite2", (await (await service(g, [target])).preview("sqlite2")).token);
+    const live = await target.open();
+    try {
+      const { epoch } = await live.acquireEpoch({ holder: "c2", at: AT });
+      for (let i = 0; i < 3; i++) await live.applyOperation(op(`many-${i}`, epoch, { audit: Array.from({ length: 100 }, () => ({ type: "x", detail: {} })).slice(0, 100) }));
+      // 300 records is within a start's writes; far more is work.
+      assert.equal(await recordFirstStart(st(g), { fingerprint: target.fingerprint }, live), true);
+    } finally { await live.close(); }
+  } finally { await finish(g); }
+  const h = await fixture();
+  try {
+    const target = await sqlTarget(h, "dest.sqlite");
+    await (await service(h, [target])).apply("sqlite2", (await (await service(h, [target])).preview("sqlite2")).token);
+    const live = await target.open();
+    try {
+      const { epoch } = await live.acquireEpoch({ holder: "c2", at: AT });
+      for (let i = 0; i < 11; i++) await live.applyOperation(op(`lots-${i}`, epoch, { audit: Array.from({ length: 100 }, () => ({ type: "x", detail: {} })) }));
+      assert.equal(await recordFirstStart(st(h), { fingerprint: target.fingerprint }, live), false, "more than a start writes is work");
+    } finally { await live.close(); }
+  } finally { await finish(h); }
+});
+
+test("a destination that is no longer empty when the copy begins is refused before anything is written, and is not emptied (card F04e)", async () => {
+  const f = await fixture();
+  try {
+    const inner = await sqlTarget(f, "dest.sqlite");
+    let opens = 0, discards = 0;
+    const target: TransferTarget = { ...inner, discard: async () => { discards += 1; }, open: async () => {
+      const real = await inner.open(); opens += 1;
+      if (opens === 3) await real.restoreRows("operations", [{ operation_id: "op-other", request_hash: "h", actor: "a", correlation_id: "c", at: AT, result: "{}" }]); // someone wrote after the plan was made
+      return real;
+    } };
+    const svc = await service(f, [target]);
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), /already holds operations records/);
+    assert.equal(discards, 0, "not ours to empty");
+    assert.equal(f.barrier.held, false);
+  } finally { await finish(f); }
 });
 
 /** A source that answers snapshots from edited rows, to prove each check refuses (the real stores cannot hold such rows). */
@@ -306,7 +461,7 @@ test("a source that records something while it is copied is not switched (card F
 });
 
 /** The controller that restarts on the destination: it takes the next epoch, finishes starting and notes its counters. */
-async function startOnDestination(f: Fixture, target: TransferTarget): Promise<{ live: ControllerStorage; epoch: number; svc: DatabaseTransferService; barrier: MaintenanceBarrier }> {
+async function startOnDestination(f: Fixture, target: TransferTarget, extra: Partial<TransferOptions> = {}): Promise<{ live: ControllerStorage; epoch: number; svc: DatabaseTransferService; barrier: MaintenanceBarrier }> {
   await guardStart(st(f), { fingerprint: target.fingerprint });
   const live = await target.open();
   f.cleanup.push(async () => { await live.close(); });
@@ -315,7 +470,7 @@ async function startOnDestination(f: Fixture, target: TransferTarget): Promise<{
   await live.applyOperation(op("restart-record", epoch, { audit: [{ type: "host.recorded", detail: {} }] }));
   await recordFirstStart(st(f), { fingerprint: target.fingerprint }, live);
   const barrier = new MaintenanceBarrier();
-  const svc = new DatabaseTransferService({ storage: live, source: { kind: "sqlite", fingerprint: target.fingerprint, name: target.name }, targets: () => [], stateDirectory: st(f), barrier, now: () => new Date(AT) });
+  const svc = new DatabaseTransferService({ storage: live, source: { kind: "sqlite", fingerprint: target.fingerprint, name: target.name }, targets: () => [], stateDirectory: st(f), barrier, now: () => new Date(AT), ...extra });
   return { live, epoch, svc, barrier };
 }
 

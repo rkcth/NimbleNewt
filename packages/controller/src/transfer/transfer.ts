@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { canon } from "../backup/canon.js";
+import { DataLockBusy, acquireDataLock, type DataLock } from "../backup/data-lock.js";
 import type { MaintenanceBarrier } from "../backup/barrier.js";
 import { DomainError } from "../domain/errors.js";
 import { canonicalJson } from "../storage/json.js";
@@ -41,7 +42,7 @@ export interface TransferTarget {
 export interface TransferSource { readonly kind: StorageKind; readonly fingerprint: string; readonly name: string }
 type Place = { readonly kind: StorageKind; readonly fingerprint: string; readonly name: string };
 
-export type TransferPhase = "copying" | "fencing" | "switched" | "failed" | "rolled-back" | "abandoned";
+export type TransferPhase = "copying" | "fencing" | "rolling-back" | "switched" | "failed" | "rolled-back" | "abandoned";
 const TERMINAL: readonly TransferPhase[] = ["switched", "failed", "rolled-back", "abandoned"];
 type Mark = { readonly epoch: number; readonly auditSeq: number; readonly deliverySeq: number };
 
@@ -101,7 +102,7 @@ export interface TransferReferences {
   checkpoints?(points: readonly { readonly id: string; readonly attemptId: string; readonly checkpoint: string }[]): Promise<readonly string[]>;
 }
 
-export type TransferPoint = "drained" | "validated" | `copy:${SnapshotTable}` | "copied" | "verified" | "before-fence" | "fenced" | "authority-written";
+export type TransferPoint = "drained" | "validated" | `copy:${SnapshotTable}` | "copied" | "verified" | "before-fence" | "fenced" | "fencing-recorded" | "authority-written" | "rollback:journal" | "rollback:fenced" | "rollback:authority";
 
 export interface TransferOptions {
   readonly storage: Pick<ControllerStorage, "snapshot" | "acquireEpoch">;
@@ -129,9 +130,9 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
 
 /** Writes a small JSON file whole or not at all (temp file in the same folder, flushed, renamed). */
 async function writeJson(path: string, value: object): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID().slice(0, 8)}.tmp`;
-  const handle = await open(temp, "w");
+  const handle = await open(temp, "w", 0o600);
   try { await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
   try { await rename(temp, path); } catch (error) { await rm(temp, { force: true }); throw error; }
   // The rename itself must survive a power cut (POSIX; Windows cannot open a directory to flush it).
@@ -160,7 +161,7 @@ export function postgresFingerprint(url: string, schema = "nimblenewt"): string 
 
 type Configured = { readonly fingerprint: string };
 const refusal = (text: string): never => { throw new Error(`NimbleNewt will not start: ${text}`); };
-const wasTransferred = (h: string | null | undefined): string | undefined => (typeof h === "string" && (h.startsWith("transferred-out:") || h.startsWith("rolled-back:")) ? h.slice(h.indexOf(":") + 1) : undefined);
+const wasTransferred = (h: string | null | undefined): string | undefined => (typeof h === "string" && (h.startsWith("transferred-out:") || h.startsWith("rolled-back:") || h.startsWith("transfer-pending:")) ? h.slice(h.indexOf(":") + 1) : undefined);
 
 /**
  * The start-time guard, before the database is opened. The state directory is ONE fixed place the host names (`StartOptions.transfer.stateDirectory`), never derived from a database path, so every database the installation has
@@ -175,7 +176,16 @@ export async function guardStart(stateDirectory: string, configured: Configured,
   const journalFile = join(stateDirectory, TRANSFER_JOURNAL);
   let result: { resolved?: "finished" | "abandoned"; note?: string } = {};
   let current = journal;
-  if (journal !== undefined) {
+  if (journal !== undefined && journal.phase === "rolling-back") {
+    // A rollback that passed its checks is finished whatever stopped it: the previous database is the authoritative one again.
+    if (!(authority?.transferId === journal.id && authority.active.fingerprint === journal.from.fingerprint)) {
+      authority = { format: 1, generation: (authority?.generation ?? 0) + 1, active: journal.from, previous: journal.to, transferId: journal.id, since: at };
+      await writeJson(join(stateDirectory, AUTHORITY_FILE), authority);
+    }
+    current = { ...journal, phase: "rolled-back", updatedAt: at, note: "a rollback that was stopped part way was finished at the start" };
+    await writeJson(journalFile, current);
+    result = { resolved: "finished", note: `database transfer ${journal.id}: the rollback was finished at start; the controller database is ${journal.from.name}` };
+  } else if (journal !== undefined) {
     const named = authority?.transferId === journal.id && authority.active.fingerprint === journal.to.fingerprint;
     if (journal.phase === "switched" && !named) refuse2(journal);
     if (!TERMINAL.includes(journal.phase)) {
@@ -221,20 +231,50 @@ export async function assertNotFenced(stateDirectory: string | undefined, config
   if (stateDirectory !== undefined) {
     const authority = await readAuthority(stateDirectory), journal = await readJournal(stateDirectory);
     if (authority?.transferId === id && authority.active.fingerprint === configured.fingerprint) return;
-    if (journal?.id === id && (journal.phase === "abandoned" || journal.phase === "failed") && journal.from.fingerprint === configured.fingerprint) return;
+    if (journal?.id === id && (journal.phase === "abandoned" || journal.phase === "failed") && journal.from.fingerprint === configured.fingerprint && !(authority !== undefined && authority.active.fingerprint !== configured.fingerprint)) return;
   }
-  return refusal(`this database was left by database transfer ${id} (${holder}) and is not the authoritative one${stateDirectory === undefined ? "; no transfer state directory is configured, so nothing can say otherwise" : ""}. Start the controller on the database the transfer moved to.`);
+  return refusal(`this database was left by database transfer ${id} (${holder}) and is not the authoritative one${stateDirectory === undefined ? "; no transfer state directory is configured, so nothing can say otherwise" : ""}. Start the controller on the database the transfer moved to. (A backup restored from before a transfer carries a normal holder: keep transfer.stateDirectory configured so the authority file refuses the old database.)`);
 }
 
-/** Records the counters of the new database when the controller on it has finished starting (its own start writes records): a rollback is safe only while they are unchanged. */
-export async function recordFirstStart(stateDirectory: string, configured: Configured, storage: Pick<ControllerStorage, "snapshot">, now: () => Date = () => new Date()): Promise<void> {
+/** What a start writes before its loops run (host record, settings): more than this since the copy is work, not a start. Provisional. */
+export const START_WRITES_MAX = { audit: 1000, deliveries: 100 } as const;
+
+/**
+ * Notes the counters of the new database when the controller on it has taken its epoch and written its own start-up records, before any loop (dispatcher, maintenance, transport) runs. Only the FIRST start after the switch
+ * records (the epoch is the copied one plus one): a start without the state directory in between, or growth beyond what a start writes, leaves nothing recorded and a rollback is then refused.
+ */
+export async function recordFirstStart(stateDirectory: string, configured: Configured, storage: Pick<ControllerStorage, "snapshot">, now: () => Date = () => new Date()): Promise<boolean> {
   const journal = await readJournal(stateDirectory);
-  if (journal === undefined || journal.phase !== "switched" || journal.to.fingerprint !== configured.fingerprint || journal.firstStart !== undefined) return;
+  if (journal === undefined || journal.phase !== "switched" || journal.to.fingerprint !== configured.fingerprint || journal.firstStart !== undefined || journal.destinationMark === undefined) return false;
   const snap = await storage.snapshot();
   try {
     const s = (await snap.read("state", { limit: 1 }))[0];
-    await writeJson(join(stateDirectory, TRANSFER_JOURNAL), { ...journal, updatedAt: now().toISOString(), firstStart: { epoch: Number(s?.["epoch"] ?? 0), auditSeq: Number(s?.["audit_seq"] ?? 0), deliverySeq: Number(s?.["delivery_seq"] ?? 0) } } satisfies TransferJournal);
+    const mark = { epoch: Number(s?.["epoch"] ?? 0), auditSeq: Number(s?.["audit_seq"] ?? 0), deliverySeq: Number(s?.["delivery_seq"] ?? 0) };
+    const was = journal.destinationMark;
+    if (mark.epoch !== was.epoch + 1 || mark.auditSeq - was.auditSeq > START_WRITES_MAX.audit || mark.deliverySeq - was.deliverySeq > START_WRITES_MAX.deliveries) return false;
+    await writeJson(join(stateDirectory, TRANSFER_JOURNAL), { ...journal, updatedAt: now().toISOString(), firstStart: mark } satisfies TransferJournal);
+    return true;
   } finally { await snap.close(); }
+}
+
+/**
+ * The journal and the authority file have one writer at a time, across processes: a lock file in the state folder (the data directory lock's machinery: live holders, stale takeover, refresh). A start waits for it (a transfer
+ * or another start is short); an apply or rollback that finds it taken is refused at once.
+ */
+export async function acquireStateLock(stateDirectory: string, options: { wait: boolean; env?: Parameters<typeof acquireDataLock>[1] } = { wait: false }): Promise<() => Promise<void>> {
+  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  // In its own sub-folder: the state folder may be the data directory, whose lock file the running controller keeps.
+  const lockFolder = join(stateDirectory, ".transfer-lock");
+  for (let waited = 0; ; waited += 250) {
+    try { const lock = await acquireDataLock(lockFolder, options.env); return async () => { await lock.release().catch(() => undefined); }; } catch (error) {
+      if (!(error instanceof DataLockBusy) || !options.wait || waited > 300_000) throw error instanceof DataLockBusy ? new DomainError("unavailable", `another start or database transfer is using the transfer state folder (${stateDirectory}); try again when it is over`) : error;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+}
+export async function withStateLock<T>(stateDirectory: string, work: () => Promise<T>, options: { wait: boolean; env?: Parameters<typeof acquireDataLock>[1] } = { wait: false }): Promise<T> {
+  const release = await acquireStateLock(stateDirectory, options);
+  try { return await work(); } finally { await release(); }
 }
 
 /** A SQLite target for a file: free space from the file system the file will be on. */
@@ -255,6 +295,7 @@ export async function sqliteTarget(input: { name: string; path: string; open: ()
   };
 }
 
+type ApplyResult = { id: string; direction: string; to: string; rows: number; claimsReleased: number; uncertainEffects: number; restartRequired: true; findings: readonly TransferFinding[] };
 interface CopyStats { rows: Record<string, number>; digests: Record<string, string> }
 interface ScanReport { digests: Record<string, string>; rows: Record<string, number>; bytes: number; findings: TransferFinding[]; uncertain: number; intended: number; claims: number }
 
@@ -430,6 +471,17 @@ export class DatabaseTransferService {
     try { const row = (await snap.read("state", { limit: 1 }))[0]; return row === undefined ? null : (row["holder"] as string | null); } finally { await snap.close(); }
   }
 
+  /** Findings that say a destination is not a new, empty database (none: it is). */
+  async #notEmpty(dest: ControllerStorage): Promise<string | undefined> {
+    const probe = await dest.snapshot();
+    try {
+      const state = (await probe.read("state", { limit: 1 }))[0];
+      if (state === undefined || Number(state["epoch"]) !== 0) return "the destination is not empty: a controller has already owned it. A transfer goes into a new, empty database.";
+      for (const table of SNAPSHOT_TABLES) if (table !== "state" && (await probe.read(table, { limit: 1 })).length > 0) return `the destination already holds ${table} records (a partial copy?); empty it first`;
+      return undefined;
+    } finally { await probe.close(); }
+  }
+
   async #at(point: TransferPoint): Promise<void> { await this.#o.inject?.(point); }
 
   async #journal(journal: TransferJournal, patch: Partial<TransferJournal>): Promise<TransferJournal> {
@@ -439,7 +491,7 @@ export class DatabaseTransferService {
   }
 
   /** Streams every table of `snap` into `dest` (claims released) and returns what was written, per table. */
-  async #copy(snap: StorageSnapshot, dest: ControllerStorage): Promise<CopyStats> {
+  async #copy(snap: StorageSnapshot, dest: ControllerStorage, pending: string): Promise<CopyStats> {
     const stats: CopyStats = { rows: {}, digests: {} };
     for (const table of SNAPSHOT_TABLES) {
       await this.#at(`copy:${table}`);
@@ -447,7 +499,7 @@ export class DatabaseTransferService {
       const hash = createHash("sha256");
       for (;;) {
         const page = await snap.read(table, { ...(after === undefined ? {} : { after }), limit: this.#size() });
-        const out = page.map((row) => releaseClaim(table, row));
+        const out = page.map((row) => releaseClaim(table, row, pending));
         if (out.length > 0) { await dest.restoreRows(table, out); this.#wrote = true; for (const row of out) hash.update(`${canonicalJson(row)}\n`); }
         count += out.length;
         if (page.length < this.#size() || table === "state") break;
@@ -483,8 +535,12 @@ export class DatabaseTransferService {
   }
 
   /** Moves the whole store to `targetName`. `confirm` is the token of the preview the owner approved. */
-  async apply(targetName: unknown, confirm: unknown): Promise<{ id: string; direction: string; to: string; rows: number; claimsReleased: number; uncertainEffects: number; restartRequired: true; findings: readonly TransferFinding[] }> {
+  async apply(targetName: unknown, confirm: unknown): Promise<ApplyResult> {
     await this.#enabled();
+    return withStateLock(this.#o.stateDirectory, () => this.#apply(targetName, confirm));
+  }
+
+  async #apply(targetName: unknown, confirm: unknown): Promise<ApplyResult> {
     const target = this.#target(targetName);
     this.#wrote = false;
     if (this.#running || this.#o.barrier.held) throw new DomainError("unavailable", "a transfer or another maintenance operation is already running");
@@ -500,7 +556,8 @@ export class DatabaseTransferService {
       let release: (() => Promise<void>) | undefined;
       let dest: ControllerStorage | undefined;
       let snap: StorageSnapshot | undefined;
-      let fenced = false;
+      let fenced = false, deposed = false;
+      const originalHolder = await this.#holder(this.#o.storage);
       try {
         release = await this.#o.barrier.raise("a database transfer is running");
         await this.#at("drained");
@@ -514,7 +571,9 @@ export class DatabaseTransferService {
         journal = await this.#journal(journal, { sourceMark: before, counts: report.rows });
         stage = "copying";
         dest = await target.open();
-        const stats = await this.#copy(snap, dest);
+        const occupied = await this.#notEmpty(dest);
+        if (occupied !== undefined) throw new Error(occupied);
+        const stats = await this.#copy(snap, dest, `transfer-pending:${id}`);
         await this.#at("copied");
         stage = "verifying";
         await this.#readBack(dest, stats);
@@ -529,13 +588,29 @@ export class DatabaseTransferService {
         await snap.close(); snap = undefined;
         stage = "fencing";
         await this.#at("before-fence");
-        journal = await this.#journal(journal, { phase: "fencing", destinationMark });
+        // The fence comes FIRST: only a source that is already fenced may be written down as fenced. A crash before the journal says so leaves `copying` and a fenced source, which a start on the source abandons.
         try { await this.#o.storage.acquireEpoch({ holder: `transferred-out:${id}`, at: this.#now(), expectedEpoch: before.epoch }); } catch (error) {
           // The commit may have happened and the answer been lost: the database itself says whether it is fenced.
           if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== `transferred-out:${id}`) throw error;
         }
         fenced = true;
         await this.#at("fenced");
+        // Writes between the last check and the fence were committed under the old epoch; none can commit now, so the source is read once more: it must be what was copied.
+        const settled = await this.#mark(this.#o.storage);
+        let late: string | undefined;
+        if (settled.auditSeq !== before.auditSeq || settled.deliverySeq !== before.deliverySeq) late = "records were written";
+        else {
+          const final = await this.#o.storage.snapshot();
+          try { const third = await this.scan(final); for (const t of SNAPSHOT_TABLES) if (t !== "state" && third.digests[t] !== report.digests[t]) { late = `${t} changed`; break; } } finally { await final.close(); }
+        }
+        if (late !== undefined) {
+          // Take the epoch back with the holder it had; this controller's services still hold the old epoch, so they are deposed and a restart follows.
+          await this.#o.storage.acquireEpoch({ holder: originalHolder ?? "controller", at: this.#now() });
+          fenced = false; deposed = true;
+          throw new Error(`the source changed between the last check and the fence (${late}); nothing was switched. The fence was lifted and the controller must be restarted`);
+        }
+        journal = await this.#journal(journal, { phase: "fencing", destinationMark });
+        await this.#at("fencing-recorded");
         stage = "switching";
         const previous = await readAuthority(this.#o.stateDirectory);
         const authority: StorageAuthority = { format: 1, generation: (previous?.generation ?? 0) + 1, active: journal.to, previous: journal.from, transferId: id, since: this.#now() };
@@ -554,10 +629,10 @@ export class DatabaseTransferService {
           let clean = !this.#wrote;
           if (this.#wrote && target.discard !== undefined) { try { await target.discard(); clean = true; } catch { clean = false; } }
           await this.#journal(journal, { phase: "failed", failure: { at: this.#now(), phase: stage, reason, destinationClean: clean } }).catch(() => undefined);
-          if (release !== undefined) await release().catch(() => undefined);
+          if (release !== undefined && !deposed) await release().catch(() => undefined); else this.#release = release;
         } else this.#release = release; // fenced and not switched: the barrier stays up; the next start settles it from the journal
         if (error instanceof DomainError) throw error;
-        throw new DomainError("unavailable", `the database transfer failed while ${stage}: ${reason}. ${fenced ? "The current database was fenced; restart the controller to settle the transfer." : "The current database is as it was and work goes on."}`);
+        throw new DomainError("unavailable", `the database transfer failed while ${stage}: ${reason}. ${fenced ? "The current database was fenced; restart the controller to settle the transfer." : deposed ? "The controller must be restarted." : "The current database is as it was and work goes on."}`);
       }
     } finally { this.#running = false; }
   }
@@ -569,26 +644,48 @@ export class DatabaseTransferService {
    */
   async rollback(): Promise<{ id: string; to: string; restartRequired: true }> {
     await this.#enabled();
+    return withStateLock(this.#o.stateDirectory, () => this.#rollback());
+  }
+
+  async #rollback(): Promise<{ id: string; to: string; restartRequired: true }> {
     if (this.#running) throw new DomainError("unavailable", "a transfer is running");
     const journal = await readJournal(this.#o.stateDirectory), authority = await readAuthority(this.#o.stateDirectory);
     if (journal === undefined || journal.phase !== "switched" || authority === undefined || authority.transferId !== journal.id) throw new DomainError("invalid_transition", "there is no switched transfer to roll back");
     if (authority.active.fingerprint !== journal.to.fingerprint || this.#o.source.fingerprint !== journal.to.fingerprint) throw new DomainError("invalid_transition", "a transfer is rolled back by the controller running on its new database, and only the most recent switch can be rolled back");
     const mark = journal.firstStart;
-    if (mark === undefined) throw new DomainError("invalid_transition", "the new database has not finished its first start, so nothing can be said about work on it; start it fully, or use a reverse transfer");
+    if (mark === undefined) throw new DomainError("invalid_transition", "no clean record of the new database's first start exists (it was started without the transfer state folder, or wrote more than a start does), so nothing can be said about work on it; use a reverse transfer");
     this.#running = true;
     let release: (() => Promise<void>) | undefined;
+    let fenced = false;
     try {
       release = await this.#o.barrier.raise("a database transfer is being rolled back");
+      const holder = await this.#holder(this.#o.storage);
       const now = await this.#mark(this.#o.storage);
       if (now.auditSeq !== mark.auditSeq || now.deliverySeq !== mark.deliverySeq) throw new DomainError("invalid_transition", `the new database has recorded work since it started (${now.auditSeq - mark.auditSeq} audit records, ${now.deliverySeq - mark.deliverySeq} messages), so going back would lose it. Use a reverse transfer to move it back with its records.`);
-      try { await this.#o.storage.acquireEpoch({ holder: `rolled-back:${journal.id}`, at: this.#now(), expectedEpoch: now.epoch }); } catch (error) { if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== `rolled-back:${journal.id}`) throw error; }
-    } catch (error) { if (release !== undefined) await release().catch(() => undefined); this.#running = false; throw error; }
-    // Fenced from here: the barrier stays up and a restart on the previous database follows.
-    this.#release = release;
-    try {
+      // From here the rollback is finished by any start, whatever stops it (the journal says so before the database is touched).
+      const rolling = await this.#journal(journal, { phase: "rolling-back" });
+      await this.#at("rollback:journal");
+      try { await this.#o.storage.acquireEpoch({ holder: `rolled-back:${journal.id}`, at: this.#now(), expectedEpoch: now.epoch }); } catch (error) { if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== `rolled-back:${journal.id}`) { await this.#journal(rolling, { phase: "switched" }); throw error; } }
+      fenced = true;
+      await this.#at("rollback:fenced");
+      // Anything committed between the check and the fence is found now (epoch-checked writes cannot commit any more) and the fence is lifted.
+      const after = await this.#mark(this.#o.storage);
+      if (after.auditSeq !== mark.auditSeq || after.deliverySeq !== mark.deliverySeq) {
+        await this.#o.storage.acquireEpoch({ holder: holder ?? "controller", at: this.#now() });
+        await this.#journal(rolling, { phase: "switched" });
+        fenced = false;
+        throw new DomainError("invalid_transition", "work was recorded on the new database while the rollback was being made, so it was not rolled back. The fence was lifted and the controller must be restarted");
+      }
       await writeJson(join(this.#o.stateDirectory, AUTHORITY_FILE), { format: 1, generation: authority.generation + 1, active: journal.from, previous: journal.to, transferId: journal.id, since: this.#now() } satisfies StorageAuthority);
-      await this.#journal(journal, { phase: "rolled-back", note: "rolled back by the owner before the new database recorded any work" });
+      await this.#at("rollback:authority");
+      await this.#journal(rolling, { phase: "rolled-back", note: "rolled back by the owner before the new database recorded any work" });
+    } catch (error) {
+      if (release !== undefined && !fenced) { /* a refusal before the fence leaves the controller running; a lifted fence leaves it deposed */
+        if (!(error instanceof DomainError && /must be restarted/.test(error.message))) await release().catch(() => undefined); else this.#release = release;
+      } else this.#release = release;
+      throw error;
     } finally { this.#running = false; }
+    this.#release = release;
     return { id: journal.id, to: journal.from.name, restartRequired: true };
   }
 
@@ -597,7 +694,9 @@ export class DatabaseTransferService {
 }
 
 /** A claim belongs to the controller that took it; the drained controller holds none the new one could honour, so they are pending again. */
-function releaseClaim(table: SnapshotTable, row: SnapshotRow): SnapshotRow {
+function releaseClaim(table: SnapshotTable, row: SnapshotRow, pending: string): SnapshotRow {
+  // Until the switch is made the copy does not look like a database a controller may start on: its holder says it is pending.
+  if (table === "state") return { ...row, holder: pending };
   if ((table === "deliveries" || table === "timers") && row["state"] === "claimed") return { ...row, state: "pending", claimed_until: null, token: null };
   return row;
 }
