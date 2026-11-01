@@ -159,6 +159,86 @@ for (const backend of backends) {
     assert.equal((await c.call(c.bob, "conversation_send", { commandId: cid("r"), threadId: t, text: "still here?" })).isError, true);
   });
 
+  suite("a thread is a resource: the list shows only the caller's threads paged, and a read gives the recent messages as one bounded text", async (c) => {
+    const long = "a subject long enough to pass the MCP name limit for a resource and therefore shortened in the listing";
+    const uri = (t: string): string => `nimblenewt://thread/${t}`;
+    interface Resource { uri: string; name: string; mimeType: string }
+    interface Listed { resources: Resource[]; nextCursor?: string }
+    interface Read { contents: { uri: string; mimeType: string; text: string }[] }
+    /** What a call answered: the test says which of the two it expects, and the assertion checks it. */
+    const result = (r: RpcResponse | undefined): unknown => {
+      assert.ok(r !== undefined && typeof r === "object" && "result" in r, JSON.stringify(r));
+      return r.result;
+    };
+    const failure = (r: RpcResponse | undefined): { code: number; message: string } => {
+      assert.ok(r !== undefined && typeof r === "object" && "error" in r, JSON.stringify(r));
+      return r.error;
+    };
+    const listed = async (token: unknown, params?: unknown): Promise<Listed> => result(await c.rpc(token, "resources/list", params)) as Listed;
+    const read = async (token: unknown, u: unknown): Promise<Read> => result(await c.rpc(token, "resources/read", { uri: u })) as Read;
+
+    const s1 = await c.call(c.ann, "conversation_start", { commandId: cid("s"), projectId: c.a, subject: long, to: ["agent:bob", "client:ext"], text: "is the build green?" });
+    const t1 = s1.structuredContent!["threadId"] as string;
+    await c.call(c.bob, "conversation_send", { commandId: cid("r"), threadId: t1, text: "green" });
+    const s2 = await c.call(c.ext, "conversation_start", { commandId: cid("s"), projectId: c.a, subject: "deploy", to: ["agent:bob"], text: "needs a look" });
+    const t2 = s2.structuredContent!["threadId"] as string;
+
+    // Only the caller's threads: ann is in the first, bob in both, an outsider in neither.
+    assert.deepEqual((await listed(c.ann)).resources.map((r) => r.uri), [uri(t1)]);
+    assert.deepEqual((await listed(c.bob)).resources.map((r) => r.uri).sort(), [uri(t1), uri(t2)].sort());
+    for (const who of [c.zed, c.eve]) assert.deepEqual((await listed(who)).resources, []);
+    // A resource is a URI, a short name and text/plain; a long subject is shortened, a short one kept whole.
+    const first = (await listed(c.ann)).resources[0]!;
+    assert.deepEqual([first.mimeType, first.name], ["text/plain", long.slice(0, 80)]);
+    assert.equal((await listed(c.bob)).resources.find((r) => r.uri === uri(t2))!.name, "deploy");
+
+    // Paging: a small page ends with a cursor, the next page ends the list, and no thread is shown twice.
+    const s3 = await c.call(c.ann, "conversation_start", { commandId: cid("s"), projectId: c.a, subject: "third", to: ["agent:bob"], text: "one more" });
+    const t3 = s3.structuredContent!["threadId"] as string;
+    const p1 = await listed(c.bob, { limit: 2 });
+    assert.deepEqual([p1.resources.length, p1.nextCursor !== undefined], [2, true]);
+    const p2 = await listed(c.bob, { cursor: p1.nextCursor, limit: 2 });
+    assert.deepEqual([p2.resources.length, p2.nextCursor], [1, undefined]);
+    const seen = [...p1.resources, ...p2.resources].map((r) => r.uri);
+    assert.deepEqual([new Set(seen).size, seen.sort()], [3, [uri(t1), uri(t2), uri(t3)].sort()]);
+    // A cursor or a page size of the wrong shape is a protocol error, not an empty page.
+    assert.equal(failure(await c.rpc(c.ann, "resources/list", { cursor: 5 })).code, -32602);
+    for (const limit of [0, -1, 1.5, "2", 1000]) assert.equal(failure(await c.rpc(c.ann, "resources/list", { limit })).code, -32602, String(limit));
+
+    // A read is one text item: oldest first, each line who and when, then the text.
+    const item = (await read(c.ann, uri(t1))).contents;
+    assert.deepEqual([item.length, item[0]!.uri, item[0]!.mimeType], [1, uri(t1), "text/plain"]);
+    const lines = item[0]!.text.split("\n");
+    assert.deepEqual(lines.length, 2, item[0]!.text);
+    assert.equal(lines[0], "2026-10-22T20:00:00.000Z agent:ann: is the build green?");
+    assert.equal(lines[1], "2026-10-22T20:00:00.000Z agent:bob: green");
+
+    // The text is bounded: the newest messages are kept and the oldest are said to be left out.
+    for (let i = 0; i < 5; i++) assert.equal((await c.call(c.ann, "conversation_send", { commandId: cid("b"), threadId: t1, text: `msg${i} ${"y".repeat(7995)}` })).isError, false);
+    const big = (await read(c.ann, uri(t1))).contents[0]!.text;
+    assert.ok(big.length <= 20_000, `the text is ${big.length} characters`);
+    assert.ok(big.startsWith("[older messages left out]"), big.slice(0, 40));
+    assert.ok(big.includes("msg4") && big.includes("msg3"), "the newest messages are kept");
+    assert.ok(!big.includes("msg0") && !big.includes("msg1"), "the oldest are left out");
+
+    // A thread the caller may not read, one that is not there and a URI that is not a thread answer identically.
+    const hidden = [
+      await c.rpc(c.zed, "resources/read", { uri: uri(t1) }), await c.rpc(c.eve, "resources/read", { uri: uri(t1) }),
+      await c.rpc(c.ann, "resources/read", { uri: uri("thr-aaaaaaaaaaaaaaaaaaaa") }), await c.rpc(c.ann, "resources/read", { uri: "nimblenewt://thread/not-a-thread" }),
+      await c.rpc(c.ann, "resources/read", { uri: "nimblenewt://project/prj-aaaaaaaaaaaaaaaaaaaa" }), await c.rpc(c.ann, "resources/read", { uri: "" }),
+    ];
+    for (const a of hidden) assert.deepEqual(failure(a), { code: -32002, message: "no such resource" });
+    assert.equal(new Set(hidden.map((a) => JSON.stringify(a))).size, 1, "existence is not revealed");
+
+    // A credential that is not accepted, and a worker's or the controller's own, are refused on both methods; the door advertises what it now serves.
+    for (const who of ["nnt-bogus", undefined, null, c.host, c.service]) {
+      assert.equal(failure(await c.rpc(who, "resources/list")).code, -32602);
+      assert.equal(failure(await c.rpc(who, "resources/read", { uri: uri(t1) })).code, -32602);
+    }
+    const init = result(await c.rpc(c.ann, "initialize", { protocolVersion: MCP_SUPPORT.revisions[0]! })) as { capabilities: Record<string, unknown> };
+    assert.deepEqual(init.capabilities["resources"], { listChanged: false, subscribe: false });
+  });
+
   suite("a protocol session is not an owner: an upgrade keeps threads, cursors and the audit trail, and nothing hangs on the handshake", async (c) => {
     const [oldRev, newRev] = [MCP_SUPPORT.revisions[1]!, MCP_SUPPORT.revisions[0]!];
     const init = (await c.rpc(c.ann, "initialize", { protocolVersion: oldRev }, 1)) as Ok;

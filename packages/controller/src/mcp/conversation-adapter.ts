@@ -1,11 +1,17 @@
+import { clipText } from "../activity/activity.js";
 import { DomainError } from "../domain/errors.js";
-import type { ConversationService } from "../conversations/index.js";
+import { CONVERSATION_LIMITS, type ConversationService, type MessageView } from "../conversations/index.js";
 import type { PrincipalService, Principal } from "../security/index.js";
 import { redactText } from "../security/redact.js";
-import { MCP_SUPPORT } from "./mcp.js";
+import { MCP_LIMITS, MCP_SUPPORT } from "./mcp.js";
 import type { RpcRequest, RpcResponse } from "./state-adapter.js";
 
-const CODES = { invalidRequest: -32600, method: -32601, params: -32602, internal: -32603 } as const;
+const CODES = { invalidRequest: -32600, method: -32601, params: -32602, internal: -32603, resource: -32002 } as const;
+const THREAD_URI = /^nimblenewt:\/\/thread\/(thr-[a-z2-7]{20})$/;
+/** How many of a thread's newest messages a resource read takes; the one text item is cut to `MCP_LIMITS.text`. */
+const RECENT = 50;
+const LEFT_OUT = "[older messages left out]";
+
 const reply = (id: string | number | null, result: unknown): RpcResponse => ({ jsonrpc: "2.0", id, result });
 const fail = (id: string | number | null, code: number, message: string, data?: unknown): RpcResponse => ({ jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } });
 
@@ -29,7 +35,8 @@ const TOOLS: Readonly<Record<string, Tool>> = {
  * that go straight to the conversation service, so the records, the sender, scoping, limits and idempotency are the service's and nothing is decided here. The adapter keeps no state: there is
  * no session record, a connection or protocol session owns no thread, cursor or task, and a client that reconnects (or asks again under a newer protocol revision) is the same principal with the same
  * threads and cursor. Every request is authenticated afresh from its credential. A command carries a `commandId` that the client keeps across a reconnect, so a repeated send is the same
- * message. Transport framing is not here.
+ * message. A thread is also a resource: `resources/list` shows the caller's threads and `resources/read` gives one thread's recent messages as one text, both through the same service, so what a
+ * caller may list and read is exactly what it may see through the tools. Transport framing is not here.
  */
 export class McpConversationAdapter {
   readonly #conversations: ConversationService;
@@ -55,8 +62,9 @@ export class McpConversationAdapter {
         case "ping": return reply(rid, {});
         case "tools/list": return reply(rid, { tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: `${t.summary}${t.kind === "command" ? " Needs a commandId; repeating the same commandId never repeats the change." : ""}`, inputSchema: this.#schema(t) })) });
         case "tools/call": return await this.#call(token, rid, m.params, authenticated);
-        case "resources/list": return reply(rid, { resources: [] });
+        case "resources/list": return await this.#listResources(token, rid, m.params, authenticated);
         case "resources/templates/list": return reply(rid, { resourceTemplates: [] });
+        case "resources/read": return await this.#readResource(token, rid, m.params, authenticated);
         case "prompts/list": return reply(rid, { prompts: [] });
         default: return fail(rid, CODES.method, `unknown method ${m.method.slice(0, 60)}`);
       }
@@ -69,7 +77,7 @@ export class McpConversationAdapter {
     if (typeof wanted !== "string") return fail(id, CODES.params, `no protocol version given; this server speaks ${MCP_SUPPORT.revisions.join(", ")}`, { supported: MCP_SUPPORT.revisions });
     const version = MCP_SUPPORT.revisions.includes(wanted) ? wanted : MCP_SUPPORT.revisions[0]!;
     // No session id is issued: nothing about the conversation is tied to this handshake.
-    return reply(id, { protocolVersion: version, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "nimblenewt-conversations", version: "conversations-1" } });
+    return reply(id, { protocolVersion: version, capabilities: { tools: { listChanged: false }, resources: { listChanged: false, subscribe: false } }, serverInfo: { name: "nimblenewt-conversations", version: "conversations-1" } });
   }
 
   #schema(t: Tool): object {
@@ -97,6 +105,11 @@ export class McpConversationAdapter {
     }
   }
 
+  /** The caller: the transport's just-checked principal when there is one, else the credential, authenticated afresh. */
+  async #who(token: unknown, authenticated: Principal | undefined): Promise<Principal | undefined> {
+    return authenticated === undefined ? await this.#authenticate(token) : this.#allowed(authenticated);
+  }
+
   async #call(token: unknown, id: string | number, params: unknown, authenticated: Principal | undefined): Promise<RpcResponse> {
     const p = params as { name?: unknown; arguments?: unknown } | undefined;
     const name = typeof p?.name === "string" && Object.hasOwn(TOOLS, p.name) ? p.name : undefined;
@@ -107,7 +120,7 @@ export class McpConversationAdapter {
     const { commandId, ...rest } = args as Record<string, unknown>;
     if (tool.kind === "command" && (typeof commandId !== "string" || commandId.length === 0)) return fail(id, CODES.params, `${name} changes state, so it needs a commandId that you keep across a reconnect`);
     if (tool.kind === "query" && commandId !== undefined) return fail(id, CODES.params, `${name} only reads, so it takes no commandId`);
-    const who = authenticated === undefined ? await this.#authenticate(token) : this.#allowed(authenticated);
+    const who = await this.#who(token, authenticated);
     if (who === undefined) return reply(id, this.#error("unauthenticated", "the credential was not accepted"));
     try {
       return reply(id, this.#ok(await this.#run(who, name, commandId as string, rest)));
@@ -159,6 +172,57 @@ export class McpConversationAdapter {
       }
       default: known([]); return c.unread(who);
     }
+  }
+
+  /** The threads the caller may read, as resources, paged by the MCP cursor (the thread id the last page ended at). */
+  async #listResources(token: unknown, id: string | number, params: unknown, authenticated: Principal | undefined): Promise<RpcResponse> {
+    const who = await this.#who(token, authenticated);
+    if (who === undefined) return fail(id, CODES.params, "the credential was not accepted");
+    const p = params as { cursor?: unknown; limit?: unknown } | undefined;
+    if (p?.cursor !== undefined && typeof p.cursor !== "string") return fail(id, CODES.params, "cursor: must be text");
+    const limit = p?.limit;
+    if (limit !== undefined && (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > CONVERSATION_LIMITS.page)) return fail(id, CODES.params, `limit: must be a whole number from 1 to ${CONVERSATION_LIMITS.page}`);
+    const page = await this.#conversations.threads(who, { ...(typeof p?.cursor === "string" ? { afterId: p.cursor } : {}), ...(limit === undefined ? {} : { limit }) });
+    return reply(id, {
+      resources: page.items.map((t) => ({ uri: `nimblenewt://thread/${t.id}`, name: clipText(redactText(t.subject), MCP_LIMITS.name), mimeType: "text/plain" })),
+      ...(page.next === undefined ? {} : { nextCursor: page.next }),
+    });
+  }
+
+  /**
+   * One thread's recent messages as a single text. A URI that is not a thread, a thread that is not there and a thread the caller may not read are answered the same way, so a resource's
+   * existence is never revealed. The messages come through the same read the tools use, so the caller's rights and the visibility rules are the service's.
+   */
+  async #readResource(token: unknown, id: string | number, params: unknown, authenticated: Principal | undefined): Promise<RpcResponse> {
+    const who = await this.#who(token, authenticated);
+    if (who === undefined) return fail(id, CODES.params, "the credential was not accepted");
+    const uri = (params as { uri?: unknown } | undefined)?.uri;
+    const match = typeof uri === "string" ? THREAD_URI.exec(uri) : null;
+    if (match === null) return fail(id, CODES.resource, "no such resource");
+    const threadId = match[1]!;
+    // The thread view says whether the caller may read it and how many messages it has; the read takes the newest window of them.
+    const thread = await this.#conversations.thread(who, threadId);
+    if (thread === undefined) return fail(id, CODES.resource, "no such resource");
+    const r = await this.#conversations.read(who, { threadId, afterSeq: Math.max(0, thread.nextSeq - 1 - RECENT), limit: RECENT });
+    if (r === undefined) return fail(id, CODES.resource, "no such resource");
+    return reply(id, { contents: [{ uri, mimeType: "text/plain", text: this.#threadText(r.items) }] });
+  }
+
+  /** The messages as one text, oldest first, each line who and when then the text. A thread too long for one item loses its oldest lines, and the reader is told. */
+  #threadText(items: readonly MessageView[]): string {
+    const lines = items.map((m) => `${m.sentAt} ${m.sender}: ${redactText(m.text)}`);
+    const kept: string[] = [];
+    let used = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!;
+      // The room for the "left out" line is kept aside as soon as a line would be dropped, so the text never passes the bound.
+      if (used + line.length + 1 > MCP_LIMITS.text - (kept.length > 0 ? LEFT_OUT.length + 1 : 0)) break;
+      kept.unshift(line);
+      used += line.length + 1;
+    }
+    if (kept.length === 0) return clipText(lines.at(-1) ?? "", MCP_LIMITS.text);
+    const body = kept.join("\n");
+    return kept.length < lines.length ? `${LEFT_OUT}\n${body}` : body;
   }
 
   #ok(result: unknown): object {

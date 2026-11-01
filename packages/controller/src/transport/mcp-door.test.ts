@@ -74,7 +74,9 @@ for (const backend of backends) {
 
       // MCP messages have their own allowance per principal, apart from REST and from other principals.
       const m = await listen({ limits: { mcpPerPrincipalPerMinute: 3 } });
-      for (let i = 0; i < 3; i++) assert.equal((await ping(m.url, ann)).status, 200);
+      for (let i = 0; i < 2; i++) assert.equal((await ping(m.url, ann)).status, 200);
+      // A resource list is an MCP message too: it uses the same allowance, not the REST one.
+      assert.equal((await post2(m.url, "/mcp", { token: ann, body: { jsonrpc: "2.0", id: 1, method: "resources/list" } })).status, 200);
       assert.equal((await ping(m.url, ann)).status, 429);
       assert.equal((await ping(m.url, bob)).status, 200);
       assert.equal((await post2(m.url, "/v1/unread", { token: ann, method: "GET" })).status, 200);
@@ -85,11 +87,15 @@ for (const backend of backends) {
       assert.equal((await ping(s.url, ann)).status, 200);
       state = "off";
       assert.equal((await ping(s.url, ann)).status, 404);
+      // The switch covers the resource methods like every other method.
+      assert.equal((await post2(s.url, "/mcp", { token: ann, body: { jsonrpc: "2.0", id: 1, method: "resources/list" } })).status, 404);
+      assert.equal((await post2(s.url, "/mcp", { token: ann, body: { jsonrpc: "2.0", id: 1, method: "resources/read", params: { uri: "nimblenewt://thread/thr-aaaaaaaaaaaaaaaaaaaa" } } })).status, 404);
       assert.equal((await post2(s.url, "/v1/unread", { token: ann, method: "GET" })).status, 200, "the REST door is not switched");
       state = "broken";
       assert.equal((await ping(s.url, ann)).status, 503);
       state = "on";
       assert.equal((await ping(s.url, ann)).status, 200);
+      assert.equal((await post2(s.url, "/mcp", { token: ann, body: { jsonrpc: "2.0", id: 1, method: "resources/list" } })).status, 200, "on again answers the resource methods");
 
       // Origin: absent is fine (not a browser), the listener's own is fine, any other is refused. The scheme word may be in any case.
       const t = await listen({});
@@ -159,6 +165,15 @@ for (const backend of backends) {
       assert.equal(r2["items"].length, 2);
       const rest = await post(url, `/v1/threads/${threadId}/messages?after=${r2["cursor"]}`, { token: ann.token, method: "GET" });
       assert.equal(rest.body.items.length, 0);
+
+      // The threads are resources through the door too: the caller is shown only its own, a read gives the messages as one text, and an outsider and a missing thread answer the same error.
+      const shown = async (token: string | undefined): Promise<string[]> => ((await rpc(token, "resources/list")).body.result.resources as { uri: string; mimeType: string }[]).map((x) => `${x.uri} ${x.mimeType}`);
+      assert.deepEqual(await shown(ann.token), [`nimblenewt://thread/${threadId} text/plain`]);
+      assert.deepEqual(await shown(zed.token), [], "another project's agent is shown nothing");
+      const got = (await rpc(ext.token, "resources/read", { uri: `nimblenewt://thread/${threadId}` })).body.result.contents as { text: string }[];
+      assert.deepEqual([got.length, got[0]!.text.includes("agent:ann: green?") && got[0]!.text.includes("client:ext: yes")], [1, true]);
+      assert.deepEqual((await rpc(zed.token, "resources/read", { uri: `nimblenewt://thread/${threadId}` })).body.error, { code: -32002, message: "no such resource" });
+      assert.deepEqual((await rpc(ann.token, "resources/read", { uri: "nimblenewt://thread/thr-aaaaaaaaaaaaaaaaaaaa" })).body.error, { code: -32002, message: "no such resource" });
 
       // Another project's agent learns nothing; a host credential is refused; a bad credential answers 401; no credential 401.
       const hidden = await tool(zed.token, "conversation_read", { threadId });
