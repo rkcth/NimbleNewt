@@ -53,8 +53,8 @@ test("an entry that is not a SQLite target is refused, and the message names the
 test("two entries with the same name are refused at the second one (card F04l)", async () => {
   await assert.rejects(
     sqliteTargetsFromConfig([
-      { name: "one", kind: "sqlite", path: "/srv/a.sqlite" },
-      { name: "one", kind: "sqlite", path: "/srv/b.sqlite" },
+      { name: "one", kind: "sqlite", path: join(tmpdir(), "nn-tgts-a.sqlite") },
+      { name: "one", kind: "sqlite", path: join(tmpdir(), "nn-tgts-b.sqlite") },
     ], deps),
     (error: Error) => error.message.includes("targets[1]") && error.message.includes("one"),
   );
@@ -90,7 +90,7 @@ test("two entries naming two different files are both accepted, however their pa
 });
 
 test("more than 16 entries are refused; exactly 16 are accepted (card F04l)", async () => {
-  const entry = (i: number) => ({ name: `t${i}`, kind: "sqlite", path: `/srv/t${i}.sqlite` });
+  const entry = (i: number) => ({ name: `t${i}`, kind: "sqlite", path: join(tmpdir(), `nn-tgts-t${i}.sqlite`) });
   await assert.rejects(sqliteTargetsFromConfig(Array.from({ length: 17 }, (_, i) => entry(i)), deps), /at most 16/);
   const ok = await sqliteTargetsFromConfig(Array.from({ length: 16 }, (_, i) => entry(i)), deps);
   assert.equal(ok.length, 16);
@@ -117,5 +117,30 @@ test("freeBytes of a path whose folder does not exist yet probes the nearest exi
     const failDeps: SqliteTargetDeps = { openStorage: deps.openStorage, statfs: async () => { throw new Error("permission denied"); } };
     const unreadable = await sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path: join(dir, "db.sqlite") }], failDeps);
     assert.equal(await unreadable[0]!.freeBytes!(), undefined, "a file system that cannot be read answers nothing, not a guess");
+  } finally { done(dir); }
+});
+
+test("a path that cannot be resolved, or is too long or holds a NUL, is refused with the entry named and without echoing the path (card F04l)", async () => {
+  for (const path of [join(tmpdir(), "x".repeat(5000)), join(tmpdir(), "a\0b")]) {
+    await assert.rejects(
+      sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path }], deps),
+      (error: Error) => error.message.includes("targets[0]") && error.message.includes("path") && !error.message.includes("xxxx") && !error.message.includes("a\0b"),
+    );
+  }
+});
+
+test("a field name with control characters is shown without them, and a non-string name is refused (card F04l)", async () => {
+  await assert.rejects(
+    sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path: join(tmpdir(), "nn-tgts-k.sqlite"), "bad\nkey\u001b[31m": 1 }], deps),
+    (error: Error) => !/[\u0000-\u001f]/.test(error.message),
+  );
+  await assert.rejects(sqliteTargetsFromConfig([{ name: 7, kind: "sqlite", path: join(tmpdir(), "nn-tgts-n.sqlite") }], deps), /targets\[0\].*name/);
+});
+
+test("free space survives a statfs that fails with no error object (card F04l)", async () => {
+  const dir = temp();
+  try {
+    const [t] = await sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path: join(dir, "db.sqlite") }], { ...deps, statfs: () => Promise.reject(null) });
+    assert.equal(await t!.freeBytes!(), undefined);
   } finally { done(dir); }
 });
