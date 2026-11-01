@@ -237,12 +237,15 @@ test("a request past its deadline, or with an attempt running, is not started an
 test("a deadline that passes while the request waits behind another on the same checkout stops it before it starts (review fix 1)", { skip }, async () => {
   let gate!: () => void;
   const hold = new Promise<void>((ok) => { gate = ok; });
-  let first = true;
-  const w = await world({ attemptsQuiet: async () => { if (first) { first = false; await hold; } return true; } });
+  let first = true; let entered = false;
+  const w = await world({ attemptsQuiet: async () => { if (first) { first = false; entered = true; await hold; } return true; } });
   try {
     await writeFile(join(w.shared, "src", "c.ts"), "export const c = 1;\n");
     sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
     const a = w.host.run(call("refresh"));
+    // The second call starts only once the first is inside the checkout's order (which of two calls started together gets there first is not fixed).
+    for (let i = 0; i < 400 && !entered; i++) await new Promise((ok) => setTimeout(ok, 25));
+    assert.equal(entered, true, "the first request is in the checkout's order");
     const b = w.host.run(call("integration", { expiresAt: new Date(Date.now() + 150).toISOString() }));
     await new Promise((ok) => setTimeout(ok, 300));
     gate();
@@ -344,6 +347,9 @@ test("two tasks landing on one shared tree run one after the other: the second i
       sh(where.checkout, "--git-dir", where.gitDir, "--work-tree", where.checkout, "add", "-A"); sh(where.checkout, "--git-dir", where.gitDir, "--work-tree", where.checkout, "commit", "-q", "-m", name);
     }
     const first = w.host.run(call("landing", { taskId: "tsk-one" }));
+    // Which of two calls started together reaches the tree's order first is not fixed (macOS showed it): the second starts only once the first is in it.
+    for (let i = 0; i < 400 && calls === 0; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(calls, 1, "the first landing is in the shared tree's order");
     const second = w.host.run(call("landing", { taskId: "tsk-second" }));
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(calls, 1, "the second landing has not even begun while the first is in the shared tree's order");
