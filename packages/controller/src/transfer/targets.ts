@@ -31,7 +31,7 @@ export const TARGET_ENTRIES_MAX = 16;
 /** Longest path accepted; longer is refused before the file system sees it. */
 export const TARGET_PATH_MAX = 4096;
 /** Absolute on this machine: on Windows a drive or UNC root (a path rooted on the current drive names a different file per working directory). */
-const absolute = (p: string): boolean => isAbsolute(p) && p.length <= TARGET_PATH_MAX && !p.includes("\0") && (process.platform !== "win32" || /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(p));
+const absolute = (p: string): boolean => isAbsolute(p) && p.length <= TARGET_PATH_MAX && !p.includes("\0") && (process.platform !== "win32" || /^(?:[a-zA-Z]:[\\/]|[\\/]{2})/.test(p));
 
 /**
  * The SQLite transfer targets the configuration names. Every refusal is an Error naming the entry's index and the problem; one bad entry returns no targets.

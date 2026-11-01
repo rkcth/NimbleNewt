@@ -113,7 +113,8 @@ test("freeBytes of a path whose folder does not exist yet probes the nearest exi
     const targets = await sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path: join(dir, "not", "yet", "db.sqlite") }], probeDeps);
     const free = await targets[0]!.freeBytes!();
     assert.ok(typeof free === "number" && free > 0, "the parent's file system answers");
-    assert.deepEqual(probed, [join(dir, "not", "yet"), join(dir, "not"), dir], "the missing folders first, then their nearest existing parent");
+    const real = await canon(dir);
+    assert.deepEqual(probed, [join(real, "not", "yet"), join(real, "not"), real], "the missing folders first, then their nearest existing parent");
     const failDeps: SqliteTargetDeps = { openStorage: deps.openStorage, statfs: async () => { throw new Error("permission denied"); } };
     const unreadable = await sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path: join(dir, "db.sqlite") }], failDeps);
     assert.equal(await unreadable[0]!.freeBytes!(), undefined, "a file system that cannot be read answers nothing, not a guess");
@@ -143,4 +144,12 @@ test("free space survives a statfs that fails with no error object (card F04l)",
     const [t] = await sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path: join(dir, "db.sqlite") }], { ...deps, statfs: () => Promise.reject(null) });
     assert.equal(await t!.freeBytes!(), undefined);
   } finally { done(dir); }
+});
+
+test("a path the file system cannot resolve is refused as such, naming the entry and not echoing the path (card F04l)", { skip: process.platform === "win32" ? "Windows does not fail a 300-character name the way POSIX does" : false }, async () => {
+  const path = join(tmpdir(), "y".repeat(300), "db.sqlite");
+  await assert.rejects(
+    sqliteTargetsFromConfig([{ name: "one", kind: "sqlite", path }], deps),
+    (error: Error) => error.message.includes("targets[0]") && error.message.includes("cannot be resolved") && !error.message.includes("yyyy"),
+  );
 });
