@@ -850,4 +850,30 @@ for (const backend of backends) {
     assert.equal(await im.open(c.dev, c.a), undefined);
     assert.ok(await im.open(c.plain, c.a));
   });
+
+  suite("the project's stand-ups are told by their latest occurrence, most recent first, to those who may read its meetings; the limit is honoured and a stand-up that has not met yet is left out (card M03h)", async (c) => {
+    const daily = await c.schedule();
+    const weekly = await c.schedule({ title: "Weekly review", time: "10:00", windowTo: "11:00" });
+    at("2026-10-23T07:00:00.000Z");
+    const created = (await c.meetings.tick(c.host)).created;
+    const dailyOcc = created.find((x) => x.scheduleId === daily.scheduleId)!.occurrenceId;
+    const weeklyOcc = created.find((x) => x.scheduleId === weekly.scheduleId)!.occurrenceId;
+    await c.meetings.settle({ ...c.host, kind: "service" } as Principal, { commandId: "s1", occurrenceId: dailyOcc, outcome: "held" });
+    await c.schedule({ title: "Not yet met" });
+    const got = await c.standups.recent(c.owner, c.a);
+    assert.ok(got !== undefined);
+    assert.deepEqual(got.items.map((x) => [x.title, x.startsAt, x.state]), [["Weekly review", "2026-10-23T08:00:00.000Z", "planned"], ["Daily stand-up", "2026-10-23T07:00:00.000Z", "held"]]);
+    assert.deepEqual(got.items.map((x) => x.occurrenceId), [weeklyOcc, dailyOcc]);
+    assert.ok(got.items.every((x) => x.revision >= 1));
+    assert.equal(got.more, false);
+    const one = await c.standups.recent(c.owner, c.a, { limit: 1 });
+    assert.deepEqual(one!.items.map((x) => x.title), ["Weekly review"]);
+    assert.equal(one!.more, true, "the stand-up left out is told");
+    assert.deepEqual((await c.standups.recent(c.reader, c.a))!.items.map((x) => x.occurrenceId), [weeklyOcc, dailyOcc], "a reader of the project's meetings sees them too");
+    assert.equal(await c.standups.recent(c.eve, c.a), undefined, "a manager of another project sees none");
+    assert.deepEqual(await c.standups.recent(c.owner, c.b), { items: [], more: false }, "a project with no stand-ups answers an empty list");
+    await refuses("invalid_command", () => c.standups.recent(c.owner, c.a, { limit: 0 }));
+    await refuses("invalid_command", () => c.standups.recent(c.owner, c.a, { limit: 51 }));
+  });
+
 }

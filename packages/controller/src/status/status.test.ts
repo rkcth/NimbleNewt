@@ -51,7 +51,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -91,7 +91,7 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
+          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
           ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
@@ -1325,6 +1325,38 @@ for (const backend of backends) {
     assert.equal(await status.ask(reader, { kind: "meetings", projectId: c.project }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "meetings", projectId: c.project }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "meetings", projectId: c.project, limit: 51 }));
+  });
+
+  suite("the meetings answer also lists the project's stand-ups newest first, honours the limit, and stays silent for a caller without the right or a project with none (card M03h)", async (c) => {
+    const meeting = { id: "occ-9", revision: 1, title: "Planning", kind: "scheduled", startsAt: "2026-10-24T14:00:00.000Z", endsAt: "2026-10-24T15:00:00.000Z", mode: "live", state: "planned", participants: [] };
+    const standups = [
+      { occurrenceId: "occ-2", revision: 2, title: "Daily stand-up", startsAt: "2026-10-22T08:00:00.000Z", state: "reported" },
+      { occurrenceId: "occ-1", revision: 1, title: "Daily stand-up", startsAt: "2026-10-21T08:00:00.000Z", state: "held" },
+    ];
+    let askedLimit: number | undefined;
+    const meetings = { planned: async (by: Principal, _p: string, page?: { limit?: number }) => (by.kind === "owner" ? { items: [meeting].slice(0, page?.limit ?? 10) } : undefined) };
+    const recent = { recent: async (by: Principal, _p: string, page?: { limit?: number }) => { if (by.kind !== "owner") return undefined; askedLimit = page?.limit; const page2 = standups.slice(0, page?.limit ?? 10); return { items: page2, more: standups.length > page2.length }; } };
+    const status = c.rebuild({}, { meetings, standups: recent });
+    const got = (await status.ask(c.owner, { kind: "meetings", projectId: c.project }))!;
+    assert.equal(got.lines[0]!.text, "Planning: scheduled, 2026-10-24T14:00:00.000Z to 2026-10-24T15:00:00.000Z, live, planned. No roster.");
+    assert.equal(got.lines[1]!.text, "Daily stand-up: stand-up, 2026-10-22T08:00:00.000Z, reported.");
+    assert.equal(got.lines[2]!.text, "Daily stand-up: stand-up, 2026-10-21T08:00:00.000Z, held.");
+    assert.deepEqual(got.lines[1]!.cites.map((x) => x.kind), ["meeting", "project"]);
+    cited(got.lines);
+    const limited = (await status.ask(c.owner, { kind: "meetings", projectId: c.project, limit: 1 }))!;
+    assert.equal(askedLimit, 1, "the stand-up source is asked for the same page as the meetings");
+    assert.deepEqual(limited.lines.map((l) => l.text), [
+      "Planning: scheduled, 2026-10-24T14:00:00.000Z to 2026-10-24T15:00:00.000Z, live, planned. No roster.",
+      "Daily stand-up: stand-up, 2026-10-22T08:00:00.000Z, reported.",
+      "There are more stand-ups than shown.",
+    ]);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "meetings", projectId: c.project }), undefined, "a caller who may not read the meetings sees no stand-ups either");
+    const partial = c.rebuild({}, { meetings: { planned: async () => ({ items: [meeting] }) }, standups: { recent: async (by: Principal) => (by.kind === "owner" ? { items: standups, more: false } : undefined) } });
+    const seen = (await partial.ask(reader, { kind: "meetings", projectId: c.project }))!;
+    assert.deepEqual(seen.lines.map((l) => l.text), ["Planning: scheduled, 2026-10-24T14:00:00.000Z to 2026-10-24T15:00:00.000Z, live, planned. No roster."], "a caller without the right to the stand-ups gets the meetings answer unchanged");
+    const none = c.rebuild({}, { meetings, standups: { recent: async () => ({ items: [], more: false }) } });
+    assert.deepEqual((await none.ask(c.owner, { kind: "meetings", projectId: c.project }))!.lines.map((l) => l.text), ["Planning: scheduled, 2026-10-24T14:00:00.000Z to 2026-10-24T15:00:00.000Z, live, planned. No roster."], "a project with no stand-ups gets no extra line");
   });
 
   suite("the hand-off going on for a task is told: who to whom, why, how far, what the package lacks, what holds it up and when a temporary one returns (card L03f)", async (c) => {

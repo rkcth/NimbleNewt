@@ -240,6 +240,8 @@ export interface StatusDeps {
   readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
+  /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer. Absent: they are not listed. */
+  readonly standups?: { recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined> };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
@@ -474,7 +476,7 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
-  /** The meetings planned in a project, soonest first: the title, the kind, when, how it is held and who is on the roster with how each is placed (present, unavailable, paused...). Nothing for a project the caller may not read. */
+  /** The meetings planned in a project, soonest first: the title, the kind, when, how it is held and who is on the roster with how each is placed (present, unavailable, paused...), then the project's stand-ups by their latest occurrence — when each ran or is planned and its state — most recent first (card M03h). Nothing for a project the caller may not read. */
   async meetingLines(by: Principal, request: { projectId: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.meetings === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);
@@ -488,6 +490,13 @@ export class StatusService {
     });
     if (lines.length === 0) lines.push(line("No meeting is planned in this project.", cite("project", projectId)));
     else if (planned.next !== undefined) lines.push(line("There are more meetings than shown.", cite("project", projectId)));
+    if (this.#deps.standups !== undefined) {
+      const recent = await this.#deps.standups.recent(by, projectId, { limit });
+      if (recent !== undefined) {
+        for (const s of recent.items) lines.push(line(`${shown(s.title)}: stand-up, ${s.startsAt}, ${s.state}.`, cite("meeting", s.occurrenceId, s.revision), cite("project", projectId)));
+        if (recent.more === true) lines.push(line("There are more stand-ups than shown.", cite("project", projectId)));
+      }
+    }
     return { observedAt: this.#runner.now(), lines };
   }
 

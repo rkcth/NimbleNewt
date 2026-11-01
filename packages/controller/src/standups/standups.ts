@@ -301,6 +301,35 @@ export class StandupService {
     return { items, more: false };
   }
 
+  /**
+   * The project's stand-ups by their latest occurrence — when each ran or is planned, and that occurrence's state — most recent first, for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. A stand-up whose schedule has not made an occurrence yet has nothing to tell and is left out; ended stand-ups are listed too (their last meeting was still a stand-up of this project). Found the same way as `list` (every stand-up record of the installation; there is no per-project index). At most `limit` (default 20, at most 50); `more` says some were left out. Added for the chat's meetings status answer (card M03h).
+   */
+  async recent(viewer: Principal, projectId: string, options: { limit?: number } = {}): Promise<{ items: { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more: boolean } | undefined> {
+    const project = checkProjectId(projectId);
+    const limit = options.limit === undefined ? 20 : whole(options.limit, "limit", 1, STANDUP_LIMITS.agendaPage);
+    // The right to read the project's meetings is asked directly, so a readable project with no stand-ups answers an empty list, not undefined.
+    if ((await this.#meetings.planned(viewer, project, { limit: 1 })) === undefined) return undefined;
+    const items: { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      if (chunk.length === 0) break;
+      for (const c of chunk) {
+        if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
+        const last = (await this.#meetings.schedule(viewer, c.id))?.lastOccurrenceId;
+        if (last === undefined) continue;
+        const found = await this.#runner.get("meeting-occurrence", last);
+        const body = found?.body as unknown as OccurrenceBody | undefined;
+        if (found === undefined || body === undefined || body.projectId !== project) continue;
+        items.push({ occurrenceId: found.id, revision: found.revision, title: body.title, startsAt: body.startsAt, state: body.state });
+      }
+      after = chunk[chunk.length - 1]!.id;
+      if (chunk.length < 100) break;
+    }
+    items.sort((x, y) => (x.startsAt !== y.startsAt ? (x.startsAt < y.startsAt ? 1 : -1) : x.occurrenceId < y.occurrenceId ? -1 : 1));
+    return { items: items.slice(0, limit), more: items.length > limit };
+  }
+
   // ---- preparation ---------------------------------------------------------------------------------------------------------------
 
   /**
