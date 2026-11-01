@@ -8,8 +8,11 @@ const REF = { kind: "generation-stream-settings", id: "main" } as const;
 /**
  * `record`: the model stream of each call is recorded against its generation. `cut`: a reply whose generation was interrupted is held back from the worker. `failClosed`: when the store cannot answer (it errors or does not
  * answer in time) a call is not sent and a reply being read is cut, with the reason shown; off ("open"): the call and the reply go on unrecorded and the reason is reported.
+ * Card L05c: `recordPaused` (on): a model call begun while the task is paused is recorded as a generation (marked as begun paused; nothing it produces can be admitted while the pause stands); off: such a call is refused before it
+ * is sent. `checkBridge` (on): the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation. `requireRecorded` (OFF): the bridge also refuses a call that no generation
+ * recorded at all; off by default because a stream that was not recorded (recording off, an unknown reply format) says nothing either way.
  */
-export const STREAM_SETTINGS = ["record", "cut", "failClosed"] as const;
+export const STREAM_SETTINGS = ["record", "cut", "failClosed", "recordPaused", "checkBridge", "requireRecorded"] as const;
 export type StreamSetting = (typeof STREAM_SETTINGS)[number];
 /** Numeric settings: 0 turns the limit off. */
 export const STREAM_VALUES = {
@@ -30,18 +33,21 @@ export interface StreamSettingsView {
   /** The fail mode `onStoreFailure`: "closed" (default) or "open". */
   readonly onStoreFailure: "open" | "closed";
   readonly failClosed: boolean;
+  readonly recordPaused: boolean;
+  readonly checkBridge: boolean;
+  readonly requireRecorded: boolean;
   readonly storeTimeoutMs: number;
   readonly batchMs: number;
   readonly batchChars: number;
   readonly heldBufferBytes: number;
 }
 
-type Stored = { record?: unknown; cut?: unknown; failClosed?: unknown } & Partial<Record<StreamValue, unknown>>;
+type Stored = { record?: unknown; cut?: unknown; failClosed?: unknown; recordPaused?: unknown; checkBridge?: unknown; requireRecorded?: unknown } & Partial<Record<StreamValue, unknown>>;
 const valueOf = (body: Stored | undefined, name: StreamValue): number => { const v = body?.[name]; return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= STREAM_VALUES[name].max ? v : STREAM_VALUES[name].default; };
 export const viewOf = (found: { revision: number; body: unknown } | undefined): StreamSettingsView => {
   const body = found?.body as Stored | undefined;
   const failClosed = body?.failClosed !== false;
-  return { revision: found?.revision ?? 0, record: body?.record !== false, cut: body?.cut !== false, onStoreFailure: failClosed ? "closed" : "open", failClosed, storeTimeoutMs: valueOf(body, "storeTimeoutMs"), batchMs: valueOf(body, "batchMs"), batchChars: valueOf(body, "batchChars"), heldBufferBytes: valueOf(body, "heldBufferBytes") };
+  return { revision: found?.revision ?? 0, record: body?.record !== false, cut: body?.cut !== false, onStoreFailure: failClosed ? "closed" : "open", failClosed, recordPaused: body?.recordPaused !== false, checkBridge: body?.checkBridge !== false, requireRecorded: body?.requireRecorded === true, storeTimeoutMs: valueOf(body, "storeTimeoutMs"), batchMs: valueOf(body, "batchMs"), batchChars: valueOf(body, "batchChars"), heldBufferBytes: valueOf(body, "heldBufferBytes") };
 };
 
 /**
@@ -91,7 +97,7 @@ export class StreamSettingsService {
         const current = await this.#runner.get(REF.kind, REF.id);
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the model stream settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
         const before = viewOf(current);
-        const next: Record<StreamSetting, boolean> & Record<StreamValue, number> = { record: before.record, cut: before.cut, failClosed: before.failClosed, storeTimeoutMs: before.storeTimeoutMs, batchMs: before.batchMs, batchChars: before.batchChars, heldBufferBytes: before.heldBufferBytes };
+        const next: Record<StreamSetting, boolean> & Record<StreamValue, number> = { record: before.record, cut: before.cut, failClosed: before.failClosed, recordPaused: before.recordPaused, checkBridge: before.checkBridge, requireRecorded: before.requireRecorded, storeTimeoutMs: before.storeTimeoutMs, batchMs: before.batchMs, batchChars: before.batchChars, heldBufferBytes: before.heldBufferBytes };
         for (const n of enable) next[n] = true;
         for (const n of disable) next[n] = false;
         for (const [k, v] of Object.entries(set)) next[k as StreamValue] = v;

@@ -286,13 +286,62 @@ for (const backend of backends) {
     assert.ok((finished?.outputTokens ?? 0) > 5, "what was received before the reply was held is counted for spend and speed");
   });
 
+  suite("a model call begun while the task is paused is recorded, marked as begun paused, and nothing it produced can be admitted while the pause stands (card L05c)", async (c) => {
+    const reply = sse(chunk({ content: "hm" }), chunk({ tool_calls: [{ index: 0, id: "call_p", type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    const paused = c.mk({ pauses: { guard: async () => ({ blockedBy: [{ kind: "task", id: c.task }], changes: [] }) } });
+    const e = endpoint([[reply]]);
+    assert.equal(await drain((await c.relayFor(e, undefined, [], { gen: paused }).relay(request as never)).body), reply);
+    const r = await run(c, 1);
+    assert.equal(r.beganPaused, true);
+    assert.equal(r.state, "finished");
+    assert.equal(r.toolCalls[0]!.state, "complete");
+    await assert.rejects(paused.admitEffect(c.owner, { commandId: "adm", runId: GenerationService.runIdOf(c.task, 1), toolCallId: "call_p", kind: "read", target: "x" }), /paused/);
+    // A call that began unpaused is not marked.
+    const free = endpoint([[reply]]);
+    await drain((await c.relayFor(free).relay(request as never)).body);
+    assert.equal((await run(c, 2)).beganPaused, undefined);
+    // Only the dispatcher may ask for it.
+    await assert.rejects(c.gen.begin(c.owner, { commandId: "bp", taskId: c.task, contextRevision: 1, whilePaused: true }), /may not record a generation of a paused task/);
+  });
+
+  suite("checkCall: a call is ok only in a complete, current, uninterrupted generation of the task; the reason is told otherwise (card L05c)", async (c) => {
+    const reply = (id: string) => sse(chunk({ tool_calls: [{ index: 0, id, type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    const ask = (callId: string) => c.gen.checkCall(c.dispatcher, { taskId: c.task, callId });
+    assert.deepEqual(await ask("call_a"), { recorded: false }, "nothing recorded yet");
+    await drain((await c.relayFor(endpoint([[reply("call_a")]])).relay(request as never)).body);
+    const ok = await ask("call_a");
+    assert.equal(ok.recorded && ok.ok, true, JSON.stringify(ok));
+    assert.deepEqual(await ask("call_unknown"), { recorded: false });
+    // A correction withdraws the calls of the generation that was current.
+    await c.gen.correct(c.owner, { commandId: "fix", taskId: c.task, expectedContextRevision: 1, reason: "use beans" });
+    const corrected = await ask("call_a");
+    assert.ok(corrected.recorded && !corrected.ok && /corrected by .*use beans/.test(corrected.reason ?? ""), JSON.stringify(corrected));
+    // The next generation (revision 2) holds a new call; the old one stays refused, now as superseded or corrected.
+    await drain((await c.relayFor(endpoint([[reply("call_b")]])).relay(request as never)).body);
+    const b = await ask("call_b");
+    assert.equal(b.recorded && b.ok, true, JSON.stringify(b));
+    assert.equal((await ask("call_a") as { ok: boolean }).ok, false);
+    // A held task refuses even a complete call; releasing lifts it.
+    await c.gen.interrupt(c.owner, { commandId: "hold", taskId: c.task, mode: "finish_and_hold", reason: "wait" });
+    const held = await ask("call_b");
+    assert.ok(held.recorded && !held.ok, JSON.stringify(held));
+    // A partial call (the stream broke) is never ok.
+    await c.gen.release(c.owner, { commandId: "rel", taskId: c.task, reason: "go on" });
+    await drain((await c.relayFor(endpoint([[sse(chunk({ tool_calls: [{ index: 0, id: "call_c", type: "function", function: { name: "desk-write", arguments: "{\"body\":\"half" } }] }))]])).relay(request as never)).body);
+    const half = await ask("call_c");
+    assert.ok(half.recorded && !half.ok && /dropped/.test(half.reason ?? ""), JSON.stringify(half));
+    // Other principals may not ask.
+    await assert.rejects(c.gen.checkCall({ ...c.dispatcher, id: "agent:ann", kind: "agent" } as never, { taskId: c.task, callId: "call_b" }), /may not check/);
+  });
+
   suite("a call is refused (not sent) for a fenced attempt, a paused task, a task waiting for a decision, and a done or cancelled task", async (c) => {
     const e = endpoint([[sse(chunk({ content: "x" }))]]);
     await assert.rejects(c.relayFor(e, undefined, [], { attempt: { attemptId: c.attemptId, taskId: c.task, generation: 99 } }).relay(request as never), /refused the call: no generation begins/, "fenced");
     const paused = c.mk({ pauses: { guard: async () => ({ blockedBy: [{ kind: "project", id: "p" }], changes: [] }) } });
-    await assert.rejects(c.relayFor(e, undefined, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused");
+    // Card L05c: a paused task's call is recorded by default; the owner can turn that off, and then the call is refused before it is sent.
+    await assert.rejects(c.relayFor(e, { record: true, cut: true, recordPaused: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused");
     // The store answered: the refusal holds whatever the fail mode is (open only covers a store that cannot answer).
-    await assert.rejects(c.relayFor(e, { record: true, cut: true, failClosed: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused, fail mode open");
+    await assert.rejects(c.relayFor(e, { record: true, cut: true, failClosed: false, recordPaused: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused, fail mode open");
     const waiting = c.mk({ decisions: { guard: async () => ({ blockedBy: ["the owner has not decided"], changes: [] }) } });
     await assert.rejects(c.relayFor(e, undefined, [], { gen: waiting }).relay(request as never), /refused the call: .*not decided/, "decision");
     const t = (await c.projects.getTask(c.task))!;

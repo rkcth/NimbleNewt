@@ -73,6 +73,8 @@ export interface RunBody {
   /** The context revision this generation was bound to when it began. */
   readonly contextRevision: number;
   readonly fence?: Fence;
+  /** The generation began while a pause gate on the task stood (card L05c); it was recorded, and its calls cannot be admitted until the pause is lifted. */
+  readonly beganPaused?: true;
   readonly state: RunState;
   readonly text: string;
   /** Chunks applied so far; the next must be numbered one more. */
@@ -90,7 +92,13 @@ export interface RunBody {
   readonly failure?: string;
 }
 
-export interface BeginRun extends NoActor { readonly taskId: string; readonly contextRevision: number; readonly fence?: Fence }
+export interface BeginRun extends NoActor {
+  readonly taskId: string;
+  readonly contextRevision: number;
+  readonly fence?: Fence;
+  /** The task is paused (L01) but its model call is recorded anyway (card L05c): the generation is begun and marked `beganPaused`. Only the dispatcher may ask. Nothing the generation produces can be admitted as an effect while the pause stands. */
+  readonly whilePaused?: boolean;
+}
 export interface RecordPiece { readonly text?: string; readonly toolCall?: { readonly id: string; readonly name?: string; readonly argumentsDelta?: string; readonly done?: boolean } }
 export interface RecordChunk extends NoActor, RecordPiece {
   readonly runId: string;
@@ -112,6 +120,8 @@ export interface RunView { readonly run: View<RunBody>; /** True while this is s
 export interface GateView { readonly gate: View<GateBody> }
 
 export const GENERATION_LIMITS = { batch: 64, text: 64 * 1024, delta: 8 * 1024, args: 16 * 1024, toolCalls: 32, late: 50, preview: 200, reason: 500, callId: 80, kind: 40, target: 500 } as const;
+/** How many of a task's latest generations are searched for a tool call. */
+export const GENERATION_CHECK_RUNS = 20;
 const RUN_ID = /^grun-[a-z2-7]{20}-\d{10}$/;
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
@@ -180,7 +190,9 @@ export class GenerationService {
 
   /** Begins a generation bound to the task's current context revision. Refused while the task is held or if the revision is not the current one. A running or finished generation of the task is superseded (another principal's only by the installation owner, assignment.manage or a valid fence). */
   async begin(principal: Principal, command: BeginRun): Promise<{ id: string; number: number; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "contextRevision", "fence"]);
+    onlyKnown(command, ["commandId", "taskId", "contextRevision", "fence", "whilePaused"]);
+    if (command.whilePaused !== undefined && typeof command.whilePaused !== "boolean") invalid("whilePaused", "must be true or false");
+    if (command.whilePaused === true && !isDispatcher(principal)) throw new DomainError("forbidden", `${principal.id} may not record a generation of a paused task`);
     const taskId = checkTaskId(command.taskId);
     const bound = whole(command.contextRevision, "contextRevision");
     const fence = command.fence === undefined ? undefined : checkFence(command.fence);
@@ -189,12 +201,15 @@ export class GenerationService {
     const scoped = scopedCommandId(principal.id, command.commandId);
     return this.#retrying(async () => {
       const result = await this.#runner.command("generation.begin", { commandId: scoped, actor: principal.id }, async () => ({
-        payload: { taskId, contextRevision: bound, ...(fence === undefined ? {} : { fence: fence as unknown as JsonObject }) },
+        payload: { taskId, contextRevision: bound, ...(fence === undefined ? {} : { fence: fence as unknown as JsonObject }), ...(command.whilePaused === true ? { whilePaused: true } : {}) },
         build: async () => {
           const gate = await this.#gate(taskId, task.projectId);
           if (gate.body.hold !== undefined) throw new GenerationRefused("held", `task ${taskId} is held (${gate.body.hold.mode}: ${gate.body.hold.reason}); no generation begins until it is released`);
           if (bound !== gate.body.contextRevision) throw new GenerationRefused("stale", `context revision ${bound} is not the current one (${gate.body.contextRevision})`);
-          const paused = [...(await this.#pauseChanges(taskId)), ...(await this.#decisionChanges(taskId, "start"))];
+          let stood = false;
+          let pauseCheck: readonly Change[] = [];
+          try { pauseCheck = await this.#pauseChanges(taskId); } catch (error) { if (command.whilePaused === true && error instanceof GenerationRefused && error.reason === "paused") stood = true; else throw error; }
+          const paused = [...pauseCheck, ...(await this.#decisionChanges(taskId, "start"))];
           const guard = fence === undefined ? undefined : await this.#assignments!.guardFor(fence).check(taskId);
           const at = this.#runner.now();
           const changes: Change[] = [];
@@ -214,7 +229,7 @@ export class GenerationService {
           const id = runIdOf(taskId, number);
           const ref: AggregateRef = { kind: "generation-run", id };
           const run: RunBody = {
-            taskId, projectId: task.projectId, owner: principal.id, number, contextRevision: bound, ...(fence === undefined ? {} : { fence }),
+            taskId, projectId: task.projectId, owner: principal.id, number, contextRevision: bound, ...(fence === undefined ? {} : { fence }), ...(stood ? { beganPaused: true as const } : {}),
             state: "streaming", text: "", chunks: 0, toolCalls: [], late: [], lateCount: 0, startedAt: at, sensitive: true,
           };
           changes.push(this.#write(gate.ref, gate.revision, { ...gate.body, runs: number, current: number }), { type: "create", ref, body: clean(run) }, ...paused, ...(guard?.changes ?? []));
@@ -594,6 +609,38 @@ export class GenerationService {
     const g = found.body as unknown as GateBody;
     if (!(await this.#mayRead(viewer, { projectId: g.projectId, taskId: g.taskId, owner: "" }))) return undefined;
     return { gate: view<GateBody>(found) };
+  }
+
+  /**
+   * Whether a model tool call belongs to a complete, current generation of the task (card L05c). The tool bridge asks this before it acts on a call the worker presents (`callId` is the model's own tool call ID).
+   * `recorded: false` means no generation of the task (among its latest `CHECK_RUNS`) has this call, so nothing can be said (the stream was not recorded: the owner's choice, an unknown reply format, a task the service
+   * did not know). Otherwise `ok` is true only when the newest generation holding the call is the task's current one at the current context revision, was not interrupted, the task is not held and the call's arguments are
+   * complete (`complete`, or `admitted` for the same call asked again); `reason` says why not, in words the worker's model can be told. Read by the owner and the dispatcher only; anyone else gets `forbidden`.
+   */
+  async checkCall(viewer: Principal, command: { taskId: string; callId: string }): Promise<{ recorded: false } | { recorded: true; ok: boolean; runId: string; number: number; reason?: string }> {
+    onlyKnown(command, ["taskId", "callId"]);
+    const taskId = checkTaskId(command.taskId);
+    if (typeof command.callId !== "string" || !CALL_ID.test(command.callId)) invalid("callId", "is not a tool call ID");
+    if (!(viewer.kind === "owner" || isDispatcher(viewer))) throw new DomainError("forbidden", `${viewer.id} may not check tool calls against generations`);
+    const gateRow = await this.#runner.get("generation-gate", gateIdOf(taskId));
+    const gate = gateRow?.body as unknown as GateBody | undefined;
+    if (gate === undefined || gate.current === undefined) return { recorded: false };
+    for (let n = gate.current; n >= 1 && n > gate.current - GENERATION_CHECK_RUNS; n--) {
+      const row = await this.#runner.get("generation-run", runIdOf(taskId, n));
+      if (row === undefined) continue;
+      const run = row.body as unknown as RunBody;
+      const call = run.toolCalls.find((c) => c.id === command.callId);
+      if (call === undefined) continue;
+      const base = { recorded: true as const, runId: row.id, number: run.number };
+      const no = (reason: string): { recorded: true; ok: false; runId: string; number: number; reason: string } => ({ ...base, ok: false, reason });
+      if (run.interrupted !== undefined) return no(`generation ${run.number} of task ${taskId} was ${run.interrupted.kind} by ${run.interrupted.by} (${run.interrupted.reason}); its tool calls are withdrawn`);
+      if (run.number !== gate.current) return no(`generation ${run.number} of task ${taskId} is no longer the current one (generation ${gate.current} is)`);
+      if (run.contextRevision !== gate.contextRevision) return no(`generation ${run.number} was begun under context revision ${run.contextRevision}; the task is at ${gate.contextRevision} (it was corrected)`);
+      if (gate.hold !== undefined) return no(`task ${taskId} is held (${gate.hold.mode}: ${gate.hold.reason})`);
+      if (call.state === "complete" || call.state === "admitted") return { ...base, ok: true };
+      return no(`tool call ${call.id} of generation ${run.number} is ${call.state}${call.reason === undefined ? "" : ` (${call.reason})`}: only a complete call of a current generation runs`);
+    }
+    return { recorded: false };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------

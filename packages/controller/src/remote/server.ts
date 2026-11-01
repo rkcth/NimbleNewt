@@ -272,7 +272,7 @@ export class WorkerTransport {
       allowed("POST");
       const body = await this.#body(req);
       const p = placementOf(body);
-      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"] }[c] ?? ["placement"]);
+      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "begin": return { status: 200, body: await svc.begin(host, session, attempt, p, body["request"] as never) };
@@ -282,6 +282,9 @@ export class WorkerTransport {
         case "acknowledge": await svc.acknowledgeDecisions(host, session, attempt, p); return { status: 204 };
         case "complete": return { status: 200, body: await svc.complete(host, session, attempt, p, { commandId: this.#key(req), result: body["result"] as never }) };
         case "launched": return { status: 200, body: await svc.launched(host, session, attempt, p, { digest: body["digest"], enforcement: body["enforcement"] ?? [] }) };
+        case "stream-start": return { status: 200, body: await svc.streamStart(host, session, attempt, p, body["call"] as never, this.#key(req)) };
+        case "stream-events": return { status: 200, body: await svc.streamEvents(host, session, attempt, p, body["streamId"], body["n"], body["events"]) };
+        case "stream-end": await svc.streamEnd(host, session, attempt, p, body["streamId"], { ok: body["ok"] }); return { status: 204 };
         case "refuse": await svc.refuseOrder(host, session, attempt, p, { digest: body["digest"], reasons: body["reasons"] }); return { status: 204 };
         default: throw new HttpError(404, "not_found", "no such route");
       }

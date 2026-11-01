@@ -254,6 +254,55 @@ for (const backend of backends) {
     assert.match(bad(out["remote"]!).message, /not this machine/);
   });
 
+  suite("a call that does not belong to a complete, current generation of the task is refused with the reason and nothing runs; the owner's switches decide the rest (card L05c)", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const seen: unknown[] = [];
+    const verdicts: Record<string, unknown> = {
+      call_ok: { recorded: true, ok: true, runId: "r", number: 1 },
+      call_old: { recorded: true, ok: false, runId: "r", number: 1, reason: "generation 1 of task T was corrected by owner:rob (use beans); its tool calls are withdrawn" },
+      call_none: { recorded: false },
+    };
+    let broken = false;
+    let mode = { check: true, require: false };
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (_t: unknown, raw: unknown) => { seen.push(raw); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      isLocalHost: () => true,
+      generations: { checkCall: async (_p: unknown, cmd: { callId: string }) => { if (broken) throw new Error("store down"); return (verdicts[cmd.callId] ?? { recorded: false }) as never; } },
+      callCheck: async () => mode,
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      const send = (callId: string, op = "task.update") => svc.handle(order.credential, gateway, { op, callId, args: { expectedRevision: 1, title: callId } });
+      out["ok"] = await send("call_ok");
+      out["old"] = await send("call_old");
+      out["oldRead"] = await send("call_old", "task.get");
+      out["none"] = await send("call_none");
+      mode = { check: true, require: true };
+      out["noneRequired"] = await send("call_none");
+      out["declare"] = await svc.handle(order.credential, gateway, { op: "tool.discover", callId: "decl-1-1", args: {} });
+      mode = { check: false, require: false };
+      out["oldUnchecked"] = await send("call_old");
+      mode = { check: true, require: false };
+      broken = true;
+      out["broken"] = await send("call_ok");
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    good(out["ok"]!);
+    assert.equal(bad(out["old"]!).code, "generation_refused");
+    assert.match(bad(out["old"]!).message, /corrected by owner:rob \(use beans\).*it was not run/);
+    assert.equal(bad(out["oldRead"]!).code, "generation_refused", "reads of a withdrawn call are refused too");
+    good(out["none"]!);
+    assert.match(bad(out["noneRequired"]!).message, /belongs to no recorded generation/);
+    assert.notEqual((out["declare"] as { code?: string }).code, "generation_refused", "the extension's own declaration reads are not a model call");
+    good(out["oldUnchecked"]!);
+    assert.equal(bad(out["broken"]!).code, "unavailable");
+    // Only the calls that passed reached the state API: ok, none, oldUnchecked.
+    assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title), ["call_ok", "call_none", "call_old"]);
+  });
+
   suite("an agent holds the grant for its own tool namespace from enrolment, so the tool path asks for approval instead of refusing the call; nothing runs before it", async (c) => {
     // Ann is enrolled with no grant for her own namespace given: she holds it all the same.
     const ann = await c.agent("ann", [...workGrants(c.project), { action: "desk.write", project: c.project }, { action: "desk.read", project: c.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" }]);

@@ -13,12 +13,12 @@ export const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", versio
 export const AGENT = "agt-abcdefghijklmnopqrst";
 
 /** A composed controller with two remote hosts, a clock the test moves and an agent with tasks to run. */
-export async function world(d: string, policy: { dataHosts?: string[]; platforms?: { os: string; arch: string }[]; credentialHosts?: string[] }, options: { requirements?: () => Record<string, unknown>; checkpointWaitMs?: number } = {}) {
+export async function world(d: string, policy: { dataHosts?: string[]; platforms?: { os: string; arch: string }[]; credentialHosts?: string[] }, options: { requirements?: () => Record<string, unknown>; checkpointWaitMs?: number; start?: Partial<Parameters<typeof startController>[0]> } = {}) {
   let now = Date.now();
   const timer = new ManualTimer();
   const requirements = (options.requirements ?? (() => ({ data: "local-only" as const, harness: "pi" }))) as () => never;
   const c = await startController({
-    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], ...options.start,
     dispatch: {
       timer, manual: true, clock: () => new Date(now).toISOString(),
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "local-only", paidAuthorized: false } }),

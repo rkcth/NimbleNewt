@@ -3,6 +3,7 @@ import type { ArtifactService } from "../artifacts/index.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
+import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import type { ToolCallRequest, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -224,6 +225,11 @@ export interface RemoteDeps {
   readonly confirmWindowMs?: () => Promise<number | undefined>;
   /** Tells the owner an attempt waits for a decision (a Needs-you notice). Called whenever a worker is seen waiting; the notice ID makes a repeat one notice. A failure is ignored: the next poll calls again. */
   readonly notify?: (notice: ReconnectNotice) => Promise<void>;
+  /**
+   * The recorder of a remote worker's model streams (card L05c): given the attempt, the tap that begins, records and completes a generation for each model call the worker makes. The worker's events reach it through
+   * `streamStart`, `streamEvents` and `streamEnd`, each checked against the placement like every other message. Absent: a worker's streams are not recorded (its calls are answered `recorded: false`).
+   */
+  readonly streams?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number }) => ModelStreamTap;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
   readonly recordLaunch?: (record: { readonly attemptId: string; readonly agentId: string; readonly outcome: "started" | "refused"; readonly requested: JsonObject; readonly bestEffort: boolean; readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[]; readonly wallTimeMs: number; readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[]; readonly reason?: string }) => Promise<void>;
 }
@@ -291,6 +297,11 @@ export class RemoteWorkerService {
   readonly #platformOf = new Map<string, string>();
   /** Workspace requests carried to hosts and their answers (card H12m). In memory: a request is recorded durably by the workspace service, and one lost with a restart reads there as uncertain. */
   readonly #asks = new Map<string, WorkspaceAskState>();
+  /** The recording taps of attempts and the model calls open on them (card L05c). In memory: a restart loses them, the worker's open call then fails on its next message and the generation stays as the store left it. */
+  readonly #taps = new Map<string, ModelStreamTap>();
+  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; last?: { readonly n: number; readonly answer: { readonly held?: string } } }>();
+  /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
+  readonly #starts = new Map<string, Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>();
 
   private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number, settleMs: number) {
     this.#settleMs = settleMs;
@@ -1154,6 +1165,79 @@ export class RemoteWorkerService {
     return (await this.#gateway(host, sessionId, attemptId, placement, "any report")).report(operationId, outcome);
   }
 
+  /**
+   * A remote worker is about to send a model request (card L05c): a generation is begun under the task's current context revision and the attempt's fence, exactly as for a local worker's call. The answer is one of
+   * `{ recorded: false }` (not recorded: the owner's setting, a task the generation service does not know), `{ refused }` (no generation may begin: the task is held, waiting for a decision, fenced, done; the worker must not send
+   * the request) or `{ streamId, amend?, heldBufferBytes? }`.
+   */
+  async streamStart(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, call: { readonly requestChars?: unknown; readonly requestDigest?: unknown }, requestKey: string): Promise<{ readonly recorded: false } | { readonly refused: string } | { readonly streamId: string; readonly amend?: string; readonly heldBufferBytes?: number }> {
+    if (call === null || typeof call !== "object" || Array.isArray(call)) invalid("call", "must be an object");
+    onlyKnown(call, ["requestChars", "requestDigest"]);
+    if (typeof call.requestChars !== "number" || !Number.isSafeInteger(call.requestChars) || call.requestChars < 0) invalid("call.requestChars", "must be a whole number");
+    if (call.requestDigest !== undefined && (typeof call.requestDigest !== "string" || !/^[0-9a-f]{64}$/.test(call.requestDigest))) invalid("call.requestDigest", "must be a SHA-256 digest in hexadecimal");
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any model call");
+    const again = this.#starts.get(`${b.attemptId}\0${requestKey}`);
+    if (again !== undefined) return again;
+    const answer = await this.#streamStart(host, b, call as { requestChars: number; requestDigest?: string });
+    this.#starts.set(`${b.attemptId}\0${requestKey}`, answer);
+    while (this.#starts.size > 256) this.#starts.delete(this.#starts.keys().next().value as string);
+    return answer;
+  }
+
+  async #streamStart(host: Principal, b: PlacementBody, call: { requestChars: number; requestDigest?: string }): Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>> {
+    if (this.#deps.streams === undefined) return { recorded: false };
+    let tap = this.#taps.get(b.attemptId);
+    if (tap === undefined) {
+      tap = this.#deps.streams({ attemptId: b.attemptId, taskId: b.taskId, generation: b.generation });
+      this.#taps.set(b.attemptId, tap);
+      while (this.#taps.size > 256) this.#taps.delete(this.#taps.keys().next().value as string);
+    }
+    // At most 4 calls of an attempt are open: the oldest is ended as failed (its partial tool calls are dropped for good).
+    const open = [...this.#calls.entries()].filter(([, c]) => c.attemptId === b.attemptId);
+    for (const [id, c] of open.slice(0, Math.max(0, open.length - 3))) { this.#calls.delete(id); void c.call.ended({ ok: false }).catch(() => undefined); }
+    let feed: ModelStreamCall | undefined;
+    try { feed = await tap.started({ requestChars: call.requestChars, ...(call.requestDigest === undefined ? {} : { requestDigest: call.requestDigest }) }); } catch (error) {
+      if (error instanceof ModelStreamRefused) return { refused: error.message.slice(0, REMOTE_LIMITS.text) };
+      throw error;
+    }
+    if (feed === undefined) return { recorded: false };
+    const streamId = `rs-${randomUUID()}`;
+    this.#calls.set(streamId, { attemptId: b.attemptId, placement: b.placement, hostId: host.id, call: feed });
+    return { streamId, ...(feed.amend === undefined ? {} : { amend: feed.amend.slice(0, REMOTE_LIMITS.text) }), ...(feed.heldBufferBytes === undefined ? {} : { heldBufferBytes: feed.heldBufferBytes }) };
+  }
+
+  /** The decoded events of one piece of a reply, recorded in order. `held` says the generation was interrupted or superseded: the worker must not pass the reply on. A stale placement or session is fenced like any message. */
+  async streamEvents(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, n: unknown, events: unknown): Promise<{ readonly held?: string }> {
+    const entry = (await this.#openCall(host, sessionId, attemptId, placement, streamId))!;
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1) invalid("n", "must be a whole number from 1");
+    // The same message sent again (its answer was lost) is answered again and recorded once; the next must follow it.
+    if (entry.last !== undefined && n === entry.last.n) return entry.last.answer;
+    if (n !== (entry.last?.n ?? 0) + 1) invalid("n", `must be ${(entry.last?.n ?? 0) + 1}, the next message of this call`);
+    const answer = await entry.call.events(checkStreamEvents(events));
+    entry.last = { n: n as number, answer };
+    return answer;
+  }
+
+  /** The reply ended (`ok`) or failed or was cancelled part way. The generation is completed; a half-written tool call is dropped for good. */
+  async streamEnd(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, outcome: { readonly ok?: unknown }): Promise<void> {
+    if (outcome === null || typeof outcome !== "object" || typeof outcome.ok !== "boolean") invalid("ok", "must be true or false");
+    // A call that already ended (the same message sent again) is not an error.
+    const entry = await this.#openCall(host, sessionId, attemptId, placement, streamId, true);
+    if (entry === undefined) return;
+    this.#calls.delete(streamId as string);
+    await entry.call.ended({ ok: outcome.ok as boolean });
+  }
+
+  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; last?: { readonly n: number; readonly answer: { readonly held?: string } } } | undefined> {
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    const entry = typeof streamId === "string" ? this.#calls.get(streamId) : undefined;
+    if (entry === undefined && tolerateClosed === true && typeof streamId === "string" && /^rs-[0-9a-f-]{36}$/.test(streamId)) return undefined;
+    if (entry === undefined || entry.attemptId !== b.attemptId || entry.hostId !== host.id) throw new DomainError("not_found", "no such model call is open for this attempt");
+    if (entry.placement !== b.placement) { this.#calls.delete(streamId as string); void entry.call.ended({ ok: false }).catch(() => undefined); throw new DomainError("fenced", `the model call belongs to placement ${entry.placement}, not ${b.placement}`); }
+    return entry;
+  }
+
   async usage(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, usage: TurnUsage, requestKey?: string): Promise<void> {
     if (usage === null || typeof usage !== "object" || Array.isArray(usage)) invalid("usage", "must be an object");
     // Usage is booked before the confirmation too (the spend happened and the budget must see it); it does not count as a confirmation of anything.
@@ -1650,4 +1734,28 @@ function checkResult(value: unknown): StoredResult {
   const t = clip(r["text"], "result.text");
   const e = clip(r["error"], "result.error");
   return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }) };
+}
+
+/** The events a worker sends for a piece of a reply: a short list of known shapes, nothing else. */
+export function checkStreamEvents(value: unknown): ModelStreamEvent[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) invalid("events", "must be a list of 1 to 500 events");
+  return (value as unknown[]).map((raw, i): ModelStreamEvent => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return invalid(`events[${i}]`, "must be an object");
+    const e = raw as Record<string, unknown>;
+    const str = (k: string, max: number): string => (typeof e[k] === "string" && (e[k] as string).length <= max ? (e[k] as string) : invalid(`events[${i}].${k}`, `must be a string of at most ${max} characters`));
+    const known = (...keys: string[]): void => { for (const k of Object.keys(e)) if (k !== "kind" && !keys.includes(k)) invalid(`events[${i}].${k}`, "is not a field of this event"); };
+    switch (e["kind"]) {
+      case "text": known("text"); return { kind: "text", text: str("text", 1024 * 1024) };
+      case "note": known("text"); return { kind: "note", text: str("text", 1000) };
+      case "end": known(); return { kind: "end" };
+      case "tool": {
+        known("id", "name", "argumentsDelta", "done");
+        if (typeof e["done"] !== "boolean") invalid(`events[${i}].done`, "must be true or false");
+        const id = str("id", 80);
+        if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(id)) invalid(`events[${i}].id`, "is not a tool call ID");
+        return { kind: "tool", id, ...(e["name"] === undefined ? {} : { name: str("name", 80) }), argumentsDelta: str("argumentsDelta", 1024 * 1024), done: e["done"] as boolean };
+      }
+      default: return invalid(`events[${i}].kind`, "must be text, tool, note or end");
+    }
+  });
 }

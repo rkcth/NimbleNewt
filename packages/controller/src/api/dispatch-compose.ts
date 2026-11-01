@@ -154,6 +154,8 @@ export interface DispatchHandle {
   /** The dispatcher's own service principal: the staff identity the lifecycle (Suspend, Stop) acts through (card L02). */
   readonly principal: Principal;
   readonly driver: DispatchDriver;
+  /** The generation service (card L05): the tool bridge asks it whether a call belongs to a complete, current generation (card L05c). */
+  readonly generation: GenerationService;
   /** Makes an agent's attempts quiet around an integration, landing, refresh, release or quarantine of its work (card H12d). */
   readonly quiesce: QuiesceCoordinator;
   /** Shuts down the local worker host the operator built, if it gave a way to. */
@@ -496,6 +498,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       const d = (): DispatcherService => holder.dispatcher!;
       remote = RemoteWorkerService.withEpoch(storage, epoch, {
         principal, hosts, artifacts,
+        streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id) },
         ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await i.workerPolicy!.recordLaunch(r as never); } }),
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
@@ -573,7 +576,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     await i.beforeLoops?.();
     if (i.options.manual !== true) driver.start();
     return {
-      dispatcher, driver, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
+      dispatcher, driver, generation, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
       ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }), ...(quiet.service === undefined ? {} : { quietHosts: quiet.service }),
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id), tell: (id, text) => dispatcher.tell(principal, id, text), stop: (id, reason) => dispatcher.stop(principal, id, { reason }) },
       attendance, standups, watches,

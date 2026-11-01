@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
+import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
 import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
@@ -223,6 +224,37 @@ export class RemoteAttempt implements ToolGateway {
     return answer;
   }
   async acknowledgeDecisions(): Promise<void> { await this.#post("acknowledge", {}); }
+
+  /**
+   * The recorder of this worker's own model calls (card L05c), for the worker's `ModelRelay` (`stream:`). Each call begins a generation on the controller under the task's current context revision and this attempt's fence; the decoded events
+   * of the reply are sent in order (numbered, so a message sent again is recorded once) and the answer says whether the reply must be held back. A call the controller refuses (the task is held, the attempt is fenced) throws
+   * `ModelStreamRefused`, so the request is not sent. If the controller cannot be reached the call is refused, and a reply being read is held back with the reason: nothing is passed on that was not recorded as applied.
+   */
+  streamTap(): ModelStreamTap {
+    const failure = (error: unknown): string => (error instanceof WorkerRequestError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : "the controller could not be reached").slice(0, 200);
+    return {
+      started: async (call): Promise<ModelStreamCall | undefined> => {
+        let answer: { recorded?: false; refused?: string; streamId?: string; amend?: string; heldBufferBytes?: number };
+        try { answer = await this.#post("stream-start", { call: { requestChars: call.requestChars, ...(call.requestDigest === undefined ? {} : { requestDigest: call.requestDigest }) } }) as typeof answer; } catch (error) {
+          throw new ModelStreamRefused(`the controller could not be asked to record the model call (${failure(error)}); the call is not sent`);
+        }
+        if (answer.refused !== undefined) throw new ModelStreamRefused(answer.refused);
+        if (answer.streamId === undefined) return undefined;
+        const streamId = answer.streamId;
+        let n = 0;
+        return {
+          ...(answer.amend === undefined ? {} : { amend: answer.amend }),
+          ...(answer.heldBufferBytes === undefined ? {} : { heldBufferBytes: answer.heldBufferBytes }),
+          events: async (events: readonly ModelStreamEvent[]): Promise<{ readonly held?: string }> => {
+            try { return await this.#post("stream-events", { streamId, n: ++n, events: events as unknown as Json }) as { held?: string }; } catch (error) {
+              return { held: `the controller could not record this part of the reply (${failure(error)})` };
+            }
+          },
+          ended: async (outcome): Promise<void> => { try { await this.#post("stream-end", { streamId, ok: outcome.ok }); } catch { /* a call left open is ended as failed by the controller when the attempt opens its next ones (at most 4 stay open) */ } },
+        };
+      },
+    };
+  }
 
   /** The split form run for a local executor: the controller decides and records, this runs it, the controller records how it ended. */
   async call(request: ToolCallRequest, executor: ToolExecutor): Promise<ToolResult> {

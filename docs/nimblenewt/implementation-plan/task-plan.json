@@ -2377,6 +2377,23 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "L05d",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Admit bridge calls as effects and show remote streams with a sandboxed remote worker",
+      "depends_on": [
+        "L05c"
+      ],
+      "deliverable": "Split from L05c (2026-10-31): the tool bridge admits a call as an effect through the generation service (so a partial or withdrawn call can never start an effect by that route either); the remote protocol's stream tap is wired into a remote worker host that runs Pi in its sandbox; a tool call ID the Pi extension rewrote (repeated or unsafe IDs) is matched to its recorded call; a remote relay's waits on the store are reported to stall detection",
+      "acceptance_and_verification": "A remote worker process in its sandbox has a late reply held and a corrected generation's tool call refused at the bridge, shown with a real worker process; a rewritten call ID is checked against its recorded generation",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "L01",
       "parent": "N05",
       "existing_issue": "AII-255",
@@ -8745,6 +8762,7 @@
         "H12s",
         "H12t",
         "L05c",
+        "L05d",
         "U14",
         "M02g",
         "M02h",

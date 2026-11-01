@@ -12,6 +12,7 @@ import type { AdmissionService } from "../admission/index.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
+import type { GenerationService } from "../generation/index.js";
 import type { HostService } from "../hosts/index.js";
 import type { PauseGuard } from "../lifecycle/index.js";
 import { allows } from "../security/access.js";
@@ -105,6 +106,13 @@ export interface ToolExecutionDeps {
    * Required, so a composer cannot forget it: one with only this machine's workers answers `() => true`.
    */
   readonly isLocalHost: (hostId: string) => boolean;
+  /**
+   * Card L05c: asks the generation service whether the call belongs to a complete, current generation of the task. Absent: calls are not checked against generations. A call a recorded generation shows is withdrawn, dropped, partial, held,
+   * superseded, or begun under an older context revision is refused with the reason (`checkBridge`, on by default); a call no generation recorded is refused only when `requireRecorded` is on (off by default).
+   */
+  readonly generations?: Pick<GenerationService, "checkCall">;
+  /** The owner's switches `checkBridge` and `requireRecorded`, read at every request. A failed read leaves the defaults (check on, require off). */
+  readonly callCheck?: () => Promise<{ readonly check: boolean; readonly require: boolean }>;
 }
 
 /** The bound gateway of the attempt the request came through. */
@@ -250,9 +258,12 @@ export class ToolExecutionService {
       // A request that was refused did nothing, so its call ID may be used again (for a corrected request); one that was answered keeps it.
       let response: BridgeResponse | undefined;
       try {
+        // A call of a generation that was corrected, superseded or never completed is refused before anything else (card L05c).
+        const stale = await this.#generationRefusal(context, request);
         // A pause stops everything the agent writes through the bridge; reading goes on.
-        const paused = WRITES.has(request.op as BridgeOperation) ? await this.#deps.pauses.guard(context.taskId) : undefined;
-        if (paused !== undefined && paused.blockedBy.length > 0) response = refusal("paused", `the task is paused (${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}); ${request.op} is refused until it is resumed`);
+        const paused = stale !== undefined ? undefined : WRITES.has(request.op as BridgeOperation) ? await this.#deps.pauses.guard(context.taskId) : undefined;
+        if (stale !== undefined) response = stale;
+        else if (paused !== undefined && paused.blockedBy.length > 0) response = refusal("paused", `the task is paused (${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}); ${request.op} is refused until it is resumed`);
         else {
           switch (request.op as BridgeOperation) {
             case "desk.read": response = await this.#deskRead(context, args); break;
@@ -274,6 +285,24 @@ export class ToolExecutionService {
       if (error instanceof DomainError) return refusal(error.code, error.message);
       return refusal("internal", "the request could not be handled");
     }
+  }
+
+  /** The refusal of a call that does not belong to a complete, current generation of its task (card L05c), or undefined. Nothing is read or changed by a refused call. */
+  async #generationRefusal(c: Context, request: BridgeRequest): Promise<BridgeResponse | undefined> {
+    if (this.#deps.generations === undefined) return undefined;
+    let mode = { check: true, require: false };
+    try { if (this.#deps.callCheck !== undefined) mode = await this.#deps.callCheck(); } catch { /* the defaults stay */ }
+    if (!mode.check && !mode.require) return undefined;
+    // The extension's own declaration reads are not a model's tool call.
+    if (request.op === "tool.discover" && request.callId.startsWith("decl-")) return undefined;
+    let verdict: Awaited<ReturnType<GenerationService["checkCall"]>>;
+    try { verdict = await this.#deps.generations.checkCall(this.#deps.principal, { taskId: c.taskId, callId: request.callId }); } catch (error) {
+      // The check could not be made: fail closed (a call is not run on a guess), and say so.
+      return refusal("unavailable", `the call could not be checked against the task's generation (${error instanceof DomainError ? error.message.slice(0, 160) : "the generation record could not be read"}); ask again`);
+    }
+    if (!verdict.recorded) return mode.require ? refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) : undefined;
+    if (!verdict.ok && mode.check) return refusal("generation_refused", `${verdict.reason ?? `call ${request.callId.slice(0, 60)} does not belong to a current generation`}; it was not run`);
+    return undefined;
   }
 
   /**

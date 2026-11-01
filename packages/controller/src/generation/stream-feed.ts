@@ -12,7 +12,7 @@ export interface StreamFeedDeps {
   /** The principal that records the streams (the dispatcher's service principal). */
   readonly principal: Principal;
   /** The owner's settings, read at the start of each call. A throw leaves the defaults (record, cut, closed). */
-  readonly settings?: () => Promise<Partial<Pick<StreamSettingsView, "record" | "cut" | "failClosed" | "storeTimeoutMs" | "batchMs" | "batchChars" | "heldBufferBytes">>>;
+  readonly settings?: () => Promise<Partial<Pick<StreamSettingsView, "record" | "cut" | "failClosed" | "recordPaused" | "storeTimeoutMs" | "batchMs" | "batchChars" | "heldBufferBytes">>>;
   /** Told about a failure that is neither a refusal nor an unknown task (the call is not affected unless the fail mode is closed). */
   readonly onError?: (error: unknown) => void;
   /** Distinguishes calls of one attempt across restarts of the controller (command IDs must not collide with those of an earlier process). */
@@ -70,7 +70,11 @@ export function streamTapFor(deps: StreamFeedDeps, attempt: StreamAttempt): Mode
       for (let pass = 0; pass < 2 && run === undefined; pass++) {
         try {
           bound = (await store(() => g.gate(deps.principal, attempt.taskId)))?.gate.contextRevision ?? 1;
-          run = await store(() => g.begin(deps.principal, { commandId: `sf-${attempt.attemptId}-${nonce}-${count}-${pass}`.slice(0, 120), taskId: attempt.taskId, contextRevision: bound, fence: { generation: attempt.generation, attemptId: attempt.attemptId } }));
+          const begin = (whilePaused: boolean) => store(() => g.begin(deps.principal, { commandId: `sf-${attempt.attemptId}-${nonce}-${count}-${pass}${whilePaused ? "p" : ""}`.slice(0, 120), taskId: attempt.taskId, contextRevision: bound, fence: { generation: attempt.generation, attemptId: attempt.attemptId }, ...(whilePaused ? { whilePaused: true } : {}) }));
+          try { run = await begin(false); } catch (error) {
+            // A paused task's call is recorded too (card L05c), unless the owner turned that off.
+            if (error instanceof GenerationRefused && error.reason === "paused" && setting.recordPaused !== false) run = await begin(true); else throw error;
+          }
         } catch (error) {
           if (error instanceof GenerationRefused) {
             if (error.reason === "held" || error.reason === "paused" || error.reason === "decision") throw new ModelStreamRefused(`no generation begins for task ${attempt.taskId}: ${error.message}`);
