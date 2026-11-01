@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,6 +58,35 @@ test("two entries with the same name are refused at the second one (card F04l)",
     ], deps),
     (error: Error) => error.message.includes("targets[1]") && error.message.includes("one"),
   );
+});
+
+test("two entries whose paths spell the same file differently are refused at the second one (card F04l)", async () => {
+  const dir = temp();
+  try {
+    mkdirSync(join(dir, "sub"));
+    const spelled = `${join(dir, "sub")}/../db.sqlite`;
+    assert.notEqual(spelled, join(dir, "db.sqlite"), "the two entries really do spell the path differently");
+    await assert.rejects(
+      sqliteTargetsFromConfig([
+        { name: "one", kind: "sqlite", path: spelled },
+        { name: "two", kind: "sqlite", path: join(dir, "db.sqlite") },
+      ], deps),
+      (error: Error) => error.message === "transfer targets[1]: path: is the same place as entry 0",
+    );
+  } finally { done(dir); }
+});
+
+test("two entries naming two different files are both accepted, however their paths are spelled (card F04l)", async () => {
+  const dir = temp();
+  try {
+    mkdirSync(join(dir, "sub"));
+    const targets = await sqliteTargetsFromConfig([
+      { name: "one", kind: "sqlite", path: `${join(dir, "sub")}/../one.sqlite` },
+      { name: "two", kind: "sqlite", path: join(dir, "two.sqlite") },
+    ], deps);
+    assert.deepEqual(targets.map((t) => t.name), ["one", "two"]);
+    assert.notEqual(targets[0]!.fingerprint, targets[1]!.fingerprint);
+  } finally { done(dir); }
 });
 
 test("more than 16 entries are refused; exactly 16 are accepted (card F04l)", async () => {

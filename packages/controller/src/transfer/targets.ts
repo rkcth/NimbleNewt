@@ -37,6 +37,7 @@ export async function sqliteTargetsFromConfig(entries: readonly unknown[], deps:
   if (entries.length > TARGET_ENTRIES_MAX) throw new Error(`transfer targets: at most ${TARGET_ENTRIES_MAX} entries (got ${entries.length})`);
   const refuse = (i: number, problem: string): never => { throw new Error(`transfer targets[${i}]: ${problem}`); };
   const names = new Set<string>();
+  const places = new Map<string, number>();
   const out: TransferTarget[] = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
@@ -48,8 +49,12 @@ export async function sqliteTargetsFromConfig(entries: readonly unknown[], deps:
     const path = typeof o["path"] === "string" && isAbsolute(o["path"]) ? o["path"] : refuse(i, "path: must be an absolute path");
     if (names.has(name)) refuse(i, `name: ${name} is used by another entry`);
     names.add(name);
+    const fingerprint = await sqliteFingerprint(path);
+    const earlier = places.get(fingerprint);
+    if (earlier !== undefined) refuse(i, `path: is the same place as entry ${earlier}`);
+    places.set(fingerprint, i);
     out.push({
-      name, kind: "sqlite", fingerprint: await sqliteFingerprint(path), open: () => deps.openStorage(path),
+      name, kind: "sqlite", fingerprint, open: () => deps.openStorage(path),
       // The room of the file system the file will be on: the folder may not exist yet, so probe the nearest existing directory at or above the path's folder.
       freeBytes: async () => {
         let probe = dirname(path);
