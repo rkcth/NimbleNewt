@@ -44,7 +44,7 @@ test("the names of a recipe are bounded and distinct, and what a reach grants st
   for (const reach of [["a", "a"], ["bad name"], [""], Array.from({ length: 33 }, (_, i) => `n${i}`), ["../x"]]) await assert.rejects(p.sandbox.open(order(reach).recipe, order(reach)), /reach must be at most 32 distinct names|cannot provide/, JSON.stringify(reach));
   // A reach that tries to mount the system or somewhere that is not under /inputs or /opt is refused by the recipe checks, not trusted because a host function named it.
   const evil = parts(() => ({ readOnly: [{ host: "/etc", guest: "/inputs/etc" }] }));
-  await assert.rejects(evil.sandbox.open(order(["x"]).recipe, order(["x"])), /system directory|cannot be mounted|symbolic link/);
+  await assert.rejects(evil.sandbox.open(order(["x"]).recipe, order(["x"])), process.platform === "win32" ? /absolute, normalised path|system directory|cannot be mounted|symbolic link/ : /system directory|cannot be mounted|symbolic link/); // a POSIX path such as /etc is not an absolute path on Windows, which the recipe check refuses first
   const outside = parts(() => ({ readOnly: [{ host: inputA, guest: "/work/elsewhere" }] }));
   await assert.rejects(outside.sandbox.open(order(["x"]).recipe, order(["x"])), /read-only mounts go under/);
   // Two reaches that set one variable differently are a conflict, not a silent win for the later one.
