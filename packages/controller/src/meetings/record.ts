@@ -1003,7 +1003,7 @@ export class MeetingRecordService {
             const cur = await this.#runner.get("meeting-decision", decisionId);
             const body = known<DecisionRecordBody>(cur)!;
             if (body.ownerResponse !== d.ownerResponse || body.ownerResponse === "pending") { moved = true; throw new DomainError("invalid_command", "the owner answered meanwhile"); }
-            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending", held: true }) }], detail: { projectId: body.projectId, limit: "reached" } };
+            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending", held: true, changes: body.changes.map((c) => (c.id === change.id && c.state === "adopted" && cell !== undefined ? { ...c, setting: cell } : c)) }) }], detail: { projectId: body.projectId, limit: "reached" } };
           },
         }))); } catch (error) { if (!moved) throw error; }
       };
@@ -1079,7 +1079,7 @@ export class MeetingRecordService {
           const body: DecisionLogBody = {
             decisionId, changeId: c.id, projectId: d.projectId, kind: c.kind, targetKind: c.target.kind, outcome, ...(code === undefined ? {} : { code }), decidedBy,
             ...(agreedBy === undefined ? {} : { agreedBy }), ...(c.actedAs === undefined ? {} : { actedAs: c.actedAs }), ...(widens === undefined ? {} : { widens }), ...(widens === undefined || c.setting === undefined ? {} : { setting: c.setting }),
-            ownerResponse: c.agreedBy?.startsWith("policy:") === true && d.ownerResponse !== "agreed" ? "not-asked" : d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
+            ownerResponse: c.agreedBy?.startsWith("policy:") === true ? "not-asked" : d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
           };
           await this.#retrying(() => this.#runner.command("meeting.decision.log", { commandId: `mdl:${decisionId}:${c.id}:${outcome}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
             payload: { decisionId, changeId: c.id, outcome },
@@ -1158,7 +1158,7 @@ export class MeetingRecordService {
 
   /**
    * The adopted decisions that wait for the owner's answer (agree, decline or an alternative), for the owner's "needs you" list (card M02g): decisions in scope whose response is pending and that still have a change left to carry out.
-   * Owner only. Reads at most 10 pages of 100 decisions; `truncated` says the end was not reached.
+   * Owner only. Reads at most 10 pages of 100 decisions (the cost of one reply is capped there); `truncated` says decisions beyond them were not read. A pending index would replace the scan (card M02h).
    */
   async ownerPending(by: Principal, limit = 50): Promise<{ items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }> {
     if (by.kind !== "owner" || by.taskScope !== undefined) return { items: [], truncated: false };
@@ -1177,7 +1177,8 @@ export class MeetingRecordService {
       }
       if (page.length < 100) return { items, truncated: false };
     }
-    return { items, truncated: true };
+    // Ten full pages were read: more exist only if the next page is not empty.
+    return { items, truncated: (await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
   }
 
   /** Tells the observer of every change that has reached a final state; each is told again on a repeat of the apply, which the observer's stable command IDs make harmless. */

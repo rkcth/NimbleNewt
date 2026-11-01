@@ -2186,7 +2186,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M02g.
-- **Deliverable:** Split from M02g (2026-10-31): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings (moving and voting, not only reading the log), learning auto-apply rules from the log once production data exists, and a cap across decisions on policy-agreed grants and raises, so splitting a list across several decisions cannot get round the per-decision limit of M02g.
+- **Deliverable:** Split from M02g (2026-10-31): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings (moving and voting, not only reading the log), learning auto-apply rules from the log once production data exists, and a cap across decisions on policy-agreed grants and raises, so splitting a list across several decisions cannot get round the per-decision limit of M02g. Also from the M02g reviews: a pending-decisions index instead of scanning, expiry of stale holds and whether the gate, rights and target checks come before a hold (owner question), order dependence between allowed and asked widening changes, re-driving an applying change after a decline in a held decision, waitingFor when the apply loop ends at exactly 10 changes, and clearing the held flag.
 - **Acceptance and verification:** Unforeseen decisions go to a capable agent under the same widening policy; the commands are reachable through chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 

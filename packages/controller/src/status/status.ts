@@ -674,8 +674,8 @@ export class StatusService {
   }
 
   /**
-   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
-   * `count` is the number found (each source up to 50); `truncated` names the sources (`questions`, `approvals`, `blockers`) that had more than was read, so the list may be missing items; the lines are cut at `limit`. Owner only (anyone else: undefined).
+   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, adopted meeting decisions waiting for the owner's answer, and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
+   * `count` is the number found (each source up to 50); `truncated` names the sources (`questions`, `approvals`, `meeting decisions`, `blockers`) that had more than was read, so the list may be missing items; the lines are cut at `limit`. Owner only (anyone else: undefined).
    */
   async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number; readonly truncated: readonly string[] } | undefined> {
     if (by.kind !== "owner") return undefined;
