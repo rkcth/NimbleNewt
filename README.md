@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **209 of 334 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **219 of 334 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,25 +106,25 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 15 of 18 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 16 of 18 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓░░░░` 70% | 19 of 27 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓░░░` 81% | 22 of 27 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 20 of 23 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 91% | 21 of 23 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 60% | 12 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 62% | 31 of 50 |
-| Agent messaging | `▓▓▓▓▓▓▓▓▓░░░` 77% | 7 of 9 |
+| Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 8 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
-| Meetings | `▓▓▓▓▓▓▓▓░░░░` 68% | 22 of 32 |
+| Meetings | `▓▓▓▓▓▓▓▓▓░░░` 78% | 25 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 33% | 6 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
-| Backup, updates and operations | `▓▓░░░░░░░░░░` 23% | 4 of 17 |
+| Backup, updates and operations | `▓▓▓░░░░░░░░░` 29% | 5 of 17 |
 | Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 15 of 18</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 16 of 18</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -162,7 +162,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [x] **F09** · P21 · Implement per-OS secret store backends _(needs F02, A01)_
 - [x] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
 - [x] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
-- [ ] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
+- [x] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 - [ ] **F04l** · P34 · Read database transfer targets from configuration and check Pi conversation stores _(needs F04e, F02)_
 - [ ] **F04m** · P34 · Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal _(needs F04e)_
 
@@ -207,15 +207,15 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓░░░░ 19 of 27</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓░░░ 22 of 27</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
 - [x] **L05** · P26 · Implement generation interruption and late-result handling _(needs C05, F06, A02)_
 - [x] **L01** · P27 · Implement Pause and background settlement _(needs C04, A02, S08, L05)_
 - [x] **L01b** · P29 · Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
-- [ ] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
-- [ ] **L05c** · P30 · Feed remote workers' model streams and check tool calls against the recorded generation _(needs L05b, H02)_
+- [x] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
+- [x] **L05c** · P30 · Feed remote workers' model streams and check tool calls against the recorded generation _(needs L05b, H02)_
 - [x] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
 - [ ] **L05d** · P31 · Admit bridge calls as effects and show remote streams with a sandboxed remote worker _(needs L05c)_
 - [x] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
@@ -236,7 +236,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L03f** · P37 · Finish hand-off: chat, richer package, locks, drafts _(needs L03e)_
 - [x] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
 - [x] **L03h** · P39 · Hand-off locks source from open workspace operations and held resource claims _(needs L03g)_
-- [ ] **L03i** · P40 · Finish hand-off: offering to reassign responsibilities with the hand-off package _(needs L03h)_
+- [x] **L03i** · P40 · Finish hand-off: offering to reassign responsibilities with the hand-off package _(needs L03h)_
 - [ ] **L03j** · P41 · Hand-off lock sources for the integrator lease and workspace holds _(needs L03i, P10, H12m)_
 
 </details>
@@ -271,7 +271,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 20 of 23</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 21 of 23</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -285,7 +285,7 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C07d** · P27 · Scale MCP result limits to the window and let the rest be read in pages _(needs C07b, R02)_
 - [x] **C07e** · P29 · Rebuild the context view when a model route changes to a smaller window _(needs C07d, H12)_
 - [x] **C08** · P29 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
-- [ ] **C07f** · P30 · Measure the route's fixed part and scale remote MCP limits _(needs C07e, H12)_
+- [x] **C07f** · P30 · Measure the route's fixed part and scale remote MCP limits _(needs C07e, H12)_
 - [x] **C08b** · P30 · Record decisions from the chat and interrupt running generation on correction _(needs C08, U03, L05)_
 - [x] **C09** · P30 · Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 - [ ] **C07g** · P31 · Put the rebuilt context into the worker's prompt and rebuild during a live attempt _(needs C07f)_
@@ -420,13 +420,13 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 </details>
 
 <details>
-<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓▓▓░░░ 7 of 9</summary>
+<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 8 of 9</summary>
 
 Durable conversations between agents, delivery classes, and the MCP conversation adapter.
 
 - [x] **U02** · P24 · Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 - [x] **U02b** · P25 · Implement the conversation transport and remote exposure _(needs U02)_
-- [ ] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
+- [x] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
 - [ ] **T05b** · P27 · Finish the MCP conversation door: stock-client conformance, push and resources _(needs T05)_
 - [x] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 - [x] **U12b** · P30 · Deliver informational messages at check-ins and show agent questions in chat _(needs U02, S08, L05, M01)_
@@ -451,7 +451,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓░░░░ 22 of 32</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓░░░ 25 of 32</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -479,12 +479,12 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [x] **M02f** · P34 · Meeting decision log: each decision and its outcome recorded and readable _(needs M02e)_
 - [x] **M03e** · P34 · Finish stand-ups: other sinks, untold decisions shown to the owner, chat _(needs M03d)_
 - [x] **M04e** · P34 · Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat _(needs M04d)_
-- [ ] **M02g** · P35 · Meeting decisions: per-decision limit on widening changes, guarded refusals, chat reading of the decision log _(needs M02f)_
+- [x] **M02g** · P35 · Meeting decisions: per-decision limit on widening changes, guarded refusals, chat reading of the decision log _(needs M02f)_
 - [x] **M03f** · P35 · Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat _(needs M03e)_
 - [x] **M04f** · P35 · Stopped-agent meeting exception in chat, and the host wake path _(needs M04e)_
 - [ ] **M02h** · P36 · Finish meeting records: steward agent, narrator, meeting chat commands, learned rules, aggregate cap _(needs M02g)_
-- [ ] **M03g** · P36 · Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands _(needs M03f)_
-- [ ] **M04g** · P36 · Compose a real safeLongRunning from the job records _(needs M04f)_
+- [x] **M03g** · P36 · Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands _(needs M03f)_
+- [x] **M04g** · P36 · Compose a real safeLongRunning from the job records _(needs M04f)_
 - [ ] **M03h** · P37 · Finish stand-ups: usage sink, owner questions raised by a stand-up, chat to run and read a stand-up _(needs M03g)_
 - [ ] **M04h** · P37 · A real host that wakes stopped agents _(needs M04g)_
 
@@ -578,7 +578,7 @@ Observations, versioned lessons, bounded experiments, scoped adoption and option
 </details>
 
 <details>
-<summary><strong>Backup, updates and operations</strong> — ▓▓░░░░░░░░░░ 4 of 17</summary>
+<summary><strong>Backup, updates and operations</strong> — ▓▓▓░░░░░░░░░ 5 of 17</summary>
 
 Backup and restore, release staging, migration recovery, maintenance windows and update orchestration.
 
@@ -595,7 +595,7 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 - [x] **K01g** · P35 · Finish backup: Pi state, maintenance barrier, in-controller restore _(needs K01f)_
 - [ ] **K03** · P35 · Implement migration recovery and rollback limits _(needs K02, G03)_
 - [ ] **K07** · P35 · Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
-- [ ] **K01h** · P36 · Finish backup: Pi state, maintenance barrier, in-controller restore _(needs K01g)_
+- [x] **K01h** · P36 · Finish backup: Pi state, maintenance barrier, in-controller restore _(needs K01g)_
 - [ ] **K01i** · P37 · Finish backup: PostgreSQL restore, remote Pi state, production wiring _(needs K01h)_
 - [ ] **K04** · P39 · Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
 - [ ] **K05** · P40 · Implement fenced primary promotion and recovery chat _(needs K04, U06)_

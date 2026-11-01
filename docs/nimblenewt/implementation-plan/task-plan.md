@@ -292,6 +292,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04e — Implement chat-controlled controller database transfer
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `bb363d2`, `45b607f`, `7f10828`, `1234120`, `c6c79f2`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Chat-controlled controller database transfer between SQLite and PostgreSQL with a durable in-database fence, verified copy, rollback and an owner switch; reading targets from configuration and the rest are F04l and F04m.
 - **Blockers:** F04, K01, F06.
 - **Deliverable:** SQLite to PostgreSQL and reverse logical transfer with maintenance journal.
 - **Acceptance and verification:** Drain work and fence admissions; validate IDs, policy, receipts, uncertain effects, timers, artifacts and Pi checkpoint references; injected transfer failures preserve source; destination authority is unique; reverse transfer checks capacity; no unsafe rollback after new effects.
@@ -759,6 +761,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C07f — Measure the route's fixed part and scale remote MCP limits
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `d782db3`, `5a05bf2`, `c4bd81e`, `ee5d52a`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The route's fixed part is measured per route and the dispatcher asks for the route change; scaling the remote MCP limits is by the measured figure. Remaining items are in the notes.
 - **Blockers:** C07e, H12.
 - **Deliverable:** Split from C07e (2026-10-28), narrowed 2026-10-31: the dispatcher asks for the route change before an attempt starts when the task last ran on another route (a fallback, a cutover or a re-admitted attempt), using the system prompt and tool schemas measured at the first admitted call on the new route; a controller with only remote hosts scales MCP limits to the window of the route in the routing table; the cut text is read back through the state API.
 - **Acceptance and verification:** A task whose next attempt is on another route has the context checked for that route's window and measured fixed part before the attempt starts, and an attempt that does not fit does not start, with the reason shown; the cut text can be read back; repeating the change gives the recorded decision; remote-only MCP limits follow the routing table's window.
@@ -873,6 +877,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L05b — Feed the model stream into revision-bound generation
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `21fac5c`, `c05873b`, `3b33705`, `0e0fe65`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The model stream is fed into revision-bound generation: batched recording, store timeouts and a fail-closed or fail-open choice; remote workers are L05c.
 - **Blockers:** L05, H12.
 - **Deliverable:** Split from L05; narrowed 2026-10-31 (remote workers and the check of a tool call against the recorded generation are L05c): on the local worker host the model relay, which carries every model reply to the worker process, reads the stream's events (partial text, tool-call fragments, the end) and reports them to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held back from the worker, never applied; the owner can turn recording and holding back on or off in chat.
 - **Acceptance and verification:** A partial tool call never runs and a late response cannot override a correction, shown with a real worker process: the owner corrects a task mid-generation, the earlier stream is held with a visible reason, and the next generation starts under the new revision.
@@ -881,6 +887,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L05c — Feed remote workers' model streams and check tool calls against the recorded generation
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `bd02d27`, `b43f258`, `e1026cd`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Remote workers' model streams are recorded through the worker protocol (batched, retried safely) and the tool bridge checks a call's generation; the sandboxed remote worker wiring and the other limits are L05d.
 - **Blockers:** L05b, H02.
 - **Deliverable:** Split from L05b (2026-10-31): a remote worker makes its own model calls, so its stream reaches the generation service through the worker protocol (events with the attempt's fence, held replies reported back); the tool bridge refuses a call that does not belong to a complete, current generation of the task, and an interrupted generation's calls are withdrawn; a task that is paused when a call begins is recorded too when the owner turns that on (chat-settable, off by default: a paused task's model call is refused before it is sent).
 - **Acceptance and verification:** A remote worker's late reply is held and shown like a local one; a tool call whose generation was corrected is refused at the bridge with the reason, shown with a real remote worker.
@@ -1035,6 +1043,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L03i — Finish hand-off: offering to reassign responsibilities with the hand-off package
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `948454a`, `f6fc7b5`, `73ea7f3`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner can move chosen responsibilities of the sender with the hand-off, with a warning when the new holder lacks rights; the lock sources (P10, H12m) are L03j.
 - **Blockers:** L03h.
 - **Deliverable:** Split from L03h (2026-10-30); narrowed 2026-10-31 (the integrator lease and workspace holds as lock sources moved to L03j): the owner can move chosen responsibilities of the sender to the recipient when completing a hand-off (checked before anything moves, carried out as the one who asked, per-entry results recorded).
 - **Acceptance and verification:** The owner can reassign responsibilities with the hand-off package.
@@ -2201,6 +2211,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M02g — Meeting decisions: per-decision limit on widening changes, guarded refusals, chat reading of the decision log
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `b276003`, `8659593`, `4e6f5e7`, `edc167f`, `d719f4d`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Meeting decisions: a per-decision limit on policy-agreed widening (the owner is shown the held decision and may agree), guarded refusal saves and the decision log read in chat; the aggregate cap, steward agent, narrator and learned rules are M02h.
 - **Blockers:** M02f.
 - **Deliverable:** Split from M02f (2026-10-30); narrowed 2026-10-31 (the steward agent, narrator, meeting chat commands, learned auto-apply rules and the aggregate cap moved to M02h): a limit on how many widening changes (grants, budget raises) one decision carries out on the approval policy's leave alone (owner settings, default three, switch-off explicit), refusals that cannot overwrite a change the owner's agreement has started, and a chat reading of the decision log (status.ask decision_log).
 - **Acceptance and verification:** The limit holds and the owner's agreement lifts it; the owner can read the log in chat.
@@ -2277,6 +2289,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M03g — Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `9ebe3ed`, `da351dd`, `5ade307`, `a5f39e5`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Stand-ups: allocation in the review, follow-ups in the chat's turn listing, stand-up chat commands; the per-project index and the rest are M03h.
 - **Blockers:** M03f.
 - **Deliverable:** Split from M03f (2026-10-30), narrowed 2026-10-31: the allocation sink (the configured P/PC allocation is read through the controller's installation settings), follow-ups shown in the chat's listing of turns, and chat commands for stand-ups (pause, resume, end or rename one by its title; set one up as a proposal; deliver outcomes) are built. Remaining: see M03h.
 - **Acceptance and verification:** The allocation shows in the stand-up balance review in the running controller, a follow-up shows in the listing of turns, and the owner can change and deliver stand-ups through chat.
@@ -2353,6 +2367,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M04g — Compose a real safeLongRunning from the job records
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `2eb5306`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A real safeLongRunning composed from the T07 background-job records: agent principals cannot admit background or long-running jobs when a meeting is near or running; the wake host is M04h.
 - **Blockers:** M04f.
 - **Deliverable:** Split from M04f (2026-10-30), narrowed 2026-10-31: a safeLongRunning predicate built from the T07 job records, asked per RUNNING attempt (never for a new one): the attempt's own unfinished jobs are all background jobs that are dispatched or running; chat-settable `meeting.safeLongRunning`, default on. Composed by the controller as `Dispatcher.carriesOnDuringMeeting(attemptId, {conversationIdle})`, plus a gate that refuses an agent's new background or long job on any task from the notice before a meeting. The host that supplies the wake hook moved to M04h.
 - **Acceptance and verification:** A long job that cannot yield is refused during a meeting and a safe one carries on.
@@ -2459,6 +2475,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T05 — Implement MCP durable conversation adapter
 
 - **Parent:** N10a / AII-520.
+- **Status:** implemented; commits `02c2928`, `404aafa`, `fb16ef2`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** MCP durable conversation adapter plus the POST /mcp door on the conversation listener, with its own rate limit and an on/off setting; the stock SDK test, event stream, resources, prompts and stdio are T05b.
 - **Blockers:** U02, U02b, T04.
 - **Deliverable:** Two-way conversation tools with stable IDs/cursors.
 - **Acceptance and verification:** Both initiation directions survive reconnect; no duplicate turns or cross-scope leakage; protocol session not task owner; a protocol-version upgrade preserves thread IDs, cursors and audit history.
@@ -2733,6 +2751,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### K01h — Finish backup: Pi state, maintenance barrier, in-controller restore
 
 - **Parent:** N17 / AII-267.
+- **Status:** implemented; commits `7dcdeac`, `4ad7739`, `87fa011`, `c74da4a`, `f16cc26`, `a0b3751`, `9d76b0b`; CI runs 41271214698; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Backup restore: Pi state, maintenance barrier and a journalled, reversible in-controller restore swap with a signed marker, data lock and crash recovery; remote hosts' Pi state, piState/piFinal production wiring and K06 items remain in the notes.
 - **Blockers:** K01g.
 - **Deliverable:** Split from K01g (2026-10-29), narrowed 2026-10-31: the agents' conversation stores (Pi Durable folders on this machine, supplied by a port) in every backup, sealed when encrypted, verified and restored; a maintenance barrier (participants held in order, released in reverse) that pauses the dispatcher and backups, refuses commands and refuses while agent work runs; an owner restore from inside the running controller for SQLite (preview with a token, chat proposal only, staged beside the live data, pre-restore snapshot, swapped in at the next start, nothing deleted, cancellable).
 - **Acceptance and verification:** A restore is verified end to end including Pi state.

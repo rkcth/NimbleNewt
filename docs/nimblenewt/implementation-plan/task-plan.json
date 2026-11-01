@@ -657,12 +657,27 @@
       ],
       "deliverable": "SQLite to PostgreSQL and reverse logical transfer with maintenance journal",
       "acceptance_and_verification": "Drain work and fence admissions; validate IDs, policy, receipts, uncertain effects, timers, artifacts and Pi checkpoint references; injected transfer failures preserve source; destination authority is unique; reverse transfer checks capacity; no unsafe rollback after new effects",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "bb363d2",
+          "45b607f",
+          "7f10828",
+          "1234120",
+          "c6c79f2"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Chat-controlled controller database transfer between SQLite and PostgreSQL with a durable in-database fence, verified copy, rollback and an owner switch; reading targets from configuration and the rest are F04l and F04m.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "F04l",
@@ -2032,12 +2047,26 @@
       ],
       "deliverable": "Split from C07e (2026-10-28), narrowed 2026-10-31: the dispatcher asks for the route change before an attempt starts when the task last ran on another route (a fallback, a cutover or a re-admitted attempt), using the system prompt and tool schemas measured at the first admitted call on the new route; a controller with only remote hosts scales MCP limits to the window of the route in the routing table; the cut text is read back through the state API",
       "acceptance_and_verification": "A task whose next attempt is on another route has the context checked for that route's window and measured fixed part before the attempt starts, and an attempt that does not fit does not start, with the reason shown; the cut text can be read back; repeating the change gives the recorded decision; remote-only MCP limits follow the routing table's window",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d782db3",
+          "5a05bf2",
+          "c4bd81e",
+          "ee5d52a"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The route's fixed part is measured per route and the dispatcher asks for the route change; scaling the remote MCP limits is by the measured figure. Remaining items are in the notes.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "C07g",
@@ -2351,12 +2380,26 @@
       ],
       "deliverable": "Split from L05; narrowed 2026-10-31 (remote workers and the check of a tool call against the recorded generation are L05c): on the local worker host the model relay, which carries every model reply to the worker process, reads the stream's events (partial text, tool-call fragments, the end) and reports them to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held back from the worker, never applied; the owner can turn recording and holding back on or off in chat",
       "acceptance_and_verification": "A partial tool call never runs and a late response cannot override a correction, shown with a real worker process: the owner corrects a task mid-generation, the earlier stream is held with a visible reason, and the next generation starts under the new revision",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "21fac5c",
+          "c05873b",
+          "3b33705",
+          "0e0fe65"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The model stream is fed into revision-bound generation: batched recording, store timeouts and a fail-closed or fail-open choice; remote workers are L05c.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "L05c",
@@ -2369,12 +2412,25 @@
       ],
       "deliverable": "Split from L05b (2026-10-31): a remote worker makes its own model calls, so its stream reaches the generation service through the worker protocol (events with the attempt's fence, held replies reported back); the tool bridge refuses a call that does not belong to a complete, current generation of the task, and an interrupted generation's calls are withdrawn; a task that is paused when a call begins is recorded too when the owner turns that on (chat-settable, off by default: a paused task's model call is refused before it is sent)",
       "acceptance_and_verification": "A remote worker's late reply is held and shown like a local one; a tool call whose generation was corrected is refused at the bridge with the reason, shown with a real remote worker",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "bd02d27",
+          "b43f258",
+          "e1026cd"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Remote workers' model streams are recorded through the worker protocol (batched, retried safely) and the tool bridge checks a call's generation; the sandboxed remote worker wiring and the other limits are L05d.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "L05d",
@@ -2809,12 +2865,25 @@
       ],
       "deliverable": "Split from L03h (2026-10-30); narrowed 2026-10-31 (the integrator lease and workspace holds as lock sources moved to L03j): the owner can move chosen responsibilities of the sender to the recipient when completing a hand-off (checked before anything moves, carried out as the one who asked, per-entry results recorded)",
       "acceptance_and_verification": "The owner can reassign responsibilities with the hand-off package",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "948454a",
+          "f6fc7b5",
+          "73ea7f3"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The owner can move chosen responsibilities of the sender with the hand-off, with a warning when the new holder lacks rights; the lock sources (P10, H12m) are L03j.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "L03j",
@@ -6178,12 +6247,27 @@
       ],
       "deliverable": "Split from M02f (2026-10-30); narrowed 2026-10-31 (the steward agent, narrator, meeting chat commands, learned auto-apply rules and the aggregate cap moved to M02h): a limit on how many widening changes (grants, budget raises) one decision carries out on the approval policy's leave alone (owner settings, default three, switch-off explicit), refusals that cannot overwrite a change the owner's agreement has started, and a chat reading of the decision log (status.ask decision_log)",
       "acceptance_and_verification": "The limit holds and the owner's agreement lifts it; the owner can read the log in chat",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "b276003",
+          "8659593",
+          "4e6f5e7",
+          "edc167f",
+          "d719f4d"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Meeting decisions: a per-decision limit on policy-agreed widening (the owner is shown the held decision and may agree), guarded refusal saves and the decision log read in chat; the aggregate cap, steward agent, narrator and learned rules are M02h.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "M02h",
@@ -6390,12 +6474,26 @@
       ],
       "deliverable": "Split from M03f (2026-10-30), narrowed 2026-10-31: the allocation sink (the configured P/PC allocation is read through the controller's installation settings), follow-ups shown in the chat's listing of turns, and chat commands for stand-ups (pause, resume, end or rename one by its title; set one up as a proposal; deliver outcomes) are built. Remaining: see M03h",
       "acceptance_and_verification": "The allocation shows in the stand-up balance review in the running controller, a follow-up shows in the listing of turns, and the owner can change and deliver stand-ups through chat",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "9ebe3ed",
+          "da351dd",
+          "5ade307",
+          "a5f39e5"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Stand-ups: allocation in the review, follow-ups in the chat's turn listing, stand-up chat commands; the per-project index and the rest are M03h.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "M03h",
@@ -6608,12 +6706,23 @@
       ],
       "deliverable": "Split from M04f (2026-10-30), narrowed 2026-10-31: a safeLongRunning predicate built from the T07 job records, asked per RUNNING attempt (never for a new one): the attempt's own unfinished jobs are all background jobs that are dispatched or running; chat-settable `meeting.safeLongRunning`, default on. Composed by the controller as `Dispatcher.carriesOnDuringMeeting(attemptId, {conversationIdle})`, plus a gate that refuses an agent's new background or long job on any task from the notice before a meeting. The host that supplies the wake hook moved to M04h",
       "acceptance_and_verification": "A long job that cannot yield is refused during a meeting and a safe one carries on",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "2eb5306"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A real safeLongRunning composed from the T07 background-job records: agent principals cannot admit background or long-running jobs when a meeting is near or running; the wake host is M04h.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "M04h",
@@ -6891,12 +7000,25 @@
       ],
       "deliverable": "Two-way conversation tools with stable IDs/cursors",
       "acceptance_and_verification": "Both initiation directions survive reconnect; no duplicate turns or cross-scope leakage; protocol session not task owner; a protocol-version upgrade preserves thread IDs, cursors and audit history",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "02c2928",
+          "404aafa",
+          "fb16ef2"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "MCP durable conversation adapter plus the POST /mcp door on the conversation listener, with its own rate limit and an on/off setting; the stock SDK test, event stream, resources, prompts and stdio are T05b.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "T05b",
@@ -7615,12 +7737,29 @@
       ],
       "deliverable": "Split from K01g (2026-10-29), narrowed 2026-10-31: the agents' conversation stores (Pi Durable folders on this machine, supplied by a port) in every backup, sealed when encrypted, verified and restored; a maintenance barrier (participants held in order, released in reverse) that pauses the dispatcher and backups, refuses commands and refuses while agent work runs; an owner restore from inside the running controller for SQLite (preview with a token, chat proposal only, staged beside the live data, pre-restore snapshot, swapped in at the next start, nothing deleted, cancellable)",
       "acceptance_and_verification": "A restore is verified end to end including Pi state",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "7dcdeac",
+          "4ad7739",
+          "87fa011",
+          "c74da4a",
+          "f16cc26",
+          "a0b3751",
+          "9d76b0b"
+        ],
+        "ci_runs": [
+          "41271214698"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Backup restore: Pi state, maintenance barrier and a journalled, reversible in-controller restore swap with a signed marker, data lock and crash recovery; remote hosts' Pi state, piState/piFinal production wiring and K06 items remain in the notes.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "K01i",
