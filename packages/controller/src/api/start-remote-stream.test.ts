@@ -168,11 +168,15 @@ test("the worker's tap batches a fast token stream into few messages and splits 
     await feed(async (call) => { assert.deepEqual(await call!.events(Array.from({ length: 2000 }, () => ({ kind: "note" as const, text: "n" }))), {}); });
     assert.ok(posts >= 5 && posts < 20, `${posts} messages`);
     assert.equal((await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 2)))!.run.text, "[n]".repeat(2000).slice(0, 64 * 1024));
+    // CJK text is three bytes a character in UTF-8: the byte cap, not the character count, bounds a message.
+    posts = 0;
+    await feed(async (call) => { assert.deepEqual(await call!.events([{ kind: "text", text: "漢字".repeat(250_000) }]), {}); });
+    assert.ok(posts >= 3 && posts < 40, `${posts} messages for CJK`);
     // One 3 MB text arrives (the generation record keeps 64 KB of text and says where recording stopped; the reply is not held).
     posts = 0;
     await feed(async (call) => { assert.deepEqual(await call!.events([{ kind: "text", text: "é\"\n".repeat(750_000) }]), {}); });
     assert.ok(posts >= 5 && posts < 40, `${posts} messages`);
-    const run3 = (await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 3)))!.run;
+    const run3 = (await gen.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 4)))!.run;
     assert.equal(run3.state, "finished");
     assert.match(run3.text, /recording stopped here|^é/);
   } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

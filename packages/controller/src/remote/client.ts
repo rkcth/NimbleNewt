@@ -285,7 +285,7 @@ export class RemoteAttempt implements ToolGateway {
               pending[0] = e.kind === "tool" ? { kind: "tool", id: e.id, argumentsDelta: rest, done: e.done } : e.kind === "text" ? { kind: "text", text: rest } : { kind: "note", text: rest };
               e = part;
             } else pending.shift();
-            const size = JSON.stringify(e).length;
+            const size = Buffer.byteLength(JSON.stringify(e));
             if (out.length > 0 && bytes + size > STREAM_MESSAGE_BYTES) { pending.unshift(e); break; }
             out.push(e); bytes += size;
           }

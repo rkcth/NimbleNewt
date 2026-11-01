@@ -624,15 +624,16 @@ export class GenerationService {
     if (!(viewer.kind === "owner" || isDispatcher(viewer))) throw new DomainError("forbidden", `${viewer.id} may not check tool calls against generations`);
     const gateRow = await this.#runner.get("generation-gate", gateIdOf(taskId));
     const gate = gateRow?.body as unknown as GateBody | undefined;
-    if (gate === undefined || gate.current === undefined) return { recorded: false };
+    if (gate === undefined) return { recorded: false };
     const unrecorded = { recorded: false as const, ...(gate.hold === undefined ? {} : { held: `task ${taskId} is held (${gate.hold.mode}: ${gate.hold.reason})` }) };
+    if (gate.current === undefined) return unrecorded;
     for (let n = gate.current; n >= 1 && n > gate.current - GENERATION_CHECK_RUNS; n--) {
       const row = await this.#runner.get("generation-run", runIdOf(taskId, n));
       if (row === undefined) continue;
       const run = row.body as unknown as RunBody;
       const call = run.toolCalls.find((c) => c.id === command.callId);
-      // Runs are read newest first and each can be large: the search ends at the first run begun under an older context revision (after reading that one, so the latest corrected generation's calls are still refused).
-      if (call === undefined) { if (run.contextRevision < gate.contextRevision) break; continue; }
+      // Newest first, at most GENERATION_CHECK_RUNS runs: a call withdrawn in an older generation (superseded, then the task corrected) must still be found and refused, so older revisions are not skipped.
+      if (call === undefined) continue;
       const base = { recorded: true as const, runId: row.id, number: run.number };
       const no = (reason: string): { recorded: true; ok: false; runId: string; number: number; reason: string } => ({ ...base, ok: false, reason });
       if (run.interrupted !== undefined) return no(`generation ${run.number} of task ${taskId} was ${run.interrupted.kind} by ${run.interrupted.by} (${run.interrupted.reason}); its tool calls are withdrawn`);

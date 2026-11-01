@@ -882,7 +882,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N05 / AII-255.
 - **Blockers:** L05b, H02.
-- **Deliverable:** Split from L05b (2026-10-31): a remote worker makes its own model calls, so its stream reaches the generation service through the worker protocol (events with the attempt's fence, held replies reported back); the tool bridge refuses a call that does not belong to a complete, current generation of the task, and an interrupted generation's calls are withdrawn; a task that is paused when a call begins is recorded too.
+- **Deliverable:** Split from L05b (2026-10-31): a remote worker makes its own model calls, so its stream reaches the generation service through the worker protocol (events with the attempt's fence, held replies reported back); the tool bridge refuses a call that does not belong to a complete, current generation of the task, and an interrupted generation's calls are withdrawn; a task that is paused when a call begins is recorded too when the owner turns that on (chat-settable, off by default: a paused task's model call is refused before it is sent).
 - **Acceptance and verification:** A remote worker's late reply is held and shown like a local one; a tool call whose generation was corrected is refused at the bridge with the reason, shown with a real remote worker.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 

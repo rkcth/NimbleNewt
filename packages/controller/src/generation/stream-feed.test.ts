@@ -341,6 +341,24 @@ for (const backend of backends) {
     await assert.rejects(c.gen.checkCall({ ...c.dispatcher, id: "agent:ann", kind: "agent" } as never, { taskId: c.task, callId: "call_b" }), /may not check/);
   });
 
+  suite("a call withdrawn in an older generation (superseded, then the task corrected) is still refused (card L05c review)", async (c) => {
+    const reply = (id: string) => sse(chunk({ tool_calls: [{ index: 0, id, type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    await drain((await c.relayFor(endpoint([[reply("call_x")]])).relay(request as never)).body);
+    await drain((await c.relayFor(endpoint([[reply("call_y")]])).relay(request as never)).body);
+    await c.gen.correct(c.owner, { commandId: "fix", taskId: c.task, expectedContextRevision: 1, reason: "use beans" });
+    await drain((await c.relayFor(endpoint([[reply("call_z")]])).relay(request as never)).body);
+    const x = await c.gen.checkCall(c.dispatcher, { taskId: c.task, callId: "call_x" });
+    assert.ok(x.recorded && !x.ok, JSON.stringify(x));
+    const z = await c.gen.checkCall(c.dispatcher, { taskId: c.task, callId: "call_z" });
+    assert.ok(z.recorded && z.ok, JSON.stringify(z));
+  });
+
+  suite("a held task with no generation at all is reported held by checkCall (card L05c review)", async (c) => {
+    await c.gen.interrupt(c.owner, { commandId: "h0", taskId: c.task, mode: "finish_and_hold", reason: "wait" });
+    const r = await c.gen.checkCall(c.dispatcher, { taskId: c.task, callId: "call_q" });
+    assert.ok(!r.recorded && /held/.test((r as { held?: string }).held ?? ""), JSON.stringify(r));
+  });
+
   suite("a call is refused (not sent) for a fenced attempt, a paused task, a task waiting for a decision, and a done or cancelled task", async (c) => {
     const e = endpoint([[sse(chunk({ content: "x" }))]]);
     await assert.rejects(c.relayFor(e, undefined, [], { attempt: { attemptId: c.attemptId, taskId: c.task, generation: 99 } }).relay(request as never), /refused the call: no generation begins/, "fenced");
