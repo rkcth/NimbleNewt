@@ -284,7 +284,8 @@ for (const backend of backends) {
       // The first run's host never answers (the process "dies" there).
       const hanging = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => new Promise<never>(() => undefined), report: async () => undefined }, { clock: r.w.clock.now });
       void hanging.run({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, []);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Waits for the run to reach the order (a fixed 100 ms was too short for a SQLite worker thread on a slow Windows runner).
+      for (let i = 0; i < 200 && (await r.cleanup.get("att-1"))?.state !== "ordering"; i++) await new Promise((resolve) => setTimeout(resolve, 25));
       assert.equal((await r.cleanup.get("att-1"))?.state, "ordering");
       assert.equal(await r.cleanup.recover(), 0, "a decision that is only seconds old is left to the run that may still be going");
       assert.equal(r.s.orders.length, 0);
