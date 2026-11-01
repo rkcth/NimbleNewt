@@ -251,10 +251,11 @@ for (const backend of backends) {
   });
 
   suite("a store that stops answering mid-reply: closed cuts the reply with the reason; open lets it go on", async (c) => {
+    // The store that answers must be given time to (a worker thread on a slow Windows runner took more than 40 ms for the first call); only the hung operations never answer.
     const hung = wrap(c.gen, { recordMany: never, gate: never });
     const reply = [sse(chunk({ content: "a" })), sse(chunk({ content: "b" }), chunk({}, "stop")) + "data: [DONE]\n\n"];
-    await assert.rejects(drain((await c.relayFor(endpoint([reply]), { record: true, cut: true, storeTimeoutMs: 40, batchMs: 0, batchChars: 0 }, [], { gen: wrap(c.gen, { recordMany: never }) }).relay(request as never)).body), /held back: .*could not be reached.*closed/);
-    const answer = await c.relayFor(endpoint([reply]), { record: true, cut: true, failClosed: false, storeTimeoutMs: 40, batchMs: 0, batchChars: 0 }, [], { gen: hung }).relay(request as never);
+    await assert.rejects(drain((await c.relayFor(endpoint([reply]), { record: true, cut: true, storeTimeoutMs: 1500, batchMs: 0, batchChars: 0 }, [], { gen: wrap(c.gen, { recordMany: never }) }).relay(request as never)).body), /held back: .*could not be reached.*closed/);
+    const answer = await c.relayFor(endpoint([reply]), { record: true, cut: true, failClosed: false, storeTimeoutMs: 1500, batchMs: 0, batchChars: 0 }, [], { gen: hung }).relay(request as never);
     assert.match(await drain(answer.body), /"b"/);
   });
 
