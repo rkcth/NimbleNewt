@@ -207,24 +207,24 @@ export class McpConversationAdapter {
     if (thread === undefined) return fail(id, CODES.resource, "no such resource");
     const r = await this.#conversations.read(who, { threadId, afterSeq: Math.max(0, thread.nextSeq - 1 - RECENT), limit: RECENT });
     if (r === undefined) return fail(id, CODES.resource, "no such resource");
-    return reply(id, { contents: [{ uri, mimeType: "text/plain", text: this.#threadText(r.items) }] });
+    return reply(id, { contents: [{ uri, mimeType: "text/plain", text: this.#threadText(r.items, thread.nextSeq - 1 > r.items.length) }] });
   }
 
   /**
    * The messages as one text, oldest first, one line per message: when, who, then the text with its line breaks and other control characters written out (`\n`), so a message can never
    * start a line that looks like another sender's. The first line says the lines are untrusted content. A thread too long for one item loses its oldest lines, and the reader is told.
    */
-  #threadText(items: readonly MessageView[]): string {
+  #threadText(items: readonly MessageView[], olderUnread: boolean): string {
     const flat = (t: string): string => t.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, (c) => (c === "\n" ? "\\n" : c === "\r" ? "\\r" : c === "\t" ? "\\t" : "?"));
     const lines = items.map((m) => `${flat(m.sentAt)} ${flat(m.sender)}: ${flat(redactText(m.text))}`);
     const fits = (kept: readonly string[], dropped: boolean): boolean => HEADER.length + 1 + (dropped ? LEFT_OUT.length + 1 : 0) + kept.reduce((n, l) => n + l.length + 1, 0) <= MCP_LIMITS.text;
     const kept: string[] = [];
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (!fits([lines[i]!, ...kept], i > 0)) break;
+      if (!fits([lines[i]!, ...kept], i > 0 || olderUnread)) break;
       kept.unshift(lines[i]!);
     }
     if (kept.length === 0) return clipText(`${HEADER}\n${lines.at(-1) ?? ""}`, MCP_LIMITS.text);
-    return [HEADER, ...(kept.length < lines.length ? [LEFT_OUT] : []), ...kept].join("\n");
+    return [HEADER, ...(kept.length < lines.length || olderUnread ? [LEFT_OUT] : []), ...kept].join("\n");
   }
 
   #ok(result: unknown): object {

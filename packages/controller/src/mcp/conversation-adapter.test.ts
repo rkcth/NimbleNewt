@@ -9,7 +9,8 @@ import { McpConversationAdapter, MCP_SUPPORT, type RpcResponse } from "./index.j
 
 after(stopServer);
 
-const options = { clock: () => "2026-10-22T20:00:00.000Z", pause: async () => undefined };
+let skew = 0;
+const options = { clock: () => new Date(Date.parse("2026-10-22T20:00:00.000Z") + skew).toISOString(), pause: async () => undefined };
 let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 type Ok = Extract<RpcResponse, { result: unknown }>;
@@ -228,6 +229,14 @@ for (const backend of backends) {
     assert.equal(big.split("\n")[1], "[older messages left out]", big.slice(0, 120));
     assert.ok(big.includes("msg4") && big.includes("msg3"), "the newest messages are kept");
     assert.ok(!big.includes("msg0") && !big.includes("msg1"), "the oldest are left out");
+
+    // A thread with more messages than the read window says so, though everything shown fits.
+    // the clock moves on every 20 messages, past the per-minute send allowance
+    for (let i = 0; i < 52; i++) { if (i % 20 === 0) skew += 120_000; if (i % 30 === 29) { const o = await c.call((await c.principals.issueCredential(c.owner, "owner:rob")).token, "conversation_send", { commandId: cid("o"), threadId: t3, text: "owner here" }); assert.equal(o.isError, false, JSON.stringify(o.content)); } const w = await c.call(c.ann, "conversation_send", { commandId: cid("w"), threadId: t3, text: `w${i}` }); assert.equal(w.isError, false, `${i}: ${JSON.stringify(w.content)}`); }
+    const windowed = (await read(c.ann, uri(t3))).contents[0]!.text.split("\n");
+    assert.deepEqual([windowed.length, windowed[1]], [52, "[older messages left out]"], windowed.slice(0, 3).join("|"));
+    assert.ok(windowed.at(-1)!.endsWith(" w51"));
+    skew = 0;
 
     // A thread the caller may not read, one that is not there and a URI that is not a thread answer identically.
     const hidden = [
