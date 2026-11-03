@@ -2086,6 +2086,41 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "C07h",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Prove handoff input stays bounded without losing what the next agent needs to fix the task",
+      "depends_on": [
+        "C07f",
+        "L03"
+      ],
+      "deliverable": "Added 2026-11-03 after an independent code audit of the Paperclip failure in which a task passed between agents accumulates ever-larger notes and every handoff gets slower. A repeated-handoff test, with a retention check as important as the size check: a task is handed A to B to A about 50 times with retries, lease timeouts, resumes, a fallback to a smaller-window route and compactions, and at each hop the test records what the next agent is actually given (the first-call size sent, the handoff package size, the stored conversation size and the resume note) and what survives in it. Size: every hop stays under the first-call limit, the average of the last 10 hops is no more than 5 percent above the first 10, and the package stays within its fixed sections. Retention, so that bounding never starves the agent that has to fix the problem: at every hop the owner's words, permissions, the current goal and acceptance criteria, open blockers and questions, the most recent failure with its diagnosis, the next action and every recorded decision are still present whole or retrievable by the reference the prompt carries, and a seeded early decision and a seeded early failure detail are found again after 50 hops. Anything cut leaves a visible marker and an archived original that can be read back, so a cut is never silent. The test is the deliverable; where it shows a path unbounded or a cut that loses essentials (the audit's candidates: a route with an unknown window admits everything, the remote worker host has no first-call check, a handoff section is cut with a plain slice and no marker, the brief is cut at its tail, the compaction lineage cap of 200 makes later captures fail, and the controller's own summariser and handoff note are never used), each is recorded as a finding and split into its own follow-up card rather than fixed inside this one",
+      "acceptance_and_verification": "The simulation runs in the integration suite on both storage backends and in the exhaustive run; it fails when a hop exceeds the ceiling or the size trend rises, when any retention item is missing or cannot be retrieved, or when a cut has no marker or no archived original; deliberately removing a bound, or deliberately cutting a retained item, makes it fail (mutation check recorded); the findings list names each unbounded path or lossy cut with the file and line, and each has a follow-up card; the production watch on the same figure is C07i",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07i",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Watch each attempt's starting size in production and alert before it becomes a slowdown",
+      "depends_on": [
+        "C07h"
+      ],
+      "deliverable": "Split from C07h (2026-11-03): the repeated-handoff test proves the bound in a simulation; this card watches the real thing. Each attempt records the size of the first call it was given, keyed by task and by how many handoffs the task has had, with the limit for its route and the share of the limit used. The owner sees an alert, and the task gets a visible warning, when a task's starting size has risen over several consecutive handoffs or passes 80 percent of its limit, so a slowdown is noticed while it is still small. The alert names the task, the trend and the largest contributors (stored conversation, handoff package, notes, project rules) and links the archived originals, and it never trims, cuts or compacts anything itself, so watching cannot cost the agent information it needs",
+      "acceptance_and_verification": "An attempt on a task whose starting size rises over a configurable number of consecutive handoffs raises one alert (not one per attempt) with the trend and the contributors; passing 80 percent of the limit raises a warning before the 25 percent refusal; a flat or falling trend raises nothing; the figure is recorded for local and remote workers and for a route with an unknown window, which is shown as unknown and not as zero; the alert thresholds are configurable and validated; the alert changes no task content and leaves every cut original retrievable; the recorded figures are read through the state API and bounded themselves (older points are rolled up, not kept without limit)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "C08",
       "parent": "N07",
       "existing_issue": "AII-257",
@@ -8834,6 +8869,8 @@
         "A08c",
         "C07f",
         "C07g",
+        "C07h",
+        "C07i",
         "L02b",
         "H08b",
         "U06b",
