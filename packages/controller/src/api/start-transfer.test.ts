@@ -169,3 +169,61 @@ test("applying the move from a chat message, not only by applyProposal, reports 
   } finally { await c.close().catch(() => undefined); }
   rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
+
+test("destinations written as configuration entries are built at start, and a move to one goes through; a bad entry or a repeated name stops the start with its index (card F04l)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfe-"));
+  const say: Record<string, unknown[]> = {};
+  const newPath = join(d, "moved.sqlite");
+  const open = async (entries: unknown[]) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    transfer: { stateDirectory: d, targets: [], targetEntries: entries } } as never);
+  try {
+    await assert.rejects(open([{ name: "Moved", kind: "sqlite", path: newPath }]), /transfer targets\[0\]: name: must be 1 to 64 characters/);
+    await assert.rejects(open([{ name: "moved", kind: "sqlite", path: "relative.sqlite" }]), /transfer targets\[0\]: path: must be an absolute path/);
+    await assert.rejects(open([{ name: "moved", kind: "sqlite", path: newPath }, { name: "moved", kind: "sqlite", path: join(d, "other.sqlite") }]), /transfer targets\[1\]: name: moved is used by another entry/);
+    const c = await open([{ name: "moved", kind: "sqlite", path: newPath }]);
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const text = "move the database to moved";
+      say[text] = [{ kind: "command", op: "database.transfer.apply", args: { target: "moved" }, evidence: text, basis: "owner" }];
+      const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
+      const proposalId = (shown[0] as { proposalId?: string }).proposalId;
+      assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+      assert.ok(proposalId !== undefined);
+      assert.match(JSON.stringify(shown[0]), /moved/);
+      const done = await c.chat!.applyProposal(boot.token, { commandId: "ap-e1", proposalId: proposalId! });
+      assert.equal(done.applied, true, JSON.stringify(done));
+      assert.equal((await readAuthority(d))?.active.name, "moved");
+    } finally { await c.close().catch(() => undefined); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("a recovery point whose conversation checkpoint the host cannot find refuses the move, and nothing is moved (card F04l)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfk-"));
+  const say: Record<string, unknown[]> = {};
+  const dbPath = join(d, "c.sqlite");
+  // A database that already holds one recovery point, as a running installation would.
+  const seed = await SqliteStorage.open({ path: dbPath });
+  const { epoch } = await seed.acquireEpoch({ holder: "seed", at: "2026-10-31T10:00:00.000Z" });
+  await seed.applyOperation({ operationId: "seed-1", epoch, actor: "owner:rob", correlationId: "c-seed", at: "2026-10-31T10:00:00.000Z", audit: [{ type: "task.created", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [], changes: [
+    { type: "create", ref: { kind: "task", id: "task-a" }, body: { title: "t" } }, { type: "create", ref: { kind: "attempt", id: "att-1" }, body: { taskId: "task-a" } },
+    { type: "create", ref: { kind: "artifact", id: "art-aaaaaaaaaaaaaaaaaaaa" }, body: { entries: [{ digest: "sha256:" + "d".repeat(64) }] } },
+    { type: "create", ref: { kind: "recovery-point", id: "rp-1" }, body: { attemptId: "att-1", taskId: "task-a", artifactId: "art-aaaaaaaaaaaaaaaaaaaa", checkpoint: "ck-1" } },
+  ] } as never);
+  await seed.close();
+  let asked: { id: string; attemptId: string; checkpoint: string }[] = [];
+  const c = await startController({ storage: { kind: "sqlite", path: dbPath }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    transfer: { stateDirectory: d, targets: [], targetEntries: [{ name: "moved", kind: "sqlite", path: join(d, "moved.sqlite") }], references: { checkpoints: async (points: { id: string; attemptId: string; checkpoint: string }[]) => { asked = points; return points.map((p) => p.id); } } } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const text = "move the database to moved";
+    say[text] = [{ kind: "command", op: "database.transfer.apply", args: { target: "moved" }, evidence: text, basis: "owner" }];
+    const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
+    assert.equal(shown[0]!.status, "refused", JSON.stringify(shown));
+    assert.match(JSON.stringify(shown[0]), /checkpoint of recovery point rp-1 is not in the conversation store/);
+    assert.deepEqual(asked, [{ id: "rp-1", attemptId: "att-1", checkpoint: '"ck-1"' }], "the host gets each checkpoint as the JSON text the record holds");
+    assert.equal(await readAuthority(d), undefined, "nothing was moved");
+  } finally { await c.close().catch(() => undefined); }
+  rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+});

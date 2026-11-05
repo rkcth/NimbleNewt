@@ -8,7 +8,7 @@ import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meet
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
 import { BackupEncryption, BackupKeyPinService, BackupService, MaintenanceBarrier, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
-import { readFile } from "node:fs/promises";
+import { readFile, statfs } from "node:fs/promises";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
 import { shareableCite } from "../meetings/shareable.js";
@@ -90,7 +90,7 @@ import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublish
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { canon } from "../backup/canon.js";
-import { DatabaseTransferService, assertNotFenced, acquireStateLock, guardStart, withStateLock, postgresFingerprint, recordFirstStart, sqliteFingerprint, type TransferPoint, type TransferSource, type TransferTarget } from "../transfer/index.js";
+import { DatabaseTransferService, assertNotFenced, acquireStateLock, guardStart, withStateLock, postgresFingerprint, recordFirstStart, sqliteFingerprint, sqliteTargetsFromConfig, type TransferPoint, type TransferReferences, type TransferSource, type TransferTarget } from "../transfer/index.js";
 import { ConversationTransport, MCP_ENABLED_SETTING, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
@@ -103,7 +103,11 @@ export interface StartOptions {
    * Moving the controller database to another one from chat (card F04e). The databases a transfer may go to are named here by the host (a PostgreSQL address holds a password, so it is never typed in chat); with none given
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
    */
-  readonly transfer?: { /** ONE fixed folder for the transfer journal and authority file, independent of every database path (mandatory when targets are given). */ readonly stateDirectory?: string; readonly targets: readonly TransferTarget[]; readonly inject?: (point: TransferPoint) => void | Promise<void>; readonly onSwitched?: () => void };
+  readonly transfer?: { /** ONE fixed folder for the transfer journal and authority file, independent of every database path (mandatory when targets are given). */ readonly stateDirectory?: string; readonly targets: readonly TransferTarget[];
+    /** SQLite destinations as the configuration lists them, `{ name, kind: "sqlite", path }` (card F04l): checked and built here, so a host passes the configuration's entries as they are. They are added to `targets`; a name or a place used twice is refused. */
+    readonly targetEntries?: readonly unknown[];
+    /** Checks outside the database, answered by the host (card F04l): `checkpoints` answers which recovery points' conversation checkpoints are MISSING from the agents' stores. The controller does not know the layout of Pi's stores, so it cannot check them itself. Each point's `checkpoint` is given as the JSON text the recovery-point record holds. */
+    readonly references?: Pick<TransferReferences, "checkpoints">; readonly inject?: (point: TransferPoint) => void | Promise<void>; readonly onSwitched?: () => void };
   /** Where releases are staged and activated (card K02): off unless given. The release root holds `incoming`, `releases` and the activation pointer; the launcher reads the pointer. */
   readonly releases?: Omit<ActivationOptions, "runner">;
   /** The command line and environment of the process: the operator's override is read from them (`--allow-unsupported-environment`, `NIMBLENEWT_ALLOW_UNSUPPORTED_ENVIRONMENT=1`). */
@@ -340,7 +344,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   const stateInput = options.transfer?.stateDirectory;
   if (stateInput !== undefined && !isAbsolute(stateInput)) throw new Error("transfer.stateDirectory must be an absolute path (it is the one fixed place of the transfer journal and authority file)");
   const stateDirectory = stateInput === undefined ? undefined : await canon(stateInput);
-  if (options.transfer !== undefined && options.transfer.targets.length > 0 && stateDirectory === undefined) throw new Error("database transfer targets are configured without a transfer state directory (transfer.stateDirectory): the journal and the authority file need one fixed place that does not depend on a database path");
+  // Destinations from the configuration are built now (a bad entry stops the start with its index and problem), and joined to the ones the host gave.
+  const configuredTargets = options.transfer?.targetEntries === undefined ? [] : await sqliteTargetsFromConfig(options.transfer.targetEntries, { openStorage: (path) => SqliteStorage.open({ path }), statfs: (path) => statfs(path) });
+  const transferTargets: readonly TransferTarget[] = [...(options.transfer?.targets ?? []), ...configuredTargets];
+  for (const [i, t] of transferTargets.entries()) {
+    const twin = transferTargets.findIndex((o, j) => j < i && (o.name === t.name || o.fingerprint === t.fingerprint));
+    if (twin >= 0) throw new Error(`database transfer targets: ${t.name} is the same name or the same place as ${transferTargets[twin]!.name}`);
+  }
+  if (transferTargets.length > 0 && stateDirectory === undefined) throw new Error("database transfer targets are configured without a transfer state directory (transfer.stateDirectory): the journal and the authority file need one fixed place that does not depend on a database path");
   const piState = options.backup?.piState ?? options.dispatch?.local?.piState?.source;
   const piFinal = options.backup?.restore?.piFinal ?? options.dispatch?.local?.piState?.final;
   // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
@@ -722,9 +733,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const barrier = new MaintenanceBarrier();
     if (backups !== undefined) barrier.add({ name: "backups", hold: async () => backups.hold() });
     barrier.add({ name: "dispatcher", hold: async () => { await dispatch?.driver.settle(); const live = dispatch === undefined ? [] : await dispatch.dispatcher.liveAttempts(dispatch.principal); if (live.length > 0) throw new Error(`${live.length} agent attempt(s) are still running: stop or pause the work first`); return () => undefined; } });
-    const databaseTransfer = options.transfer === undefined || options.transfer.targets.length === 0 || stateDirectory === undefined ? undefined : new DatabaseTransferService({
-      storage, source: sourcePlace, targets: () => options.transfer!.targets, stateDirectory, barrier, enabled: async () => (await configuration.installationValue("database.transfer.enabled")) !== false,
-      references: { ...(blobStore === undefined ? {} : { artifacts: async (digests: readonly string[]) => { const missing: string[] = []; for (const d of digests) if (!(await blobStore.has(d))) missing.push(d); return missing; } }) },
+    const databaseTransfer = options.transfer === undefined || transferTargets.length === 0 || stateDirectory === undefined ? undefined : new DatabaseTransferService({
+      storage, source: sourcePlace, targets: () => transferTargets, stateDirectory, barrier, enabled: async () => (await configuration.installationValue("database.transfer.enabled")) !== false,
+      references: { ...(options.transfer.references?.checkpoints === undefined ? {} : { checkpoints: options.transfer.references.checkpoints }), ...(blobStore === undefined ? {} : { artifacts: async (digests: readonly string[]) => { const missing: string[] = []; for (const d of digests) if (!(await blobStore.has(d))) missing.push(d); return missing; } }) },
       ...(options.transfer.inject === undefined ? {} : { inject: options.transfer.inject }), ...(options.transfer.onSwitched === undefined ? {} : { onSwitched: () => options.transfer!.onSwitched!() }),
     });
     const stagedRestore = backups === undefined || dataDirectory === undefined || options.storage.kind !== "sqlite" ? undefined : new StagedRestore({ backups, root: options.backup!.directory, barrier, sqlitePath: resolve(options.storage.path), dataDirectory, storage, ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(piFinal === undefined ? {} : { piFinal }), piStateConfigured: piState !== undefined, ...(dataLock === undefined ? {} : { lock: dataLock }), confirmMinutes: async () => (await retentionSettings.effective()).restoreConfirmMinutes, changeMargin: async () => (await retentionSettings.effective()).restoreChangeMargin, ...(backupEncryption === undefined ? {} : { unlock: (m) => backupEncryption!.unlock(m) }), deletions: () => new DeletionLedger(join(options.backup!.directory, LEDGER_FILE)).read(), ...(options.backup!.restore?.onStaged === undefined ? {} : { onStaged: options.backup!.restore.onStaged }), ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
