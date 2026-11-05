@@ -145,3 +145,27 @@ test("the chat proposes a database move with the plan the controller works out; 
   } finally { await c.close().catch(() => undefined); }
   rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
+
+test("applying the move from a chat message, not only by applyProposal, reports it applied: the turn cannot be written to the database that was just retired (card F04m)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfm-"));
+  const say: Record<string, unknown[]> = {};
+  const newPath = join(d, "moved.sqlite");
+  const open = async () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    transfer: { stateDirectory: d, targets: [{ ...(await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) })), freeBytes: async () => 1e12 }] } } as never);
+  const c = await open();
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const text = "move the database to moved";
+    say[text] = [{ kind: "command", op: "database.transfer.apply", args: { target: "moved" }, evidence: text, basis: "owner" }];
+    const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
+    const proposalId = (shown[0] as { proposalId?: string }).proposalId;
+    assert.ok(proposalId !== undefined, JSON.stringify(shown[0]));
+    const yes = "yes, move it";
+    say[yes] = [{ kind: "apply_proposal", proposalId, evidence: yes, basis: "owner" }];
+    const answer = await c.chat!.submit(boot.token, { messageId: "m2", text: yes });
+    assert.equal(answer.outcomes[0]!.status, "applied", JSON.stringify(answer.outcomes));
+    assert.equal((await readAuthority(d))?.active.name, "moved");
+  } finally { await c.close().catch(() => undefined); }
+  rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+});

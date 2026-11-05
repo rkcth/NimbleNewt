@@ -1219,6 +1219,9 @@ export class ChatService {
     try {
       await this.#finishTurn(owner, turnId, done);
     } catch (error) {
+      // A database transfer applied by this very message fences the database the turn lives in (card F04m): the move was made, and the note that the turn is done cannot be written to the database that was just retired.
+      // The owner is told it was applied; the records that would follow (the project's context line, the resumed question) are written to the new database by the next message.
+      if (error instanceof DomainError && error.code === "stale_epoch" && outcomes.some((o) => o.status === "applied" && o.results?.some((r) => r.op === "database.transfer.apply" || r.op === "database.transfer.rollback") === true)) return done;
       if (!(error instanceof DomainError) || error.code !== "stale_revision") throw error;
       const now = await this.#turn(turnId);
       if (now?.status === "done") return now;
