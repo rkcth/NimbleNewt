@@ -457,7 +457,7 @@ for (const backend of backends) {
     at("2026-10-20T12:00:00.000Z");
     const pc = async (id: string): Promise<void> => { await c.contracts.setContract(c.owner, { commandId: cid("ct"), taskId: id, expectedVersion: (await c.contracts.get(c.owner, id))!.version, workClass: "PC" } as never); };
     await c.task("Ship the report", c.agentA, "done");
-    await c.task("Ship the export", c.agentA, "in_progress");
+    const pExport = await c.task("Ship the export", c.agentA, "in_progress");
     const pcDone = await c.task("Cache the fixtures", c.agentB, "done"); await pc(pcDone);
     const pcWork = await c.task("Faster lint", c.agentB, "in_progress"); await pc(pcWork);
     const pcStuck = await c.task("Retire the old tool", c.agentB, "blocked"); await pc(pcStuck);
@@ -479,6 +479,14 @@ for (const backend of backends) {
     assert.match(text, /Next protected improvement window: none is scheduled\./);
     assert.ok(bare.review.lines.every((l) => l.cites.length > 0), "every line cites the records it rests on");
     assert.deepEqual([bare.review.figures.deliveredP, bare.review.figures.pendingP, bare.review.figures.deliveredPC, bare.review.figures.activePC, bare.review.figures.deferredPC], [1, 1, 1, 1, 2]);
+    // With attempts on record, the use is the worker-slot time of the attempts in the period, by the class of each attempt's task (card M03h): 2 hours on P work and 1 hour on PC work make a PC share of 33%.
+    const proj = c.a;
+    at("2026-10-20T10:00:00.000Z"); await c.put("dispatch", "att-slot-p", { attemptId: "att-slot-p", taskId: pExport, projectId: proj, state: "finished", startedAt: "2026-10-20T08:00:00.000Z", claimedAt: "2026-10-20T08:00:00.000Z" });
+    at("2026-10-20T13:00:00.000Z"); await c.put("dispatch", "att-slot-pc", { attemptId: "att-slot-pc", taskId: pcWork, projectId: proj, state: "finished", startedAt: "2026-10-20T12:00:00.000Z", claimedAt: "2026-10-20T12:00:00.000Z" });
+    at("2026-10-20T13:30:00.000Z"); await c.put("dispatch", "att-other-project", { attemptId: "att-other-project", taskId: pcWork, projectId: "prj-elsewhere", state: "finished", startedAt: "2026-10-20T08:00:00.000Z", claimedAt: "2026-10-20T08:00:00.000Z" });
+    at("2026-10-21T05:00:00.000Z");
+    const slot = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
+    assert.match(slot, /actual PC share 33% \(worker-slot time of 2 attempts/);
     // With the owner's allocation and a measured use and a window, the lines say so.
     const rich = c.make({ allocation: async () => ({ floor: 10, target: 20, ceiling: 30 }), usage: async () => ({ pcShare: 18, basis: "worker-slot time" }), improvementWindow: async () => "2026-11-02T09:00:00.000Z" });
     const r = (await rich.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");

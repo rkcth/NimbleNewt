@@ -1,4 +1,5 @@
 import { DomainError } from "../domain/errors.js";
+import { DISPATCH_KIND, type DispatchBody } from "../dispatch/model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerBody } from "../domain/blockers.js";
 import { derivedId } from "../domain/ids.js";
@@ -128,7 +129,7 @@ export interface StandupOptions extends RunnerOptions {
   readonly waitingMessages?: (by: Principal, agent: string) => Promise<number>;
   /** The configured P/PC allocation (floor, target, ceiling in percent), for the balance review (see `allocationFrom`). */
   readonly allocation?: () => Promise<Allocation | undefined>;
-  /** Actual use on the allocation basis (worker-slot time) when something measures it; absent: the review says so and falls back to counting tasks. */
+  /** Actual use on the allocation basis (worker-slot time), when a host measures it better than the review does. Absent: the review measures it from the dispatcher's attempt records (`#slotUsage`), and counts tasks when no attempt ran in the period. */
   readonly usage?: (projectId: string, since: string, until: string) => Promise<{ readonly pcShare: number; readonly basis: string } | undefined>;
   /** What needs the owner now (the digest, part of the daily meeting by the owner's decision of 2026-10-22), as lines with their records: see `needsOwnerFrom`. Absent or failing: the agenda says the list could not be read. */
   readonly ownerItems?: (projectId: string) => Promise<readonly ReviewLine[]>;
@@ -612,6 +613,33 @@ export class StandupService {
     return facts;
   }
 
+  /**
+   * The use of worker slots in the period, from the dispatcher's own records (card M03h): for each attempt of the project that ran in the period, the time it held a slot (from its start to its last update; to the end of
+   * the period while it still runs; to its last heartbeat while it is parked, as it gave its place back), cut to the period and added up by the class of its task. An estimate, since an attempt record does not keep the exact
+   * time it ended; the basis says how many attempts it rests on. No attempt in the period: nothing is measured and the review counts tasks. A cut scan marks the review partial, as the other figures.
+   */
+  async #slotUsage(projectId: string, since: string, until: string, facts: { partial: boolean }): Promise<{ pcShare: number; basis: string } | undefined> {
+    const from = Date.parse(since), to = Date.parse(until);
+    const sums = { P: 0, PC: 0 };
+    const classes = new Map<string, "P" | "PC">();
+    let attempts = 0;
+    await this.#scan(DISPATCH_KIND, facts, async (a) => {
+      const d = a.body as unknown as DispatchBody;
+      if (d.projectId !== projectId || typeof d.startedAt !== "string") return;
+      const begin = Date.parse(d.startedAt);
+      const end = d.state === "running" ? to : Date.parse(d.state === "parked" ? (d.lastHeartbeatAt ?? a.updatedAt) : a.updatedAt);
+      const lo = Math.max(begin, from), hi = Math.min(end, to);
+      if (!(hi > lo)) return;
+      let workClass = classes.get(d.taskId);
+      if (workClass === undefined) { workClass = await this.#classOf(d.taskId); classes.set(d.taskId, workClass); }
+      sums[workClass] += hi - lo;
+      attempts++;
+    });
+    const total = sums.P + sums.PC;
+    if (total === 0) return undefined;
+    return { pcShare: Math.round((sums.PC / total) * 100), basis: `worker-slot time of ${attempts} attempt${attempts === 1 ? "" : "s"}, estimated from start to last update` };
+  }
+
   async #classOf(taskId: string): Promise<"P" | "PC"> {
     return ((await this.#runner.get("task-contract", taskId))?.body as unknown as { workClass?: "P" | "PC" } | undefined)?.workClass ?? "P";
   }
@@ -711,7 +739,7 @@ export class StandupService {
     const allocation = this.#options.allocation === undefined ? undefined : await this.#options.allocation().catch(() => undefined);
     const classed = live.filter((t) => t.body.state === "in_progress" || t.body.state === "done");
     const byCount = classed.length === 0 ? undefined : Math.round((classed.filter((t) => t.workClass === "PC").length / classed.length) * 100);
-    const measured = this.#options.usage === undefined ? undefined : await this.#options.usage(projectId, since, until).catch(() => undefined);
+    const measured = this.#options.usage === undefined ? await this.#slotUsage(projectId, since, until, facts).catch(() => undefined) : await this.#options.usage(projectId, since, until).catch(() => undefined);
     const planned = allocation === undefined || (allocation.floor === undefined && allocation.target === undefined && allocation.ceiling === undefined) ? "no P/PC allocation is set" : `planned PC share: floor ${allocation.floor ?? "-"}%, target ${allocation.target ?? "-"}%, ceiling ${allocation.ceiling ?? "-"}%`;
     const actual = measured !== undefined ? `actual PC share ${measured.pcShare}% (${cut(measured.basis, 100)})` : byCount !== undefined ? `actual PC share ${byCount}% by count of tasks worked on or finished (worker-slot time is not measured here, so this is only a rough guide)` : "nothing was worked on or finished in the period";
     lines.push({ text: `Allocation against use: ${planned}; ${actual}.`, cites: [project] });
