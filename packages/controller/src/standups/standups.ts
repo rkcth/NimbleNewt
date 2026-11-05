@@ -614,22 +614,25 @@ export class StandupService {
   }
 
   /**
-   * The use of worker slots in the period, from the dispatcher's own records (card M03h): for each attempt of the project that ran in the period, the time it held a slot (from its start to its last update; to the end of
-   * the period while it still runs; to its last heartbeat while it is parked, as it gave its place back), cut to the period and added up by the class of its task. An estimate, since an attempt record does not keep the exact
-   * time it ended; the basis says how many attempts it rests on. No attempt in the period: nothing is measured and the review counts tasks. A cut scan marks the review partial, as the other figures.
+   * The use of worker slots in the period, from the dispatcher's own records (card M03h): for each attempt of the project that ran in the period, the time it held a slot (from its start to its recorded end; to the end of
+   * the period while it still runs), cut to the period and added up by the class of its task. An attempt that gave its place back and asked for it again (parked and resumed, or placed more than once) keeps its first start,
+   * so its record cannot tell run time from waiting time; those attempts are left out of the share and counted in the basis, rather than counted as if they had run the whole time. No attempt that can be measured in the
+   * period: nothing is measured and the review counts tasks. A cut scan marks the review partial, as the other figures.
    */
   async #slotUsage(projectId: string, since: string, until: string, facts: { partial: boolean }): Promise<{ pcShare: number; basis: string } | undefined> {
     const from = Date.parse(since), to = Date.parse(until);
     const sums = { P: 0, PC: 0 };
     const classes = new Map<string, "P" | "PC">();
-    let attempts = 0;
+    let attempts = 0, left = 0;
     await this.#scan(DISPATCH_KIND, facts, async (a) => {
       const d = a.body as unknown as DispatchBody;
       if (d.projectId !== projectId || typeof d.startedAt !== "string") return;
+      if (d.state === "waiting") return;
       const begin = Date.parse(d.startedAt);
-      const end = d.state === "running" ? to : Date.parse(d.state === "parked" ? (d.lastHeartbeatAt ?? a.updatedAt) : a.updatedAt);
+      const end = d.state === "running" ? to : d.state === "finished" ? Date.parse(d.outcome?.at ?? a.updatedAt) : Date.parse(d.lastHeartbeatAt ?? a.updatedAt);
       const lo = Math.max(begin, from), hi = Math.min(end, to);
-      if (!(hi > lo)) return;
+      if (!(hi > lo)) return; // it did not hold a slot in the period
+      if (d.state === "parked" || (d.requests ?? 0) > 1 || (d.resumedFor?.length ?? 0) > 0) { left++; return; }
       let workClass = classes.get(d.taskId);
       if (workClass === undefined) { workClass = await this.#classOf(d.taskId); classes.set(d.taskId, workClass); }
       sums[workClass] += hi - lo;
@@ -637,7 +640,7 @@ export class StandupService {
     });
     const total = sums.P + sums.PC;
     if (total === 0) return undefined;
-    return { pcShare: Math.round((sums.PC / total) * 100), basis: `worker-slot time of ${attempts} attempt${attempts === 1 ? "" : "s"}, estimated from start to last update` };
+    return { pcShare: Math.round((sums.PC / total) * 100), basis: `worker-slot time of ${attempts} attempt${attempts === 1 ? "" : "s"}${left === 0 ? "" : `; ${left} that parked or were placed again are not counted, as their run time is not recorded`}` };
   }
 
   async #classOf(taskId: string): Promise<"P" | "PC"> {

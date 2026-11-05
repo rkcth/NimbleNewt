@@ -1202,7 +1202,7 @@ export class MeetingRecordService {
    * The owner answers an adopted decision (only the authenticated owner). `agree` lets it be applied (and applies it). `decline` refuses the changes not yet applied: what was already applied stays reported as applied. `alternative`
    * records the owner's own wording as a separate owner decision (C08) and refuses the changes not yet applied; no re-vote is needed. The vote and the owner's decision stay separate records.
    */
-  async ownerRespond(by: Principal, command: NoActor & { decisionId: string; response: "agree" | "decline" | "alternative"; alternative?: Omit<RecordDecision, "commandId"> & { commandId: string } }): Promise<{ ownerDecisionId?: string; applied?: number }> {
+  async ownerRespond(by: Principal, command: NoActor & { decisionId: string; response: "agree" | "decline" | "alternative"; alternative?: Omit<RecordDecision, "commandId"> & { commandId: string } }): Promise<{ ownerDecisionId?: string; applied?: number; /** After a decline or an alternative: a change that had already started could not be finished just now and stays applying until the decision is applied again. */ stillApplying?: true }> {
     onlyKnown(command, ["commandId", "decisionId", "response", "alternative"]);
     if (by.kind !== "owner") throw forbidden(by, "answer for the owner");
     const decisionId = this.#decisionId(command.decisionId);
@@ -1241,9 +1241,10 @@ export class MeetingRecordService {
     // A change that was already started when the owner declined carries on under the agreement it started with. Nothing else would finish it (a sweep does not apply decisions), so it is driven here; the answer is already
     // saved, so a failure leaves the change applying for the next apply and does not undo or hide the owner's answer (card M02h).
     const left = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
-    if (left?.changes.some((c) => c.state === "applying") === true) { try { await this.#applyDecision(by, decisionId); } catch { /* the change stays applying; a later apply finishes it */ } }
+    let stillApplying = false;
+    if (left?.changes.some((c) => c.state === "applying") === true) { try { await this.#applyDecision(by, decisionId); } catch { stillApplying = true; /* the change stays applying; a later apply finishes it */ } }
     else await this.#logChanges(decisionId);
-    return { ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }) };
+    return { ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(stillApplying ? { stillApplying: true as const } : {}) };
   }
 
   // ---- ending ----------------------------------------------------------------------------------------------------------------------------------

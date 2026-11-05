@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import { after, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -12,6 +13,30 @@ import { ConversationTransport } from "./index.js";
 // and expects (its headers, its handshake, its notification, its attempt to open a stream) is accepted.
 
 after(stopServer);
+
+// The package test runner replaces the global fetch with one that always refuses (scripts/offline-guard.mjs: a test must not depend on a real network). The SDK's transport sends through `fetch`, so it is given this
+// one, which only reaches this machine's own loopback address over node:http (which the guard allows) and answers like fetch does.
+const loopbackFetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => new Promise((resolve, reject) => {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") { reject(new Error(`the test fetch only reaches loopback, not ${url.hostname}`)); return; }
+  const headers: Record<string, string> = {};
+  new Headers(init?.headers).forEach((value, key) => { headers[key] = value; });
+  const body = typeof init?.body === "string" ? init.body : undefined;
+  const req = httpRequest(url, { method: init?.method ?? "GET", headers: { ...headers, ...(body === undefined ? {} : { "content-length": String(Buffer.byteLength(body)) }) } }, (res) => {
+    const chunks: Buffer[] = [];
+    res.on("data", (d: Buffer) => chunks.push(d));
+    res.on("end", () => {
+      const out = new Headers();
+      for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : v);
+      const status = res.statusCode!;
+      resolve(new Response(status === 202 || status === 204 || status === 205 || status === 304 ? null : Buffer.concat(chunks), { status, headers: out }));
+    });
+  });
+  req.on("error", reject);
+  init?.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")), { once: true });
+  if (body !== undefined) req.write(body);
+  req.end();
+});
 
 const options = { clock: () => "2026-10-21T10:00:00.000Z", pause: async () => undefined };
 let n = 0;
@@ -40,7 +65,7 @@ for (const backend of backends) {
       const connect = async (token: string): Promise<Client> => {
         const client = new Client({ name: "stock-client", version: "1.0.0" });
         // The SDK's own types do not satisfy this repository's exactOptionalPropertyTypes (its transport's sessionId), so the cast is only for the compiler.
-        await client.connect(new StreamableHTTPClientTransport(new URL("/mcp", transport!.url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }) as never);
+        await client.connect(new StreamableHTTPClientTransport(new URL("/mcp", transport!.url), { fetch: loopbackFetch as never, requestInit: { headers: { authorization: `Bearer ${token}` } } }) as never);
         clients.push(client);
         return client;
       };

@@ -486,7 +486,13 @@ for (const backend of backends) {
     at("2026-10-20T13:30:00.000Z"); await c.put("dispatch", "att-other-project", { attemptId: "att-other-project", taskId: pcWork, projectId: "prj-elsewhere", state: "finished", startedAt: "2026-10-20T08:00:00.000Z", claimedAt: "2026-10-20T08:00:00.000Z" });
     at("2026-10-21T05:00:00.000Z");
     const slot = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
-    assert.match(slot, /actual PC share 33% \(worker-slot time of 2 attempts/);
+    assert.match(slot, /actual PC share 33% \(worker-slot time of 2 attempts\)/);
+    // The exact end time is used for a finished attempt (not the last update of its record), and an attempt that parked and came back is left out and said to be: its first start would count the waiting as running (card M03h).
+    at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-late", { attemptId: "att-slot-late", taskId: pExport, projectId: proj, state: "finished", startedAt: "2026-10-20T14:00:00.000Z", claimedAt: "2026-10-20T14:00:00.000Z", outcome: { status: "succeeded", summary: "done", at: "2026-10-20T15:00:00.000Z" } });
+    at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-parked", { attemptId: "att-slot-parked", taskId: pcWork, projectId: proj, state: "finished", startedAt: "2026-10-20T08:00:00.000Z", claimedAt: "2026-10-20T08:00:00.000Z", requests: 2, outcome: { status: "succeeded", summary: "done", at: "2026-10-20T19:00:00.000Z" } });
+    at("2026-10-21T05:00:00.000Z");
+    const slot2 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
+    assert.match(slot2, /actual PC share 25% \(worker-slot time of 3 attempts; 1 that parked or were placed again are not counted/);
     // With the owner's allocation and a measured use and a window, the lines say so.
     const rich = c.make({ allocation: async () => ({ floor: 10, target: 20, ceiling: 30 }), usage: async () => ({ pcShare: 18, basis: "worker-slot time" }), improvementWindow: async () => "2026-11-02T09:00:00.000Z" });
     const r = (await rich.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");

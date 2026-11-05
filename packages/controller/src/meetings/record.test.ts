@@ -918,20 +918,32 @@ for (const backend of backends) {
     const m = await adopt(c, rec, c.asB, { agendaItemId: item, changes: [change(c, task, c.pA)] });
     const d = await decisionOf(c, m);
     const seen: string[] = [];
-    let crash = true;
+    let crashes = 2; // the first apply, and the owner's decline that drives the started change once more
     const base = taskUpdateApplier(c.projects);
-    const widening: ChangeApplier = { ...base, widens: "spend", async apply(ch) { seen.push(ch.agreedBy); if (crash) { crash = false; throw new DomainError("unavailable", "storage went away"); } return base.apply(ch); } };
+    const widening: ChangeApplier = { ...base, widens: "spend", async apply(ch) { seen.push(ch.agreedBy); if (crashes > 0) { crashes--; throw new DomainError("unavailable", "storage went away"); } return base.apply(ch); } };
     const svc = c.reopen({ appliers: { "task.update": widening }, widening: async () => "allow" });
     await refuses("unavailable", () => svc.apply(c.host, { decisionId: d.id }));
     const mid = (await decisionOf(c, m)).changes[0]!;
     assert.deepEqual([mid.state, mid.agreedBy], ["applying", "policy:spend"]);
     // The owner declines while the apply is half done; the started change carries on under the recorded agreement.
-    await svc.ownerRespond(c.owner, { commandId: cid("dec"), decisionId: d.id, response: "decline" });
-    // The change that had started carries on at once under its recorded agreement (card M02h); nothing else would finish it.
-    assert.equal((await decisionOf(c, m)).changes[0]!.state, "applied", "a decline does not cancel a started apply, which is carried out");
+    // The change that had started is driven at once under its recorded agreement (card M02h); here it fails again, and the owner's answer is kept and says the change is still applying.
+    const declined = await svc.ownerRespond(c.owner, { commandId: cid("dec"), decisionId: d.id, response: "decline" });
+    assert.equal(declined.stillApplying, true, "a failure of the drive is not hidden from the answer");
+    assert.equal((await decisionOf(c, m)).changes[0]!.state, "applying", "a decline does not cancel a started apply, and a failed drive leaves it applying");
     assert.deepEqual(await svc.apply(c.host, { decisionId: d.id }), { applied: 1, notApplied: 0, pending: 0 });
-    assert.deepEqual(seen, ["policy:spend", "policy:spend"], "the same basis on the replay");
+    assert.deepEqual(seen, ["policy:spend", "policy:spend", "policy:spend"], "the same basis on every replay");
     assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide, v2");
+    // When the drive after the decline succeeds, the started change is applied at once and the answer says nothing is left.
+    const task2 = await c.task();
+    const second = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const m2 = await adopt(c, second.rec, c.asB, { agendaItemId: second.item, changes: [change(c, task2, c.pA)] });
+    const d2 = await decisionOf(c, m2);
+    crashes = 1;
+    await refuses("unavailable", () => svc.apply(c.host, { decisionId: d2.id }));
+    assert.equal((await decisionOf(c, m2)).changes[0]!.state, "applying");
+    const declined2 = await svc.ownerRespond(c.owner, { commandId: cid("dec"), decisionId: d2.id, response: "decline" });
+    assert.equal(declined2.stillApplying, undefined);
+    assert.equal((await decisionOf(c, m2)).changes[0]!.state, "applied", "a decline does not cancel a started apply, which is carried out (card M02h)");
   });
 
   suite("a decision may carry out only so many widening changes on the policy's leave; at the limit it waits for the owner, whose agreement carries out the rest and whose decline refuses them (card M02g)", async (c) => {
