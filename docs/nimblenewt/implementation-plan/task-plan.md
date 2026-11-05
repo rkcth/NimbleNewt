@@ -29,7 +29,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | --- | --- |
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
-| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F09 |
+| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F04n, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L06, L06b, H08, H08b |
@@ -313,6 +313,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** F04e.
 - **Deliverable:** Split from F04e (2026-10-31): after the switch the controller waits for the host to restart it (no automatic restart); an apply_proposal inside a chat message (not applyProposal) records its turn in the fenced database and fails with stale_epoch; a failed copy starts over; the journal and authority file carry no integrity mark; a PostgreSQL controller without a data directory cannot run transfers; from the third review: the holder check and the epoch take are separate steps (take the epoch inside the state lock or with expectedEpoch from the row the check read), writes that bump neither the audit nor the delivery counter are invisible to the rollback check, a failed take-back after a late write leaves a half-settled transfer, the state lock is held across slow start work, and there is no owner-facing wipe of a pending or failed destination.
 - **Acceptance and verification:** The host restarts onto the new database by itself when it opts in; the message path reports the move as applied; an interrupted copy resumes or is cleaned without the owner emptying the destination; the authority file and journal are rejected when changed by anything else; transfers are available without a data directory by a configured state folder.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04n — Make a failed fence take-back in a database rollback leave the new database startable
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04m.
+- **Deliverable:** Raised 2026-11-05 from the F04m audit and flagged to the owner as a possible serious defect, recorded and not yet changed (owner instruction 2026-11-05): in a rollback of a database transfer, the journal says rolling-back before the fence is taken, and when work is then found on the new database that was written between the last check and the fence, the fence is taken back and the journal returned to switched in that order; if the take-back fails, the journal stays rolling-back and the next start finishes the rollback onto the previous database, which drops the work recorded on the new one without a word. The new database stays fenced the whole time, so the case needs a write that got past the maintenance barrier and then a failed take-back. The planned change: write the journal back to switched first and take the fence back second, so a failed take-back leaves a state the authority file already allows a restart on the new database to recover from with the work intact. The apply path (source fenced, journal at copying) was checked and is already safe: the next start abandons the transfer and the source stays authoritative.
+- **Acceptance and verification:** A test makes the take-back fail after a late write is found and shows the next start comes up on the new database, with the late records present and the authority file still naming it, and not on the previous one; the same test on the apply path shows the source still authoritative; a failed journal write at that point changes nothing else; the owner's message names what happened and says to restart; no behavior of the successful path changes.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F05 — Implement pinned Pi adapter submission contract
@@ -3147,7 +3155,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i, F04l, F04m.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i, F04l, F04m, F04n.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

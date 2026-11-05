@@ -715,6 +715,23 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "F04n",
+      "parent": "N02",
+      "existing_issue": "AII-252",
+      "title": "Make a failed fence take-back in a database rollback leave the new database startable",
+      "depends_on": [
+        "F04m"
+      ],
+      "deliverable": "Raised 2026-11-05 from the F04m audit and flagged to the owner as a possible serious defect, recorded and not yet changed (owner instruction 2026-11-05): in a rollback of a database transfer, the journal says rolling-back before the fence is taken, and when work is then found on the new database that was written between the last check and the fence, the fence is taken back and the journal returned to switched in that order; if the take-back fails, the journal stays rolling-back and the next start finishes the rollback onto the previous database, which drops the work recorded on the new one without a word. The new database stays fenced the whole time, so the case needs a write that got past the maintenance barrier and then a failed take-back. The planned change: write the journal back to switched first and take the fence back second, so a failed take-back leaves a state the authority file already allows a restart on the new database to recover from with the work intact. The apply path (source fenced, journal at copying) was checked and is already safe: the next start abandons the transfer and the source stays authoritative",
+      "acceptance_and_verification": "A test makes the take-back fail after a late write is found and shows the next start comes up on the new database, with the late records present and the authority file still naming it, and not on the previous one; the same test on the apply path shows the source still authoritative; a failed journal write at that point changes nothing else; the owner's message names what happened and says to restart; no behavior of the successful path changes",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "F05",
       "parent": "N03",
       "existing_issue": "AII-253",
@@ -8956,7 +8973,8 @@
         "P03b",
         "K01i",
         "F04l",
-        "F04m"
+        "F04m",
+        "F04n"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
