@@ -8,7 +8,7 @@ export const ALLOWED = {
   config: [],
   registry: [],
   "pi-adapter": ["@nimblenewt/contracts", "@nimblenewt/registry", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
-  controller: ["pg", "@types/pg", "embedded-postgres", "@nimblenewt/registry"],
+  controller: ["pg", "@types/pg", "embedded-postgres", "@nimblenewt/registry", "@modelcontextprotocol/sdk"],
   api: [],
   // The worker host speaks the controller channel defined in contracts (card H12b); it depends on nothing else of the product.
   worker: ["@nimblenewt/contracts"],
