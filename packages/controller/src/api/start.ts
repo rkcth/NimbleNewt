@@ -501,7 +501,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // A schedule that names no zone uses the owner's `meeting.timeZone` setting (card M01c).
     const invitationInbox = InvitationInbox.withEpoch(storage, epoch);
     const meetingLead = async (): Promise<number> => { const v = await configuration.installationValue("meeting.leadMinutes"); return typeof v === "number" ? v : MEETING_LIMITS.leadDefault; };
-    const meetings = MeetingService.withEpoch(storage, epoch, { inquiries }, { availability: pauses.availability, leadMinutes: meetingLead, ownerTimeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; } });
+    const meetings = MeetingService.withEpoch(storage, epoch, { inquiries }, { ...(options.dispatch?.clock === undefined ? {} : { clock: options.dispatch.clock }) /* the meeting service creates the occurrences the dispatcher's attendance looks for, so both read one clock */, availability: pauses.availability, leadMinutes: meetingLead, ownerTimeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; } });
     // The host's workspace port is reached only through this closure, which the dispatch composer fills in (card H12m): there is no other way to it from outside the workspace service.
     let workspacePort: ((taskId: string) => Promise<WorkspacePort | undefined>) | undefined;
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
