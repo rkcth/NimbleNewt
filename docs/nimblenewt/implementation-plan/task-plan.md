@@ -2506,12 +2506,12 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Both initiation directions survive reconnect; no duplicate turns or cross-scope leakage; protocol session not task owner; a protocol-version upgrade preserves thread IDs, cursors and audit history.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### T05b — Finish the MCP conversation door: stock-client conformance, push and resources
+### T05b — Finish the MCP conversation door: stock-client conformance, resources and stdio
 
 - **Parent:** N10a / AII-520.
 - **Blockers:** T05.
-- **Deliverable:** Split from T05 (2026-10-31): the adapter and a plain request/response door (POST /mcp on the conversation listener: one JSON-RPC message per request, no session id, its own per-principal allowance, Origin check, a chat-settable conversation.mcp.enabled switch, version negotiation down) are built; what remains is what a stock MCP client needs: a test against a real MCP SDK client (Accept and MCP-Protocol-Version headers, streamable-HTTP expectations), an optional server-to-client event stream (GET /mcp) with listChanged-style notices that carry no state beyond the cursor, thread resources and prompts, and stdio for a local client.
-- **Acceptance and verification:** A stock MCP client connects, lists the tools and holds a conversation across a dropped stream; a stream carries no history of its own and a reconnect resumes only from the cursor; switching the door off by chat also ends open streams.
+- **Deliverable:** Split from T05 (2026-10-31): the adapter and a plain request/response door (POST /mcp on the conversation listener: one JSON-RPC message per request, no session id, its own per-principal allowance, Origin check, a chat-settable conversation.mcp.enabled switch, version negotiation down) are built; what remains is what a stock MCP client needs: a test against a real MCP SDK client (Accept and MCP-Protocol-Version headers, streamable-HTTP expectations), thread resources, and stdio for a local client. Amended 2026-11-05 by the owner: the optional server-to-client event stream (GET /mcp, answered 405) and prompts (prompts/list stays empty) are deliberately not built; a client reads new messages with the tools from its cursor, and either can be added later without changing the rest.
+- **Acceptance and verification:** A stock MCP client connects, lists the tools and holds a conversation across a dropped connection; a connection carries no history of its own and a new one resumes only from the cursor; switching the door off by chat refuses the next request; a local client can use the door over stdio with its own credential.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### T06 — Implement the protected agent tool bridge and execution service

@@ -7076,12 +7076,12 @@
       "id": "T05b",
       "parent": "N10a",
       "existing_issue": "AII-520",
-      "title": "Finish the MCP conversation door: stock-client conformance, push and resources",
+      "title": "Finish the MCP conversation door: stock-client conformance, resources and stdio",
       "depends_on": [
         "T05"
       ],
-      "deliverable": "Split from T05 (2026-10-31): the adapter and a plain request/response door (POST /mcp on the conversation listener: one JSON-RPC message per request, no session id, its own per-principal allowance, Origin check, a chat-settable conversation.mcp.enabled switch, version negotiation down) are built; what remains is what a stock MCP client needs: a test against a real MCP SDK client (Accept and MCP-Protocol-Version headers, streamable-HTTP expectations), an optional server-to-client event stream (GET /mcp) with listChanged-style notices that carry no state beyond the cursor, thread resources and prompts, and stdio for a local client",
-      "acceptance_and_verification": "A stock MCP client connects, lists the tools and holds a conversation across a dropped stream; a stream carries no history of its own and a reconnect resumes only from the cursor; switching the door off by chat also ends open streams",
+      "deliverable": "Split from T05 (2026-10-31): the adapter and a plain request/response door (POST /mcp on the conversation listener: one JSON-RPC message per request, no session id, its own per-principal allowance, Origin check, a chat-settable conversation.mcp.enabled switch, version negotiation down) are built; what remains is what a stock MCP client needs: a test against a real MCP SDK client (Accept and MCP-Protocol-Version headers, streamable-HTTP expectations), thread resources, and stdio for a local client. Amended 2026-11-05 by the owner: the optional server-to-client event stream (GET /mcp, answered 405) and prompts (prompts/list stays empty) are deliberately not built; a client reads new messages with the tools from its cursor, and either can be added later without changing the rest",
+      "acceptance_and_verification": "A stock MCP client connects, lists the tools and holds a conversation across a dropped connection; a connection carries no history of its own and a new one resumes only from the cursor; switching the door off by chat refuses the next request; a local client can use the door over stdio with its own credential",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

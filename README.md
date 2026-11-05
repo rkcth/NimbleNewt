@@ -430,7 +430,7 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 - [x] **U02** · P24 · Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 - [x] **U02b** · P25 · Implement the conversation transport and remote exposure _(needs U02)_
 - [x] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
-- [ ] **T05b** · P27 · Finish the MCP conversation door: stock-client conformance, push and resources _(needs T05)_
+- [ ] **T05b** · P27 · Finish the MCP conversation door: stock-client conformance, resources and stdio _(needs T05)_
 - [x] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 - [x] **U12b** · P30 · Deliver informational messages at check-ins and show agent questions in chat _(needs U02, S08, L05, M01)_
 - [x] **U12c** · P32 · Finish agent messages: owner questions in chat, stand-up boundary _(needs U12b, M03b)_
