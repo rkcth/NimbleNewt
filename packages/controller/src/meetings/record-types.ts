@@ -211,6 +211,8 @@ export interface SummaryDecision {
   readonly changes: readonly { readonly id: string; readonly summary: string; readonly state: ChangeState; readonly reason?: string }[];
   readonly ownerResponse: OwnerResponse;
   readonly ownerDecisionId?: string;
+  /** Set when a decision carried out only in part still waits for the owner's answer for the rest, so "part-applied" is not read as finished (card M02h). */
+  readonly waitingForOwner?: true;
 }
 
 export interface SummaryItem { readonly entryId: string; readonly seq: number; readonly speaker: string; readonly text: string; readonly verifiable: boolean; readonly assignee?: string; readonly taskId?: string }

@@ -12,7 +12,7 @@ import { allows } from "../security/access.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { reassignWarningSink } from "./reassign-warning.js";
-import { MeetingRecordService, MeetingService, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
+import { MeetingRecordService, MeetingService, RECORD_LIMITS, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
 
 after(stopServer);
 
@@ -927,7 +927,8 @@ for (const backend of backends) {
     assert.deepEqual([mid.state, mid.agreedBy], ["applying", "policy:spend"]);
     // The owner declines while the apply is half done; the started change carries on under the recorded agreement.
     await svc.ownerRespond(c.owner, { commandId: cid("dec"), decisionId: d.id, response: "decline" });
-    assert.equal((await decisionOf(c, m)).changes[0]!.state, "applying", "a decline does not cancel a started apply");
+    // The change that had started carries on at once under its recorded agreement (card M02h); nothing else would finish it.
+    assert.equal((await decisionOf(c, m)).changes[0]!.state, "applied", "a decline does not cancel a started apply, which is carried out");
     assert.deepEqual(await svc.apply(c.host, { decisionId: d.id }), { applied: 1, notApplied: 0, pending: 0 });
     assert.deepEqual(seen, ["policy:spend", "policy:spend"], "the same basis on the replay");
     assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide, v2");
@@ -976,7 +977,13 @@ for (const backend of backends) {
     await held2.svc.summarize(c.host, { commandId: cid("sm"), recordId: held2.rec });
     const sum = (await held2.svc.summary(c.owner, held2.rec))!.content.decisions;
     assert.deepEqual(sum.map((x) => x.status), ["part-applied"]);
+    assert.deepEqual(sum.map((x) => x.waitingForOwner), [true], "a part-applied decision that still waits says so (card M02h)");
     assert.deepEqual([...new Set((await held2.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === held2.d.id).map((e) => e.ownerResponse))], ["not-asked"]);
+    assert.equal((await held2.now()).held, true);
+    await held2.svc.ownerRespond(c.owner, { commandId: cid("or2"), decisionId: held2.d.id, response: "decline" });
+    assert.equal((await held2.now()).held, undefined, "the owner's answer clears the flag (card M02h)");
+    await held2.svc.summarize(c.host, { commandId: cid("sm2"), recordId: held2.rec });
+    assert.deepEqual((await held2.svc.summary(c.owner, held2.rec))!.content.decisions.map((x) => x.waitingForOwner), [undefined], "and the summary no longer shows it as waiting");
     // Only widening changes wait: with a limit of 1, [widen, widen, plain] applies the first and the plain one; the second waits, and a decline refuses only it.
     const mixedHeld = await decide(async () => 1, ["widen", "widen", "plain"]);
     assert.deepEqual(mixedHeld.result, { applied: 2, notApplied: 0, pending: 1, waitingFor: "owner" });
@@ -992,6 +999,9 @@ for (const backend of backends) {
     // A failing read of the limit fails closed (as 0).
     const broken = await decide(async () => { throw new Error("settings down"); }, ["widen"]);
     assert.deepEqual(broken.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // The pass ends at the card's ten changes: when the last of them is the one that makes the decision wait, the answer still says it waits for the owner (card M02h).
+    const tenth = await decide(async () => 0, [...Array<Mixed>(RECORD_LIMITS.changes - 1).fill("plain"), "widen"]);
+    assert.deepEqual(tenth.result, { applied: RECORD_LIMITS.changes - 1, notApplied: 0, pending: 1, waitingFor: "owner" });
     // A change that widens nothing (policy:none) does not count: with a limit of 1, a plain change and a widening one both go ahead.
     const mixed = await decide(async () => 1, ["plain", "plain", "widen"]);
     assert.deepEqual(mixed.result, { applied: 3, notApplied: 0, pending: 0 });

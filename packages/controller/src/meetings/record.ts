@@ -1192,9 +1192,10 @@ export class MeetingRecordService {
     }
   }
 
-  async #applyDecisionTally(decisionId: string): Promise<{ applied: number; notApplied: number; pending: number }> {
+  async #applyDecisionTally(decisionId: string): Promise<{ applied: number; notApplied: number; pending: number; waitingFor?: "owner" }> {
     const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId))!;
-    return { applied: d.changes.filter((c) => c.state === "applied").length, notApplied: d.changes.filter((c) => c.state === "not-applied").length, pending: d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length };
+    // The pass can end on its last allowed change being the one that makes the decision wait for the owner; the answer says so as the early returns do (card M02h).
+    return { applied: d.changes.filter((c) => c.state === "applied").length, notApplied: d.changes.filter((c) => c.state === "not-applied").length, pending: d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length, ...(d.ownerResponse === "pending" ? { waitingFor: "owner" as const } : {}) };
   }
 
   /**
@@ -1230,12 +1231,18 @@ export class MeetingRecordService {
         const response: OwnerResponse = command.response === "agree" ? "agreed" : command.response === "decline" ? "declined" : "alternative";
         const reason = command.response === "decline" ? "the owner declined it" : `the owner chose an alternative (${ownerDecisionId ?? ""})`;
         const changes = command.response === "agree" ? d.changes : d.changes.map((c) => (c.state === "adopted" ? { ...c, state: "not-applied" as const, code: "owner" as const, reason, at: now } : c));
-        const next: DecisionRecordBody = { ...d, changes, ownerResponse: response, ownerRespondedAt: now, ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }) };
+        // The owner's answer ends the wait: the flag that marked a decision put back to waiting part way goes, so a decided decision never carries it (card M02h).
+        const { held: _held, ...settled } = d; void _held;
+        const next: DecisionRecordBody = { ...settled, changes, ownerResponse: response, ownerRespondedAt: now, ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }) };
         return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: found.revision, body: json(next) }], detail: { projectId: d.projectId, response } };
       },
     }));
     if (command.response === "agree") return { applied: (await this.#applyDecision(by, decisionId)).applied };
-    await this.#logChanges(decisionId);
+    // A change that was already started when the owner declined carries on under the agreement it started with. Nothing else would finish it (a sweep does not apply decisions), so it is driven here; the answer is already
+    // saved, so a failure leaves the change applying for the next apply and does not undo or hide the owner's answer (card M02h).
+    const left = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+    if (left?.changes.some((c) => c.state === "applying") === true) { try { await this.#applyDecision(by, decisionId); } catch { /* the change stays applying; a later apply finishes it */ } }
+    else await this.#logChanges(decisionId);
     return { ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }) };
   }
 

@@ -57,6 +57,7 @@ export function buildSummary(input: SummaryInput): SummaryContent {
     discussion: { recordId: input.recordId, fromSeq: d.discussion.fromSeq, toSeq: d.discussion.toSeq },
     changes: d.changes.map((c) => ({ id: c.id, summary: c.summary, state: c.state, ...(c.reason === undefined ? {} : { reason: c.reason }) })),
     ownerResponse: d.ownerResponse, ...(d.ownerDecisionId === undefined ? {} : { ownerDecisionId: d.ownerDecisionId }),
+    ...(d.outcome === "adopted" && d.scope === "in-scope" && d.ownerResponse === "pending" && d.changes.some((c) => c.state === "adopted" || c.state === "applying") && d.changes.some((c) => c.state === "applied") ? { waitingForOwner: true as const } : {}),
   }));
   const adopted = decisions.filter((d) => d.outcome === "adopted").map((d) => d.id);
   const applied: SummaryContent["applied"][number][] = [];
