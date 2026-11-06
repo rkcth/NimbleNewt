@@ -833,6 +833,17 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `standup.recent`
+
+A project's stand-ups by their latest occurrence (when each ran or is planned, and that occurrence's state), most recent first. The occurrence ID is what preparing a stand-up or reading its briefs takes. Needs the right to read the project's meetings; otherwise nothing is found.
+
+Arguments:
+
+- `projectId`: the project
+- `limit` (optional): most items, 1 to 100, default 20
+
+Result: `{ item: { items: [{ occurrenceId, revision, title, startsAt, state }], more } }`.
+
 #### `standup.list`
 
 A project's stand-ups with their title, state (active, paused, ended), time and zone and the revision to quote when changing one. Ended ones are left out unless asked for. Needs the right to read the project's meetings; otherwise nothing is found.

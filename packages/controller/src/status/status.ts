@@ -218,9 +218,22 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent"], about: "a replay of a task's recorded run" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "access that was revoked" },
+  standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
   owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
 };
+
+/** The parts of a stand-up brief the status answer reads (a brief is a record kept by the stand-up service; this is only the view of it). */
+export interface StandupBriefView {
+  readonly id: string; readonly revision: number; readonly occurrenceId: string; readonly agent: string;
+  readonly accomplishments: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
+  readonly unfinished: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
+  readonly blockers: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
+  readonly advice: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
+  readonly priorities: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
+  readonly statements: readonly { readonly section: string; readonly text: string; readonly by?: "owner" }[];
+  readonly partial: boolean;
+}
 
 export type StatusRequest =
   | { readonly kind: "task"; readonly taskId: string }
@@ -242,6 +255,7 @@ export type StatusRequest =
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
+  | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string }
@@ -268,7 +282,7 @@ export interface StatusDeps {
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer. Absent: they are not listed. */
-  readonly standups?: { recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined> };
+  readonly standups?: { recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>; briefs?(viewer: Principal, occurrenceId: string): Promise<readonly StandupBriefView[]> };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
@@ -393,6 +407,7 @@ export class StatusService {
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
+      case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -504,6 +519,28 @@ export class StatusService {
   }
 
   /** The meetings planned in a project, soonest first: the title, the kind, when, how it is held and who is on the roster with how each is placed (present, unavailable, paused...), then the project's stand-ups by their latest occurrence — when each ran or is planned and its state — most recent first (card M03h). Nothing for a project the caller may not read. */
+  /**
+   * The briefs prepared for one stand-up, or one agent's, in plain lines (card M03h): what the agent did, what is unfinished, what blocks it, the advice it needs, its priorities, and the notes added to it, each marked as the agent's or the owner's.
+   * What the reader may not see reads as missing. Entries come from the records the brief was made from and cite them; the statements are words, not records.
+   */
+  async standupBriefLines(by: Principal, request: { occurrenceId: string; agent?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const briefs = this.#deps.standups?.briefs;
+    if (briefs === undefined) return undefined;
+    if (typeof request.occurrenceId !== "string" || request.occurrenceId === "") invalid("occurrenceId", "must be a stand-up occurrence ID");
+    if (request.agent !== undefined && (typeof request.agent !== "string" || request.agent === "")) invalid("agent", "must be an agent ID");
+    const all = (await this.#deps.standups!.briefs!(by, request.occurrenceId)).filter((b) => request.agent === undefined || b.agent === request.agent);
+    const lines: Line[] = [];
+    const sections: readonly [string, "accomplishments" | "unfinished" | "blockers" | "advice" | "priorities"][] = [["Done", "accomplishments"], ["Unfinished", "unfinished"], ["Blocked", "blockers"], ["Advice needed", "advice"], ["Priorities", "priorities"]];
+    for (const b of all) {
+      const who = shown(b.agent);
+      lines.push(line(`${who}'s brief: ${sections.map(([label, key]) => `${b[key].length} ${label.toLowerCase()}`).join(", ")}${b.partial ? ". Some records could not be read, so it may be incomplete" : ""}.`, cite("standup-brief", b.id, b.revision)));
+      for (const [label, key] of sections) for (const e of b[key].slice(0, 5)) lines.push(line(`${who} - ${label}: ${shown(e.text)}`, ...e.cites));
+      for (const st of b.statements) lines.push(line(`${st.by === "owner" ? "A note from the owner" : `${who}'s own words`} (${st.section}): ${shown(st.text)}`, cite("standup-brief", b.id, b.revision)));
+    }
+    if (all.length === 0) lines.push(line("No brief has been prepared for that stand-up yet, or none is yours to read.", cite("meeting", request.occurrenceId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async meetingLines(by: Principal, request: { projectId: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.meetings === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);

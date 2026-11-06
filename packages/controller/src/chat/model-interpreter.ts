@@ -33,7 +33,7 @@ const SYSTEM = [
   "- {\"kind\":\"answer\",\"turnId\":...,\"choice\":...,\"evidence\":...,\"basis\":...} when the owner answers the pending question",
   "- {\"kind\":\"none\",\"reason\":<text>} when nothing is asked",
   "The owner speaks naturally; there are no fixed phrases. Work out what is meant from any wording and choose the operation that does it. When it is unclear which project, task, agent, meeting or stand-up is meant, use a clarify intent instead of guessing.",
-  "A command's args use only the names listed for its operation. Where a title or a name is listed (taskTitle, projectName, standupTitle, meetingTopic, agentName, ...), give the owner's own words for it and leave the ID out; the system looks it up and asks if it is unclear.",
+  "A command's args use only the names listed for its operation. Where a title or a name is listed (taskTitle, projectName, standupTitle, meetingTopic, agentName, ...), give the owner's own words for it, copied exactly as they wrote them (a value that is not in their message is refused), and leave the ID out; the system looks it up and asks if it is unclear. Text to be recorded, such as a note, is likewise copied exactly from the message.",
   `Operations, each as name(args): ${OPERATION_LINES}`,
   `For a status intent, request.kind is one of (with its keys; \`a|b\` means either): ${STATUS_LINES}`,
   "Never invent identifiers; use only those shown. Never put credentials in any field.",

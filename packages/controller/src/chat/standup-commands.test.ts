@@ -4,25 +4,29 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { chatTurnFollowUps } from "./follow-ups.js";
 import { StandupService, agendaOutcomeSink } from "../standups/index.js";
 import type { ChatService, Outcome } from "./index.js";
-import { cid, openWorld, type World } from "./testing/harness.js";
+import { BlockerService } from "../domain/blockers.js";
+import { WaitService } from "../domain/waits.js";
+import { StatusService } from "../status/index.js";
+import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 after(stopServer);
 
 const cmd = (op: string, args: Record<string, unknown>, evidence: string, extra: Record<string, unknown> = {}) => ({ kind: "command", op, args, evidence, basis: "owner", ...extra });
 
 for (const backend of backends) {
-  const suite = (name: string, body: (w: World, script: Record<string, unknown>, ctl: { sched(projectId: string, title: string): Promise<string>; schedule(id: string): Promise<{ state: string; title: string; time: string; revision: number }> }) => Promise<void>) =>
+  const suite = (name: string, body: (w: World, script: Record<string, unknown>, ctl: { status(): StatusService; sched(projectId: string, title: string, when?: { time: string; windowFrom: string; windowTo: string }): Promise<string>; schedule(id: string): Promise<{ state: string; title: string; time: string; revision: number }> }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const script: Record<string, unknown> = {};
       // The stand-up service needs the world's meeting service, which exists only once the world is open: the API reaches it through this holder.
       const holder: { s?: StandupService } = {};
       const lazy = new Proxy({}, { get: (_t, k) => (...a: unknown[]) => (holder.s as unknown as Record<string, (...x: unknown[]) => unknown>)[k as string]!(...a) }) as StandupService;
       const w = await openWorld(backend, script, undefined, { standups: lazy });
-      holder.s = StandupService.withEpoch(w.world.storage, w.projects.epoch, { meetings: w.meetings, assignments: w.assignments }, { availability: async () => "available", outcomes: agendaOutcomeSink({ followUp: (turnId, f) => chatTurnFollowUps(w.world.storage, w.projects.epoch).add(turnId, f), inquiry: async () => undefined, messages: { noticeFromController: async () => undefined } }) });
+      holder.s = StandupService.withEpoch(w.world.storage, w.projects.epoch, { meetings: w.meetings, assignments: w.assignments }, { ...options, availability: async () => "available", outcomes: agendaOutcomeSink({ followUp: (turnId, f) => chatTurnFollowUps(w.world.storage, w.projects.epoch).add(turnId, f), inquiry: async () => undefined, messages: { noticeFromController: async () => undefined } }) });
       const ctl = {
-        sched: async (projectId: string, title: string) => {
+        status: (): StatusService => StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, meetings: w.meetings, standups: holder.s as never }, options),
+        sched: async (projectId: string, title: string, when = { time: "09:00", windowFrom: "08:00", windowTo: "10:00" }) => {
           const agent = await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: `A-${title}` });
-          const made = await holder.s!.configure(w.owner, { commandId: cid("su"), projectId, title, roster: [`agent:${agent.id}`], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/London", recurrence: { kind: "daily" } });
+          const made = await holder.s!.configure(w.owner, { commandId: cid("su"), projectId, title, roster: [`agent:${agent.id}`], ...when, timeZone: "Europe/London", recurrence: { kind: "daily" } });
           return made.scheduleId;
         },
         schedule: async (id: string) => { const got = (await holder.s!.standup(w.owner, id))!.schedule; return { state: got.state, title: got.title, time: got.time, revision: got.revision }; },
@@ -174,4 +178,59 @@ for (const backend of backends) {
     const stored = (await w.world.storage.getAggregate({ kind: "chat-context", id: `ctx:${w.owner.id}` }))!.body as unknown as { projects: Record<string, { turns: Record<string, unknown>[] }> };
     assert.ok(stored.projects[a]!.turns.every((t) => t["followUps"] === undefined), "the listing adds it on reading; the stored context is not changed");
   });
+  suite("the owner prepares a stand-up now, leaves a note on an agent's brief and reads the briefs, naming them in loose words; the first two are shown first and an unclear name asks (card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    // A stand-up at 11:30 London time (10:30 UTC) on a day when the world's clock reads 10:00 UTC: its preparation window is open, so a planned occurrence exists.
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    await ctl.sched(a, "Morning sync", when);
+    await ctl.sched(a, "Evening wrap", when);
+    const made = (await w.meetings.tick(w.owner)).created;
+    assert.equal(made.length, 2, "both stand-ups have a planned occurrence");
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const briefsOf = async (text: string) => JSON.stringify((await say(w, chat, text)).outcomes);
+
+    // Nothing is prepared yet, so there is no brief to read or write on.
+    script["Add a note for the morning agent: look at the cache."] = [cmd("standup.add-statement", { meetingTopic: "morning", agentName: "morning", section: "note", text: "look at the cache" }, "Add a note for the morning agent: look at the cache")];
+    const early = only((await say(w, chat, "Add a note for the morning agent: look at the cache.")).outcomes);
+    assert.equal(early.status, "refused", JSON.stringify(early));
+    assert.match(String(early.message), /no briefs yet/);
+
+    // Preparing one named in loose words: shown first even in the autonomous profile, with the stand-up's own title; nothing happens until applied.
+    script["Get the morning one ready now."] = [cmd("standup.prepare", { meetingTopic: "morning" }, "Get the morning one ready now")];
+    const prep = only((await say(w, chat, "Get the morning one ready now.")).outcomes);
+    assert.equal(prep.status, "proposed", JSON.stringify(prep));
+    assert.match(JSON.stringify(prep), /Morning sync/);
+    assert.equal(JSON.stringify(prep).includes("Evening wrap"), false, "only the named stand-up");
+    const prepared = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: prep.proposalId! });
+    assert.equal(prepared.applied, true, JSON.stringify(prepared));
+
+    // Words that fit no title ask, listing what exists; words that fit two ask too.
+    script["Prepare the lunch one."] = [cmd("standup.prepare", { meetingTopic: "lunch" }, "Prepare the lunch one")];
+    const none = only((await say(w, chat, "Prepare the lunch one.")).outcomes);
+    assert.equal(none.status, "asked", JSON.stringify(none));
+    assert.ok(JSON.stringify(none).includes("Morning sync") && JSON.stringify(none).includes("Evening wrap"));
+    script["Prepare the stand-up."] = [cmd("standup.prepare", {}, "Prepare the stand-up")];
+    const both = only((await say(w, chat, "Prepare the stand-up.")).outcomes);
+    assert.equal(both.status, "asked", JSON.stringify(both));
+
+    // A note for an agent named by part of its name: shown first, kept as the owner's, and the revision it was proposed against is the brief's.
+    script["Tell the morning agent: look at the cache."] = [cmd("standup.add-statement", { meetingTopic: "morning", agentName: "morning", section: "note", text: "look at the cache" }, "Tell the morning agent: look at the cache")];
+    const note = only((await say(w, chat, "Tell the morning agent: look at the cache.")).outcomes);
+    assert.equal(note.status, "proposed", JSON.stringify(note));
+    assert.match(JSON.stringify(note), /A-Morning sync/);
+    const done = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: note.proposalId! });
+    assert.equal(done.applied, true, JSON.stringify(done));
+
+    // The briefs are read by asking in words; the owner's note shows as the owner's, and an agent that is not on the stand-up finds nothing.
+    script["What did the morning stand-up brief say?"] = [{ kind: "status", request: { kind: "standup_briefs", meetingTopic: "morning" }, evidence: "What did the morning stand-up brief say", basis: "owner" }];
+    const read = await briefsOf("What did the morning stand-up brief say?");
+    assert.match(read, /A note from the owner \(note\): look at the cache/);
+    assert.match(read, /brief:/);
+    script["Show the evening agent's brief."] = [{ kind: "status", request: { kind: "standup_briefs", meetingTopic: "evening", agentName: "morning" }, evidence: "Show the evening agent's brief", basis: "owner" }];
+    const wrong = await briefsOf("Show the evening agent's brief.");
+    assert.match(wrong, /No brief has been prepared|no brief/i);
+  });
+
 }

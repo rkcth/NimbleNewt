@@ -453,6 +453,36 @@ export class ChatService {
           request["taskId"] = matches[0]!.id;
           delete request["taskTitle"];
         }
+        // A stand-up's briefs asked for by the stand-up's and the agent's names in the owner's words: the stand-up is the one whose title fits (else the next one coming up, else the latest), the agent the one named. Unclear asks.
+        if (request["kind"] === "standup_briefs") {
+          const topic = request["meetingTopic"];
+          const agentName = request["agentName"];
+          delete request["meetingTopic"];
+          delete request["agentName"];
+          if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) { push({ i, kind: "refused", code: "invalid_command", message: "meetingTopic and agentName must be text" }); continue; }
+          if (request["occurrenceId"] === undefined) {
+            if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+            const recent = await this.#get(token, "standup.recent", { projectId: currentFocus.projectId, limit: 50 });
+            const all = (recent?.["items"] as Record<string, unknown>[] | undefined) ?? [];
+            const words = typeof topic === "string" ? topic : "";
+            const matches = all.filter((m) => looseMatch(words, String(m["title"])));
+            if (all.length === 0) { push({ i, kind: "refused", code: "not_found", message: "there is no stand-up in that project" }); continue; }
+            if (matches.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no stand-up in that project is called "${words.slice(0, 80)}"` }); continue; }
+            const coming = matches.filter((m) => m["state"] === "planned").sort((a, b) => (String(a["startsAt"]) < String(b["startsAt"]) ? -1 : 1));
+            // Words that fit several stand-ups ask; with no words, the next one coming up is meant.
+            if (words.trim() !== "" && new Set(matches.map((m) => String(m["title"]))).size > 1) { push({ i, kind: "asked", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["title"]).slice(0, 60)}, ${String(m["startsAt"])}`) }); continue; }
+            request["occurrenceId"] = String((coming[0] ?? matches[0])!["occurrenceId"]);
+          }
+          if (request["agent"] === undefined && typeof agentName === "string" && agentName.trim() !== "") {
+            const agents = await this.#listAll(token, "agent.list", { state: "active" });
+            const wanted = agentName.trim().toLowerCase();
+            const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
+            const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
+            if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called "${agentName.trim().slice(0, 80)}"` }); continue; }
+            if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) }); continue; }
+            request["agent"] = String(found[0]!["principalId"]);
+          }
+        }
         if (!isObject(request) || hasRefMarker(request)) { push({ i, kind: "refused", code: "invalid_command", message: "that question is not understood" }); continue; }
         push({ i, kind: "status", request: asJson(request) });
         continue;
@@ -538,7 +568,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -765,6 +795,62 @@ export class ChatService {
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which question are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["inquiryId"])} (${String(m["question"]).slice(0, 60)})`), field: "inquiryId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["inquiryId"])) };
         args["inquiryId"] = String(matches[0]!["inquiryId"]);
       }
+    }
+    // A stand-up and an agent's brief named in the owner's own words (card M03h). The model gives the words (`meetingTopic`, `agentName`); the stand-up is looked up in the project's records by any part of its title, the agent by name,
+    // and anything unclear is asked, never guessed. The brief's current revision is read here, so the proposal the owner sees is for exactly that brief.
+    if (intent.op === "standup.prepare" || intent.op === "standup.add-statement") {
+      const topic = args["meetingTopic"];
+      const agentName = args["agentName"];
+      delete args["meetingTopic"];
+      delete args["agentName"];
+      const isNote = intent.op === "standup.add-statement";
+      if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) return refuse("invalid_command", "meetingTopic and agentName must be text");
+      if (topic !== undefined && args["occurrenceId"] !== undefined) return refuse("invalid_command", "give either occurrenceId or meetingTopic, not both");
+      if (agentName !== undefined && args["briefId"] !== undefined) return refuse("invalid_command", "give either briefId or agentName, not both");
+      if (typeof args["briefId"] === "string") {
+        // A brief picked from the owner's answer (or named by ID): it must be in this project, and its revision is read now.
+        if (!isNote) return refuse("invalid_command", "preparing a stand-up takes the stand-up, not a brief");
+        const brief = await this.#get(token, "standup.brief", { briefId: args["briefId"] });
+        if (brief === undefined || brief["projectId"] !== projectId) return refuse("not_found", "that brief is not in this project");
+        args["expectedRevision"] = brief["revision"];
+        labels[String(args["briefId"])] = `${String(brief["agent"]).slice(0, 80)}'s brief`;
+      } else {
+        const recent = await this.#get(token, "standup.recent", { projectId, limit: 50 });
+        const open = ((recent?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => (isNote ? i["state"] === "planned" : i["state"] === "planned" || i["state"] === "reported"));
+        const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${String(i["title"]).slice(0, 60)}, ${String(i["startsAt"])})`;
+        let occurrence: Record<string, unknown> | undefined;
+        if (typeof args["occurrenceId"] === "string") {
+          occurrence = open.find((i) => i["occurrenceId"] === args["occurrenceId"]);
+          if (occurrence === undefined) return refuse("not_found", isNote ? "that stand-up is not coming up in this project, so its briefs are closed" : "that stand-up is not one that can be prepared in this project");
+        } else {
+          const words = typeof topic === "string" ? topic : "";
+          const matches = open.filter((i) => looseMatch(words, String(i["title"])));
+          if (open.length === 0) return refuse("not_found", isNote ? "no stand-up is coming up in this project" : "no stand-up in this project can be prepared now");
+          if (matches.length === 0) return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
+          if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
+          occurrence = matches[0]!;
+          args["occurrenceId"] = String(occurrence["occurrenceId"]);
+        }
+        labels[String(args["occurrenceId"])] = `${String(occurrence["title"]).slice(0, 80)} (${String(occurrence["startsAt"])})`;
+        if (isNote) {
+          const briefs = (await this.#get(token, "standup.briefs", { occurrenceId: args["occurrenceId"] })) as unknown as Record<string, unknown>[] | undefined;
+          if (briefs === undefined || briefs.length === 0) return refuse("not_found", "that stand-up has no briefs yet; they are made when it is prepared");
+          const agents = await this.#listAll(token, "agent.list", { state: "active" });
+          const nameOf = (id: unknown): string => String(agents.find((a) => a["principalId"] === id)?.["friendlyName"] ?? id);
+          const wanted = typeof agentName === "string" ? agentName.trim().toLowerCase() : "";
+          if (wanted === "") return refuse("invalid_command", "say which agent's brief the note is for");
+          const exact = briefs.filter((b) => nameOf(b["agent"]).trim().toLowerCase() === wanted);
+          const chosen = exact.length > 0 ? exact : briefs.filter((b) => looseMatch(wanted, nameOf(b["agent"])));
+          if (chosen.length === 0) return refuse("not_found", `no brief in that stand-up is for an agent called "${wanted.slice(0, 80)}"`);
+          if (chosen.length > 1) return { ok: false, kind: "ask", question: "Whose brief do you mean?", options: chosen.slice(0, CHAT_LIMITS.options).map((b) => `${String(b["id"])} (${nameOf(b["agent"]).slice(0, 60)})`), field: "briefId", choices: chosen.slice(0, CHAT_LIMITS.options).map((b) => String(b["id"])) };
+          args["briefId"] = String(chosen[0]!["id"]);
+          args["expectedRevision"] = chosen[0]!["revision"];
+          delete args["occurrenceId"];
+          labels[String(args["briefId"])] = `${nameOf(chosen[0]!["agent"]).slice(0, 80)}'s brief`;
+        }
+      }
+      // A brief belongs to its stand-up, and the operation takes the brief alone; the occurrence only served to find it.
+      if (isNote) delete args["occurrenceId"];
     }
     // A meeting named by its words (the one planned meeting of the project whose title contains them, or the only one) and an agent named by its name: both are resolved from the records, and anything unclear asks.
     if (intent.op === "meeting.invite-direct") {
@@ -1718,4 +1804,12 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
     }
   }
   return lines;
+}
+
+/** Whether the words the owner used fit a title or a name: every word of any length that says something (not "stand-up", "meeting", "the", ...) is found in it, in any case. No words fit everything. */
+const FILLER = new Set(["the", "a", "an", "my", "our", "of", "for", "stand", "up", "standup", "stand-up", "meeting"]);
+function looseMatch(words: string, text: string): boolean {
+  const haystack = text.toLowerCase();
+  const wanted = words.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0 && !FILLER.has(w));
+  return wanted.every((w) => haystack.includes(w));
 }
