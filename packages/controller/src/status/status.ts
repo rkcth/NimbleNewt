@@ -195,6 +195,33 @@ export interface FailedEventDetail {
   readonly lines: readonly Line[];
 }
 
+/**
+ * The kinds of status question the owner can ask, with the keys each takes and what it answers, in the owner's terms. The chat tells its model this list so that any free-form question can be turned into the right request (card M03h);
+ * `ask` still checks every key, and a test confirms that every kind listed here is one `ask` knows. `taskTitle` stands for a task named by its words: the chat looks the task up before the request reaches this service.
+ */
+export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly string[]; readonly about: string }>> = {
+  task: { keys: ["taskId|taskTitle"], about: "how one task is going and what blocks it" },
+  overview: { keys: ["projectId", "agentId", "state", "execution", "limit"], about: "the tasks of a project or of one agent, by state" },
+  changes: { keys: ["projectId", "since", "limit"], about: "what changed in a project since a time" },
+  tools: { keys: ["projectId", "taskId|taskTitle", "since", "limit"], about: "which tools were used" },
+  delivered: { keys: ["projectId", "taskId|taskTitle", "since"], about: "what was delivered" },
+  noticeboard: { keys: ["projectId"], about: "the project's noticeboard" },
+  failed_events: { keys: ["projectId", "taskId|taskTitle", "limit"], about: "events whose handling failed" },
+  failed_event: { keys: ["handlingId"], about: "one failed event in detail" },
+  timeline: { keys: ["projectId", "agent", "since", "limit"], about: "a project's timeline, or one agent's" },
+  shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
+  handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
+  meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
+  decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
+  agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
+  explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
+  replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent"], about: "a replay of a task's recorded run" },
+  activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
+  revocations: { keys: ["name", "limit"], about: "access that was revoked" },
+  needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
+  owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
+};
+
 export type StatusRequest =
   | { readonly kind: "task"; readonly taskId: string }
   | { readonly kind: "overview"; readonly projectId?: string; readonly agentId?: string; readonly state?: string; readonly execution?: string; readonly afterId?: string; readonly limit?: number }

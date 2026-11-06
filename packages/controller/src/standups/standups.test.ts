@@ -395,12 +395,16 @@ for (const backend of backends) {
     assert.equal((await c.standups.brief(c.asA, mineId))!.statements.length, 1);
     const b2 = (await c.standups.brief(c.asA, mineId))!;
     await refuses("forbidden", () => c.standups.addStatement(c.asB, { commandId: cid("st"), briefId: mineId, expectedRevision: b2.revision, section: "note", text: "hello" }));
-    await refuses("forbidden", () => c.standups.addStatement(c.owner, { commandId: cid("st"), briefId: mineId, expectedRevision: b2.revision, section: "note", text: "hello" }));
+    await refuses("forbidden", () => c.standups.addStatement(c.host, { commandId: cid("st"), briefId: mineId, expectedRevision: b2.revision, section: "note", text: "hello" }));
     await refuses("stale_revision", () => c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: b0.revision, section: "note", text: "hello" }));
+    // The owner may leave a note on the agent's brief (card M03h); it is kept as the owner's and never reads as the agent's own words. It counts toward the same limit.
+    await c.standups.addStatement(c.owner, { commandId: cid("st"), briefId: mineId, expectedRevision: b2.revision, section: "note", text: "Please also look at the cache size." });
+    const bo = (await c.standups.brief(c.asA, mineId))!;
+    assert.deepEqual(bo.statements.map((x) => [x.section, x.by ?? "agent"]), [["advice", "agent"], ["note", "owner"]]);
     await refuses("invalid_command", () => c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: b2.revision, section: "note", text: "key sk-abcdefghijklmnopqrstuvwxyz123456" }));
     await refuses("invalid_command", () => c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: b2.revision, section: "plan" as never, text: "x" }));
-    let revision = b2.revision;
-    for (let i = 1; i < 10; i++) { await c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: revision, section: "note", text: `note ${i}` }); revision++; }
+    let revision = bo.revision;
+    for (let i = 2; i < 10; i++) { await c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: revision, section: "note", text: `note ${i}` }); revision++; }
     await refuses("invalid_command", () => c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: revision, section: "note", text: "one too many" }));
     at("2026-10-21T07:00:00.000Z");
     await refuses("invalid_command", () => c.standups.addStatement(c.asA, { commandId: cid("st"), briefId: mineId, expectedRevision: revision, section: "note", text: "too late" }), (e) => assert.match(e.message, /started/));

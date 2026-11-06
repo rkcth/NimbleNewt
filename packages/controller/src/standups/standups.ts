@@ -45,7 +45,8 @@ export interface BriefEntry {
 export type BriefSection = "accomplishments" | "unfinished" | "blockers" | "advice" | "priorities";
 export const BRIEF_SECTIONS: readonly BriefSection[] = ["accomplishments", "unfinished", "blockers", "advice", "priorities"];
 /** What the agent itself added; it is its own words and is shown as such, never as a record. */
-export interface AgentStatement { readonly section: "advice" | "priorities" | "note"; readonly text: string; readonly at: string }
+/** A statement kept with a brief. Without `by` it is the agent's own words; with `by: "owner"` it is the owner's note for that agent, shown as the owner's (card M03h). */
+export interface AgentStatement { readonly section: "advice" | "priorities" | "note"; readonly text: string; readonly at: string; readonly by?: "owner" }
 
 /**
  * An agent's brief for one stand-up (kind `standup-brief`): accomplishments over the period, unfinished work, blockers, advice needed and next priorities, every entry with the records it rests on. It is made from records; the agent
@@ -456,14 +457,15 @@ export class StandupService {
       build: async () => {
         const found = await this.#runner.get("standup-brief", id);
         const body = found?.body as unknown as BriefBody | undefined;
-        // Someone else's brief reads like a missing one.
-        if (found === undefined || body === undefined || body.agent !== by.id || by.asOf === undefined || !inTaskScope(by, body.projectId)) throw new DomainError("forbidden", `${by.id} may not add to that brief`);
+        // The owner may leave a note on any agent's brief; it is kept as the owner's, never as the agent's own words. Someone else's brief reads like a missing one to everyone else.
+        const asOwner = by.kind === "owner" && by.taskScope === undefined;
+        if (found === undefined || body === undefined || (!asOwner && (body.agent !== by.id || by.asOf === undefined || !inTaskScope(by, body.projectId)))) throw new DomainError("forbidden", `${by.id} may not add to that brief`);
         if (found.revision !== expected) throw new DomainError("stale_revision", `brief ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
         const occ = (await this.#runner.get("meeting-occurrence", body.occurrenceId))?.body as unknown as OccurrenceBody | undefined;
         if (occ === undefined || occ.state !== "planned" || Date.parse(this.#runner.now()) >= Date.parse(occ.startsAt)) throw new DomainError("invalid_command", "the stand-up has started or is over; the brief is closed", { field: "briefId" });
         if (body.statements.length >= STANDUP_LIMITS.statements) throw new DomainError("invalid_command", `a brief holds at most ${STANDUP_LIMITS.statements} statements`, { field: "text" });
         const ref: AggregateRef = { kind: "standup-brief", id };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, statements: [...body.statements, { section: command.section, text, at: this.#runner.now() }] }) }], detail: { projectId: body.projectId } };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, statements: [...body.statements, { section: command.section, text, at: this.#runner.now(), ...(asOwner ? { by: "owner" as const } : {}) }] }) }], detail: { projectId: body.projectId } };
       },
     })));
   }

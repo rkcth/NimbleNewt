@@ -24,7 +24,7 @@ import { McpService, type CatalogItem } from "../mcp/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
+import { STATUS_KINDS, StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
 import type { Line } from "./index.js";
 
 after(stopServer);
@@ -996,6 +996,10 @@ for (const backend of backends) {
   suite("the request dispatcher answers each kind, refuses unknown ones and returns nothing for what is missing", async (c) => {
     const t = await c.work("Dispatch");
     await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "weather" } as never));
+    // Every kind the chat model is told about is one the service answers to (or refuses for another reason than not knowing the kind).
+    for (const kind of Object.keys(STATUS_KINDS)) {
+      try { await c.status.ask(c.owner, { kind } as never); } catch (error) { assert.doesNotMatch(String((error as Error).message), /not a kind of status request/, `${kind} is a kind`); }
+    }
     await refuses("invalid_command", () => c.status.ask(c.owner, null as never));
     await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "changes", projectId: c.project, since: "2026-10-22T00:00:00.000Z", extra: 1 } as never));
     assert.equal(await c.status.ask(c.owner, { kind: "task", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }), undefined);
