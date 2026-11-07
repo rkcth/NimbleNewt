@@ -84,6 +84,11 @@ export interface DispatchBody {
   readonly reserveRound?: number;
   /** A hold being given back: set before the budget is asked to release it, cleared after, so a stopped process can finish it. */
   readonly releasingId?: string;
+  /**
+   * A place or hold taken for this attempt after it had finished (an advance that was already under way when a stop ended it; card H12q). Written in the same commit as the place or hold is recorded, with the
+   * attempt kept in the live list, so a crash or a failed release does not leak it: every tick gives back what it names, and the mark and the live entry go once both are given back.
+   */
+  readonly lateHeld?: { readonly requestId?: string; readonly reservationId?: string };
   readonly used?: { readonly costMicros: number; readonly computeMs: number };
   /** What the attempt meant to hold, written before the reservation is asked for, so a repeat after a crash asks for exactly the same amounts. */
   readonly reserving?: { readonly costMicros?: number; readonly computeMs?: number };

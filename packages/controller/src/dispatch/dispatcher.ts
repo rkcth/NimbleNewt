@@ -381,6 +381,8 @@ export class DispatcherService {
       let taskId = "";
       try {
         const d = await this.#load(id);
+        // A finished attempt is in the live list only while a place or hold taken after its end is still to be given back (`lateHeld`); a failure is told and tried again next tick.
+        if (d !== undefined && d.body.state === "finished") { taskId = d.body.taskId; if (d.body.lateHeld !== undefined) await this.#giveBackLate(id); continue; }
         if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
         taskId = d.body.taskId;
         // An attempt that started without a time limit is held to the owner's attempt time from the moment it started running (`startedAt`; the claim time for a record that has none), once that is switched on (provisional: the owner's figure only, not the configuration's or the contract's).
@@ -430,6 +432,7 @@ export class DispatcherService {
     // 5. Calls waiting for an approval: say how each was decided to the worker, and close those that were denied or ran out.
     for (const id of await this.#liveIds()) {
       const before = await this.#load(id);
+      if (before?.body.state === "finished") continue; // kept only for what it took late (step 1); its calls were settled when it ended
       const parked = before?.body.state === "parked";
       const verdicts = await this.#path.sweepParked(id, { includeTold: parked });
       approvals.push(...verdicts);
@@ -613,12 +616,13 @@ export class DispatcherService {
    * Makes the agent quiet before someone integrates its changes, refreshes its checkout or quarantines its work: new calls are refused, calls in flight settle, and a checkpoint is taken. Call
    * `release` when the other step is done. The checkpoint is handed to the checkpoint hook (C04) and returned.
    */
-  async quiesce(by: Principal, attemptId: string, reason: string, options: { strictMs?: number } = {}): Promise<{ checkpoint?: JsonObject }> {
+  async quiesce(by: Principal, attemptId: string, reason: string, options: { strictMs?: number; startingMs?: number } = {}): Promise<{ checkpoint?: JsonObject }> {
     await this.freeze(by, attemptId, reason);
     // A worker that is still coming up is waited for (bounded like the settle), so the checkpoint is its own and nothing of it runs beside the operation; one that does not come up in time is not quiet.
     const starting = this.#starting.get(attemptId);
     if (starting !== undefined) {
-      const limit = options.strictMs ?? 10_000;
+      // `startingMs` bounds only this wait (the stop's checkpoint step, which must not wait past its deadline but keeps the settle as it was); otherwise `strictMs`, then 10 s.
+      const limit = options.startingMs ?? options.strictMs ?? 10_000;
       let timer: NodeJS.Timeout | undefined;
       const up = await Promise.race([starting.then(() => true, () => true), new Promise<boolean>((ok) => { timer = setTimeout(() => ok(false), limit); })]).finally(() => clearTimeout(timer));
       // `field: "starting"` lets a caller that can wait (the stop's cleanup) tell this from a quiesce that failed: the worker is work still to come, not a fault.
@@ -914,10 +918,11 @@ export class DispatcherService {
   }
 
   /** Adds or removes an attempt from the live list in the same commit as the record that makes it so. */
-  async #liveChange(attemptId: string, add: boolean): Promise<Change[]> {
+  async #liveChange(attemptId: string, add: boolean, overLimit = false): Promise<Change[]> {
     const found = await this.#runner.get(LIVE.kind, LIVE.id);
     const ids = found === undefined ? [] : (found.body as unknown as { ids: string[] }).ids;
-    if (add && ids.length >= LIVE_MAX && !ids.includes(attemptId)) throw new DomainError("unavailable", `the dispatcher already holds ${LIVE_MAX} live attempts; none is added until some finish`);
+    // `overLimit`: a finished attempt kept only until what it took late is given back (`lateHeld`) is never refused for want of room, or that place or hold would be left behind.
+    if (add && !overLimit && ids.length >= LIVE_MAX && !ids.includes(attemptId)) throw new DomainError("unavailable", `the dispatcher already holds ${LIVE_MAX} live attempts; none is added until some finish`);
     const next = add ? [...new Set([...ids, attemptId])] : ids.filter((i) => i !== attemptId);
     const body = { ids: next } as unknown as JsonObject;
     return found === undefined ? [{ type: "create", ref: LIVE, body }] : [{ type: "update", ref: LIVE, expectedRevision: found.revision, body }];
@@ -1483,7 +1488,9 @@ export class DispatcherService {
       }
       throw error;
     }
-    await this.#update(d.body.attemptId, (x) => ({ ...x, reservationId: id, used: x.used ?? { costMicros: 0, computeMs: 0 } }));
+    // Ended meanwhile: the hold is marked as taken late (see `#request`), never recorded as the finished attempt's own.
+    const attemptId = d.body.attemptId;
+    await this.#update(attemptId, (x) => (x.state === "finished" ? { ...x, lateHeld: { ...x.lateHeld, reservationId: id } } : { ...x, reservationId: id, used: x.used ?? { costMicros: 0, computeMs: 0 } }), async (x) => (x.state === "finished" ? this.#liveChange(attemptId, true, true) : []));
     return undefined;
   }
 
@@ -1523,7 +1530,9 @@ export class DispatcherService {
         throw error;
       }
     }
-    await this.#update(d.body.attemptId, (b) => ({ ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }));
+    // Ended meanwhile (a stop that landed during this advance): the end already gave back what the record held, so this place is marked as taken late, in the same commit, and the tick gives it back (H12q review).
+    const id = d.body.attemptId;
+    await this.#update(id, (b) => (b.state === "finished" ? { ...b, lateHeld: { ...b.lateHeld, requestId: asked.id }, requests: Math.max(b.requests ?? 0, n + 1) } : { ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }), async (b) => (b.state === "finished" ? this.#liveChange(id, true, true) : []));
     return asked.id;
   }
 
@@ -1533,6 +1542,8 @@ export class DispatcherService {
    */
   async #giveBack(d: Loaded): Promise<void> {
     const fresh = (await this.#load(d.body.attemptId))?.body ?? d.body;
+    // Started meanwhile by another caller (a second dispatcher over the same records): the place and hold on the record are that start's own, and this advance, which judged an older copy, gives back nothing (H12q review).
+    if (fresh.state === "running" || fresh.state === "parked") return;
     const id = fresh.requestId;
     if (id !== undefined) {
       await this.#deps.admission.release({ commandId: `dpa-rel:${fresh.attemptId}:${fresh.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: id, reason: "the attempt cannot start now" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
@@ -1560,18 +1571,31 @@ export class DispatcherService {
   }
 
   /**
-   * The place and hold an advance took for an attempt that was ended meanwhile, before this advance could start it. The end already gave back what the record held when it ran, so each is let go only if it is
-   * still held: a place that is no longer running or waiting is `not_found`, and a hold already settled or released (or uncertain, which is never released) is `invalid_transition`; both mean nothing is left to give back.
-   * The record is not changed (it is finished); the command IDs derive from the place and the hold, so a repeat lets go of each once.
+   * The place and hold an advance took for an attempt that was ended meanwhile (`lateHeld`). They were taken after the end gave back what the record held, so the attempt never ran on them and nothing was used
+   * against them: both are let go, whatever the attempt used before (that use is on its own hold, which the end settled). A place that is no longer running or waiting is `not_found`, and a hold already
+   * released is `invalid_transition`; both mean nothing is left to give back. Each release is tried on its own; the mark and the live entry go only once both are done, so a failure (or a crash) is tried again
+   * at the next tick. The command IDs derive from the place and the hold, so a repeat lets go of each once.
    */
-  async #giveBackLate(b: DispatchBody): Promise<void> {
-    // An attempt that used anything ran: its hold carries what it used and is settled by its end, never released here (released with nothing used, it is the same as settled with nothing).
-    if ((b.used?.costMicros ?? 0) > 0 || (b.used?.computeMs ?? 0) > 0) return;
-    if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-late-rel:${b.attemptId}:${b.requestId}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "the attempt ended before it was started" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+  async #giveBackLate(attemptId: string): Promise<void> {
+    const b = (await this.#load(attemptId))?.body;
+    const late = b?.lateHeld;
+    if (b === undefined || b.state !== "finished" || late === undefined) return;
+    const failed: unknown[] = [];
+    if (late.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-late-rel:${attemptId}:${late.requestId}`, actor: DISPATCHER_ACTOR, requestId: late.requestId, reason: "the attempt ended before it was started" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) failed.push(error); });
     const budgets = this.#deps.budgets;
-    if (b.reservationId !== undefined && budgets?.release !== undefined) {
-      await budgets.release(this.#deps.principal, { commandId: `dpa-late-rrel:${b.attemptId}:${b.reservationId}`, reservationId: b.reservationId }).catch((error: unknown) => { if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "not_found")) throw error; });
+    // A budget service that cannot release has nothing to give back to: the mark is dropped.
+    if (late.reservationId !== undefined && budgets?.release !== undefined) {
+      await budgets.release(this.#deps.principal, { commandId: `dpa-late-rrel:${attemptId}:${late.reservationId}`, reservationId: late.reservationId }).catch((error: unknown) => { if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "not_found")) failed.push(error); });
     }
+    if (failed.length > 0) { for (const error of failed.slice(1)) this.#options.onError?.(error); throw failed[0]; }
+    // Only what was given back here is taken off the mark: a place or hold marked meanwhile stays for the next tick.
+    const left = (x: DispatchBody): DispatchBody["lateHeld"] => {
+      if (x.lateHeld === undefined) return undefined;
+      const rest = { ...(x.lateHeld.requestId === undefined || x.lateHeld.requestId === late.requestId ? {} : { requestId: x.lateHeld.requestId }), ...(x.lateHeld.reservationId === undefined || x.lateHeld.reservationId === late.reservationId ? {} : { reservationId: x.lateHeld.reservationId }) };
+      return Object.keys(rest).length === 0 ? undefined : rest;
+    };
+    await this.#update(attemptId, (x) => { if (x.lateHeld === undefined) return x; const rest = left(x); const { lateHeld: _l, ...body } = x; void _l; return rest === undefined ? body : { ...body, lateHeld: rest }; },
+      async (x) => (x.lateHeld !== undefined && left(x) === undefined && x.state === "finished" ? this.#liveChange(attemptId, false) : []));
   }
 
   async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
@@ -1603,10 +1627,11 @@ export class DispatcherService {
     } catch (error) {
       if (frozen) return { kind: "waiting" };
       if (isDomainError(error, "invalid_command")) {
-        // Ended (a stop) while this advance asked for its place and allowance: the end gave back what the record held when it ran, and the place and hold this advance took after that are given back here (H12q review).
-        const fresh = (await this.#load(b.attemptId))?.body;
-        if (fresh?.state === "finished") await this.#giveBackLate(fresh);
-        return { kind: "skipped", check: "place", reason: fresh?.state === "finished" ? "the attempt has ended" : "another caller started the attempt" };
+        // Ended (a stop) while this advance asked for its place and allowance: the end gave back what the record held when it ran, and the place and hold this advance took after that (marked `lateHeld`) are
+        // given back here; one that cannot be given back now stays marked and the next tick tries again (H12q review).
+        const ended = (await this.#load(b.attemptId))?.body.state === "finished";
+        if (ended) await this.#giveBackLate(b.attemptId).catch((error: unknown) => { if (isDomainError(error, "stale_epoch")) throw error; this.#options.onError?.(error); });
+        return { kind: "skipped", check: "place", reason: ended ? "the attempt has ended" : "another caller started the attempt" };
       }
       throw error;
     }
@@ -1824,7 +1849,13 @@ export class DispatcherService {
     // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
     if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
     if (b.resumeFrom !== undefined) await this.#dropResumeCheck(attemptId, b.taskId, b.projectId);
-    await this.#update(attemptId, (x) => ({ ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
+    // A place or hold an advance recorded after `b` was read was not given back above: it is marked as taken late, and the attempt stays in the live list until the tick gives it back (H12q review).
+    const lateOf = (x: DispatchBody): DispatchBody["lateHeld"] => {
+      const late = { ...x.lateHeld, ...(x.requestId !== undefined && x.requestId !== b.requestId ? { requestId: x.requestId } : {}), ...(x.reservationId !== undefined && x.reservationId !== b.reservationId ? { reservationId: x.reservationId } : {}) };
+      return Object.keys(late).length === 0 ? undefined : late;
+    };
+    await this.#update(attemptId, (x) => { const late = lateOf(x); return { ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
+      async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
     // A worker registered while this end was running (its start answered after the end began) is let go too.
     const late = this.#live.get(attemptId);
     if (late !== undefined && late.handle !== live?.handle && !(await late.handle.stop().then(() => true, () => false))) { workerStopped = false; await this.#update(attemptId, (x) => ({ ...x, workerStopped: false })).catch(() => undefined); }

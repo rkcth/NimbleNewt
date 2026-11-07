@@ -295,7 +295,14 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       let checkpointed = true;
       let artifacts = true;
       for (const id of attempts) {
-        const { checkpoint } = await h!.dispatcher.quiesce(h!.principal, id, "checkpoint before suspension");
+        // A worker still coming up is waited for no longer than the request's deadline allows (card H12q). A Stop's ending stops it and it has nothing of its own to save yet, so a Stop goes on without it;
+        // a Suspend cannot checkpoint it, and the refusal blocks the Suspend as before.
+        const startingMs = options?.deadlineAt === undefined ? undefined : Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));
+        let checkpoint: Readonly<Record<string, unknown>> | undefined;
+        try { ({ checkpoint } = await h!.dispatcher.quiesce(h!.principal, id, "checkpoint before suspension", startingMs === undefined || !Number.isFinite(startingMs) ? {} : { startingMs })); } catch (error) {
+          if (options?.mode === "stop" && error instanceof DomainError && error.code === "unavailable" && error.field === "starting") continue;
+          throw error;
+        }
         if (checkpoint === undefined) checkpointed = false;
         else if (checkpoint["artifactsDurable"] === false) artifacts = false;
       }

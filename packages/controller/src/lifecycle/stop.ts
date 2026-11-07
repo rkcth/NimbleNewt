@@ -31,7 +31,7 @@ export interface StopPorts {
   /** Scoped cleanup only (finish or checkpoint what is running, nothing new). `backup` asks for an eligible backup model after the first one was lost. */
   cleanup(scope: PauseScope, options: { deadlineAt: string; spendBudget?: number; backup: boolean; by: Principal }): Promise<{ remaining: readonly InventoryItem[]; spent?: number; modelLost?: boolean; costs?: readonly CleanupCost[] }>;
   /** The checkpoint of the scope's state, and whether it and the artifacts it names are durable. */
-  checkpoint(scope: PauseScope, options?: { by: Principal; mode: StopMode }): Promise<{ checkpointId: string; durable: boolean; artifactsDurable: boolean }>;
+  checkpoint(scope: PauseScope, options?: { by: Principal; mode: StopMode; deadlineAt?: string }): Promise<{ checkpointId: string; durable: boolean; artifactsDurable: boolean }>;
   /** Ends execution. `force` skips waiting. `unresolved` names what could not be settled (effects of unknown outcome, children still running). */
   terminate(scope: PauseScope, options: { force: boolean; by: Principal }): Promise<{ ended: boolean; unresolved: readonly string[]; costs?: readonly CleanupCost[] }>;
   /** Charges the cleanup cost of one attempt to the budget of its task (card L02d). Safe to repeat with the same `commandId`; the amounts are what is new since the last charge. Absent: nothing is charged. */
@@ -311,7 +311,7 @@ export class StopService {
           return view<StopIntentBody>((await this.#runner.get(KIND, id))!); // still settling: the next call looks again
         }
         let cp: Awaited<ReturnType<StopPorts["checkpoint"]>>;
-        try { cp = await this.#ports.checkpoint(b.scope, { by, mode: b.mode }); } catch (error) {
+        try { cp = await this.#ports.checkpoint(b.scope, { by, mode: b.mode, deadlineAt: b.deadlineAt }); } catch (error) {
           await this.#block(id, by.id, `the checkpoint could not be taken: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["preparing"]);
           continue;
         }

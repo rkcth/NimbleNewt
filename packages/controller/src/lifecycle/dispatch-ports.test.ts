@@ -208,6 +208,34 @@ test("the cleanup lists a worker still coming up as a running process and goes o
   await assert.rejects(ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false, by: staff }), /the store is down/);
 });
 
+test("the checkpoint step waits for a worker still coming up no longer than the request's deadline; a Stop goes on without it (it has nothing to save yet), a Suspend is refused (card H12q review)", async () => {
+  const waits: (number | undefined)[] = [];
+  const quiesced: string[] = [];
+  let other: Error | undefined;
+  const dispatcher = {
+    liveAttemptsOf: async () => ["att-1", "att-2"], get: async () => undefined, operations: async () => [] as never, release: async () => undefined, stop: async () => undefined,
+    quiesce: async (_by: Principal, id: string, _reason: string, o: { startingMs?: number; strictMs?: number } = {}) => {
+      waits.push(o.startingMs);
+      assert.equal(o.strictMs, undefined, "the settle is not made strict by the deadline");
+      if (other !== undefined) throw other;
+      if (id === "att-1") throw new DomainError("unavailable", `the worker of attempt ${id} was still starting after ${o.startingMs ?? 10_000} ms`, { field: "starting" });
+      quiesced.push(id); return { checkpoint: { id: "cp" } };
+    },
+  };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }));
+  const task = { kind: "task", id: "task-x" } as const;
+  const stopped = await ports.checkpoint(task, { by: staff, mode: "stop", deadlineAt: new Date(Date.now() - 1000).toISOString() });
+  assert.deepEqual(stopped, { checkpointId: "task:task-x", durable: true, artifactsDurable: true });
+  assert.deepEqual(quiesced, ["att-2"], "the other attempt was still checkpointed");
+  assert.deepEqual(waits, [1, 1], "a deadline that has passed waits 1 ms");
+  waits.length = 0;
+  await ports.checkpoint(task, { by: staff, mode: "stop", deadlineAt: new Date(Date.now() + 2000).toISOString() });
+  assert.ok(waits.every((w) => w !== undefined && w > 1000 && w <= 2000), `bounded by the deadline (${waits.join(", ")})`);
+  await assert.rejects(ports.checkpoint(task, { by: staff, mode: "suspend", deadlineAt: new Date(Date.now() + 2000).toISOString() }), /still starting/);
+  other = new DomainError("unavailable", "the store is down");
+  await assert.rejects(ports.checkpoint(task, { by: staff, mode: "stop", deadlineAt: new Date(Date.now() + 2000).toISOString() }), /the store is down/, "any other failure still fails a Stop's checkpoint");
+});
+
 test("terminate asks a task's jobs and its swarm children's jobs to stop (not a tracked remote one), Force Stop escalates one already asked, a job the asker may not control is unresolved, and the children's attempts are stopped and listed (card L02d)", async () => {
   const stopped: string[] = [];
   const dispatcher = {
