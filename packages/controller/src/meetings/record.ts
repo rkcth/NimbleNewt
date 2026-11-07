@@ -292,7 +292,7 @@ const repairHint = (topic: string, state: string): string => (state === "active"
  * The refusal when the owner's own decision was recorded under this command ID but is not the answer to this meeting decision: the meeting decision no longer waits for an answer (answered meanwhile, or it never waited: `neverWaited`), or the ID belongs to another meeting decision
  * (`elsewhere`). The owner is told the decision's id, topic and state, that it is not linked, and how to repair it.
  */
-const orphanError = (id: string, topic: string, state: string, response: string, how: "waited" | "neverWaited" | "elsewhere" | "unknown" | "full" = "waited"): DomainError => {
+const orphanError = (id: string, topic: string, state: string, response: string, how: "waited" | "neverWaited" | "elsewhere" | "unknown" = "waited"): DomainError => {
   const hint = repairHint(topic, state);
   const why = how === "elsewhere" ? "but for another meeting decision, not for this one" : how === "unknown" ? "but nothing shows which meeting decision it was for (it was recorded before that was kept), so it is not used for this one" : how === "neverWaited" ? `but this meeting decision does not wait for your answer (${response})` : `but this meeting decision no longer waits for an answer (${response})`;
   return new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded under this command ID and ${standing(state)}, ${why}; your decision is not linked to it${hint === "" ? "" : `; ${hint}`}`, { field: "alternative" });
@@ -1278,7 +1278,12 @@ export class MeetingRecordService {
         // Marked first: if this call stops after the owner decision is recorded, the marker is how it is found again, and how an answer given differently is told about it. The list is bounded; at the bound a new alternative is refused until the decision is answered.
         const listed = marked(found);
         if (!listed.includes(altId)) {
-          if (listed.length >= RECORD_LIMITS.pendingAlternatives) invalid("alternative", `${listed.length} earlier alternatives of yours were recorded for this meeting decision and never saved as its answer; answer it with agree or decline, or send one of them again`);
+          if (listed.length >= RECORD_LIMITS.pendingAlternatives) {
+            // Marked attempts count whether or not they were recorded (one may have stopped before the record, or been refused after the marker); the owner is told how many were.
+            let recordedCount = 0;
+            for (const id of listed) if ((await this.#deps.decisions.get(by, id).catch(() => undefined))?.origin.meetingDecisionId === decisionId) recordedCount++;
+            invalid("alternative", `${listed.length} earlier alternatives of yours to this meeting decision were begun and never saved as its answer (${recordedCount} of them recorded); answer it with agree or decline (to decide otherwise, decline and say what you decide on the topic), or send one of them again through the API`);
+          }
           await this.#cmd("meeting.decision.owner-pending", by, derivedId("dec", `pending:${decisionId}:${altId}`), async () => ({
             payload: { decisionId, pendingAlternative: altId },
             build: async () => {
@@ -1287,7 +1292,7 @@ export class MeetingRecordService {
               if (head === undefined || d === undefined) throw new DomainError("not_found", "that decision does not exist");
               if (d.outcome !== "adopted" || d.scope !== "in-scope" || (d.ownerResponse !== "pending" && d.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", `the owner already answered (${d.ownerResponse})`, { field: "decisionId" });
               const list = marked(d);
-                            if (!list.includes(altId) && list.length >= RECORD_LIMITS.pendingAlternatives) invalid("alternative", "too many earlier alternatives were recorded for this meeting decision and never saved as its answer");
+              if (!list.includes(altId) && list.length >= RECORD_LIMITS.pendingAlternatives) invalid("alternative", "too many earlier alternatives to this meeting decision were begun and never saved as its answer");
               const { pendingAlternative: _old, ...rest } = d; void _old;
               return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: head.revision, body: json({ ...rest, pendingAlternatives: list.includes(altId) ? list : [...list, altId] }) }], detail: { projectId: d.projectId } };
             },

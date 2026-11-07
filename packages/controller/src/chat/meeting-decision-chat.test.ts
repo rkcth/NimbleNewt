@@ -1196,8 +1196,16 @@ for (const backend of backends) {
     assert.equal((await ctl.decision(e.id)).pendingAlternatives!.length, 8);
     const ninth = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: altArgs(ctl, "staging server", "Keep the staging server number 9.", "alt-b9") }, "b9");
     assert.equal(ninth.ok, false);
-    assert.match(ninth.error.message, /^alternative: 8 earlier alternatives of yours were recorded for this meeting decision and never saved as its answer; answer it with agree or decline, or send one of them again$/);
+    assert.match(ninth.error.message, /^alternative: 8 earlier alternatives of yours to this meeting decision were begun and never saved as its answer \(0 of them recorded\); answer it with agree or decline \(to decide otherwise, decline and say what you decide on the topic\), or send one of them again through the API$/);
     assert.equal((await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: altArgs(ctl, "staging server", "Keep the staging server number 3.", "alt-b3") }, "b3")).ok, true, "a listed one still works");
+    // A mixed list: two of eight recorded (crash after the record), six that stopped before it; the count of recorded ones is true.
+    const m = await ctl.pending("Retire the old mixed job on Thursday.", "mixed job", "Mixed task");
+    for (let n = 0; n < 8; n++) {
+      if (n < 2) ctl.recordCrash.n = 1; else ctl.recordFail.n = 1;
+      await call(w, w.ownerToken, OP, { decisionId: m.id, response: "alternative", alternative: altArgs(ctl, "mixed job", `Keep the mixed job number ${n}.`, `alt-mx${n}`) }, `mx${n}`);
+    }
+    const mixed = await call(w, w.ownerToken, OP, { decisionId: m.id, response: "alternative", alternative: altArgs(ctl, "mixed job", "Keep the mixed job number 9.", "alt-mx9") }, "mx9");
+    assert.match(mixed.error.message, /^alternative: 8 earlier alternatives of yours to this meeting decision were begun and never saved as its answer \(2 of them recorded\); /);
     // A record as the first version left it: recorded, marked with the single field, without its meeting decision on the owner decision: not claimed.
     const f = await ctl.pending("Retire the old report job on Monday.", "report job", "Report task");
     const old = await w.decisions.record(w.owner, { commandId: cid("old"), projectId: ctl.project, category: "decision", topic: "report job", statement: "Keep the report job", wording: "Keep the report job", source: { channel: "direct" }, basedOn: 0 } as never);
