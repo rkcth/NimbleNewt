@@ -14,7 +14,7 @@ const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3
 const later = (ms: number) => new Promise<void>((ok) => setTimeout(ok, ms));
 
 for (const backend of backends) {
-  const rig = async (hooks: { busy: (taskId: string) => Promise<boolean>; opening?: () => Promise<void> }) => {
+  const rig = async (hooks: { busy: (taskId: string) => Promise<boolean>; opening?: () => Promise<void>; settleMs?: number; budget?: boolean }) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     await w.principals.enroll(w.owner, { commandId: "eh", kind: "host", name: "local", grants: [] });
@@ -38,7 +38,8 @@ for (const backend of backends) {
     const d = w.restart({ workers: [local], workspaceBusy: hooks.busy });
     const ann = await w.agent("ann", workGrants(w.project, ["read-file"]));
     const { attemptId, taskId } = await w.task("t", ann);
-    const coordinator = new QuiesceCoordinator({ dispatcher: d, blockers: w.blockers, principal: w.owner });
+    if (hooks.budget === true) await w.budgets.open(w.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    const coordinator = new QuiesceCoordinator({ dispatcher: d, blockers: w.blockers, principal: w.owner, ...(hooks.settleMs === undefined ? {} : { settleMs: hooks.settleMs }) });
     const service = (port: WorkspacePort) => WorkspaceOpService.withEpoch(w.storage, w.epoch, {
       quiesce: coordinator, portOf: async () => port, assignee: async () => "agent:ann",
       attempts: { live: (t: string) => d.liveAttemptsOf(w.owner, { taskId: t }), frozenReason: async (id: string) => (await d.get(w.owner, id))?.frozen?.reason, release: (id: string) => d.release(w.owner, id), tell: (id: string, text: string) => d.tell(w.owner, id, text), stop: (id: string, reason: string) => d.stop(w.owner, id, { reason }) },
@@ -104,6 +105,115 @@ for (const backend of backends) {
       assert.equal(r.checkpoints(), 1, "a checkpoint was taken from the worker before the landing");
       assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "and the attempt goes on afterwards");
       r.turn.end!(); await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  // What the attempt holds: the place (its request on the record, and whether admission still has it running or waiting) and the allowance (the reservation on the record, and the task's open holds).
+  const holds = async (r: Awaited<ReturnType<typeof rig>>) => {
+    const body = (await r.d.get(r.w.owner, r.attemptId))!;
+    const report = await r.w.budgets.report(r.w.owner, r.taskId);
+    return { requestId: body.requestId, reservationId: body.reservationId, releasingId: body.releasingId, open: report?.reservations.length ?? 0 };
+  };
+
+  test(`${backend.name}: a landing that begins while a worker is coming up and the worker is not up within the settle time is refused with a blocker; the host is not asked, nothing stays frozen, and the next landing goes (card H12q review)`, async () => {
+    let svc: WorkspaceOpService | undefined;
+    let letUp!: () => void; const up = new Promise<void>((ok) => { letUp = ok; });
+    let opening!: () => void; const inOpening = new Promise<void>((ok) => { opening = ok; });
+    let ran = 0;
+    const r = await rig({ settleMs: 200, busy: async (t) => svc!.isBusy(t), opening: async () => { opening(); await up; } });
+    try {
+      svc = r.service({ run: async () => { ran++; r.log.push("host:landing"); return { ok: true, summary: "landed", detail: { landed: true, changed: true } }; } });
+      const tick = r.d.tick();
+      await inOpening;
+      // The dispatcher says so in a form a caller that can wait (a stop's cleanup) can tell from a failure.
+      await assert.rejects(r.d.quiesce(r.w.owner, r.attemptId, "a look", { strictMs: 50 }), (e: unknown) => (e as { code?: string; field?: string }).code === "unavailable" && (e as { field?: string }).field === "starting");
+      await r.d.release(r.w.owner, r.attemptId);
+      const answer = await svc.request(r.w.owner, { commandId: "l1", operation: "landing", taskId: r.taskId, reason: "reviewed" }) as { state: string; summary?: string };
+      assert.notEqual(answer.state, "done", "the landing did not run beside a worker that is still starting");
+      assert.match(answer.summary ?? "", /still starting/);
+      assert.equal(ran, 0, "the host was never asked");
+      assert.ok((await r.w.blockers.openFor("runtime_hold", { kind: "task", id: r.taskId })) !== undefined, "the owner sees why");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the landing's freeze is lifted");
+      letUp();
+      assert.deepEqual((await tick).started, [r.attemptId], "the worker comes up and runs");
+      const second = await svc.request(r.w.owner, { commandId: "l2", operation: "landing", taskId: r.taskId, reason: "again" }) as { state: string };
+      assert.equal(second.state, "done");
+      assert.equal(ran, 1);
+      assert.deepEqual(r.log.filter((l) => l !== "worker:running"), ["worker:opening", "worker:up", "host:landing"]);
+      r.turn.end!(); await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: an attempt frozen after the dispatcher found the task free is not started and gives back its place and its held allowance; ticks while it stays frozen hold nothing, and it starts once released (card H12q review)`, async () => {
+    let first = true;
+    let mid: Awaited<ReturnType<typeof holds>> | undefined;
+    const r = await rig({ budget: true, busy: async () => { if (first) { first = false; await r.d.freeze(r.w.owner, r.attemptId, "owner hold"); } return false; } });
+    try {
+      const tick = await r.d.tick();
+      assert.deepEqual(tick.started, []);
+      assert.ok(tick.waiting.includes(r.attemptId));
+      mid = await holds(r);
+      assert.deepEqual(mid, { requestId: undefined, reservationId: undefined, releasingId: undefined, open: 0 }, "the place and the hold taken for the start were given back");
+      assert.deepEqual((await r.d.tick()).started, []);
+      assert.deepEqual(await holds(r), mid, "a later tick leaks nothing");
+      assert.deepEqual(r.log, [], "no worker was opened");
+      await r.d.release(r.w.owner, r.attemptId);
+      assert.deepEqual((await r.d.tick()).started, [r.attemptId]);
+      r.turn.end!(); await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: an attempt left waiting and frozen asks for no place, holds no allowance and pins nothing at each tick (card H12q review)`, async () => {
+    let busy = true;
+    const r = await rig({ budget: true, busy: async () => busy });
+    try {
+      // The first tick claims the attempt and leaves it waiting (the checkout is busy), holding nothing; then it is frozen and the checkout is free.
+      assert.ok((await r.d.tick()).waiting.includes(r.attemptId));
+      busy = false;
+      const asked: string[] = [];
+      const spy = (target: object, name: string, counts: (...a: unknown[]) => boolean = () => true) => { const t = target as Record<string, (...a: unknown[]) => unknown>; const real = t[name]!.bind(target); t[name] = (...a: unknown[]) => { if (counts(...a)) asked.push(name); return real(...a); }; };
+      // The checkout is looked at (not pinned) by the checks every tick; only a pin counts.
+      spy(r.w.admission, "request"); spy(r.w.admission, "release"); spy(r.w.budgets, "reserve"); spy(r.w.budgets, "release"); spy(r.w.resources, "dispatchCheckout", (c) => (c as { pin: boolean }).pin);
+      await r.d.freeze(r.w.owner, r.attemptId, "owner hold");
+      for (let i = 0; i < 3; i++) assert.ok((await r.d.tick()).waiting.includes(r.attemptId));
+      assert.deepEqual(asked, [], "nothing was asked for, held or pinned");
+      assert.deepEqual(await holds(r), { requestId: undefined, reservationId: undefined, releasingId: undefined, open: 0 });
+      await r.d.release(r.w.owner, r.attemptId);
+      assert.deepEqual((await r.d.tick()).started, [r.attemptId]);
+      const afterRelease = asked as string[];
+      assert.ok(afterRelease.includes("request") && afterRelease.includes("reserve"), "once released it asks for its place and holds its allowance");
+      r.turn.end!(); await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: an ending freeze (a stop that is ending the attempt) does not keep a waiting attempt from starting; the stop then ends it (card H12q review)`, async () => {
+    let busy = true;
+    const r = await rig({ busy: async () => busy });
+    try {
+      assert.ok((await r.d.tick()).waiting.includes(r.attemptId));
+      busy = false;
+      await r.d.freeze(r.w.owner, r.attemptId, "ending", { ending: true });
+      assert.deepEqual((await r.d.tick()).started, [r.attemptId], "the start goes on");
+      await r.d.stop(r.w.owner, r.attemptId, { reason: "owner says stop" });
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.state, "finished", "and the stop ends it");
+      r.turn.end!(); await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a stop that ends a waiting attempt after the dispatcher found the task free leaves no place or allowance held for it (card H12q review)`, async () => {
+    let first = true;
+    const r = await rig({ budget: true, busy: async () => { if (first) { first = false; await r.d.stop(r.w.owner, r.attemptId, { reason: "owner says stop" }); } return false; } });
+    try {
+      const tick = await r.d.tick();
+      assert.deepEqual(tick.started, []);
+      const body = (await r.d.get(r.w.owner, r.attemptId))!;
+      assert.equal(body.state, "finished");
+      assert.ok(body.requestId !== undefined && body.reservationId !== undefined, "the advance took a place and a hold after the stop ended the attempt");
+      const where = await r.w.admission.where(body.requestId);
+      assert.ok(where.state !== "running" && where.state !== "waiting", `the place was given back (${where.state})`);
+      assert.equal((await holds(r)).open, 0, "the hold was given back");
+      assert.deepEqual(r.log, [], "no worker was opened");
+      await r.d.idle();
     } finally { await r.store.close(); }
   });
 }

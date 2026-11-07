@@ -8,6 +8,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { PauseService, STOP_LIMITS, StopService, type InventoryItem, type StopPorts } from "./index.js";
+import { dispatchStopPorts } from "./dispatch-ports.js";
+import type { PauseScope } from "./pause.js";
 
 after(stopServer);
 
@@ -226,6 +228,38 @@ for (const backend of backends) {
     c.rt.cleanups = [{ remaining: [] }];
     await c.stops.choose(c.mgr, { commandId: cid("c"), intentId, choice: "wait" });
     assert.equal((await c.stops.advance(c.mgr, { intentId })).outcome?.state, "suspended");
+  });
+
+  // The cleanup is the dispatcher port's own, over a dispatcher whose quiesce says the worker was still starting (card H12q) until `up` is set.
+  const startingPorts = (c: { rt: Runtime; owner: Principal }) => {
+    const state = { starting: true };
+    const dispatcher = {
+      liveAttemptsOf: async () => ["att-1"], get: async () => undefined, operations: async () => [], release: async () => undefined, stop: async () => undefined,
+      quiesce: async (_by: Principal, id: string) => { if (state.starting) throw new DomainError("unavailable", `the worker of attempt ${id} was still starting after 1 ms`, { field: "starting" }); return { checkpoint: { id: "cp" } }; },
+    };
+    const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: c.owner }));
+    c.rt.cleanup = async (s: PauseScope, o: { deadlineAt: string; backup: boolean; by: Principal }) => { c.rt.calls.push("cleanup"); return ports.cleanup(s, o); };
+    return state;
+  };
+
+  suite("a worker still coming up when the cleanup's wait runs out does not block a Stop: it goes on, and its ending stops the worker (card H12q review)", async (c) => {
+    startingPorts(c);
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "shutting down" });
+    const stopped = await c.stops.advance(c.owner, { intentId });
+    assert.deepEqual([stopped.phase, stopped.outcome?.state], ["done", "stopped"], "the Stop is not blocked");
+    assert.deepEqual(c.rt.calls, ["inventory", "cleanup", "checkpoint", "terminate"]);
+  });
+
+  suite("a worker still coming up when the cleanup's wait runs out keeps a Suspend preparing (it waits for it like running work), not blocked; once it is up the Suspend finishes (card H12q review)", async (c) => {
+    const state = startingPorts(c);
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "maintenance", deadlineMs: 60_000 });
+    const waiting = await c.stops.advance(c.owner, { intentId });
+    assert.equal(waiting.phase, "preparing", "still preparing, not blocked");
+    assert.deepEqual(waiting.inventory, [{ kind: "process", ref: "att-1/starting", state: "running" }], "the worker coming up is listed as running work");
+    assert.equal(c.rt.count("checkpoint"), 0, "no checkpoint is taken while it comes up");
+    state.starting = false;
+    const done = await c.stops.advance(c.owner, { intentId });
+    assert.deepEqual([done.phase, done.outcome?.state], ["done", "suspended"], "once it is up it is made quiet and the Suspend finishes");
   });
 
   suite("the deadline passing with work running blocks it; restart from an earlier boundary reports recovery-required, never suspended", async (c) => {

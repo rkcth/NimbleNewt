@@ -621,7 +621,8 @@ export class DispatcherService {
       const limit = options.strictMs ?? 10_000;
       let timer: NodeJS.Timeout | undefined;
       const up = await Promise.race([starting.then(() => true, () => true), new Promise<boolean>((ok) => { timer = setTimeout(() => ok(false), limit); })]).finally(() => clearTimeout(timer));
-      if (!up) throw new DomainError("unavailable", `the worker of attempt ${attemptId} was still starting after ${limit} ms`);
+      // `field: "starting"` lets a caller that can wait (the stop's cleanup) tell this from a quiesce that failed: the worker is work still to come, not a fault.
+      if (!up) throw new DomainError("unavailable", `the worker of attempt ${attemptId} was still starting after ${limit} ms`, { field: "starting" });
     }
     await this.settle(by, attemptId, { cancel: true, ...(options.strictMs === undefined ? {} : { strictMs: options.strictMs }) });
     const checkpoint = await this.#checkpoint(attemptId, reason);
@@ -1405,6 +1406,12 @@ export class DispatcherService {
         return { kind: "waiting" };
       }
     }
+    // A frozen attempt is not started (card H12q), so while it stays frozen it asks for no place, holds no allowance and pins nothing: it waits, holding nothing, and a later tick looks again. An ending freeze is a stop: the
+    // start goes on and the stop ends it. A freeze that lands after this look is caught by the start itself, which gives back what was taken meanwhile.
+    if (b.frozen !== undefined && b.frozen.ending !== true) {
+      if (b.requestId !== undefined || b.reservationId !== undefined || b.releasingId !== undefined) await this.#giveBack(d);
+      return { kind: "waiting" };
+    }
     // The place. The request ID derives from the dispatch and the number of requests so far, so a repeat after a crash finds the same request.
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
@@ -1552,6 +1559,21 @@ export class DispatcherService {
     await this.#update(marked.attemptId, (b) => { if (b.releasingId !== releasing) return b; const { releasingId: _r, ...rest } = b; void _r; return rest; });
   }
 
+  /**
+   * The place and hold an advance took for an attempt that was ended meanwhile, before this advance could start it. The end already gave back what the record held when it ran, so each is let go only if it is
+   * still held: a place that is no longer running or waiting is `not_found`, and a hold already settled or released (or uncertain, which is never released) is `invalid_transition`; both mean nothing is left to give back.
+   * The record is not changed (it is finished); the command IDs derive from the place and the hold, so a repeat lets go of each once.
+   */
+  async #giveBackLate(b: DispatchBody): Promise<void> {
+    // An attempt that used anything ran: its hold carries what it used and is settled by its end, never released here (released with nothing used, it is the same as settled with nothing).
+    if ((b.used?.costMicros ?? 0) > 0 || (b.used?.computeMs ?? 0) > 0) return;
+    if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-late-rel:${b.attemptId}:${b.requestId}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "the attempt ended before it was started" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    const budgets = this.#deps.budgets;
+    if (b.reservationId !== undefined && budgets?.release !== undefined) {
+      await budgets.release(this.#deps.principal, { commandId: `dpa-late-rrel:${b.attemptId}:${b.reservationId}`, reservationId: b.reservationId }).catch((error: unknown) => { if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "not_found")) throw error; });
+    }
+  }
+
   async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
     let done!: () => void;
     const starting = new Promise<void>((ok) => { done = ok; });
@@ -1580,7 +1602,12 @@ export class DispatcherService {
       }, async () => this.#placedChange(b.taskId, host.hostId, b.route));
     } catch (error) {
       if (frozen) return { kind: "waiting" };
-      if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "place", reason: "another caller started the attempt" };
+      if (isDomainError(error, "invalid_command")) {
+        // Ended (a stop) while this advance asked for its place and allowance: the end gave back what the record held when it ran, and the place and hold this advance took after that are given back here (H12q review).
+        const fresh = (await this.#load(b.attemptId))?.body;
+        if (fresh?.state === "finished") await this.#giveBackLate(fresh);
+        return { kind: "skipped", check: "place", reason: fresh?.state === "finished" ? "the attempt has ended" : "another caller started the attempt" };
+      }
       throw error;
     }
     await this.#assertCurrent(b);

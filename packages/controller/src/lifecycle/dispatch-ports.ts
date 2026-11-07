@@ -267,14 +267,20 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const l = look();
       const attempts = await attemptsOf(scope, l);
       const { allowed } = await controllable(options.by, attempts, scope);
+      // A worker still coming up when the wait ran out (card H12q) is not a failed cleanup: it is frozen, and it is listed as a process still running. A Suspend waits for it like any other running work (the next pass
+      // looks again, and the deadline blocks it as usual); a Stop does not wait for processes in preparation, and its ending stops the worker that came up.
+      const starting: InventoryItem[] = [];
       for (const id of allowed) {
         const strictMs = Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));
-        await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs });
+        try { await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs }); } catch (error) {
+          if (error instanceof DomainError && error.code === "unavailable" && error.field === "starting") { starting.push({ kind: "process", ref: `${id}/starting`.slice(0, 120), state: "running" }); continue; }
+          throw error;
+        }
       }
       // What the preparation cost, as the runtime counts it (a hook that is absent or fails says nothing, so nothing is charged on a guess).
       const figure = local?.spent === undefined ? undefined : await local.spent(attempts).catch(() => undefined);
       const spent = typeof figure === "number" && Number.isFinite(figure) && figure >= 0 ? figure : undefined;
-      return { remaining: await inFlight(attempts, scope, l), ...(spent === undefined ? {} : { spent }), ...(await costsOf(scope, attempts)) };
+      return { remaining: [...await inFlight(attempts, scope, l), ...starting], ...(spent === undefined ? {} : { spent }), ...(await costsOf(scope, attempts)) };
     },
     checkpoint: async (scope, options) => {
       const h = dispatch();

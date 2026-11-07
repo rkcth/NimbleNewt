@@ -243,4 +243,28 @@ for (const backend of backends) {
       await r.d.idle();
     } finally { await r.store.close(); }
   });
+
+  test(`${backend.name}: a second look that fails, then a release that fails too, opens a blocker and names the attempt to the caller (card H12q review)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      let listings = 0;
+      const realList = r.d.liveAttemptsOf.bind(r.d);
+      (r.d as { liveAttemptsOf: unknown }).liveAttemptsOf = async (by: never, scope: never) => { if (++listings === 2) throw new Error("the live list could not be read"); return realList(by, scope); };
+      const realRelease = r.d.release.bind(r.d);
+      let failing = true;
+      (r.d as { release: unknown }).release = async (by: never, id: string, o?: never) => { if (failing) throw new Error("the record could not be written"); return realRelease(by, id, o); };
+      const status = { unreleased: [] as string[] };
+      await assert.rejects(() => r.coordinator.around({ taskId: r.taskId }, "landing", async () => undefined, undefined, "tag-m", status), /the live list could not be read/);
+      assert.deepEqual(status.unreleased, [r.attemptId], "the freeze that could not be lifted is named to the caller");
+      const blocker = await r.w.blockers.openFor("runtime_hold", { kind: "task", id: r.taskId });
+      assert.match(blocker?.summary ?? "", /landing did not run, but an attempt could not be released/);
+      failing = false;
+      await r.d.release(r.w.owner, r.attemptId);
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
 }

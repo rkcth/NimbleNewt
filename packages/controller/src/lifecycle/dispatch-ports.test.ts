@@ -188,6 +188,26 @@ test("a stop goes on for the other attempts when one has ended meanwhile, and a 
   assert.deepEqual(stops, ["att-2"]);
 });
 
+test("the cleanup lists a worker still coming up as a running process and goes on with the other attempts; any other quiesce failure still fails the cleanup (card H12q review)", async () => {
+  const quiesced: string[] = [];
+  let other: Error | undefined;
+  const dispatcher = {
+    liveAttemptsOf: async () => ["att-1", "att-2"], get: async () => undefined, operations: async () => [] as never, release: async () => undefined, stop: async () => undefined,
+    quiesce: async (_by: Principal, id: string) => {
+      if (other !== undefined) throw other;
+      if (id === "att-1") throw new DomainError("unavailable", `the worker of attempt ${id} was still starting after 1 ms`, { field: "starting" });
+      quiesced.push(id); return {};
+    },
+  };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }));
+  const task = { kind: "task", id: "task-x" } as const;
+  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() - 1000).toISOString(), backup: false, by: staff });
+  assert.deepEqual(cleaned.remaining, [{ kind: "process", ref: "att-1/starting", state: "running" }]);
+  assert.deepEqual(quiesced, ["att-2"], "the other attempt was still made quiet");
+  other = new DomainError("unavailable", "the store is down");
+  await assert.rejects(ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false, by: staff }), /the store is down/);
+});
+
 test("terminate asks a task's jobs and its swarm children's jobs to stop (not a tracked remote one), Force Stop escalates one already asked, a job the asker may not control is unresolved, and the children's attempts are stopped and listed (card L02d)", async () => {
   const stopped: string[] = [];
   const dispatcher = {
