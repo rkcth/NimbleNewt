@@ -1429,10 +1429,13 @@ for (const backend of backends) {
     }
     await assert.rejects(status.ask(c.owner, { kind: "retention_hold", recordKind: "", id: "x" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     held = { retained: false, reasons: [] };
-    const damaged = c.rebuild({}, { retention: { check: retention.check, settings: async () => { throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)"); } } });
+    const damaged = c.rebuild({}, { retention: { check: retention.check, settings: async () => { throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)", { field: "settings" }); } } });
     const told = (await damaged.ask(c.owner, { kind: "retention" }))!.lines;
     cited(told);
     assert.deepEqual(told.map((l) => l.text), ["The stored retention setting is damaged; set it again (retention.settings.set)."]);
+    // Any other storage trouble is not a reason to tell the owner to set the values again.
+    const outage = c.rebuild({}, { retention: { check: retention.check, settings: async () => { throw new DomainError("unavailable", "storage did not report a revision for retention-settings main"); } } });
+    assert.equal(await outage.ask(c.owner, { kind: "retention" }), undefined);
   });
 
   suite("past revocations are told to the owner only: each with which version, who, when and why, a line for the ones not shown, and a closing line when the catalogue was larger than one look covers (card T02c)", async (c) => {

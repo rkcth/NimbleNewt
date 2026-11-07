@@ -432,3 +432,31 @@ test("route-change records (cut text and decisions) are kept by default; with co
     assert.ok((await call(boot.token, "retention.settings.set", { contextRouteDays: null }, "x4")).ok, "off again");
   } finally { await c.close(); clean(d); }
 });
+
+test("a confirmed run archives and removes exactly the incidents the preview named, even if others qualify by the time it runs; more than one run takes is said (card T02c review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-inc-"));
+  const { c, boot, call, project, put } = await world(d, { backup: { directory: join(d, "backups"), now: () => new Date("2026-10-01T10:00:00.000Z") } });
+  try {
+    const incident = (n: string, extra: object) => put("responsibility-incident", `inc-${n}`, { responsibilityId: "rsp-x", projectId: project, signature: `sig-${n}`, state: "resolved", resolvedAt: "2020-01-01T00:00:00.000Z", ...extra });
+    const get = (n: string) => c.storage.getAggregate({ kind: "responsibility-incident", id: `inc-${n}` });
+    assert.ok((await call(boot.token, "retention.settings.set", { incidentArchiveDays: 30, incidentPurgeDays: 60 }, "i1")).ok);
+    await incident("a", {}); await incident("c", { archivedAt: "2020-02-01T00:00:00.000Z" });
+    const preview = (await call(boot.token, "retention.run", {}, "i2")).result;
+    assert.deepEqual([preview.incidents.wouldArchive, preview.incidents.wouldPurge, preview.incidents.more], [1, 1, undefined]);
+    // Something else qualifies while the run is going (after the digest was checked): it is left for the next run.
+    const original = c.services.backups!.prune.bind(c.services.backups!);
+    c.services.backups!.prune = async (retention) => { await incident("b", {}); await incident("d", { archivedAt: "2020-02-01T00:00:00.000Z" }); return original(retention); };
+    const ran = (await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "i3")).result;
+    assert.deepEqual([ran.incidents.archived, ran.incidents.purged], [1, 1]);
+    assert.ok((await get("a"))!.body["archivedAt" as never] !== undefined, "the previewed incident is archived");
+    assert.equal((await get("c")), undefined, "the previewed archived incident is removed");
+    assert.equal((await get("b"))!.body["archivedAt" as never], undefined, "an incident that qualified later is left");
+    assert.ok(await get("d"), "an archived incident that qualified later is left");
+    c.services.backups!.prune = original;
+    // More are due than one run takes: the preview says so.
+    for (let i = 0; i < 201; i++) await incident(`m${i}`, {});
+    const big = (await call(boot.token, "retention.run", {}, "i4")).result;
+    assert.deepEqual([big.incidents.wouldArchive, big.incidents.more, big.partial], [200, true, true]);
+    assert.match(big.shown[0], /200 resolved incident\(s\) would be archived, \d+ archived incident\(s\) would be removed \(there are more due than one run takes: at most 200 of each kind per project\)/);
+  } finally { await c.close(); clean(d); }
+});

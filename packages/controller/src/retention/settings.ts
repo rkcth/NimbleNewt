@@ -127,7 +127,7 @@ export class RetentionSettingsService {
     const found = await this.#runner.get(REF.kind, REF.id);
     if (found === undefined) return this.#defaults;
     const stored = this.#parse(found.body);
-    if (stored === undefined) throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)");
+    if (stored === undefined) throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)", { field: "settings" });
     return { ...this.#defaults, ...stored };
   }
 

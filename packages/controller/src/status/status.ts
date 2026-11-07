@@ -508,8 +508,8 @@ export class StatusService {
     if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
     let got;
     try { got = await this.#deps.retention.settings(by); } catch (error) {
-      if (error instanceof DomainError && error.code === "forbidden") return undefined;
-      // A damaged stored setting is told, with the way out, rather than reading like a view that is not there.
+      if (error instanceof DomainError && (error.code === "forbidden" || (error.code === "unavailable" && error.field !== "settings"))) return undefined;
+      // A damaged stored setting (and only that: any other storage trouble is not a reason to re-set values) is told, with the way out, rather than reading like a view that is not there.
       if (error instanceof DomainError && error.code === "unavailable") return { observedAt: this.#runner.now(), lines: [line("The stored retention setting is damaged; set it again (retention.settings.set).", cite("retention-settings", "main"))] };
       throw error;
     }

@@ -40,10 +40,10 @@ export interface BackupPort {
   prune(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
 }
 export interface IncidentPort {
-  archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string }): Promise<number>;
-  purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string }): Promise<number>;
-  /** Which incidents a run would archive and remove now (the preview and its digest cover them). Absent: they are left out of the preview and the digest. */
-  due?(by: Principal, options: { archiveDays?: number; purgeDays?: number; projectId?: string }): Promise<{ archive: string[]; purge: string[] }>;
+  archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number>;
+  purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number>;
+  /** Which incidents a run would archive and remove now (the preview and its digest cover them); `more` says there are more due than one run takes. Absent: they are left out of the preview and the digest. */
+  due?(by: Principal, options: { archiveDays?: number; purgeDays?: number; projectId?: string }): Promise<{ archive: string[]; purge: string[]; more?: boolean }>;
 }
 export interface CatalogRetentionPort {
   retentionCandidates(by: Principal, keep: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean }>;
@@ -59,7 +59,7 @@ export function describeRun(r: RunReport): string {
   // Held records and held tool versions both count as kept; each list stops at RETAINED_LISTED, so a full list means there may be more.
   const heldVersions = r.catalogVersions?.retained.length ?? 0;
   const kept = `${r.retained.length + heldVersions}${r.retained.length >= RETAINED_LISTED || heldVersions >= RETAINED_LISTED ? " or more" : ""}`;
-  if (r.dryRun) return `Retention preview: ${r.candidates.length} expired record(s) (derived summaries, model replies, route records) would be removed, ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment)${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.incidents?.wouldArchive === undefined ? "" : `, ${r.incidents.wouldArchive} resolved incident(s) would be archived, ${r.incidents.wouldPurge ?? 0} archived incident(s) would be removed`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts would be deleted`}. To run exactly this for real, ask for it to be run (digest ${r.digest}).`;
+  if (r.dryRun) return `Retention preview: ${r.candidates.length} expired record(s) (derived summaries, model replies, route records) would be removed, ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment)${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.incidents?.wouldArchive === undefined ? "" : `, ${r.incidents.wouldArchive} resolved incident(s) would be archived, ${r.incidents.wouldPurge ?? 0} archived incident(s) would be removed${r.incidents.more === true ? " (there are more due than one run takes: at most 200 of each kind per project)" : ""}`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts would be deleted`}. To run exactly this for real, ask for it to be run (digest ${r.digest}).`;
   // `removed` counts everything taken away, so the dropped versions and blanked texts are taken out of the expired records.
   const derived = r.removed - (r.catalogVersions?.removed ?? 0) - (r.revokedBytes?.blanked ?? 0);
   return `Retention ran: ${derived} expired record(s) removed${r.backups?.deleted === undefined ? "" : `, ${r.backups.deleted.length} backup(s) were deleted`}${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.removed} old tool version(s) dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.blanked} revoked tool text(s) blanked`}${r.incidents?.archived === undefined || (r.incidents.archiveDays === null && r.incidents.purgeDays === null) ? "" : `, ${r.incidents.archived} resolved incident(s) archived, ${r.incidents.purged ?? 0} archived incident(s) removed`}; ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment).`;
@@ -121,7 +121,7 @@ export interface RunReport {
   /** Present on a preview: pass it back as `confirm` to run exactly what was shown. */
   readonly digest?: string;
   readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null } };
-  readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number; wouldArchive?: number; wouldPurge?: number };
+  readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number; wouldArchive?: number; wouldPurge?: number; more?: boolean };
   /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set; in the automatic pass also `catalogAutoDrop`): what it would drop (or dropped), and the versions kept because something still needs them (with the reasons). */
   readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
   /** Executable text of revoked versions (off unless `revokedBytesBlank` is on and `revokedBytesDays` is set): what it would blank (or blanked). The record, digest and revocation stay. */
@@ -215,7 +215,7 @@ export class RetentionService {
 
   /**
    * The retention runner. Preview (the default) lists what each rule would remove (derived data, model replies, route records, backups, old catalogue versions, revoked executable text), and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
-   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained (a revoked executable text that something cites when the run reads it is left out of `revokedBytes`; one that becomes cited during the run stays listed there but is not blanked, so `blanked` is lower; neither is listed as retained).
+   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). The preview also counts the resolved incidents to archive and the archived ones to remove (`incidents.wouldArchive` and `wouldPurge`) when their windows are set; the digest covers their IDs and a confirmed run acts on exactly those. Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained (a revoked executable text that something cites when the run reads it is left out of `revokedBytes`; one that becomes cited during the run stays listed there but is not blanked, so `blanked` is lower; neither is listed as retained).
    */
   async run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string } = {}): Promise<RunReport> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not run retention by hand`);
@@ -311,19 +311,20 @@ export class RetentionService {
     const backupsPort = this.#deps.backups;
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
     // The incidents a run would archive and remove (card T02c: what the owner confirms includes them): counted in the preview and part of the digest, so a run refuses when they changed.
-    let incidentsDue: { archive: string[]; purge: string[] } | undefined;
+    let incidentsDue: { archive: string[]; purge: string[]; more: boolean } | undefined;
     if (this.#deps.incidents?.due !== undefined && this.#deps.projects !== undefined && (values.incidentArchiveDays !== null || values.incidentPurgeDays !== null)) {
-      incidentsDue = { archive: [], purge: [] };
+      incidentsDue = { archive: [], purge: [], more: false };
       for (const projectId of await this.#deps.projects()) {
         const one = await this.#deps.incidents.due(by, { ...(values.incidentArchiveDays === null ? {} : { archiveDays: values.incidentArchiveDays }), ...(values.incidentPurgeDays === null ? {} : { purgeDays: values.incidentPurgeDays }), projectId });
         incidentsDue.archive.push(...one.archive); incidentsDue.purge.push(...one.purge);
+        if (one.more === true) { incidentsDue.more = true; partial = true; }
       }
     }
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays, incidentsDue === undefined ? null : [incidentsDue.archive, incidentsDue.purge]], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
       dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
-      ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length }) } }),
+      ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length, ...(incidentsDue.more ? { more: true } : {}) }) } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
       ...(versions === undefined ? {} : { catalogVersions: { keep: keepVersions!, candidates: versions.items.map((v) => ({ name: v.name, version: v.version, ageDays: v.ageDays })), retained: versionsRetained, removed: 0, partial: versions.partial } }),
     };
@@ -365,9 +366,16 @@ export class RetentionService {
     let archived: number | undefined; let purged: number | undefined;
     if (this.#deps.incidents !== undefined && this.#deps.projects !== undefined) {
       archived = 0; purged = 0;
-      for (const projectId of await this.#deps.projects()) {
-        if (values.incidentArchiveDays !== null) archived += await this.#deps.incidents.archive(by, { olderThanDays: values.incidentArchiveDays, projectId });
-        if (values.incidentPurgeDays !== null) purged += await this.#deps.incidents.purge(by, { olderThanDays: values.incidentPurgeDays, projectId });
+      if (!auto && incidentsDue !== undefined) {
+        // The owner's confirmed run acts on exactly the incidents the preview named (each still has to qualify when it is handled), not on whatever qualifies by now.
+        const chunks = <T,>(all: readonly T[]): T[][] => { const out: T[][] = []; for (let i = 0; i < all.length; i += 200) out.push(all.slice(i, i + 200)); return out; };
+        if (values.incidentArchiveDays !== null) for (const ids of chunks(incidentsDue.archive)) archived += await this.#deps.incidents.archive(by, { olderThanDays: values.incidentArchiveDays, limit: ids.length, ids });
+        if (values.incidentPurgeDays !== null) for (const ids of chunks(incidentsDue.purge)) purged += await this.#deps.incidents.purge(by, { olderThanDays: values.incidentPurgeDays, limit: ids.length, ids });
+      } else {
+        for (const projectId of await this.#deps.projects()) {
+          if (values.incidentArchiveDays !== null) archived += await this.#deps.incidents.archive(by, { olderThanDays: values.incidentArchiveDays, projectId });
+          if (values.incidentPurgeDays !== null) purged += await this.#deps.incidents.purge(by, { olderThanDays: values.incidentPurgeDays, projectId });
+        }
       }
     }
     // The record of the run: what was removed (IDs only, never content), kept in the same shape the owner reads.

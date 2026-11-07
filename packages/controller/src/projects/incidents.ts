@@ -191,35 +191,41 @@ export class IncidentService {
 
   /**
    * Which incidents a retention run would archive and which it would remove now (card K06, T02c: the preview and its digest cover them), with the same rules as `archive` and `purge`: at most `limit` (default 200) of each, optionally
-   * for one project, the IDs in record-ID order. A window left out lists none of that kind. Owner or service only.
+   * for one project, the IDs in record-ID order; `more` says there were more than `limit` of either kind. A window left out lists none of that kind. Owner or service only.
    */
-  async due(by: Principal, options: { archiveDays?: number; purgeDays?: number; limit?: number; projectId?: string } = {}): Promise<{ archive: string[]; purge: string[] }> {
+  async due(by: Principal, options: { archiveDays?: number; purgeDays?: number; limit?: number; projectId?: string } = {}): Promise<{ archive: string[]; purge: string[]; more: boolean }> {
     if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "look at which incidents are due");
     const limit = options.limit ?? 200;
     const now = Date.parse(this.#runner.now());
+    let more = false;
     const pick = async (days: number | undefined, test: (b: IncidentBody, cutoff: number) => boolean): Promise<string[]> => {
       if (days === undefined) return [];
       const cutoff = now - days * 86_400_000;
       const found = await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && test(b, cutoff); });
-      return found.map((a) => a.id).sort().slice(0, limit);
+      const ids = found.map((a) => a.id).sort();
+      if (ids.length > limit) more = true;
+      return ids.slice(0, limit);
     };
-    return { archive: await pick(options.archiveDays, archivable), purge: await pick(options.purgeDays, purgeable) };
+    const archive = await pick(options.archiveDays, archivable);
+    const purge = await pick(options.purgeDays, purgeable);
+    return { archive, purge, more };
   }
 
   /**
    * Soft archive (card K06): marks resolved incidents resolved more than `olderThanDays` ago (default 90, 7..3650) as archived, at most `limit` (default 200, 1..1000) per call, optionally
-   * for one project. An incident escalated but not yet told is kept. A lost race is skipped. Returns how many were archived. Owner or service only.
+   * for one project or only for the given `ids` (each still has to qualify when it is handled). An incident escalated but not yet told is kept. A lost race is skipped. Returns how many were archived. Owner or service only.
    */
-  async archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string } = {}): Promise<number> {
+  async archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string; ids?: readonly string[] } = {}): Promise<number> {
     if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "archive incidents");
     const days = options.olderThanDays ?? 90;
     const limit = options.limit ?? 200;
     if (!Number.isInteger(days) || days < 7 || days > 3650) throw invalid("olderThanDays", "must be a whole number from 7 to 3650");
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw invalid("limit", "must be a whole number from 1 to 1000");
     const cutoff = Date.parse(this.#runner.now()) - days * 86_400_000;
+    const only = options.ids === undefined ? undefined : new Set(options.ids);
     const old = (b: IncidentBody): boolean => archivable(b, cutoff);
     let done = 0;
-    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && old(b); })) {
+    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && (only === undefined || only.has(x.id)) && old(b); })) {
       if (done >= limit) break;
       const result = await this.#runner.command("responsibility.incident.archive", { commandId: `rarc-${a.id}`, actor: by.id }, async () => ({
         payload: { incidentId: a.id },
@@ -239,20 +245,21 @@ export class IncidentService {
 
   /**
    * Hard removal (card K06b, the storage delete primitive): removes incidents archived more than `olderThanDays` ago (30..3650, required: nothing is removed
-   * by default), at most `limit` (default 200, 1..1000) per call, optionally for one project. Only records that are resolved, archived, and not escalated-but-untold
+   * by default), at most `limit` (default 200, 1..1000) per call, optionally for one project or only for the given `ids` (each still has to qualify when it is handled). Only records that are resolved, archived, and not escalated-but-untold
    * qualify; each removal is guarded by the revision just read (a record changed in between is skipped) and recorded in the audit trail. Owner or service only.
    * Returns how many were removed. Which window applies (a chat-settable retention key, else the profile) is decided by the caller.
    */
-  async purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string }): Promise<number> {
+  async purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number> {
     if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "remove incidents");
     const days = options.olderThanDays;
     const limit = options.limit ?? 200;
     if (!Number.isInteger(days) || days < 30 || days > 3650) throw invalid("olderThanDays", "must be a whole number from 30 to 3650");
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw invalid("limit", "must be a whole number from 1 to 1000");
     const cutoff = Date.parse(this.#runner.now()) - days * 86_400_000;
+    const only = options.ids === undefined ? undefined : new Set(options.ids);
     const expired = (b: IncidentBody): boolean => purgeable(b, cutoff);
     let done = 0;
-    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && expired(b); })) {
+    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && (only === undefined || only.has(x.id)) && expired(b); })) {
       if (done >= limit) break;
       const result = await this.#runner.command("responsibility.incident.purge", { commandId: `rpurge-${a.id}`, actor: by.id }, async () => ({
         payload: { incidentId: a.id },

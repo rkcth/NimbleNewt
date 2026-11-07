@@ -205,9 +205,9 @@ type Resolved =
  * - **Plan first, then act.** The planned commands are stored before the first one runs, so a restart carries on from the stored plan (without asking the model again) and every step keeps its
  *   command ID. The stored turn links each outcome to the command IDs (and so to the audit entries) it produced.
  */
-/** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
 /** The owner saying a running-call choice in their own words, with its usual endings ("cancel", "cancelled", "cancels"; "finish", "finished"; "pause", "paused"). */
 const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { finish: /\bfinish(?:ed|es|ing)?\b/i, cancel: /\bcancel(?:l?ed|s|l?ing)?\b/i, pause: /\bpause(?:d|s)?\b|\bpausing\b/i };
+/** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
 const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
