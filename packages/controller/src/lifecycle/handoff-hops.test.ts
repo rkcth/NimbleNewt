@@ -35,14 +35,22 @@ const PERMISSIONS = "PERMISSIONS: may edit files under importer/, may not run ne
 const OPEN_QUESTION = "OPEN-QUESTION: which encoding do the oldest fixtures use";
 const PER_HOP = 4;
 
-/** A record ID of the shape the continuation service accepts (`dsk-` and 20 characters of base32), made from a number. */
-const recordId = (k: number): string => { const id = recordIdRaw(k); if (!/^[a-z]{2,5}-[a-z2-7]{20}$/.test(id)) throw new Error(`${id} is not a record ID the continuation service would accept`); return id; };
-const recordIdRaw = (k: number): string => `dsk-${k.toString(32).padStart(20, "0").replace(/[018-9]/g, (c) => ({ "0": "q", "1": "r", "8": "s", "9": "t" })[c] ?? c)}`;
+/** A record ID of the shape the continuation service accepts (`dsk-` and 20 characters of the base32 alphabet a-z, 2-7), made from a number; different numbers give different IDs. */
+const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+const recordId = (number: number): string => {
+  let k = number; let out = "";
+  for (let i = 0; i < 20; i++) { out = ALPHABET[k % 32]! + out; k = Math.floor(k / 32); }
+  const id = `dsk-${out}`;
+  if (!/^[a-z]{2,5}-[a-z2-7]{20}$/.test(id)) throw new Error(`${id} is not a record ID the continuation service would accept`);
+  return id;
+};
 /** The desk: what each decision ID stands for. The package carries the ID, as the real continuation does; the text is read back from the desk by the reference. */
 const desk = new Map<string, string>();
 const decisionId = (hop: number, i: number): string => {
   const id = recordId(hop * 10 + i);
-  desk.set(id, i === PER_HOP - 1 ? `LATEST-DIAGNOSIS-${hop}: the retry at hop ${hop} failed on the lease, the cause is the stale cursor` : hop === 1 && i === 0 ? "SEEDED-EARLY-DECISION: the importer reads UTF-8 only" : hop === 2 && i === 0 ? "SEEDED-EARLY-FAILURE: fixture 7 off by one, header row counted twice" : `Decision ${hop}.${i}: strict column order, rejected rows listed with line numbers`);
+  const text = (i === PER_HOP - 1 ? `LATEST-DIAGNOSIS-${hop}: the retry at hop ${hop} failed on the lease, the cause is the stale cursor` : hop === 1 && i === 0 ? "SEEDED-EARLY-DECISION: the importer reads UTF-8 only" : hop === 2 && i === 0 ? "SEEDED-EARLY-FAILURE: fixture 7 off by one, header row counted twice" : `Decision ${hop}.${i}: strict column order, rejected rows listed with line numbers`);
+  if (desk.has(id) && desk.get(id) !== text) throw new Error(`record ID ${id} is used for two different decisions`);
+  desk.set(id, text);
   return id;
 };
 const EARLY_DECISION = decisionId(1, 0);
@@ -123,7 +131,7 @@ for (const backend of backends) {
   const run = (): Promise<Hop[]> => (cached ??= simulate());
   const mean = (xs: readonly number[]): number => xs.reduce((s, x) => s + x, 0) / xs.length;
   const everything = (h: Hop): string => Object.values(h.sections).join("\n");
-  /** An item is kept if it is there whole, or the section carries a cut marker that names an archived original that can be read back. */
+  /** An item is kept if its text is there whole in the package. When C07j adds cut markers with archives this must also accept an item named by a marker whose archive reads back. */
   const kept = (h: Hop, item: string): boolean => everything(h).includes(item);
 
   test(`${backend.name}: 50 hand-offs: every package has only the fixed sections, each inside the section limit`, async () => {
@@ -149,7 +157,7 @@ for (const backend of backends) {
   });
 
   test(`${backend.name}: 50 hand-offs: the most recent diagnosis is in every package`, { todo: "C07j: a hand-off section is cut at its tail with a plain slice, so once decisions pile up the newest ones are the ones lost" }, async () => {
-    for (const h of await run()) { const id = latestDiagnosis(h.hop); assert.ok(kept(h, id), `hop ${h.hop}: the most recent diagnosis (${id}) was cut`); assert.match(desk.get(id) ?? "", /LATEST-DIAGNOSIS/, "the reference does not lead to the diagnosis"); }
+    for (const h of await run()) { const id = latestDiagnosis(h.hop); assert.ok(kept(h, id), `hop ${h.hop}: the most recent diagnosis (${id}) was cut`); assert.match(desk.get(id) ?? "", new RegExp(`^LATEST-DIAGNOSIS-${h.hop}:`), "the reference does not lead to this hop's diagnosis"); }
   });
 
   // Holds today only because the cut keeps the head of a section; the day a section is summarised or cut from the front, this is the check that must still pass.
@@ -165,7 +173,7 @@ for (const backend of backends) {
     for (const h of cutHops) for (const [name, text] of Object.entries(h.sections)) if (text.length >= HANDOFF_LIMITS.section) assert.match(text, /\[cut: \d+ of \d+ entries, archive \S+\]/, `hop ${h.hop}: ${name} was cut with no marker`);
   });
 
-  test(`${backend.name}: 50 hand-offs: the average package size of the last 10 hops is no more than 5 percent above the first 10`, { todo: "C07k: lifecycle/handoff-sources.ts:52-53 lists every decision and nothing summarises the decisions, so the package grows with every hand-off until it reaches the section limit" }, async () => {
+  test(`${backend.name}: 50 hand-offs: the average package size of the last 10 hops is no more than 5 percent above the first 10`, { todo: "C07k: lifecycle/handoff-sources.ts:48-49 lists every decision and nothing summarises the decisions, so the package grows with every hand-off until it reaches the section limit" }, async () => {
     const hops = await run();
     const first = mean(hops.slice(0, 10).map((h) => h.total));
     const lastTen = mean(hops.slice(-10).map((h) => h.total));
