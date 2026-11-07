@@ -4777,7 +4777,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `retention.run`
 
-Owner only: the retention runner. Without `dryRun: false` it only shows what the rule would remove (derived summaries older than `derivedDays`, backups outside the counts, and, when `catalogVersionsKept` is set, old versions of catalogue tools: `catalogVersions` lists them and the ones kept because a resumable task ran them) and gives a `digest`; run it for real by passing that digest as `confirm`. Material a resumable task or replay needs is skipped and shown as retained. Nothing is removed while derivedDays is unset (backups follow their counts).
+Owner only: the retention runner. Without `dryRun: false` it only shows what the rule would remove (derived summaries older than `derivedDays`, backups outside the counts, and, when `catalogVersionsKept` is set, old versions of catalogue tools: `catalogVersions` lists them and the ones kept because a resumable task ran them) and gives a `digest`; run it for real by passing that digest as `confirm`. Material a resumable task or replay needs is skipped and shown as retained. Each rule acts only when its own value is set (`derivedDays`, `generationRunDays`, `contextRouteDays`, `catalogVersionsKept`, and `revokedBytesBlank` with `revokedBytesDays`); backups follow their counts. `revokedBytes` lists the revoked executable texts that would be blanked, and a real run reports `blanked`.
 
 Arguments:
 
