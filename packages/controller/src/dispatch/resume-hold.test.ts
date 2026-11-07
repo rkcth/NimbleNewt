@@ -109,6 +109,16 @@ for (const backend of backends) {
     assert.equal(new Set(f.resumeCalls).size, 1, "both tries used the same command ID");
   });
 
+  suite("a commit's error message holding a credential where the reason is cut: the reason is redacted before the cut, so no part of it is kept", async (c, f, real, a, go) => {
+    const token = `npm_${"A".repeat(36)}`;
+    f.continuations.resume = (async () => { throw new Error(`${"y".repeat(280)} ${token}`); }) as never;
+    const t1 = await go().tick();
+    assert.equal(t1.skipped[0]!.check, "resume");
+    assert.ok(!t1.skipped[0]!.reason.includes("AAAAAAAA"), t1.skipped[0]!.reason);
+    assert.ok(t1.skipped[0]!.reason.includes("[redacted]"), t1.skipped[0]!.reason);
+    void real; void a;
+  });
+
   suite("a crash after the commit and before the start does not record a second resume", async (c, f, real, a, go) => {
     // The check is committed (as if the controller died right after), then a new controller starts the attempt.
     const warm = go({ workspaceBusy: async () => true });
@@ -803,9 +813,12 @@ for (const backend of backends) {
     assert.deepEqual([...f.resumeRecorded], []);
   });
 
-  suite("an approval that finds the check still being committed by someone else is refused as not approved yet; approving again later finishes it", async (c, f, real, a, go) => {
+  suite("an approval that finds the check still being committed by someone else is refused as not approved yet; approving again later finishes it and closes the notice at once", async (c, f, real, a, go) => {
     f.relevant = true;
-    await go().tick();
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+    const open = async () => (await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check");
+    await go({ notifications }).tick();
+    assert.equal((await open()).length, 1);
     const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
     f.failResumeOnce = true;
     await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), /disk hiccup/);
@@ -815,8 +828,10 @@ for (const backend of backends) {
     await assert.rejects(real.approve(c.owner, { commandId: "o2", taskId: a.taskId }), isCode("invalid_transition", /^not approved yet: the task's resume is still being committed; try again in a moment$/));
     assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
     f.continuations.resume = record;
-    assert.equal((await real.approve(c.owner, { commandId: "o3", taskId: a.taskId })).phase, "done");
+    // The approval that finishes a check left committing closes the owner's notice itself, before any tick (G1).
+    assert.equal((await declining(c, f, releaseOf(c), notifications).approve(c.owner, { commandId: "o3", taskId: a.taskId })).phase, "done");
     assert.equal(f.resumeRecorded.size, 1);
+    assert.deepEqual(await open(), [], "the notice is closed at once");
   });
 
   suite("inputs that move while the attempt ends during an approval: the approval says the attempt is no longer active, not that the inputs changed", async (c, f, real, a, go) => {
@@ -886,6 +901,36 @@ for (const backend of backends) {
     const detail = await noticeOf(c, real);
     assert.equal(detail, `"${"t".repeat(40)}" is held before it resumes: 1 change(s) since it stopped matter to it: file /src/a.ts (changed).${TAIL}`);
   }, "t".repeat(200));
+
+  // B1/B2: the title and the change keys are redacted before they are cut (a credential cut short no longer matches its pattern, and the notification redacts only what it is given), and a
+  // control character in a key does not make the notification refuse the notice.
+  const NPM = `npm_${"A".repeat(36)}`;
+  const PASSWORD = "hunter2hunter2hunter2hunter2";
+  const noRunOf = (detail: string, secret: string) => { for (let i = 0; i + 8 <= secret.length; i++) assert.ok(!detail.includes(secret.slice(i, i + 8)), `no part of the secret is in the notice: ${detail}`); };
+  suite("a title holding a credential cut by the title's room: no part of it reaches the owner's notice", async (c, f, real) => {
+    f.relevant = true;
+    const detail = await noticeOf(c, real);
+    noRunOf(detail, NPM.slice(4));
+    assert.ok(detail.startsWith(`"x [redacted]" is held`), detail);
+    assert.ok(detail.endsWith(TAIL));
+  }, `x ${NPM}`);
+
+  suite("a change key holding a URL with a password, cut before its @ by the room left: no part of the password reaches the owner's notice", async (c, f, real) => {
+    f.relevant = true;
+    // The scheme stands as its own word: the URL shape needs that (a scheme run on from other letters is not the shape, cut or not).
+    f.key = `${"z".repeat(30)} https://bob:${PASSWORD}@example.com`;
+    const detail = await noticeOf(c, real);
+    noRunOf(detail, PASSWORD);
+    assert.ok(detail.includes("Approve") && detail.includes("decline") && detail.endsWith(TAIL), detail);
+    assert.ok(detail.length <= 200);
+  });
+
+  suite("a change key holding a tab: the owner is still told, with what to do", async (c, f, real) => {
+    f.relevant = true;
+    f.key = "a\tb";
+    const detail = await noticeOf(c, real);
+    assert.ok(detail.includes("file a b (changed)") && detail.includes("Approve") && detail.includes("decline"), detail);
+  });
 
   suite("a reviewer's reason with a character outside the basic plane at the note's cut is kept whole-charactered", async (c, f, real, a, go) => {
     f.relevant = true;

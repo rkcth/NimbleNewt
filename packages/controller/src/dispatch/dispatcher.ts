@@ -1058,11 +1058,14 @@ export class DispatcherService {
 
   /** A ready resume check that holds changes judged to matter waits for the owner. The owner is told once (the command ID is the check's), in words that match the stored check. */
   async #holdForReview(attemptId: string, title: string, projectId: string, check: { id: string }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
-    const names = relevant.slice(0, 3).map((i) => `${i.kind} ${i.key} (${i.status})`).join(", ");
+    // The title and the change keys are the owner's and the agents' text: secret-shaped parts are redacted BEFORE anything is cut (a credential cut short no longer matches its pattern, and the
+    // notification redacts only what it is given), and control characters become spaces (a tab in a key would make the notification refuse the detail, and the owner would never be told).
+    const plain = (s: string): string => redactText(s).replace(/[\u0000-\u001f\u007f]/g, " ");
+    const names = relevant.slice(0, 3).map((i) => `${i.kind} ${plain(i.key)} (${i.status})`).join(", ");
     const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
     // The owner is shown the task by its title (quoted, on one line, cut short), never by its ID; what changed is cut to the room left, so what to do always fits in the notice's 200 characters.
     // Every cut keeps a character whole (never half of a surrogate pair): ill-formed text is refused by the notification, and the owner would never be told.
-    const head = `"${clipText(title.replace(/[\u0000-\u001f\u007f]/g, " "), HELD_TITLE)}" is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: `;
+    const head = `"${clipText(plain(title), HELD_TITLE)}" is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: `;
     const tail = " Approve to let it go on, or decline to release it.";
     const what = `${names}${more}.`;
     const room = NOTICE_DETAIL - head.length - tail.length;
@@ -1951,7 +1954,8 @@ export class DispatcherService {
   }
 }
 
-const errorText = (error: unknown): string => (error instanceof Error ? error.message : "failed").slice(0, 300);
+/** An error's message for a reason, a failure or a blocker summary: secret-shaped parts redacted before it is cut (a credential cut short no longer matches its pattern, so a later redaction would miss it). */
+const errorText = (error: unknown): string => redactText(error instanceof Error ? error.message : "failed").slice(0, 300);
 type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: string } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 
