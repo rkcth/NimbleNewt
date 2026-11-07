@@ -5,6 +5,9 @@ import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ProjectResourceService } from "../projects/index.js";
+import { CacheEndpoints } from "../inference-cache/index.js";
+import { LlamaSim, simulatedFetch } from "../inference-cache/simulators.js";
+import { CachePolicies } from "./cache.js";
 import { operationKind, type ToolOperationBody } from "./model.js";
 import type { ToolResult } from "./ports.js";
 import { ScriptedWorker, buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "./testing/world.js";
@@ -1674,6 +1677,60 @@ for (const backend of backends) {
     const usage = await c.budgets.usage(c.owner, { taskId });
     assert.deepEqual(usage.cacheByBackend, { "llama-cpp": { cachedTokens: 700, computedTokens: 40, writtenTokens: 0, calls: 1 } });
     assert.deepEqual(usage.cache, { cachedTokens: 700, computedTokens: 40, writtenTokens: 0, calls: 1 });
+  });
+
+  suite("the hit figures the attempt's cache policy takes from a slotted server reach budget accounting: real reuse is billed as cached inside a project, none across projects, and a resent report is charged once (card H12e)", async (c) => {
+    const ann = await c.agent("ann", [...workGrants(c.project, ["read-file"])]);
+    const kitchen = (await c.projects.createProject({ commandId: "p-kitchen", actor: c.owner.id, name: "Kitchen" })).id;
+    const bob = await c.agent("bob", workGrants(kitchen, ["read-file"]));
+    // The dispatcher's own cache policies over one simulated llama-server with two slots; a worker sends its model calls through the attempt's policy, as the relay does, and reports what `takeUsage` gave it.
+    const policies = new CachePolicies({ secret: "installation-secret-0123456789", state: new CacheEndpoints(), principal: c.dispatcherPrincipal, endpoints: { "localp/small": { url: "http://127.0.0.1:8080", config: { kind: "llama-cpp", model: "local", route: "localp/small", options: { slots: 2 } } } } });
+    const server = new LlamaSim(2);
+    const answered: { slot: unknown; cached: number; computed: number }[] = [];
+    const recording = { send: async (r: Parameters<LlamaSim["send"]>[0]) => { const a = await server.send(r); const t = (a.body as { timings?: { cache_n: number; prompt_n: number } }).timings; if (t !== undefined) answered.push({ slot: r.body["id_slot"], cached: t.cache_n, computed: t.prompt_n }); return a; } };
+    const prompt = (turns: number) => JSON.stringify({ model: "local", stream: true, messages: [{ role: "system", content: "shared project document ".repeat(60) }, ...Array.from({ length: turns }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", content: `turn ${i}` }))] });
+    const taken = new Map<string, unknown[]>();
+    c.worker.script = async ({ order, gateway }) => {
+      const attempt = await policies.forAttempt({ projectId: order.projectId, route: order.route });
+      assert.equal(attempt.routed, true);
+      const call = async (turns: number) => { await (await attempt.policy.fetch!(simulatedFetch(recording))("http://127.0.0.1:8080/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" }, body: prompt(turns) })).text(); };
+      // The first turn's figures go through the gateway, and the same report is sent again (a resend after a lost answer): it is charged once.
+      await call(1);
+      const one = (await attempt.takeUsage())!;
+      await gateway.usage({ turnSeq: 1, cache: one });
+      await gateway.usage({ turnSeq: 1, cache: one });
+      // The second turn makes two calls; its figures come with the turn's result, as the local host returns them.
+      await call(3);
+      await call(5);
+      const two = (await attempt.takeUsage())!;
+      assert.equal(await attempt.takeUsage(), undefined, "figures are taken once");
+      taken.set(order.taskId, [one, two]);
+      return { status: "completed", text: "x", usage: { turnSeq: 2, cache: two } };
+    };
+    // One task at a time, so the order of the calls is known; the first task has a budget open and the others none (both are charged).
+    const runOne = async (title: string, agent: { aid: string }, project = c.project) => {
+      const t = await c.task(title, agent, { project });
+      if (title === "t1") await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000 });
+      const from = answered.length;
+      assert.deepEqual((await c.run()).started, [t.attemptId]);
+      assert.equal((await c.dispatcher.get(c.owner, t.attemptId!))!.usageError, undefined);
+      return { ...t, list: answered.slice(from) };
+    };
+    const sum = (list: { cached: number; computed: number }[]) => ({ cachedTokens: list.reduce((x, a) => x + a.cached, 0), computedTokens: list.reduce((x, a) => x + a.computed, 0), writtenTokens: 0 });
+    const first = await runOne("t1", ann), second = await runOne("t2", ann), other = await runOne("t3", bob, kitchen);
+    const a1 = first.list, a2 = second.list, b1 = other.list;
+    assert.equal(a1[0]!.cached, 0, "an empty slot serves nothing");
+    assert.ok(a1.slice(1).every((a) => a.cached > 0) && a2.every((a) => a.cached > 0), `the project reuses its own slot, across turns and attempts (${JSON.stringify([a1, a2])})`);
+    assert.ok(b1.every((a) => typeof a.slot === "number" && a.slot !== a1[0]!.slot), `the other project gets its own slot (${JSON.stringify(b1)})`);
+    assert.equal(b1[0]!.cached, 0, "the other project's first call, the same prompt the first project's slot holds, reads nothing");
+    // What the server reported is what accounting has, per task and per project; the resent report is not counted twice, and `calls` counts the two usage reports.
+    for (const [t, list] of [[first, a1], [second, a2], [other, b1]] as const) {
+      const usage = await c.budgets.usage(c.owner, { taskId: t.taskId });
+      assert.deepEqual(usage.cacheByBackend, { "llama-cpp": { ...sum(list), calls: 2 } }, `task ${t.taskId}`);
+      assert.deepEqual(taken.get(t.taskId)!.map((u) => (u as { cachedTokens: number }).cachedTokens), [sum(list.slice(0, 1)).cachedTokens, sum(list.slice(1)).cachedTokens], "each report is the figures since the last take");
+    }
+    assert.deepEqual((await c.budgets.usage(c.owner, { projectId: c.project })).cacheByBackend, { "llama-cpp": { ...sum([...a1, ...a2]), calls: 4 } });
+    assert.deepEqual((await c.budgets.usage(c.owner, { projectId: kitchen })).cacheByBackend, { "llama-cpp": { ...sum(b1), calls: 2 } });
   });
 
   suite("a usage report with a route of the longest allowed length is charged, two identical reports are two records, and a report that cannot be charged is recorded on the attempt, not dropped silently", async (c) => {

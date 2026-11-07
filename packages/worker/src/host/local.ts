@@ -351,6 +351,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         await process.close().catch(() => undefined);
         throw error;
       }
+      let closed = false;
       let contextTokens: number | undefined = typeof nn?.["contextTokens"] === "number" ? (nn["contextTokens"] as number) : undefined;
       // A checkpoint that did not say how big the conversation is (taken in the middle of a turn) is not an empty one: the stored conversation's own size is the estimate (it counts what the model no longer sees too, so it errs towards refusing and compacting).
       if (contextTokens === undefined) { const stored = estimateStoredTokens(join(entry.workspace.home, "pi")); if (stored !== undefined) contextTokens = stored; }
@@ -362,7 +363,16 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         firstCall: (content) => ({ systemPromptChars: process.info.systemPromptChars ?? UNKNOWN_SYSTEM_PROMPT_CHARS, toolSchemaChars: process.info.toolSchemaChars ?? 0, startupTokens: Math.ceil(content.length / 3) + (contextTokens ?? 0), replyReserveTokens: model.maxTokens }),
         async run(content, requestId) {
           let result;
-          try { result = await process.run(requestId, content); } catch (error) { return { status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) }; }
+          try { result = await process.run(requestId, content); } catch (error) {
+            const failed = { status: "failed" as const, error: String((error as Error)?.message ?? error).slice(0, 2000) };
+            // The model calls a turn made before its process died were real work: their cache figures are reported with the failure (card H12e), under a number of their own, or they would be lost with the attempt.
+            // A process this host closed on purpose (a stop, a restart for a recipe change) leaves them to whoever continues the attempt, which takes them with its next turn.
+            if (closed) return failed;
+            const figures = await cache?.takeUsage?.().catch(() => undefined);
+            if (figures === undefined) return failed;
+            turnSeq += 1;
+            return { ...failed, usage: { turnSeq, cache: figures } };
+          }
           // The same request again (a replay after a restart, answered from the store) is the same turn: it keeps its number, so its usage is charged once.
           if (requestId !== lastRequest) { turnSeq += 1; lastRequest = requestId; }
           const figures = await cache?.takeUsage?.().catch(() => undefined);
@@ -388,7 +398,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           contextTokens = compacted.contextTokens ?? (await process.checkpoint().then((c) => c.contextTokens, () => undefined)) ?? contextTokens;
         },
         async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },
-        async close() { await process.close(); },
+        async close() { closed = true; await process.close(); },
       };
     },
   };

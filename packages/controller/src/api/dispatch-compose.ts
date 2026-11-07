@@ -12,7 +12,7 @@ import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorker
 import { DecisionService, startupItems, type DecisionDeps } from "../decisions/index.js";
 import { ContextEnforcementService, type ContextRouteSettingsService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
-import { MarkerService } from "../inference-cache/index.js";
+import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
 import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
@@ -397,7 +397,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     let cache: { forOrder(order: WorkOrder): Promise<AttemptCache> } | undefined;
     if (i.options.cache !== undefined) {
       const o = i.options.cache;
-      const policies = new CachePolicies({ ...o, principal, markers: MarkerService.withEpoch(storage, epoch, ro), ...(i.onError === undefined ? {} : { onError: i.onError }) });
+      // The adapter's endpoint state is the controller's own (card H12e): when the operator gives none, one is kept for the controller's life, so a slotted server is never put in the no-reuse mode merely because it was not passed.
+      const policies = new CachePolicies({ ...o, state: o.state ?? new CacheEndpoints(), principal, markers: MarkerService.withEpoch(storage, epoch, ro), ...(i.onError === undefined ? {} : { onError: i.onError }) });
       // One policy per attempt: its slot, its pin bookkeeping and its figures belong to the attempt, so the relay and the host must share it. An entry is kept until the attempt's own expiry (it cannot run past it) and dropped then, never earlier.
       const made = new Map<string, { readonly cache: Promise<AttemptCache>; readonly until: number }>();
       const forgetEnded = unlimited();

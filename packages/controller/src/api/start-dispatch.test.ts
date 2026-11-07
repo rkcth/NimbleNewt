@@ -222,7 +222,7 @@ test("start gives the local host one cache policy per attempt, from the owner's 
     harnesses: [PI],
     dispatch: {
       timer: new ManualTimer(), manual: true,
-      cache: { secret: "installation-secret-0123456789", endpoints: { "vllm/big": { url: "http://127.0.0.1:8000", config: { kind: "vllm", model: "big", route: "vllm/big" } } } },
+      cache: { secret: "installation-secret-0123456789", endpoints: { "vllm/big": { url: "http://127.0.0.1:8000", config: { kind: "vllm", model: "big", route: "vllm/big" } }, "llama/local": { url: "http://127.0.0.1:8080", config: { kind: "llama-cpp", model: "local", route: "llama/local", options: { slots: 2 } } } } },
       local: { acceptUnenforcedLimits: true, window: () => 8192, build: (services) => { seen.push(services.cache as never); return { hostId: "host:w1" } as unknown as WorkerHost; } },
     },
   });
@@ -237,6 +237,12 @@ test("start gives the local host one cache policy per attempt, from the owner's 
     assert.notEqual(one.policy.key, other.policy.key, "another project has another key");
     assert.match(one.policy.key!, /^nn-/);
     assert.equal(JSON.stringify(one.policy).includes("installation-secret"), false);
+    // The operator gave no endpoint state: the composer keeps the controller's own, so a slotted server goes through the adapter (a slot per project) and is never put in the no-reuse mode.
+    type Slotted = { routed: boolean; slot?: number; policy: { degraded?: string } };
+    const s1 = await cache.forOrder(order("att-4", "proj-a", "llama/local")) as unknown as Slotted;
+    const s2 = await cache.forOrder(order("att-5", "proj-b", "llama/local")) as unknown as Slotted;
+    assert.deepEqual([s1.routed, s1.policy.degraded, s2.routed, s2.policy.degraded], [true, undefined, true, undefined]);
+    assert.ok(s1.slot !== undefined && s2.slot !== undefined && s1.slot !== s2.slot, "one state for the controller: the two projects are given different slots");
     // A route with no configured endpoint is a generic backend: nothing is sent.
     assert.equal((await cache.forOrder(order("att-3", "proj-a", "other/model"))).routed, false);
   } finally { await c.close(); cleanup(d); }
