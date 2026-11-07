@@ -368,6 +368,9 @@ test("a restart keeps the settings, the quota and the reserve; a missing reserve
     raw.getAggregate = async (ref) => { const a = await realGet(ref); return damaged && ref.kind === "retention-settings" && a !== undefined ? { ...a, body: { values: { derivedDays: "soon" } } } as never : a; };
     const bad = (await c.api.handle(boot.token, { v: 1, op: "retention.settings.get", args: {} } as never) as Reply);
     assert.equal(bad.error?.code, "unavailable");
+    // The chat view tells the owner the way out (and only for this error, not for any storage trouble).
+    const told = (await c.api.handle(boot.token, { v: 1, op: "status.ask", args: { request: { kind: "retention" } } } as never) as Reply);
+    assert.deepEqual(told.result.item.lines.map((l: any) => l.text), ["The stored retention setting is damaged; set it again (retention.settings.set)."]);
     assert.equal((await c.api.handle(boot.token, { v: 1, op: "retention.run", args: {}, commandId: "r1" } as never) as Reply).error?.code, "unavailable", "the runner does not guess");
     assert.ok(((await c.api.handle(boot.token, { v: 1, op: "retention.settings.set", args: { derivedDays: 60 }, commandId: "s2" } as never)) as Reply).ok, "and the owner can repair it");
     damaged = false;
@@ -443,15 +446,15 @@ test("a confirmed run archives and removes exactly the incidents the preview nam
     await incident("a", {}); await incident("c", { archivedAt: "2020-02-01T00:00:00.000Z" });
     const preview = (await call(boot.token, "retention.run", {}, "i2")).result;
     assert.deepEqual([preview.incidents.wouldArchive, preview.incidents.wouldPurge, preview.incidents.more], [1, 1, undefined]);
-    // Something else qualifies while the run is going (after the digest was checked): it is left for the next run.
+    // Something else qualifies while the run is going (after the digest was checked), and sorts before the previewed ones: it is left for the next run.
     const original = c.services.backups!.prune.bind(c.services.backups!);
-    c.services.backups!.prune = async (retention) => { await incident("b", {}); await incident("d", { archivedAt: "2020-02-01T00:00:00.000Z" }); return original(retention); };
+    c.services.backups!.prune = async (retention) => { await incident("0b", {}); await incident("0d", { archivedAt: "2020-02-01T00:00:00.000Z" }); return original(retention); };
     const ran = (await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "i3")).result;
     assert.deepEqual([ran.incidents.archived, ran.incidents.purged], [1, 1]);
     assert.ok((await get("a"))!.body["archivedAt" as never] !== undefined, "the previewed incident is archived");
     assert.equal((await get("c")), undefined, "the previewed archived incident is removed");
-    assert.equal((await get("b"))!.body["archivedAt" as never], undefined, "an incident that qualified later is left");
-    assert.ok(await get("d"), "an archived incident that qualified later is left");
+    assert.equal((await get("0b"))!.body["archivedAt" as never], undefined, "an incident that qualified later is left");
+    assert.ok(await get("0d"), "an archived incident that qualified later is left");
     c.services.backups!.prune = original;
     // More are due than one run takes: the preview says so.
     for (let i = 0; i < 201; i++) await incident(`m${i}`, {});

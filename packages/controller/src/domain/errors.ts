@@ -26,7 +26,7 @@ export class DomainError extends Error {
   readonly code: DomainErrorCode;
   /** For `stale_revision`: the revision the record has now. */
   readonly currentRevision: number | undefined;
-  /** For `invalid_command`: the field at fault. */
+  /** For `invalid_command`: the field at fault; a few `unavailable` errors name the setting at fault (for example `settings` for a damaged stored setting). */
   readonly field: string | undefined;
 
   constructor(code: DomainErrorCode, message: string, options: { currentRevision?: number; field?: string; cause?: unknown } = {}) {
