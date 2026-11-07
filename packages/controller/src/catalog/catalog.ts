@@ -50,7 +50,7 @@ export interface VersionBody {
   readonly digest: string;
   readonly registeredBy: string;
   readonly registeredAt: string;
-  /** Set by retention for the moment between deciding to drop this version and dropping it (card T02c): no new run of it starts meanwhile. A claim older than `CLAIM_MS` is void. */
+  /** Set by retention for the moment between deciding to drop this version and dropping it (card T02c): no new run of it starts meanwhile. A claim older than `CLAIM_MS`, or stamped in the future, is void. */
   readonly dropping?: string;
 }
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
@@ -356,7 +356,7 @@ export class CatalogService {
 
   /**
    * The past revocations, newest first (owner only): which version, why, who and when. Never any content. `total` counts them all; at most `limit` (default 50, up to 200) are listed. Retention never
-   * drops a revoked version (it may only blank its executable text, `revokedBytesDays`), so its version record and its revocation record both stay.
+   * drops a revoked version (it may only blank its executable text, after `revokedBytesDays` and only while `revokedBytesBlank` is on), so its version record and its revocation record both stay.
    */
   async revocations(owner: Principal, query: { name?: string; limit?: number } = {}): Promise<{ items: { name: string; version: string; reason: string; revokedBy: string; at: string }[]; total: number; partial?: true }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner reads past revocations`);
@@ -421,7 +421,7 @@ export class CatalogService {
 
   /**
    * Drops one version for retention (card T02c) in two steps, so a run cannot start on a version while it goes. First the version is CLAIMED: its record is updated (`dropping`), which refuses every new run of it and
-   * makes any run being recorded at that moment fail its revision check. Then `holds` is asked (the caller reads what resumable tasks, parked calls, environments and dependency records still need, now that nothing new can
+   * makes any run being recorded at that moment fail its revision check. Then `holds` is asked (the caller reads what resumable tasks, calls pinned to it (in any state), environments and dependency records still need, now that nothing new can
    * start); if anything holds the version the claim is lifted and nothing is dropped. Only then are the version record and its place in the entry removed together, guarded by the revisions seen and by the claim still being in force (a claim older than `CLAIM_MS`, or from the future, is void, so a run may have started: the claim is lifted and nothing is dropped). The latest, the highest live
    * one (what the tool resolves to), the newest unrevoked one and any revoked one are refused, and so is a version that is among the newest `keep` now. Its usage records stay: they are history, not a copy.
    * Returns `{ dropped: false }` when it changed or is gone since it was listed, and `held` with the reasons when something still needs it.
@@ -644,7 +644,7 @@ export class CatalogService {
     if (source === undefined) throw new DomainError("not_found", `${name} has no ${part}`);
     // Read as the registrant would: the desk's own rule about who may read a record applies to the registrant, and the catalog serves what was registered.
     const record = (await this.#runner.get("desk-record", source.recordId))?.body as unknown as { body: string } | undefined;
-    if ((record as { deleted?: unknown } | undefined)?.deleted !== undefined) throw new DomainError("not_found", `${name} ${version}: the ${part} text was removed (retention keeps the record and digest of a revoked version, not its text)`);
+    if ((record as { deleted?: unknown } | undefined)?.deleted !== undefined) throw new DomainError("not_found", `${name} ${version}: the ${part} text was removed (blanked by retention after the version was revoked, or deleted by the owner; the version's record and digest stay)`);
     if (record === undefined || sha(record.body) !== source.digest) throw new DomainError("invalid_command", `${name} ${version}: the recorded ${part} is missing or has changed since it was registered`);
     return record.body;
   }

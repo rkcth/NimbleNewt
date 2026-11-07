@@ -1391,6 +1391,15 @@ for (const backend of backends) {
     const operator = c.rebuild({}, { catalogPolicy: CatalogPolicyService.withEpoch(c.storage, c.epoch, "finish", options, () => "cancel") });
     assert.match((await operator.ask(c.owner, { kind: "catalog_policy" }))!.lines.map((l) => l.text).join("\n"), /\(cancel\), from the operator's startup option, which beats your setting\.\nYour setting is pause \(it does not apply/);
     assert.ok((await status.ask(c.owner, { kind: "catalog_policy" }))!.lines.every((l) => l.cites.length > 0));
+    const damaged = c.rebuild({}, { catalogPolicy: { get: async () => ({ revision: 1, runningCalls: null, damaged: true, default: "finish", effective: "cancel", source: "damaged" }) } });
+    const said = (await damaged.ask(c.owner, { kind: "catalog_policy" }))!.lines.map((l) => l.text).join("\n");
+    assert.match(said, /Your stored setting cannot be read\. The default is finish\./);
+    assert.doesNotMatch(said, /You have set none/);
+    assert.match(said, /The stored setting is damaged and reads as cancel until you set it again\./);
+    const underOperator = c.rebuild({}, { catalogPolicy: { get: async () => ({ revision: 1, runningCalls: null, damaged: true, default: "finish", effective: "finish", source: "operator" }) } });
+    const said2 = (await underOperator.ask(c.owner, { kind: "catalog_policy" }))!.lines.map((l) => l.text).join("\n");
+    assert.match(said2, /from the operator's startup option/);
+    assert.doesNotMatch(said2, /damaged and reads as cancel until/);
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "catalog_policy" }), undefined, "only the owner is told");
     assert.equal(await c.rebuild().ask(c.owner, { kind: "catalog_policy" }), undefined, "not offered when the policy is not running");

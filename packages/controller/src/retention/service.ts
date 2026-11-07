@@ -49,6 +49,16 @@ export interface CatalogRetentionPort {
   dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }, holds?: (versionId: string) => Promise<readonly string[] | undefined>): Promise<{ dropped: boolean; held?: readonly string[] }>;
 }
 
+/** The one-line account of a run that the owner reads (chat and API): a preview says what would happen and how to confirm it, a real run says what happened. Dropped versions and blanked texts are counted apart from derived records. */
+export function describeRun(r: RunReport): string {
+  // Held derived records and held tool versions both count as kept.
+  const kept = r.retained.length + (r.catalogVersions?.retained.length ?? 0);
+  if (r.dryRun) return `Retention preview: ${r.candidates.length} derived record(s) would be removed, ${kept} kept because a resumable task or replay needs them${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts`}. To run exactly this, confirm with digest ${r.digest}.`;
+  // `removed` counts everything taken away, so the dropped versions and blanked texts are taken out of the derived records.
+  const derived = r.removed - (r.catalogVersions?.removed ?? 0) - (r.revokedBytes?.blanked ?? 0);
+  return `Retention ran: ${derived} derived record(s) removed${r.backups?.deleted === undefined ? "" : `, ${r.backups.deleted.length} backup(s) deleted`}${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.removed} old tool version(s) dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.blanked} revoked tool text(s) blanked`}; ${kept} kept because a resumable task or replay needs them.`;
+}
+
 export interface RetentionDeps {
   /** The tool catalogue, for the old-versions and revoked-text rules (card T02c). Absent: neither does anything. */
   readonly catalog?: CatalogRetentionPort;
@@ -97,6 +107,7 @@ export interface RunReport {
   readonly derivedDays: number | null;
   /** What the derived-data rule would remove (or removed), with its project and age. */
   readonly candidates: Candidate[];
+  /** Everything a real run took away: derived records, dropped catalogue versions and blanked revoked texts (the last two are also counted in `catalogVersions.removed` and `revokedBytes.blanked`). */
   readonly removed: number;
   /** Candidates a resumable task or replay still needs: kept, and shown as retained with why. */
   readonly retained: { kind: string; id: string; reasons: string[] }[];
@@ -185,7 +196,7 @@ export class RetentionService {
     return all.sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? 1 : -1) : a.createdAt < b.createdAt ? 1 : -1)).slice(0, n);
   }
 
-  /** Whether the record is held, and why: by a resumable task or a replay (its records, checkpoints, dependency records, and the tool versions it ran, pinned a call to or lists as a dependency; the full list is in `RetainedMaterial`). */
+  /** Whether the record is held, and why: by a resumable task or a replay (its records, checkpoints, dependency records, and the tool versions it ran, pinned a call to or lists as a dependency, and the versions in the skill library of an agent's active environment or of an environment revision such a task's attempt is pinned to; the full list is in `RetainedMaterial`). */
   async check(by: Principal, ref: { kind: string; id: string }): Promise<{ kind: string; id: string; retained: boolean; reasons: string[] }> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not ask what is retained`);
     if (typeof ref.kind !== "string" || typeof ref.id !== "string") invalid("ref", "needs a kind and an id");
@@ -198,7 +209,7 @@ export class RetentionService {
 
   /**
    * The retention runner. Preview (the default) lists what each rule would remove (derived data, model replies, route records, backups, old catalogue versions, revoked executable text), and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
-   * Each rule acts only when its own value is set. Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained.
+   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained.
    */
   async run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string } = {}): Promise<RunReport> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not run retention by hand`);

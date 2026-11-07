@@ -484,12 +484,12 @@ export class StatusService {
       : p.source === "setting" ? "your setting"
       : p.source === "damaged" ? "a safe fallback, because the stored setting is damaged"
       : "the default";
-    const mine = p.runningCalls === null ? "You have set none." : `Your setting is ${shown(p.runningCalls, 20)}${p.source === "operator" ? " (it does not apply while the startup option stands)" : ""}.`;
+    const mine = p.damaged ? "Your stored setting cannot be read." : p.runningCalls === null ? "You have set none." : `Your setting is ${shown(p.runningCalls, 20)}${p.source === "operator" ? " (it does not apply while the startup option stands)" : ""}.`;
     const c = cite("catalog-policy", "main", p.revision === 0 ? undefined : p.revision);
     return { observedAt: this.#runner.now(), lines: [
       line(`When a tool version is revoked and no choice is named, running calls ${p.effective === "finish" ? "are let finish" : p.effective === "cancel" ? "are cancelled" : "are cancelled and their tasks paused"} (${shown(p.effective, 20)}), from ${where}.`, c),
       line(`${mine} The default is ${shown(p.default, 20)}.`, c),
-      ...(p.damaged ? [line("The stored setting is damaged and reads as cancel until you set it again.", c)] : []),
+      ...(p.damaged ? [line(p.source === "damaged" ? "The stored setting is damaged and reads as cancel until you set it again." : "The stored setting is damaged; it does not apply while the operator's startup option stands, and reads as cancel if that is removed before you set it again.", c)] : []),
     ] };
   }
 
