@@ -283,6 +283,9 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  * - **Summary.** Built from the records alone: attendance, key updates, decisions with reasons and a link to the discussion, dissent, unresolved questions, actions, and the plan; adopted is kept apart from applied. A conclusion that rests on a
  *   private record is marked unverifiable for readers who cannot be shown it.
  */
+/** What an owner's answer to a decision did: `applied` (changes applied in all, after an agreement), `stillApplying` (a started change could not be finished just now), and from the record before and after: changes carried out by this answer, the codes of those it refused, those done before, those still open. */
+export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; carriedOut: number; refused: string[]; alreadyDone: number; stillOpen: number }
+
 export class MeetingRecordService {
   readonly #runner: CommandRunner;
   readonly #deps: { meetings?: MeetingService; decisions?: DecisionService };
@@ -1206,10 +1209,11 @@ export class MeetingRecordService {
    * The owner answers an adopted decision (only the authenticated owner). `agree` lets it be applied (and applies it). `decline` refuses the changes not yet applied: what was already applied stays reported as applied. `alternative`
    * records the owner's own wording as a separate owner decision (C08) and refuses the changes not yet applied; no re-vote is needed. The vote and the owner's decision stay separate records.
    */
-  async ownerRespond(by: Principal, command: NoActor & { decisionId: string; response: "agree" | "decline" | "alternative"; alternative?: Omit<RecordDecision, "commandId"> & { commandId: string } }): Promise<{ ownerDecisionId?: string; applied?: number; /** After a decline or an alternative: a change that had already started could not be finished just now and stays applying until the decision is applied again. */ stillApplying?: true }> {
+  async ownerRespond(by: Principal, command: NoActor & { decisionId: string; response: "agree" | "decline" | "alternative"; alternative?: Omit<RecordDecision, "commandId"> & { commandId: string } }): Promise<OwnerAnswer> {
     onlyKnown(command, ["commandId", "decisionId", "response", "alternative"]);
     if (by.kind !== "owner" || by.taskScope !== undefined) throw forbidden(by, "answer for the owner");
     const decisionId = this.#decisionId(command.decisionId);
+    const before = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
     if (!["agree", "decline", "alternative"].includes(command.response as string)) invalid("response", "must be agree, decline or alternative");
     if ((command.response === "alternative") !== (command.alternative !== undefined)) invalid("alternative", "is needed for an alternative, and only for one");
     let ownerDecisionId: string | undefined;
@@ -1241,14 +1245,27 @@ export class MeetingRecordService {
         return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: found.revision, body: json(next) }], detail: { projectId: d.projectId, response } };
       },
     }));
-    if (command.response === "agree") return { applied: (await this.#applyDecision(by, decisionId)).applied };
-    // A change that was already started when the owner declined carries on under the agreement it started with. Nothing else would finish it (a sweep does not apply decisions), so it is driven here; the answer is already
-    // saved, so a failure leaves the change applying for the next apply and does not undo or hide the owner's answer (card M02h).
-    const left = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+    // The answer is saved. What follows (carrying out the agreed changes, or finishing a change that had already started when the owner declined; nothing else would finish it, a sweep does not apply decisions) must not undo or hide it:
+    // a failure of the applier leaves the change applying and is reported as `stillApplying` (card M02h).
     let stillApplying = false;
-    if (left?.changes.some((c) => c.state === "applying") === true) { try { await this.#applyDecision(by, decisionId); } catch { stillApplying = true; /* the change stays applying; a later apply finishes it */ } }
-    else await this.#logChanges(decisionId);
-    return { ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(stillApplying ? { stillApplying: true as const } : {}) };
+    let applied: number | undefined;
+    if (command.response === "agree") {
+      try { applied = (await this.#applyDecision(by, decisionId)).applied; } catch { stillApplying = true; /* the change stays applying; a later apply finishes it */ }
+    } else {
+      const left = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+      if (left?.changes.some((c) => c.state === "applying") === true) { try { await this.#applyDecision(by, decisionId); } catch { stillApplying = true; } }
+      else await this.#logChanges(decisionId);
+    }
+    // What this answer did to the changes, from the record before and after (the changes keep their order).
+    const after = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+    const was = before?.changes ?? [];
+    const now = after?.changes ?? [];
+    const carriedOut = now.filter((c, n) => c.state === "applied" && was[n]?.state !== "applied").length;
+    const refused = now.flatMap((c, n) => (c.state === "not-applied" && was[n]?.state !== "not-applied" ? [c.code ?? "failed"] : []));
+    return {
+      ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(applied === undefined ? {} : { applied }), ...(stillApplying ? { stillApplying: true as const } : {}),
+      carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length,
+    };
   }
 
   // ---- ending ----------------------------------------------------------------------------------------------------------------------------------

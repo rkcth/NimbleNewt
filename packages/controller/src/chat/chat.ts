@@ -3,7 +3,7 @@ import { BUILTIN_COMMANDS, OPERATION_BY_NAME } from "../api/operations.js";
 import { expandShorthand } from "./shorthand.js";
 import { parseInvocation } from "../commands/resolve.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
-import { GATE_TOPIC, TOPIC, normalTopic, notADecision, notADecisionIn } from "../decisions/records.js";
+import { GATE_TOPIC, TOPIC, normalText, normalTopic, notADecision, notADecisionIn } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -832,7 +832,7 @@ export class ChatService {
       const said = typeof statement === "string" ? statement.trim() : "";
       if (isAlternative) {
         if (said === "") return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
-        if (!evidenceStrong(said)) return instead("a decision needs at least two words");
+        if (!evidenceStrong(said)) return instead("a decision needs at least two words and at least six characters");
         if (said.length > 150) return instead("it is too long to show whole before you confirm (150 characters at most)");
         const notDecision = notADecision(said) ?? notADecisionIn(words, said);
         if (notDecision !== undefined) return instead(notDecision);
@@ -847,7 +847,7 @@ export class ChatService {
       const askWhich = (list: Record<string, unknown>[]): Resolved & { ok: false } => ({ ok: false, kind: "ask", question: "Which meeting decision are you answering?", options: list.slice(0, CHAT_LIMITS.options).map(pick), field: "decisionId", choices: list.slice(0, CHAT_LIMITS.options).map((d) => String(d["id"])) });
       if (typeof args["decisionId"] === "string") {
         chosen = waiting.find((d) => d["id"] === args["decisionId"]);
-        if (chosen === undefined) return refuse("not_found", "that meeting decision is not waiting for your answer");
+        if (chosen === undefined) return refuse("not_found", cut ? tooMany : "that meeting decision is not waiting for your answer");
         // An ID the owner did not say or pick from the question is the model's own: with several waiting, the owner is asked.
         if (waiting.length > 1 && !words.includes(String(chosen["id"]))) return askWhich(waiting);
       } else {
@@ -862,12 +862,21 @@ export class ChatService {
         if (cut) fillNotes.push(tooMany);
       }
       const started = Number(chosen["applying"] ?? 0);
-      labels[String(args["decisionId"])] = `${String(chosen["text"]).slice(0, 100)}; ${String(chosen["left"])} change${chosen["left"] === 1 ? "" : "s"} left to carry out`;
+      labels[String(args["decisionId"])] = `${String(chosen["text"]).slice(0, 80)}; ${String(chosen["left"])} change${chosen["left"] === 1 ? "" : "s"} left to carry out`;
       labels[`started:${String(args["decisionId"])}`] = String(started);
       if (isAlternative) {
-        const raw = typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : String(chosen["text"]);
+        // The topic is the owner's words or the topic the decision answered; the wording of a motion (an agent's text) is never made into a topic.
+        const raw = typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : undefined;
+        if (raw === undefined) return instead("the decision has no topic of its own, so name one for yours (for example: topic staging server)");
         const topic = normalTopic(raw.replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).replace(/^[^a-z0-9]+/, "").slice(0, 80).trim();
         if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit; name one (for example: topic staging server)");
+        // What the decision service would refuse on the topic is read now, so nothing bound to fail is proposed: another kind of decision on the topic, a conflict not yet settled, the same words already decided.
+        const history = ((await this.#get(token, "decision.history", { projectId: chosen["projectId"], topic })) as unknown as Record<string, unknown>[] | undefined) ?? [];
+        const kindHeld = history.find((e) => typeof e["category"] === "string" && e["category"] !== "decision");
+        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind; name another topic`);
+        const live = history.filter((e) => e["state"] !== "superseded" && e["taskId"] === undefined);
+        if (live.some((e) => e["state"] === "disputed")) return instead(`the topic "${topic}" has a conflict between two of your instructions that you must settle first`);
+        if (live.some((e) => typeof e["statement"] === "string" && normalText(e["statement"]) === normalText(said) && e["gate"] === undefined)) return instead(`you have already decided exactly this on the topic "${topic}"; it stands`);
         const alt: Record<string, unknown> = { projectId: chosen["projectId"], category: "decision", topic, statement: said, wording: said };
         const base = await this.#revisionFor(token, "decision", alt, undefined, new Map());
         if (!base.ok) return base;
@@ -1905,10 +1914,11 @@ function looseMatch(words: string, text: string): boolean {
 
 /** Words that say nothing about which meeting decision is meant, besides those every title match ignores. */
 const DECISION_FILLER = new Set(["decision", "decisions", "change", "changes", "one", "ones", "thing", "things", "it", "that", "this", "those", "these", "motion", "vote", "proposal", "item", "agree", "decline", "yes", "no", "please", "go", "ahead", "with", "to", "on", "about", "and", "in"]);
-/** Whether the owner's words fit a held decision's wording or topic: every significant word (`all`), or at least one when `all` is false; a plural fits its singular. No significant word fits everything. */
+/** Whether the owner's words fit a held decision's wording or topic: every significant word (`all`), or at least one when `all` is false; whole words only, a plural fits its singular. No significant word fits everything. */
 function decisionWordsMatch(words: string, text: string, all: boolean): boolean {
-  const haystack = text.toLowerCase();
+  const have = new Set(text.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0));
   const wanted = words.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0 && !FILLER.has(w) && !DECISION_FILLER.has(w));
-  const has = (w: string): boolean => haystack.includes(w) || (w.length > 3 && w.endsWith("s") && haystack.includes(w.slice(0, -1)));
+  // Whole words only ("art" is not "start"); a plural fits its singular and the other way round.
+  const has = (w: string): boolean => have.has(w) || (w.length > 3 && w.endsWith("s") && have.has(w.slice(0, -1))) || (w.length > 2 && have.has(`${w}s`));
   return wanted.length === 0 || (all ? wanted.every(has) : wanted.some(has));
 }

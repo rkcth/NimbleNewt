@@ -3077,7 +3077,7 @@ Result: `{ applied, notApplied, pending }`.
 
 #### `meeting.record.owner-respond`
 
-The owner agrees, declines or answers with an alternative to a decision that needs them. After a decline or an alternative, a change that had already started is finished at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, and the change stays applying until the decision is applied again).
+The owner agrees, declines or answers with an alternative to a decision that needs them. After an agreement the agreed changes are carried out, and after a decline or an alternative a change that had already started is finished, at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, the change stays applying, and nothing applies it again by itself: it is finished when the decision is applied again with `meeting.record.apply`).
 
 Arguments:
 
@@ -3086,7 +3086,7 @@ Arguments:
 - `alternative`: the owner's own decision instead
 - `commandId`: required
 
-Result: `{ ownerDecisionId?, applied?, stillApplying?, shown }`: `applied` (changes of the decision carried out, in all) after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change, `shown` plain lines saying what happened (for the chat).
+Result: `{ ownerDecisionId?, applied?, stillApplying?, carriedOut, refused, alreadyDone, stillOpen, shown }`: `applied` (changes of the decision carried out, in all) after an agreement; `stillApplying` when a change could not be carried out or finished just now; `carriedOut` the changes this answer carried out, `refused` the codes of those it refused, `alreadyDone` those done before, `stillOpen` those still adopted or applying; `shown` plain lines saying what happened (for the chat).
 
 #### `meeting.record.finish`
 

@@ -1083,7 +1083,7 @@ for (const backend of backends) {
     const one = await c.meet({ chair: c.pD, item: "delegated-decision" });
     const mU = await adopt({ ...c, records: svcU } as Ctx, one.rec, c.asB, { agendaItemId: one.item, changes: [change(c, task, c.pA, "Retitled once")] });
     const dU = await decisionOf({ ...c, records: svcU } as Ctx, mU);
-    await refuses("unavailable", () => svcU.ownerRespond(c.owner, { commandId: cid("or"), decisionId: dU.id, response: "agree" }));
+    assert.equal((await svcU.ownerRespond(c.owner, { commandId: cid("or"), decisionId: dU.id, response: "agree" })).stillApplying, true, "the answer is kept and says the change is still applying (card M02h)");
     const midU = (await decisionOf({ ...c, records: svcU } as Ctx, mU)).changes[0]!;
     assert.deepEqual([midU.state, midU.actedAs], ["applying", c.owner.id]);
     assert.deepEqual(await svcU.apply(c.host, { decisionId: dU.id }), { applied: 1, notApplied: 0, pending: 0 });
@@ -1100,7 +1100,7 @@ for (const backend of backends) {
     const two = await c.meet({ chair: c.pD });
     const mR = await adopt({ ...c, records: svcR } as Ctx, two.rec, c.asB, { topic: "unrelated topic", changes: [{ kind: "task.reassign", agent: c.pA, target: { kind: "task", id: t.id }, expectedRevision: t.revision, patch: { toAgent: c.pC, from: c.pD, generation: a.generation, revision: a.revision }, summary: "hand the task over" }] });
     const dR = await decisionOf({ ...c, records: svcR } as Ctx, mR);
-    await refuses("unavailable", () => svcR.ownerRespond(c.owner, { commandId: cid("or"), decisionId: dR.id, response: "agree" }));
+    assert.equal((await svcR.ownerRespond(c.owner, { commandId: cid("or"), decisionId: dR.id, response: "agree" })).stillApplying, true);
     assert.equal((await decisionOf({ ...c, records: svcR } as Ctx, mR)).changes[0]!.state, "applying");
     assert.deepEqual(await svcR.apply(c.host, { decisionId: dR.id }), { applied: 1, notApplied: 0, pending: 0 });
     assert.deepEqual(seenR, [c.owner.id, c.owner.id]);

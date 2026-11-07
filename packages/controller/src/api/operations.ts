@@ -345,6 +345,33 @@ const need = (commandId: string | undefined): string => commandId ?? invalid("co
 const asJson = (value: unknown): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
 const page = (result: { items: unknown[]; next?: string; scanLimited?: boolean }): JsonObject => asJson({ items: result.items, ...(result.next === undefined ? {} : { next: result.next }), ...(result.scanLimited === true ? { scanLimited: true } : {}) });
 const found = (what: string, value: unknown): JsonObject => (value === undefined ? ((): never => { throw new DomainError("not_found", `no such ${what}`); })() : asJson({ item: value }));
+/** Why a change was not carried out, by the code the record keeps (never the change's own words). */
+const NOT_CARRIED_OUT: Readonly<Record<string, string>> = {
+  conflict: "what it changes had moved on", unauthorized: "the agent meant to carry it out no longer holds the right to", gate: "a project gate holds that work", missing: "what it changes no longer exists",
+  failed: "it failed when it was carried out", recommendation: "it was only a recommendation", owner: "you refused it",
+};
+
+/** What an owner's answer did, in plain lines, from the counts `ownerRespond` returns (card M02h): what was carried out now, what was not and why, what was done before, what is still open. */
+export function ownerAnswerLines(response: string, out: Readonly<Record<string, unknown>>): string[] {
+  const num = (k: string): number => (typeof out[k] === "number" ? (out[k] as number) : 0);
+  const count = (k: number): string => `${k} change${k === 1 ? "" : "s"}`;
+  const carried = num("carriedOut");
+  const before = num("alreadyDone");
+  const lines: string[] = [];
+  const refused = Array.isArray(out["refused"]) ? (out["refused"] as string[]) : [];
+  const byCode = new Map<string, number>();
+  for (const code of refused) if (!(response !== "agree" && code === "owner")) byCode.set(code, (byCode.get(code) ?? 0) + 1);
+  if (response === "agree") lines.push(`You agreed.${carried > 0 ? ` ${count(carried)} carried out now.` : " None of its changes was carried out now."}${before > 0 ? ` ${count(before)} had been done before.` : ""}`);
+  else {
+    lines.push(response === "decline" ? "You declined. The changes not yet started are refused; those already done stay done." : `You chose your own decision instead${typeof out["ownerDecisionId"] === "string" ? ` (${out["ownerDecisionId"]})` : ""}. The changes not yet started are refused; those already done stay done.`);
+    if (carried > 0) lines.push(`${count(carried)} already started ${carried === 1 ? "was" : "were"} finished.`);
+  }
+  for (const [code, n] of byCode) lines.push(`${count(n)} not carried out: ${NOT_CARRIED_OUT[code] ?? "it could not be carried out"}.`);
+  if (out["stillApplying"] === true) lines.push("A change that was carried out or finished just now failed and stays applying. Nothing applies it again by itself: it is finished when the decision is applied again through the API (meeting.record.apply); you have no chat command for that yet.");
+  else if (response === "agree" && num("stillOpen") > 0) lines.push(`${count(num("stillOpen"))} still waiting to be carried out.`);
+  return lines;
+}
+
 const written = (r: { id: string; revision?: number; replayed: boolean }): JsonObject => asJson({ id: r.id, ...(r.revision === undefined ? {} : { revision: r.revision }), replayed: r.replayed });
 /** Everything in `args` except the named keys, for passing on to a service that checks its own fields. */
 const rest = (args: Args, ...skip: string[]): Args => Object.fromEntries(Object.entries(args).filter(([k]) => !skip.includes(k)));
@@ -742,14 +769,11 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("casting-vote", "command", "The chair breaks a tie.", "castingVote", ["motionId", "value", "reason"], "`{ state, decisionId? }`."),
   recordOp("apply", "command", "Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied. A change that was already started when the owner declined is finished by this call too (the owner's answer reports `stillApplying: true` when that could not be done just then).", "apply", ["decisionId"], "`{ applied, notApplied, pending }`.", "viewer"),
   ((): Operation => {
-    const base = recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After a decline or an alternative, a change that had already started is finished at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, and the change stays applying until the decision is applied again).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying?, shown }`: `applied` (changes of the decision carried out, in all) after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change, `shown` plain lines saying what happened (for the chat).");
+    const base = recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After an agreement the agreed changes are carried out, and after a decline or an alternative a change that had already started is finished, at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, the change stays applying, and nothing applies it again by itself: it is finished when the decision is applied again with `meeting.record.apply`).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying?, carriedOut, refused, alreadyDone, stillOpen, shown }`: `applied` (changes of the decision carried out, in all) after an agreement; `stillApplying` when a change could not be carried out or finished just now; `carriedOut` the changes this answer carried out, `refused` the codes of those it refused, `alreadyDone` those done before, `stillOpen` those still adopted or applying; `shown` plain lines saying what happened (for the chat).");
     return { ...base, run: async (c, a, id) => {
       const out = await base.run(c, a, id);
       // What happened, in plain lines, for the owner who answered by chat (and any other reader of the answer).
-      const shown: string[] = [];
-      if (a["response"] === "agree") shown.push(out["applied"] === 0 ? "You agreed, but none of its changes could be carried out now (what they change had moved on)." : `You agreed. ${String(out["applied"])} change${out["applied"] === 1 ? " is" : "s are"} carried out.`);
-      else shown.push(a["response"] === "decline" ? "You declined. The changes not yet started are refused; those already done stay done." : `You chose your own decision instead${typeof out["ownerDecisionId"] === "string" ? ` (${out["ownerDecisionId"]})` : ""}. The changes not yet started are refused; those already done stay done.`);
-      if (out["stillApplying"] === true) shown.push("A change that had already started could not be finished just now; it stays applying until the decision is applied again.");
+      const shown = ownerAnswerLines(String(a["response"]), out);
       return { ...out, shown };
     } };
   })(),

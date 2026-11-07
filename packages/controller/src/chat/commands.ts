@@ -359,7 +359,7 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   const spec = CHAT_OPS[op];
   const parts: string[] = [];
   // What a decision is (a gate and its kind above all) is said first, so a long text or label after it can never push it off the line.
-  const first = op === "decision.record" ? ["category", "gate"] : op === "meeting.record.owner-respond" ? ["response", "alternative"] : [];
+  const first = op === "decision.record" ? ["category", "gate"] : op === "meeting.record.owner-respond" ? ["response", "decisionId", "alternative"] : [];
   const ordered = [...first.filter((k) => k in args).map((k): [string, unknown] => [k, args[k]]), ...Object.entries(args).filter(([k]) => !first.includes(k))];
   for (const [key, value] of ordered) {
     if (key === "expectedRevision" || key === "expectedVersion") continue;
@@ -376,7 +376,9 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
   const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : "";
   const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
-  return line.length > CHAT_LIMITS.line ? `${line.slice(0, CHAT_LIMITS.line - 3)}...` : line;
+  // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
+  const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
+  return line.length > room ? `${line.slice(0, room - 3)}...` : line;
 }
 
 /**
