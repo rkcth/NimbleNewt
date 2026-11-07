@@ -15,6 +15,7 @@ import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
+import type { StopService } from "../lifecycle/stop.js";
 import type { CallBody } from "../mcp/mcp.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
@@ -211,6 +212,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   failed_event: { keys: ["handlingId"], about: "one failed event in detail" },
   timeline: { keys: ["projectId", "agent", "since", "limit"], about: "a project's timeline, or one agent's" },
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
+  stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task; or scopeKind task, agent, team or installation with the scopeId, which must be an ID, not a name)" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
@@ -252,6 +254,7 @@ export type StatusRequest =
   | { readonly kind: "needs_you"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "shutdown" }
+  | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
@@ -292,6 +295,8 @@ export interface StatusDeps {
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
   /** Whether the installation could be stopped now (card L06). Absent: the view is not offered. */
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
+  /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
+  readonly stops?: Pick<StopService, "cleanupSpend">;
   readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
@@ -414,6 +419,7 @@ export class StatusService {
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
       case "timeline": { onlyKnown(request, ["kind", "projectId", "agent", "since", "limit"]); return this.timelineLines(by, request); }
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
+      case "stop_cleanup": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.stopCleanupLines(by, request); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
@@ -572,6 +578,53 @@ export class StatusService {
     const lines: Line[] = [line(`The installation could not be stopped cleanly yet: ${r.unsettled.length}${r.truncated ? " or more" : ""} thing(s) are still running or not known.`, cite("installation", "installation"))];
     for (const i of r.unsettled.slice(0, 20)) lines.push(line(`${shown(i.kind)} ${shown(i.ref)}: ${shown(i.state)}.`, cite("installation", "installation")));
     lines.push(...exceptions);
+    return { observedAt: at, lines };
+  }
+
+  /** What a Suspend or Stop has spent on cleanup, as charged to the budgets (card L02d). A task (`taskId`) or a scope (`scope: { kind, id }`) is named; a scope with no request of its own gets one line saying so; one the asker may not control reads as nothing. */
+  async stopCleanupLines(by: Principal, asked: { readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.stops === undefined) return undefined;
+    // The scope comes nested (`scope`) or flat (`scopeKind` and `scopeId`, the form chat uses); not both, and a flat one needs both parts.
+    if ((asked.scopeKind === undefined) !== (asked.scopeId === undefined) || (asked.scope !== undefined && asked.scopeKind !== undefined)) return invalid("scope", "give scope, or scopeKind with scopeId");
+    const request = { ...(asked.taskId === undefined ? {} : { taskId: asked.taskId }), ...(asked.scope !== undefined ? { scope: asked.scope } : asked.scopeKind !== undefined ? { scope: { kind: asked.scopeKind, id: asked.scopeId! } } : {}) };
+    if ((request.taskId === undefined) === (request.scope === undefined)) return invalid("taskId", "name either a task or a scope");
+    let scope: { kind: "task" | "agent" | "team" | "installation"; id: string };
+    if (request.taskId !== undefined) scope = { kind: "task", id: checkTaskId(request.taskId) };
+    else {
+      const sc = request.scope as { kind?: unknown; id?: unknown };
+      if (typeof sc !== "object" || sc === null || (sc.kind !== "task" && sc.kind !== "agent" && sc.kind !== "team" && sc.kind !== "installation") || typeof sc.id !== "string" || sc.id.length === 0 || sc.id.length > 200) return invalid("scope", "must be { kind: task, agent, team or installation, id }");
+      scope = { kind: sc.kind, id: sc.id };
+    }
+    let r;
+    try { r = await this.#deps.stops.cleanupSpend(by, scope); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
+    const at = this.#runner.now();
+    const where = cite(scope.kind, scope.id);
+    if (r === undefined) {
+      // Only what is true for the kind: a task can be stopped through its agent, a team above that agent, a parent task of its swarm or the installation; an agent through its team, a team above that or the installation; a team through a team above it or the installation; the installation through nothing.
+      const wider = scope.kind === "task" ? " (its agent, a team above that agent, a parent task in its swarm, or the whole installation)" : scope.kind === "agent" ? " (its team, a team above that, or the whole installation)" : scope.kind === "team" ? " (a team above it or the whole installation)" : undefined;
+      return { observedAt: at, lines: [line(wider === undefined ? "No Suspend or Stop of the installation was requested." : `No Suspend or Stop was requested for ${scope.kind} ${shown(scope.id, 80)} itself; one made through a wider scope${wider} is read by naming that scope.`, where)] };
+    }
+    const money = (micros: number): string => (micros / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, ".0");
+    const used = `${money(r.spent)} (budget currency)${r.spendBudget === undefined ? ", with no limit set" : `, against a limit of ${money(r.spendBudget)}`}`;
+    // The cost of ending the work is billed once the ending has run, and only a Stop (a force stop says it in its own sentence) has one to come. A Stop that never reached the ending (restart from an earlier boundary, a resume) says nothing about it.
+    const live = r.phase === "preparing" || r.phase === "blocked" || r.phase === "prepared" || r.phase === "terminating";
+    const onTop = r.mode !== "stop" ? "" : r.endingRan ? "; the cost of ending the work is charged on top" : live ? "; the cost of ending the work, when it runs, is charged on top" : "";
+    const name = `${scope.kind} ${shown(scope.id, 80)}`;
+    let head: string;
+    if (r.mode === "force-stop") {
+      head = r.reusedCheckpoint ? `The force stop of ${name} is ${r.phase}. Its preparation was the checkpoint of an earlier Suspend (that cost is in the attempt totals below); what ending the work cost is charged to the attempts below.`
+        : !r.forcedAfterPreparation ? `The force stop of ${name} is ${r.phase}. A Force Stop has no preparation; what ending the work cost is charged to the attempts below.`
+          : `The force stop of ${name} is ${r.phase}. Its last cleanup budget window before the Force Stop (an extended wait starts it again) used ${used}; what ending the work cost is charged to the attempts below.`;
+    } else if (r.reusedCheckpoint) head = `The ${r.mode} of ${name} is ${r.phase}. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below${onTop}.`;
+    else head = `The ${r.mode} of ${name} is ${r.phase}. Its cleanup budget window (an extended wait starts it again) has used ${used}${onTop}.`;
+    const lines: Line[] = [line(head, cite("stop", r.intentId), where)];
+    for (const a of r.attempts.slice(0, 20)) lines.push(line(`Attempt ${shown(a.attemptId, 80)}: ${money(a.costMicros)} and ${a.computeMs} ms of compute charged to its task's budget in all (every stop of it counted once)${a.pending ? "; a further charge is still being made" : ""}.`, cite("stop", r.intentId)));
+    if (r.attempts.length > 20) lines.push(line(`${r.attempts.length - 20} more attempt(s) are not listed.`, cite("stop", r.intentId)));
+    if (r.attempts.length === 0) lines.push(line("No cleanup cost was reported for any attempt.", cite("stop", r.intentId)));
+    if (r.unpaid) lines.push(line("Some of the cleanup spend is not charged yet; it is retried until it is.", cite("stop", r.intentId)));
     return { observedAt: at, lines };
   }
 

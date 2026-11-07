@@ -263,6 +263,9 @@ test("the documentation is generated from the operation table and is up to date"
   assert.equal(readFileSync(file, "utf8"), renderApiDocs(), "run `npm run build && npm run api:docs:write` and commit the result");
   for (const op of OPERATIONS) assert.ok(renderApiDocs().includes(`#### \`${op.name}\``), `${op.name} is documented`);
   assert.equal(new Set(OPERATIONS.map((o) => o.name)).size, OPERATIONS.length, "operation names are unique");
+  // Every status view the chat model is told about is also named, backquoted, in the status.ask description clients read.
+  const ask = OPERATIONS.find((o) => o.name === "status.ask")!;
+  for (const kind of Object.keys(STATUS_KINDS)) assert.ok(ask.summary.includes(`\`${kind}\``), `status.ask names the ${kind} view`);
 });
 
 test("the status.ask description names every kind of status question the chat model is told, so the two lists cannot drift apart (card T02c review)", () => {

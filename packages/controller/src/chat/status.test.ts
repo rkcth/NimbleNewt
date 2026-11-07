@@ -74,6 +74,27 @@ for (const backend of backends) {
     assert.equal((await chat.submit(w.ownerToken, { messageId: "m-6", text: "all the tools" })).outcomes[0]!.code, "invalid_command", "unknown fields are refused by the status service");
   });
 
+  suite("the cleanup spend of a stop is asked for in free words by the task's title; the title is resolved to the task (card L02d)", async (w, script) => {
+    const a = await w.project("A");
+    const t = await w.task(a, "Order seeds");
+    const asked: unknown[] = [];
+    const stops = { cleanupSpend: async (_by: unknown, scope: unknown) => { asked.push(scope); return { intentId: "stp-1", mode: "stop" as const, phase: "done" as const, endingRan: true, spent: 3000, unpaid: false, forcedAfterPreparation: false, reusedCheckpoint: false, attempts: [{ attemptId: "att-1", costMicros: 3500, computeMs: 10, pending: false }] }; } };
+    const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, stops }, options);
+    script["what did stopping Order seeds cost"] = [ask({ kind: "stop_cleanup", taskTitle: "Order seeds" }, "what did stopping Order seeds cost")];
+    const chat = w.chat({ status });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const r = await chat.submit(w.ownerToken, { messageId: "m-1", text: "what did stopping Order seeds cost" });
+    assert.equal(r.outcomes[0]!.status, "answered", JSON.stringify(r.outcomes));
+    assert.deepEqual(asked, [{ kind: "task", id: t }]);
+    assert.match(r.reply.join("\n"), /Its cleanup budget window .* has used 0\.003/);
+    assert.match(r.reply.join("\n"), /Attempt att-1: 0\.0035/);
+    // A scope given with a title beside it: the title is dropped (the request would be refused for the extra key), the scope is used as given.
+    script["what did stopping the Garden team cost"] = [ask({ kind: "stop_cleanup", scopeKind: "team", scopeId: "tm-garden", taskTitle: "Order seeds" }, "what did stopping the Garden team cost")];
+    const withScope = await chat.submit(w.ownerToken, { messageId: "m-2", text: "what did stopping the Garden team cost" });
+    assert.equal(withScope.outcomes[0]!.status, "answered", JSON.stringify(withScope.outcomes));
+    assert.deepEqual(asked.at(-1), { kind: "team", id: "tm-garden" });
+  });
+
   suite("a question that came from quoted text is not answered; without the status service chat says so; a long answer says how much it left out", async (w, script, status) => {
     const a = await w.project("A");
     for (let i = 0; i < 35; i++) await w.task(a, `Task number ${i}`);

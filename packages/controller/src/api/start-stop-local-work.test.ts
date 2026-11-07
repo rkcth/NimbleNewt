@@ -101,6 +101,21 @@ test("a Stop asks the worker host what is still held, ends a background job, bil
     // The cleanup cost is on the task's budget exactly once, as stop-cleanup, even though the cost was reported again by later looks.
     const usage = await call(c, boot.token, "budget.usage", { taskId: one.id });
     assert.deepEqual([usage.result.item.byActivity["stop-cleanup"]?.costMicros, usage.result.item.byActivity["stop-cleanup"]?.computeMs], [7000, 700], JSON.stringify(usage.result));
+    // The owner can read the charged cleanup spend (the view chat uses): the figure and the attempt it was charged for.
+    const seen = await call(c, boot.token, "status.ask", { request: { kind: "stop_cleanup", taskId: one.id } });
+    assert.ok(seen.ok, JSON.stringify(seen));
+    const said = (seen.result.item.lines as { text: string }[]).map((l) => l.text);
+    assert.match(said[0]!, /The stop of task .* is recovery-required\. Its cleanup budget window \(an extended wait starts it again\) has used 0\.007 \(budget currency\), with no limit set; the cost of ending the work is charged on top\./, said.join("\n"));
+    assert.ok(said.some((t) => t.includes(`Attempt ${one.attempt}: 0.007 and 700 ms of compute charged`)), said.join("\n"));
+    // Someone who may not control the task, and a task that does not exist, are told nothing (not "it was never stopped").
+    await c.services.principals.enroll(owner, { commandId: "e-eve", kind: "agent", name: "eve", grants: [] });
+    const eve = await c.services.principals.issueCredential(owner, "agent:eve");
+    const hidden = await call(c, eve.token, "status.ask", { request: { kind: "stop_cleanup", taskId: one.id } });
+    assert.equal(hidden.ok, false, JSON.stringify(hidden));
+    assert.equal(hidden.error.code, "not_found");
+    const ghost = await call(c, boot.token, "status.ask", { request: { kind: "stop_cleanup", taskId: "task-aaaaaaaaaaaaaaaaaaaa" } });
+    assert.equal(ghost.ok, false, JSON.stringify(ghost));
+    assert.equal(ghost.error.code, "not_found");
     const again = await call(c, boot.token, "lifecycle.sweep", {}, "sw1");
     assert.ok(again.ok);
     assert.equal((await call(c, boot.token, "budget.usage", { taskId: one.id })).result.item.byActivity["stop-cleanup"].costMicros, 7000, "a sweep or a repeat does not charge again");

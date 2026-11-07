@@ -61,6 +61,10 @@ export interface StopIntentBody {
   readonly spent: number;
   readonly backupUsed: boolean;
   readonly prepared?: { readonly at: string; readonly checkpointId: string };
+  /** Set when the request was made as a Stop after a finished Suspend and went on from that Suspend's checkpoint instead of preparing: the ID of the Suspend. Written once, at creation (the capped history cannot say it reliably). */
+  readonly reusedFrom?: string;
+  /** Set once the ending of execution (terminate) has run and its cost has been charged. */
+  readonly ended?: true;
   readonly inventory: readonly InventoryItem[];
   /** The attempts the runtime saw for the scope while preparing (so a process of one that ended meanwhile is still asked about after a restart). */
   readonly attempts?: readonly string[];
@@ -68,7 +72,7 @@ export interface StopIntentBody {
   /** The pause request that held the scope when this request was made: a later stop reuses this request's checkpoint only if the same hold is still in place. */
   readonly gateRequestId?: string;
   readonly outcome?: StopOutcome;
-  readonly forced?: { readonly by: string; readonly reason: string; readonly at: string };
+  readonly forced?: { readonly by: string; readonly reason: string; readonly at: string; /** The Force Stop took over a request that began as a Suspend or Stop, whatever phase it had reached (its `spent`, `spendBudget` and `attempts` are from that earlier work). A Force Stop that began as one has no such work. */ readonly afterPreparation?: true };
   readonly history: readonly { readonly phase: StopPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
@@ -159,7 +163,7 @@ export class StopService {
         // A stop after a finished suspension, while the scope is still held, goes on from the durable checkpoint instead of preparing again.
         const reuse = command.mode === "stop" && intent?.phase === "done" && intent.outcome?.state === "suspended" && intent.prepared !== undefined && gateRequestId !== undefined && intent.gateRequestId === gateRequestId ? intent.prepared : undefined;
         const body: StopIntentBody = {
-          scope, ...(target.projectId === undefined ? {} : { projectId: target.projectId }), mode: command.mode, phase: reuse === undefined ? "preparing" : "prepared", ...(reuse === undefined ? {} : { prepared: reuse }), ...(gateRequestId === undefined ? {} : { gateRequestId }), requestedBy: by.id, requestedAt: at, reason,
+          scope, ...(target.projectId === undefined ? {} : { projectId: target.projectId }), mode: command.mode, phase: reuse === undefined ? "preparing" : "prepared", ...(reuse === undefined ? {} : { prepared: reuse, reusedFrom: current! }), ...(reuse === undefined || (intent?.attempts ?? []).length === 0 ? {} : { attempts: intent!.attempts }), ...(gateRequestId === undefined ? {} : { gateRequestId }), requestedBy: by.id, requestedAt: at, reason,
           deadlineAt: new Date(Date.parse(at) + deadlineMs).toISOString(), ...(command.spendBudget === undefined ? {} : { spendBudget: command.spendBudget }), spent: 0, backupUsed: false, inventory: [],
           history: [{ phase: reuse === undefined ? "preparing" : "prepared", at, by: by.id, note: reuse === undefined ? `${command.mode} requested` : `stop requested after suspend; checkpoint ${reuse.checkpointId} is reused` }],
         };
@@ -211,7 +215,7 @@ export class StopService {
       const ref: AggregateRef = { kind: FORCE_REF, id: mine };
       await this.#runner.command("stop.force-ref", { commandId: `stop-fref-${mine.slice(4)}`, actor: by.id }, async () => ({ payload: { intentId: id! }, build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { intentId: id! } }], detail: {} }) }));
     }
-    await this.#update(id!, (b) => ({ ...b, mode: "force-stop", phase: "terminating", forced: { by: by.id, reason, at: this.#runner.now() }, blocked: undefined, history: this.#push(b, "terminating", by.id, `force stop: ${reason}`) }), ["preparing", "blocked", "prepared", "terminating"]);
+    await this.#update(id!, (b) => ({ ...b, mode: "force-stop", phase: "terminating", forced: { by: by.id, reason, at: this.#runner.now(), ...(b.mode !== "force-stop" || b.forced?.afterPreparation === true ? { afterPreparation: true as const } : {}) }, blocked: undefined, history: this.#push(b, "terminating", by.id, `force stop: ${reason}`) }), ["preparing", "blocked", "prepared", "terminating"]);
     await this.advance(by, { intentId: id! });
     const done = (await this.#runner.get(KIND, id!))!.body as unknown as StopIntentBody;
     return { intentId: id!, outcome: done.outcome! };
@@ -324,6 +328,9 @@ export class StopService {
         const graceful = b.forced === undefined;
         // What the ending cost is billed too; a charge that cannot be made is named, never dropped.
         const billed = await this.#charge(id, by, ended.costs);
+        // The attempts the ending charged are recorded on the request too (a Force Stop, or a Stop that reused a checkpoint, never saw them while preparing), so the owner's view lists them.
+        const charged = (ended.costs ?? []).map((c) => c?.attemptId).filter((a): a is string => typeof a === "string" && /^[A-Za-z0-9:_-]{1,120}$/.test(a));
+        await this.#update(id, (x) => ({ ...x, ended: true as const, ...(charged.some((a) => !(x.attempts ?? []).includes(a)) ? { attempts: [...new Set([...(x.attempts ?? []), ...charged])].slice(-STOP_LIMITS.inventory) } : {}) }), ["terminating"]);
         if (billed.failed) ended = { ...ended, unresolved: [...ended.unresolved, CLEANUP_UNPAID] };
         if (ended.ended && ended.unresolved.length === 0) {
           await this.#observe(by, b.scope, id, "stopped", graceful ? "ended after preparation" : "force stopped; incomplete state may need reconciling");
@@ -376,6 +383,24 @@ export class StopService {
     if (found === undefined) return undefined;
     try { await this.#pauses.authorizeControl(viewer, (found.body as unknown as StopIntentBody).scope); } catch { return undefined; }
     return view<StopIntentBody>(found);
+  }
+
+  /**
+   * What the latest suspension or stop of a scope has spent on cleanup, for the owner to read (card L02d): the figure the request counted, what the runtime reported and the budgets were charged for each attempt the
+   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` starts a new one, and a pass that went stale is not in it), not the full cost.
+   */
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** A Force Stop that took over a request which had been preparing: `spent` and `spendBudget` are that preparation's. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+    // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
+    await this.#pauses.authorizeControl(viewer, scope);
+    const id = await this.#activeId(scope);
+    const found = id === undefined ? undefined : (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
+    if (found === undefined || id === undefined) return undefined;
+    const attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] = [];
+    for (const attemptId of (found.attempts ?? []).slice(0, STOP_LIMITS.inventory)) {
+      const charge = (await this.#runner.get(CHARGE, attemptId))?.body as unknown as ChargeBody | undefined;
+      if (charge !== undefined) attempts.push({ attemptId, costMicros: charge.costMicros, computeMs: charge.computeMs, pending: charge.pending !== undefined });
+    }
+    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true || attempts.some((a) => a.pending), forcedAfterPreparation: found.forced?.afterPreparation === true, reusedCheckpoint: found.reusedFrom !== undefined, endingRan: found.ended === true, attempts };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------

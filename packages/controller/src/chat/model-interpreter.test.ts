@@ -49,6 +49,7 @@ test("the model is told every operation with the argument names the chat accepts
     const args = (acceptedArgs(op) ?? []).filter((k) => k !== "projectName");
     assert.ok(system.includes(`${op}(${args.join(", ")})`), `${op} is described with its argument names`);
   }
+  assert.ok(system.includes("stop_cleanup(taskId|taskTitle, scopeKind, scopeId)"), "the cleanup-spend view is told to the model");
   for (const [kind, k] of Object.entries(STATUS_KINDS)) assert.ok(system.includes(`${kind}(${k.keys.join(", ")})`), `${kind} is a status kind the model is told`);
   assert.match(system, /there are no fixed phrases/);
   assert.match(system, /use a clarify intent instead of guessing/);

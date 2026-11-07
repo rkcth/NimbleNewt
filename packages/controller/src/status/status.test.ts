@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -52,7 +53,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -93,7 +94,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1001,6 +1002,12 @@ for (const backend of backends) {
     for (const kind of Object.keys(STATUS_KINDS)) {
       try { await c.status.ask(c.owner, { kind } as never); } catch (error) { assert.doesNotMatch(String((error as Error).message), /not a kind of status request/, `${kind} is a kind`); }
     }
+    // And the other way round: every kind the service answers to is one the chat model is told about (read from the compiled service itself, so a new case cannot be left out of STATUS_KINDS).
+    const compiled = readFileSync(fileURLToPath(new URL("./status.js", import.meta.url)), "utf8");
+    const dispatch = compiled.slice(compiled.indexOf("async ask("), compiled.indexOf('default: return invalid("kind"'));
+    const handled = [...dispatch.matchAll(/case "([a-z_]+)":/g)].map((m) => m[1]!);
+    assert.ok(handled.length > 10 && handled.includes("stop_cleanup"), `read the cases: ${handled.join(",")}`);
+    for (const kind of handled) assert.ok(kind in STATUS_KINDS, `${kind} is answered by ask() but the chat model is not told about it (STATUS_KINDS)`);
     await refuses("invalid_command", () => c.status.ask(c.owner, null as never));
     await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "changes", projectId: c.project, since: "2026-10-22T00:00:00.000Z", extra: 1 } as never));
     assert.equal(await c.status.ask(c.owner, { kind: "task", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }), undefined);
@@ -1466,6 +1473,103 @@ for (const backend of backends) {
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "revocations" }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "revocations" }), undefined);
+  });
+
+  suite("what a Suspend or Stop spent on cleanup is told for a task or a scope: the figure, the limit, each attempt charged and any charge not yet paid; a scope never stopped says so; unreadable reads as missing (card L02d)", async (c) => {
+    const t = await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "Build" });
+    let answer: Record<string, unknown> | undefined = { intentId: "stp-1", mode: "stop", phase: "done", endingRan: true, spent: 2_500_000, spendBudget: 5_000_000, unpaid: false, attempts: [{ attemptId: "att-1", costMicros: 2_500_000, computeMs: 900, pending: false }] };
+    const asked: unknown[] = [];
+    const stops = { cleanupSpend: async (by: Principal, scope: unknown) => { asked.push(scope); if (by.kind !== "owner") throw new DomainError("forbidden", "no"); return answer as never; } };
+    const status = c.rebuild({}, { stops });
+    const got = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!;
+    cited(got.lines);
+    assert.deepEqual(got.lines.map((l) => l.text), [
+      `The stop of task ${t.id} is done. Its cleanup budget window (an extended wait starts it again) has used 2.5 (budget currency), against a limit of 5.0; the cost of ending the work is charged on top.`,
+      "Attempt att-1: 2.5 and 900 ms of compute charged to its task's budget in all (every stop of it counted once).",
+    ]);
+    assert.deepEqual(asked[0], { kind: "task", id: t.id });
+    answer = { ...answer!, spendBudget: undefined, unpaid: true, attempts: [{ attemptId: "att-1", costMicros: 10, computeMs: 0, pending: true }] };
+    const open = (await status.ask(c.owner, { kind: "stop_cleanup", scope: { kind: "agent", id: "agt-a" } }))!.lines.map((l) => l.text);
+    assert.deepEqual(asked[1], { kind: "agent", id: "agt-a" });
+    assert.match(open[0]!, /with no limit set; the cost of ending the work is charged on top\.$/);
+    assert.match(open[1]!, /a further charge is still being made/);
+    assert.match(open[2]!, /not charged yet; it is retried/);
+    // The "ending is charged on top" clause belongs to a stop only: not a suspend, not a cancelled request; a Force Stop has no preparation figure.
+    const first = async (): Promise<string> => (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines[0]!.text;
+    answer = { ...answer!, mode: "suspend", phase: "done", unpaid: false, attempts: [] };
+    assert.doesNotMatch(await first(), /charged on top/);
+    answer = { ...answer!, mode: "stop", phase: "cancelled", endingRan: false };
+    assert.doesNotMatch(await first(), /charged on top/);
+    answer = { ...answer!, mode: "stop", phase: "done", endingRan: true };
+    assert.match(await first(), /the cost of ending the work is charged on top\.$/);
+    // No attempt was charged: the view says so.
+    assert.deepEqual((await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text).slice(1), ["No cleanup cost was reported for any attempt."]);
+    answer = { ...answer!, mode: "force-stop", phase: "recovery-required", spent: 0 };
+    const forced = await first();
+    assert.match(forced, /^The force stop of task .* is recovery-required\. A Force Stop has no preparation; what ending the work cost is charged to the attempts below\.$/);
+    assert.doesNotMatch(forced, /budget window/);
+    // A request that kept many attempts says how many are not listed.
+    answer = { ...answer!, mode: "stop", phase: "done", attempts: Array.from({ length: 25 }, (_, i) => ({ attemptId: `att-${i}`, costMicros: 1, computeMs: 0, pending: false })) };
+    const many = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
+    assert.equal(many.length, 1 + 20 + 1);
+    assert.equal(many.at(-1), "5 more attempt(s) are not listed.");
+    answer = undefined;
+    assert.match((await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines[0]!.text, /was requested for task .* itself/);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "stop_cleanup", taskId: t.id }), undefined, "an asker who may not control the scope gets nothing");
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "stop_cleanup", taskId: t.id }), undefined, "not offered without the stop service");
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id, scope: { kind: "task", id: t.id } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    // The flat form chat uses (a chat request has no nesting) reads the same scope; half of it, or both forms together, is refused.
+    answer = { intentId: "stp-1", mode: "suspend", phase: "done", spent: 0, unpaid: false, attempts: [] };
+    asked.length = 0;
+    assert.ok(await status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "team", scopeId: "tm-a" }));
+    assert.deepEqual(asked, [{ kind: "team", id: "tm-a" }]);
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "team" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "team", scopeId: "tm-a", scope: { kind: "team", id: "tm-a" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scope: { kind: "galaxy", id: "x" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  });
+
+  suite("every sentence of the cleanup-spend view is true for each mode, phase and kind of scope (card L02d review)", async (c) => {
+    type A = { intentId: string; mode: string; phase: string; endingRan: boolean; spent: number; spendBudget?: number | undefined; unpaid: boolean; forcedAfterPreparation: boolean; reusedCheckpoint: boolean; attempts: unknown[] };
+    const base: A = { intentId: "stp-1", mode: "stop", phase: "done", endingRan: false, spent: 5000, spendBudget: 100, unpaid: false, forcedAfterPreparation: false, reusedCheckpoint: false, attempts: [] };
+    let answer: A | undefined;
+    const status = c.rebuild({}, { stops: { cleanupSpend: async () => answer as never } });
+    const head = async (scope: { kind: string; id: string }): Promise<string> => (await status.ask(c.owner, { kind: "stop_cleanup", scope }))!.lines[0]!.text;
+    const task = { kind: "task", id: "task-aaaaaaaaaaaaaaaaaaaa" };
+    // Nothing recorded for exactly this scope: only the wider scopes that exist for its kind are named.
+    answer = undefined;
+    assert.match(await head(task), /itself; one made through a wider scope \(its agent, a team above that agent, a parent task in its swarm, or the whole installation\) is read by naming that scope\.$/);
+    assert.match(await head({ kind: "agent", id: "agt-a" }), /itself; one made through a wider scope \(its team, a team above that, or the whole installation\) is read/);
+    assert.match(await head({ kind: "team", id: "tm-a" }), /itself; one made through a wider scope \(a team above it or the whole installation\) is read/);
+    assert.equal(await head({ kind: "installation", id: "installation" }), "No Suspend or Stop of the installation was requested.");
+    // Mode and phase: the window sentence and the "ending on top" clause.
+    for (const kind of ["task", "agent", "team", "installation"]) for (const mode of ["suspend", "stop", "force-stop"]) for (const phase of ["preparing", "blocked", "prepared", "terminating", "done", "recovery-required", "cancelled"]) {
+      const ran = mode === "stop" && (phase === "done" || phase === "recovery-required");
+      answer = { ...base, mode, phase, endingRan: ran, ...(mode === "force-stop" ? { spent: 0, spendBudget: undefined } : {}) };
+      const text = await head({ kind, id: kind === "installation" ? "installation" : "x-1" });
+      const label = `${mode}/${phase}/${kind}: ${text}`;
+      assert.match(text, new RegExp(`^The ${mode === "force-stop" ? "force stop" : mode} of ${kind} `), label);
+      assert.ok(text.includes(` is ${phase}.`), label);
+      assert.equal(text.includes("; the cost of ending the work is charged on top"), ran, label);
+      const live = ["preparing", "blocked", "prepared", "terminating"].includes(phase);
+      assert.equal(text.includes("the cost of ending the work, when it runs, is charged on top"), mode === "stop" && live, label);
+      assert.equal(text.includes("A Force Stop has no preparation"), mode === "force-stop", label);
+      assert.equal(text.includes("budget window"), mode !== "force-stop", label);
+      assert.equal(text.includes("against a limit of 0.0001"), mode !== "force-stop", label);
+    }
+    // A Force Stop over a preparation keeps its figure and limit; one over a reused checkpoint points to the attempt totals; a reused-checkpoint Stop does not claim a window.
+    answer = { ...base, mode: "force-stop", phase: "done", forcedAfterPreparation: true };
+    assert.equal(await head(task), "The force stop of task task-aaaaaaaaaaaaaaaaaaaa is done. Its last cleanup budget window before the Force Stop (an extended wait starts it again) used 0.005 (budget currency), against a limit of 0.0001; what ending the work cost is charged to the attempts below.");
+    answer = { ...base, mode: "force-stop", phase: "done", spent: 0, spendBudget: undefined, forcedAfterPreparation: true, reusedCheckpoint: true };
+    assert.match(await head(task), /Its preparation was the checkpoint of an earlier Suspend \(that cost is in the attempt totals below\); what ending the work cost/);
+    answer = { ...base, mode: "stop", phase: "done", endingRan: true, spent: 0, spendBudget: undefined, reusedCheckpoint: true };
+    assert.equal(await head(task), "The stop of task task-aaaaaaaaaaaaaaaaaaaa is done. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below; the cost of ending the work is charged on top.");
+    answer = { ...base, mode: "stop", phase: "cancelled", reusedCheckpoint: true };
+    assert.doesNotMatch(await head(task), /charged on top|budget window/);
+    // A Stop that never reached the ending (restart from an earlier boundary, a resume while terminating) does not say the ending was charged.
+    answer = { ...base, mode: "stop", phase: "recovery-required", endingRan: false };
+    assert.doesNotMatch(await head(task), /charged on top/);
   });
 
   suite("whether the installation could be stopped now is told to the owner only: ready, or what is still running or unknown (card L06)", async (c) => {
