@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
-import { ENDED_CANCEL, STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
+import { DECLINED, ENDED_CANCEL, STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
 import type { EffectService } from "../domain/effects.js";
@@ -1020,6 +1020,9 @@ export class DispatcherService {
         const existing = await resumes.get(by, resumes.checkIdFor(by, keys[n]!));
         if (existing === undefined || existing.phase !== "cancelled") break;
         await this.#settleHold(existing.id, projectId);
+        // The owner declined this attempt's resume: it is never checked again (a new check might find nothing that matters and start the work the owner turned down). The decline releases the task,
+        // which ends the attempt; until then it only waits.
+        if (existing.history.some((h) => h.note === DECLINED)) return "the owner declined this resume; the task is being released";
         if (!resumes.cancelledAsStale(existing)) counted++;
         if (counted > RESUME_RESTARTS) { n = keys.length; break; }
       }

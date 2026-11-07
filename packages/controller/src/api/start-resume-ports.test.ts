@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { DependencyService } from "../dependencies/index.js";
+import { NotificationService } from "../notifications/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { PI } from "../dispatch/testing/world.js";
@@ -133,7 +134,13 @@ for (const store of stores) {
           const said = (needs.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
           assert.match(said, new RegExp(`Task ${task} is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a\\.ts \\(changed\\) \\(approve the resume`));
           assert.equal((await call(ann, "resume.decline", { taskId: task }, "a4")).error.code, "forbidden", "declining is the owner's too");
+          // The dispatcher's notice that the resume is held (same command ID and reference): the controller's approval closes it.
+          const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+          const held = async () => (await notifications.inbox(rob)).items.filter((i) => i.ref.kind === "resume-check");
+          await notifications.emitFromController({ commandId: `dpa-ntf:resume-review:${s.result.item.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: s.result.item.id }, projectId: project, detail: "held" });
+          assert.equal((await held()).length, 1);
           const ok = await call(boot.token, "resume.approve", { taskId: task }, "o1");
+          assert.deepEqual(await held(), [], "the approval closed the owner's notice");
           assert.equal(ok.result.item.phase, "done");
           assert.equal((await call(boot.token, "resume.approve", { taskId: task }, "o2")).result.item.phase, "done");
           const after = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[];
@@ -178,7 +185,14 @@ for (const store of stores) {
       const before = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[];
       assert.ok(before.some((l) => l.text.includes("held before it resumes") && l.text.includes("or decline it, which releases the task")), JSON.stringify(before));
       assert.equal((await call(ann, "resume.decline", { taskId: task }, "a1")).error.code, "forbidden");
+      assert.equal((await call(boot.token, "resume.decline", { taskId: task, extra: 1 }, "x1")).error.code, "invalid_command", "an unknown argument is refused");
+      assert.equal((await c.services.assignments.getAssignment(task))!.state, "assigned", "and nothing was released");
+      const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+      const held = async () => (await notifications.inbox(rob)).items.filter((i) => i.ref.kind === "resume-check");
+      await notifications.emitFromController({ commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: check.id }, projectId: project, detail: "held" });
+      assert.equal((await held()).length, 1);
       const declined = await call(boot.token, "resume.decline", { taskId: task }, "o1");
+      assert.deepEqual(await held(), [], "the decline closed the owner's notice");
       assert.ok(declined.ok, JSON.stringify(declined));
       assert.equal(declined.result.item.phase, "cancelled");
       assert.equal((await c.services.assignments.getAssignment(task))!.state, "released", "the task is released");

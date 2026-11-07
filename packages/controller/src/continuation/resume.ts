@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { BlockerService } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { attemptId as checkAttemptId, type AttemptBody } from "../domain/assignment-model.js";
+import { assignmentIdOf, attemptId as checkAttemptId, type AssignmentBody, type AttemptBody } from "../domain/assignment-model.js";
 import { onlyKnown, taskId as checkTaskId, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { DependencyCheck, DependencyService, Observation } from "../dependencies/dependencies.js";
@@ -80,6 +80,8 @@ const validRounds = (n: unknown): n is number => typeof n === "number" && Number
  */
 const RESUMER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
 const KIND = "resume-check";
+/** One record per `resume.decline` command (by its scoped command ID): which check it declined, so the same command again answers as it did. */
+const DECLINE_KIND = "resume-decline";
 const ORPHANED = "not committed: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so nothing is resumed";
 const ACTIVE = "resume-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -231,28 +233,56 @@ export class ResumeCheckService {
   }
 
   /**
-   * The owner's decision NOT to let a held task go on (card L04c): the task's current check, held for changes judged to matter, is cancelled and the task is released (its waiting attempt ends and nothing
-   * works on it until it is assigned again), and the owner's notice that it is held is closed. A repeat answers as it is (and releases the task if that did not happen the first time); a check in any
-   * other state is refused with where it stands. Releasing needs the controller's `release` (absent: refused as unavailable for a check the dispatcher holds).
+   * The owner's decision NOT to let a held task go on (card L04c): the task is released (its waiting attempt ends and nothing works on it until it is assigned again), then the task's check, held for
+   * changes judged to matter, is cancelled, and the owner's notice that it is held is closed. Released FIRST: once the attempt has ended, neither the dispatcher nor an approval can commit the check or
+   * start the attempt (both require the check's attempt to be the active one), so no gap exists in which the dispatcher could take a cancelled check as a reason to start a new one and go on. A decline
+   * that stopped after the release (a crash) is finished by declining again; the same command ID answers as it did the first time (recorded per command, so a retried command never declines a newer check).
+   * Refused with where it stands: a check that is not held, one whose attempt was transferred or given another attempt (nothing would be released), one not tied to an attempt (started through
+   * `resume.start`: nothing says which attempt to release). Releasing needs the controller's `release` (absent: refused as unavailable).
    */
   async decline(by: Principal, command: NoActor & { taskId: string }): Promise<View<ResumeCheckBody>> {
     onlyKnown(command, ["commandId", "taskId"]);
     if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner declines a resume that holds changes judged to matter");
-    const check = await this.forTask(by, command.taskId);
+    const taskId = checkTaskId(command.taskId);
+    const scoped = scopedCommandId(by.id, command.commandId);
+    const recordId = derivedId("rck", `decline\0${scoped}`);
+    // The same command again answers as it did, even after the task was assigned again and has a newer check.
+    const prior = await this.#runner.get(DECLINE_KIND, recordId);
+    if (prior !== undefined) {
+      const p = prior.body as unknown as { taskId: string; checkId: string };
+      if (p.taskId !== taskId) throw new DomainError("command_conflict", "this command ID was already used to decline another task's resume");
+      return view<ResumeCheckBody>(await this.#get(by, p.checkId));
+    }
+    const check = await this.forTask(by, taskId);
     if (check === undefined) throw new DomainError("not_found", "that task has no resume check");
-    const repeat = check.phase === "cancelled" && check.history.at(-1)?.note === DECLINED;
-    if (!repeat) {
+    if (check.attemptId === undefined) throw new DomainError("invalid_command", "this resume check is not tied to an attempt, so declining it would release nothing; cancel it with resume.cancel or release the task", { field: "taskId" });
+    if (this.#release === undefined) throw new DomainError("unavailable", "declining a held resume needs the task release, which this controller does not run");
+    const declined = check.history.some((h) => h.note === DECLINED);
+    const notHeld = (): never => {
       if (check.phase === "done" || check.phase === "executing") throw new DomainError("invalid_command", "the task's resume check was already approved and committed; there is nothing to decline", { field: "taskId" });
-      if (check.phase !== "ready" || relevantChanges(check).length === 0) throw new DomainError("invalid_command", `the task's resume check is ${check.phase}${check.phase === "ready" ? " and holds no change judged to matter" : ""}; only a resume held for changes judged to matter can be declined`, { field: "taskId" });
+      throw new DomainError("invalid_command", `the task's resume check is ${check.phase}${check.phase === "ready" ? " and holds no change judged to matter" : ""}; only a resume held for changes judged to matter can be declined`, { field: "taskId" });
+    };
+    const moved = (): never => { throw new DomainError("invalid_transition", "not declined: the attempt this resume check was for is no longer the task's active attempt (the task was transferred or given another attempt), so there is nothing to release; the task is left as it is"); };
+    const held = relevantChanges(check).length > 0;
+    if (await this.#attemptState(check.attemptId) === "active") {
+      if (!declined && (check.phase !== "ready" || !held)) notHeld();
+      await this.#release(by, check.taskId, check.attemptId);
+      // The release looks at the assignment itself: if the task moved meanwhile nothing was released, and the owner is told so.
+      if (!(await this.#releasedFor(check))) moved();
+    } else {
+      // The attempt ended already. Only a release of that very attempt, with the task still released, means what a decline means: an earlier decline that stopped before the cancel (or the task
+      // was released some other way) is finished. A transfer, a new attempt or a task assigned again is refused, and nothing is touched.
+      if (!(await this.#releasedFor(check))) moved();
+      if (!declined && ((check.phase !== "ready" && check.phase !== "cancelled") || !held)) notHeld();
     }
-    if (check.attemptId !== undefined && this.#release === undefined) throw new DomainError("unavailable", "declining a held resume needs the task release, which this controller does not run");
-    // Cancelled first, so an approval racing the decline cannot commit afterwards; then the task is released, so the dispatcher does not start a new check and hold it again.
-    if (!repeat && !(await this.#update(check.id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, DECLINED) }), ["ready"]))) {
-      const now = await this.#get(by, check.id);
-      throw new DomainError("invalid_transition", `not declined: the task's resume check changed meanwhile and is ${(now.body as unknown as ResumeCheckBody).phase}`);
-    }
-    if (check.attemptId !== undefined && await this.#forCurrentAttempt(check)) await this.#release!(by, check.taskId, check.attemptId);
+    // The check is cancelled after the release; if it moved meanwhile (the dispatcher dropped it when the attempt ended, or an approval committed it before the release), the release stands
+    // and the attempt never runs: the decline is done either way.
+    if (!TERMINAL.includes(check.phase) && check.phase !== "executing") await this.#update(check.id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, DECLINED) }), ["collecting", "verifying", "reviewing", "ready", "blocked"]);
     await this.#settle?.(check.id, check.projectId).catch(() => undefined);
+    await this.#runner.command("resume.decline", { commandId: scoped, actor: by.id }, async () => ({
+      payload: { taskId },
+      build: async () => ({ ref: { kind: DECLINE_KIND, id: recordId }, creates: true, changes: [{ type: "create", ref: { kind: DECLINE_KIND, id: recordId }, body: clean({ taskId, checkId: check.id, attemptId: check.attemptId }) }], detail: { taskId, checkId: check.id } }),
+    }));
     return view<ResumeCheckBody>((await this.#runner.get(KIND, check.id))!);
   }
 
@@ -438,6 +468,16 @@ export class ResumeCheckService {
   async #forCurrentAttempt(b: Pick<ResumeCheckBody, "attemptId">): Promise<boolean> {
     if (b.attemptId === undefined) return true;
     return ((await this.#runner.get("attempt", b.attemptId))?.body as unknown as AttemptBody | undefined)?.state === "active";
+  }
+
+  async #attemptState(attemptId: string): Promise<AttemptBody["state"] | undefined> {
+    return ((await this.#runner.get("attempt", attemptId))?.body as unknown as AttemptBody | undefined)?.state;
+  }
+
+  /** Whether the check's attempt ended by a release and the task is still released (not transferred, not assigned again): what a decline leaves behind. */
+  async #releasedFor(b: Pick<ResumeCheckBody, "attemptId" | "taskId">): Promise<boolean> {
+    if (b.attemptId === undefined || await this.#attemptState(b.attemptId) !== "released") return false;
+    return ((await this.#runner.get("assignment", assignmentIdOf(b.taskId)))?.body as unknown as AssignmentBody | undefined)?.state === "released";
   }
 
   async #get(by: Principal, checkId: string) {

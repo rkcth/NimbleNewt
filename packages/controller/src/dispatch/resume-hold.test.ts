@@ -383,6 +383,175 @@ for (const backend of backends) {
     assert.deepEqual(f.resumeCalls, []);
   });
 
+  // Card L04c review F1-F3: the decline releases first, then cancels; each crash point and race leaves the attempt unstarted and the answer true.
+  const releaseOf = (c: DispatchWorld) => async (by: { id: string }, taskId: string, attemptId: string): Promise<void> => {
+    const asg = (await c.assignments.getAssignment(taskId))!;
+    if (asg.state === "assigned" && asg.activeAttemptId === attemptId) await c.assignments.releaseTask({ commandId: `rel-${attemptId}`, actor: by.id, taskId, expectedRevision: asg.revision });
+  };
+  const declining = (c: DispatchWorld, f: Fakes, release: (by: { id: string }, taskId: string, attemptId: string) => Promise<void>, notifications?: NotificationService) => ResumeCheckService.withEpoch(c.storage, c.epoch, {
+    continuations: f.continuations as never, dependencies: f.dependencies as never, blockers: f.blockers as never, ports: f.ports, release,
+    ...(notifications === undefined ? {} : { settle: async (checkId: string, projectId: string) => { await notifications.settleFromController({ commandId: `s-${checkId}`, kind: "maintenance", ref: { kind: "resume-check", id: checkId }, projectId }); } }),
+  }, { clock: c.options.clock! });
+  const isCode = (code: string, pattern?: RegExp) => (e: unknown) => e instanceof DomainError && e.code === code && (pattern === undefined || pattern.test(e.message));
+
+  suite("a decline that fails before its release starts nothing, even when a tick then finds nothing that matters; declining again releases the task", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const d = go();
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    let crash = true;
+    const svc = declining(c, f, async (by, taskId, attemptId) => { if (crash) { crash = false; throw new Error("controller died in the release"); } await releaseOf(c)(by, taskId, attemptId); });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), /died in the release/);
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "nothing was cancelled before the release");
+    f.relevant = false;
+    for (let i = 0; i < 2; i++) { const t = await d.tick(); await d.idle(); assert.deepEqual(t.started, [], t.skipped.map((s) => s.reason).join("; ")); }
+    assert.deepEqual(f.resumeCalls, [], "no resume recorded");
+    assert.equal((await real.forTask(c.dispatcherPrincipal, a.taskId))!.id, check.id, "no new check was started");
+    const done = await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId });
+    assert.deepEqual([done.id, done.phase, done.history.at(-1)!.note], [check.id, "cancelled", "declined by the owner"]);
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "released");
+  });
+
+  suite("a decline that fails after its release starts nothing; declining again finishes it truthfully, and the same command again answers the same", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+    const d = go({ notifications });
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    let crash = true;
+    const svc = declining(c, f, async (by, taskId, attemptId) => { await releaseOf(c)(by, taskId, attemptId); if (crash) { crash = false; throw new Error("controller died after the release"); } }, notifications);
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), /died after the release/);
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "released");
+    f.relevant = false;
+    for (let i = 0; i < 2; i++) { const t = await d.tick(); await d.idle(); assert.deepEqual(t.started, [], t.skipped.map((s) => s.reason).join("; ")); }
+    assert.deepEqual(f.resumeCalls, [], "no resume recorded");
+    // The dispatcher dropped the ended attempt's check meanwhile; the retried decline still finishes, and says what is true.
+    const done = await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId });
+    assert.deepEqual([done.id, done.phase], [check.id, "cancelled"]);
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "released");
+    assert.deepEqual((await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check"), []);
+    assert.equal((await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId })).id, check.id, "the same command answers as before");
+  });
+
+  for (const when of ["before", "after"] as const) {
+    suite(`a tick ${when} the decline's release starts nothing and holds nothing again`, async (c, f, real, a, go) => {
+      f.relevant = true;
+      const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+      const d = go({ notifications });
+      await d.tick();
+      const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+      const inner: (readonly string[])[] = [];
+      const tick = async () => { const t = await d.tick(); await d.idle(); inner.push(t.started); };
+      const svc = declining(c, f, async (by, taskId, attemptId) => { f.relevant = false; if (when === "before") await tick(); await releaseOf(c)(by, taskId, attemptId); if (when === "after") await tick(); }, notifications);
+      const declined = await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId });
+      assert.deepEqual(inner, [[]], "the tick inside the decline started nothing");
+      assert.deepEqual([declined.id, declined.phase], [check.id, "cancelled"]);
+      assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "released", "the task is released, as the owner is told");
+      for (let i = 0; i < 2; i++) { const t = await d.tick(); await d.idle(); assert.deepEqual(t.started, []); }
+      assert.deepEqual(f.resumeCalls, [], "no resume recorded");
+      assert.equal((await real.forTask(c.dispatcherPrincipal, a.taskId))!.id, check.id, "no new check was started");
+      assert.deepEqual((await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check"), []);
+    });
+  }
+
+  suite("a check the owner declined is never checked again by the dispatcher while its attempt waits", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const d = go();
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    // As an older build left it: cancelled as declined while the attempt is still the active one.
+    await real.cancel(c.owner, { checkId: check.id, reason: "declined by the owner" as never });
+    f.relevant = false;
+    const t = await d.tick();
+    await d.idle();
+    assert.deepEqual(t.started, []);
+    assert.match(t.skipped[0]!.reason, /^the owner declined this resume; the task is being released$/);
+    assert.equal((await real.forTask(c.dispatcherPrincipal, a.taskId))!.id, check.id, "no new check was started");
+    assert.deepEqual(f.resumeCalls, []);
+  });
+
+  suite("a decline after the task was transferred is refused and changes nothing", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const bob = await c.agent("bob", workGrants(c.project, []));
+    const asg = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.transferTask({ commandId: "tr", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision, to: { kind: "agent", id: bob.id } });
+    const svc = declining(c, f, async () => { throw new Error("must not release"); });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_transition", /^not declined: the attempt this resume check was for is no longer the task's active attempt/));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "the check is untouched");
+    const now = (await c.assignments.getAssignment(a.taskId))!;
+    assert.deepEqual([now.state, now.owner?.id], ["assigned", bob.id], "still bob's");
+  });
+
+  suite("a task transferred while the decline releases it is not said to be released, and its check is left held", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const bob = await c.agent("bob", workGrants(c.project, []));
+    // The task moves just before the release looks at it, so the release finds nothing of this attempt to release.
+    const svc = declining(c, f, async (by, taskId, attemptId) => {
+      const asg = (await c.assignments.getAssignment(taskId))!;
+      await c.assignments.transferTask({ commandId: "tr", actor: c.owner.id, taskId, expectedRevision: asg.revision, to: { kind: "agent", id: bob.id } });
+      await releaseOf(c)(by, taskId, attemptId);
+    });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_transition", /^not declined: /));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "not cancelled as declined");
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.owner?.id, bob.id);
+  });
+
+  suite("a check not tied to an attempt cannot be declined: nothing would be released", async (c, f, real, a) => {
+    f.relevant = true;
+    const check = await real.start(c.owner, { commandId: "k", taskId: a.taskId, model: { provider: "x", id: "y" }, after: "continue" });
+    assert.deepEqual([check.phase, check.attemptId], ["ready", undefined]);
+    const svc = declining(c, f, async () => { throw new Error("must not release"); });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_command", /not tied to an attempt.*resume\.cancel or release the task/));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready");
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "assigned");
+  });
+
+  suite("a held check the owner cancelled cannot be declined, and the task stays assigned", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    await real.cancel(c.owner, { checkId: check.id });
+    const svc = declining(c, f, releaseOf(c));
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_command", /is cancelled; only a resume held/));
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "assigned");
+  });
+
+  suite("a decline's command ID retried after the task was assigned again answers as before and leaves the newer check alone", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const old = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const svc = declining(c, f, releaseOf(c));
+    assert.equal((await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId })).id, old.id);
+    const again = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.assignTask({ commandId: "as2", actor: c.owner.id, taskId: a.taskId, expectedRevision: again.revision, owner: { kind: "agent", id: "ann" } });
+    const now = (await c.assignments.getAssignment(a.taskId))!;
+    const next = (await c.assignments.admitAttempt({ commandId: "ad2", actor: "inbox", taskId: a.taskId, expectedRevision: now.revision, generation: now.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" })).id;
+    // A new decline of the old check now would release nothing: refused, not answered as released.
+    await assert.rejects(svc.decline(c.owner, { commandId: "d2", taskId: a.taskId }), isCode("invalid_transition", /^not declined: the attempt this resume check was for is no longer/));
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.activeAttemptId, next);
+    const newer = await real.start(c.dispatcherPrincipal, { commandId: "newer", taskId: a.taskId, attemptId: next, model: { provider: "x", id: "y" }, after: "continue" });
+    assert.equal(newer.phase, "ready");
+    const replay = await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId });
+    assert.deepEqual([replay.id, replay.phase], [old.id, "cancelled"], "the retried command answers with the check it declined");
+    assert.equal((await real.get(c.owner, newer.id))!.phase, "ready", "the newer check is not declined");
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.activeAttemptId, next, "the newer attempt is not released");
+  });
+
+  suite("an approval of a check already done closes the notice another approval left open", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+    await go({ notifications }).tick();
+    const open = async () => (await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check");
+    assert.equal((await real.approve(c.owner, { commandId: "ok", taskId: a.taskId })).phase, "done");
+    assert.equal((await open()).length, 1, "approved through a service that cannot close the notice");
+    assert.equal((await declining(c, f, releaseOf(c), notifications).approve(c.owner, { commandId: "ok2", taskId: a.taskId })).phase, "done");
+    assert.deepEqual(await open(), []);
+  });
+
   suite("a resume that is not held for the owner cannot be declined", async (c, f, real, a, go) => {
     await go({ workspaceBusy: async () => true }).tick();
     const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
