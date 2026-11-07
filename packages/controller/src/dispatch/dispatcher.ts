@@ -286,6 +286,11 @@ export class DispatcherService {
   readonly #options: Required<Pick<AttemptDispatcherOptions, "leaseMs" | "scanPage" | "expectedMinutes">> & AttemptDispatcherOptions;
   readonly #holder: string;
   readonly #live = new Map<string, Live>();
+  /**
+   * Attempts this dispatcher is starting (from just before the record says running until the worker is live or the start gave up). `quiesce` waits for a start in progress, so an operation on the checkout (card H12q:
+   * a landing) never runs beside a worker that is still coming up; set before the running record is written, so a freeze either lands first (the start is refused) or finds the start here.
+   */
+  readonly #starting = new Map<string, Promise<void>>();
   /** Loops that started in an earlier tick and have not ended (a hung one is not started again on top of itself). */
   readonly #loopsRunning = new Set<string>();
   readonly #path: ToolPath;
@@ -610,6 +615,14 @@ export class DispatcherService {
    */
   async quiesce(by: Principal, attemptId: string, reason: string, options: { strictMs?: number } = {}): Promise<{ checkpoint?: JsonObject }> {
     await this.freeze(by, attemptId, reason);
+    // A worker that is still coming up is waited for (bounded like the settle), so the checkpoint is its own and nothing of it runs beside the operation; one that does not come up in time is not quiet.
+    const starting = this.#starting.get(attemptId);
+    if (starting !== undefined) {
+      const limit = options.strictMs ?? 10_000;
+      let timer: NodeJS.Timeout | undefined;
+      const up = await Promise.race([starting.then(() => true, () => true), new Promise<boolean>((ok) => { timer = setTimeout(() => ok(false), limit); })]).finally(() => clearTimeout(timer));
+      if (!up) throw new DomainError("unavailable", `the worker of attempt ${attemptId} was still starting after ${limit} ms`);
+    }
     await this.settle(by, attemptId, { cancel: true, ...(options.strictMs === undefined ? {} : { strictMs: options.strictMs }) });
     const checkpoint = await this.#checkpoint(attemptId, reason);
     return checkpoint === undefined ? {} : { checkpoint };
@@ -1540,18 +1553,33 @@ export class DispatcherService {
   }
 
   async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
+    let done!: () => void;
+    const starting = new Promise<void>((ok) => { done = ok; });
+    this.#starting.set(d.body.attemptId, starting);
+    let outcome: AdvanceOutcome;
+    try { outcome = await this.#startNow(d, host, requestId); } finally { this.#starting.delete(d.body.attemptId); done(); }
+    // Frozen while it waited (an operation on its checkout made it quiet after the busy check above): it is not started; the place is given back and a later tick looks again (card H12q).
+    if (outcome.kind === "waiting") await this.#giveBack((await this.#load(d.body.attemptId)) ?? d);
+    return outcome;
+  }
+
+  async #startNow(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
     const b = d.body;
     // The place, the host and the generation were judged just before (`#advance`, which runs every check again for a claim that waits); here the claim on the attempt is made. The record says "running"
     // before the worker exists, and only one caller can make it: it must still be waiting, with the place this caller holds. If this process dies now, the lease ends and the attempt is taken as lost.
     const now = this.#runner.now();
     const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
+    let frozen = false;
     try {
       await this.#update(b.attemptId, (x) => {
         if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
+        // A frozen attempt may make no call, so it is not started (its worker would only come up beside whatever froze it, such as a landing on its checkout). An ending freeze is a stop: the start goes on and the stop ends it.
+        if (x.frozen !== undefined && x.frozen.ending !== true) { frozen = true; throw new DomainError("unavailable", `attempt ${b.attemptId} is frozen (${x.frozen.reason})`); }
         const { resumeNote: _n, resumeFrom: _f, pinnedHost: _p, ...rest } = x; void _n; void _f; void _p;
         return { ...rest, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until } };
       }, async () => this.#placedChange(b.taskId, host.hostId, b.route));
     } catch (error) {
+      if (frozen) return { kind: "waiting" };
       if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "place", reason: "another caller started the attempt" };
       throw error;
     }

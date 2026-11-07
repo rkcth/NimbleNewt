@@ -225,4 +225,22 @@ for (const backend of backends) {
       await r.d.idle();
     } finally { await r.store.close(); }
   });
+
+  test(`${backend.name}: a second look at the scope that fails releases the attempts the first look froze, and the operation does not run (card H12q)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      let listings = 0;
+      const real = r.d.liveAttemptsOf.bind(r.d);
+      (r.d as { liveAttemptsOf: unknown }).liveAttemptsOf = async (by: never, scope: never) => { if (++listings === 2) throw new Error("the live list could not be read"); return real(by, scope); };
+      let ran = false;
+      await assert.rejects(() => r.coordinator.around({ taskId: r.taskId }, "landing", async () => { ran = true; }, undefined, "tag-l"), /the live list could not be read/);
+      assert.equal(ran, false, "the operation did not run");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the attempt frozen by the first look was released");
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
 }

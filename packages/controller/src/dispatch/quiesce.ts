@@ -89,7 +89,14 @@ export class QuiesceCoordinator {
     // An attempt that starts while the others are being made quiet is found by listing again (a few rounds), so none begins to run on a checkout that is about to change.
     const seen = new Set<string>();
     for (let round = 0; round < 4; round++) {
-      const fresh = (await dispatcher.liveAttemptsOf(principal, scope)).filter((id) => !seen.has(id));
+      let listed: string[];
+      try { listed = await dispatcher.liveAttemptsOf(principal, scope); } catch (error) {
+        // A later look that fails leaves the attempts already frozen by this call: they are released before the operation is refused (H12q review), never left refusing calls with nobody holding them.
+        const failed = await releaseAll();
+        if (failed !== undefined) await unreleasedBlocker(failed, "did not run");
+        throw error;
+      }
+      const fresh = listed.filter((id) => !seen.has(id));
       // Looked at twice at least: the first look may have been just before an attempt began.
       if (fresh.length === 0 && round > 0) break;
       for (const attemptId of fresh) { seen.add(attemptId); await makeQuiet(attemptId); }
