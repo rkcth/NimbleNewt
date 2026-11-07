@@ -67,7 +67,7 @@ export interface StopIntentBody {
   readonly ended?: true;
   /**
    * Figures this request's own pass reported but could not record anywhere else (the attempt's note and its wait both lost six races): per attempt the highest one. The sweep charges them and takes each off once it is charged;
-   * until then the request counts as unpaid. Bounded by the inventory limit. Records written by older builds have none.
+   * until then the request counts as unpaid. At most the inventory limit of attempts: a figure for one more attempt is refused (the pass ends with the retryable `stale_revision`), never written over an older one. Records written by older builds have none.
    */
   readonly owed?: readonly { readonly attemptId: string; readonly costMicros: number; readonly computeMs: number }[];
   readonly inventory: readonly InventoryItem[];
@@ -365,8 +365,10 @@ export class StopService {
       for (const rec of page) {
         after = rec.id;
         const b = rec.body as unknown as StopIntentBody;
-        // What a pass could not record anywhere else is charged first (see `owed`), for a finished request too.
-        if ((b.owed?.length ?? 0) > 0) await this.#payOwed(by, rec.id).catch(() => undefined);
+        // What a pass could not record anywhere else is charged first (see `owed`), for a finished request too. A finished request that still carries the "not charged" mark is looked at as well, owed or not: the write
+        // that takes the mark off may have failed after the last owed figure was taken off, or a sweep may have paid what was owed before the request settled with the mark; `#payOwed` clears it then unless an open entry
+        // still lists the request. Only a request this build marked (it carries `ended`, written before the mark) is cleared this way: an older record's mark says nothing about where its figure went.
+        if ((b.owed?.length ?? 0) > 0 || (TERMINAL.includes(b.phase) && b.ended === true && b.outcome?.unresolved.includes(CLEANUP_UNPAID) === true)) await this.#payOwed(by, rec.id).catch(() => undefined);
         if (TERMINAL.includes(b.phase)) continue;
         try { await this.advance(by, { intentId: rec.id }); advanced.push(rec.id); } catch { failed.push(rec.id); }
       }
@@ -525,15 +527,17 @@ export class StopService {
   /**
    * Records the figure a request could not charge now: in the attempt's open entry (`#waitOn`), or, when that entry keeps changing, on the request's OWN record as `owed` (a record only that request's passes write), so the figure is
    * never left unrecorded. The error never reaches the caller: `#charge` reports the charge as failed, the request counts as unpaid, and the sweep charges what is owed (`#payOwed`). Only a record that cannot be written either
-   * (six lost races on it too) throws, and then the pass is left unfinished and retried.
+   * (six lost races on it too), or a request that already owes figures for the inventory limit of other attempts, throws, and then the pass is left unfinished and retried.
    */
   async #wait(attemptId: string, intentId: string, want: { costMicros: number; computeMs: number }): Promise<void> {
     try { await this.#waitOn(attemptId, intentId, want); } catch (error) {
       if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
       await this.#update(intentId, (x) => {
         const have = (x.owed ?? []).find((o) => o.attemptId === attemptId);
+        // The list is never cut (that would drop a figure nobody charged): a new attempt past the limit is refused like a write that cannot be made, and the pass is left unfinished and retried.
+        if (have === undefined && (x.owed ?? []).length >= STOP_LIMITS.inventory) throw new DomainError("stale_revision", `the request already owes figures for ${STOP_LIMITS.inventory} attempts; the pass is left unfinished and the next sweep carries it on`);
         const merged = { attemptId, costMicros: Math.max(have?.costMicros ?? 0, want.costMicros), computeMs: Math.max(have?.computeMs ?? 0, want.computeMs) };
-        return { ...x, owed: [...(x.owed ?? []).filter((o) => o.attemptId !== attemptId), merged].slice(-STOP_LIMITS.inventory) };
+        return { ...x, owed: [...(x.owed ?? []).filter((o) => o.attemptId !== attemptId), merged] };
       });
     }
   }
@@ -697,11 +701,16 @@ export class StopService {
     }
     for (const intentId of cleared) {
       if (stuck.has(intentId)) continue;
-      // A request that has not finished has no outcome to clear yet (its mark may still be written): it stays listed. A clear that fails is tried again by the next sweep.
-      const phase = ((await this.#runner.get(KIND, intentId))?.body as unknown as StopIntentBody | undefined)?.phase;
-      if (phase === undefined || !TERMINAL.includes(phase)) { stuck.add(intentId); continue; }
-      const wrote = await this.#update(intentId, (x) => (x.outcome === undefined || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
-      if (!wrote) stuck.add(intentId);
+      // A request that has not finished has no outcome to clear yet (its mark may still be written): it stays listed. Nor is a request cleared while it still owes a figure of its own (`owed`): its mark stays until
+      // `#payOwed` has charged that too, and it stays listed here. A clear that fails is tried again by the next sweep.
+      const x0 = (await this.#runner.get(KIND, intentId))?.body as unknown as StopIntentBody | undefined;
+      if (x0 === undefined || !TERMINAL.includes(x0.phase) || (x0.owed?.length ?? 0) > 0) { stuck.add(intentId); continue; }
+      let owes = false;
+      const wrote = await this.#update(intentId, (x) => {
+        owes = (x.owed?.length ?? 0) > 0;
+        return owes || x.outcome === undefined || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") };
+      }).catch(() => false);
+      if (!wrote || owes) stuck.add(intentId);
     }
     // A settled entry whose requests are cleared is taken off the index (the per-attempt running total stays: it is what keeps a later stop from charging twice).
     for (const f of finished) {
