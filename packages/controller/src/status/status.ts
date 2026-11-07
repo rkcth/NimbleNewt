@@ -628,7 +628,11 @@ export class StatusService {
     for (const a of r.attempts.slice(0, 20)) lines.push(line(`Attempt ${shown(a.attemptId, 80)}: ${money(a.costMicros)} and ${a.computeMs} ms of compute charged to its task's budget in all (every stop of it counted once)${a.pending ? "; a further charge is still being made" : ""}.`, cite("stop", r.intentId)));
     if (r.attempts.length > 20) lines.push(line(`${r.attempts.length - 20} more attempt(s) are not listed.`, cite("stop", r.intentId)));
     if (r.attempts.length === 0) lines.push(line("No attempt with a charged cleanup cost is recorded on this request.", cite("stop", r.intentId)));
-    if (r.unpaid) lines.push(line(r.markOnly ? "A charge failed when the request ended; this request has nothing left to charge, and the next sweep checks it again and clears this." : "Some of the cleanup spend is not charged yet; it is retried until it is.", cite("stop", r.intentId)));
+    if (r.unpaid) lines.push(line(r.markOnly ? "A charge failed when the request ended; this request has nothing left to charge, and the next sweep checks it again and clears this."
+      : r.markKept ? "A charge failed when the request ended. This request was recorded by an older version, which did not note where that charge went, so no sweep will clear this; compare the attempt totals above with the task's budget spending to see whether it was charged."
+        : r.scanCut ? "A charge failed when the request ended. More charges are open than this view reads, so whether this request still has some of its own to make is not known."
+          : "Some of the cleanup spend is not charged yet; it is retried until it is.", cite("stop", r.intentId)));
+    else if (r.scanCut) lines.push(line("More charges are open than this view reads, so a charge this request is still making on an attempt not listed above may not be shown.", cite("stop", r.intentId)));
     return { observedAt: at, lines };
   }
 

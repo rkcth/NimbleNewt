@@ -1499,6 +1499,19 @@ for (const backend of backends) {
     const marked = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
     assert.equal(marked.at(-1), "A charge failed when the request ended; this request has nothing left to charge, and the next sweep checks it again and clears this.");
     assert.ok(!marked.some((x) => /retried until/.test(x)));
+    // A mark no sweep will clear (an older build's record on no open entry) is not promised a clear, and a scan of the open charges that was cut says so (card L02d review 15).
+    answer = { ...answer!, unpaid: true, markOnly: false, markKept: true, scanCut: false };
+    const kept = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
+    assert.equal(kept.at(-1), "A charge failed when the request ended. This request was recorded by an older version, which did not note where that charge went, so no sweep will clear this; compare the attempt totals above with the task's budget spending to see whether it was charged.");
+    assert.ok(!kept.some((x) => /clears this\.|retried until/.test(x)));
+    answer = { ...answer!, unpaid: true, markOnly: false, markKept: false, scanCut: true };
+    const cut = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
+    assert.equal(cut.at(-1), "A charge failed when the request ended. More charges are open than this view reads, so whether this request still has some of its own to make is not known.");
+    assert.ok(!cut.some((x) => /clears this\.|retried until/.test(x)));
+    answer = { ...answer!, unpaid: false, markOnly: false, markKept: false, scanCut: true };
+    const cutPaid = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
+    assert.equal(cutPaid.at(-1), "More charges are open than this view reads, so a charge this request is still making on an attempt not listed above may not be shown.");
+    answer = { ...answer!, scanCut: false };
     // The "ending is charged on top" clause belongs to a stop only: not a suspend, not a cancelled request; a Force Stop has no preparation figure.
     const first = async (): Promise<string> => (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines[0]!.text;
     answer = { ...answer!, mode: "suspend", phase: "done", unpaid: false, attempts: [] };

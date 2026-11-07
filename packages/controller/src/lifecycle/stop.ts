@@ -404,7 +404,7 @@ export class StopService {
    * What the latest suspension or stop of a scope has spent on cleanup, for the owner to read (card L02d): the figure the request counted, what the runtime reported and the budgets were charged for each attempt the
    * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass that went stale is not in it), not the full cost.
    */
-  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid. */ markOnly: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
     // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
     await this.#pauses.authorizeControl(viewer, scope);
     const id = await this.#activeId(scope);
@@ -420,25 +420,31 @@ export class StopService {
       // A pending note belongs to the request that wrote it; another request's further charge on the same attempt is not this request's debt.
       if (charge.pending?.intentId === id) ownPending = true;
     }
-    // The request's own pending note may be on an attempt its record does not list: the open index names every request with a note or a wait on an attempt.
+    // The request's own pending note may be on an attempt its record does not list: the open index names every request with a note or a wait on an attempt. The scan is cut at `RETRY_PAGES` pages; a scan that did not reach
+    // the end (a short page) says nothing about the rest, so it is reported as cut, never as "nothing of its own left". `listed`: some entry read lists the request (the sweep clears its mark there once that entry is paid).
+    let complete = ownPending, listed = false;
     for (let after: string | undefined, pages = 0; !ownPending && pages < RETRY_PAGES; pages++) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const rec of page) {
         after = rec.id;
         if (!(rec.body as unknown as OpenBody).intents.includes(id)) continue;
+        listed = true;
         const charge = (await this.#runner.get(CHARGE, rec.id))?.body as unknown as ChargeBody | undefined;
         const want = (rec.body as unknown as OpenBody).want;
         // Its own note, or a figure it (or a request after it) reported that is still above what was charged: the request has charging left to do, not just a mark.
         if (charge?.pending?.intentId === id || (want !== undefined && (charge === undefined || charge.costMicros < want.costMicros || charge.computeMs < want.computeMs))) { ownPending = true; break; }
       }
-      if (page.length < 100) break;
+      if (ownPending || page.length < 100) { complete = true; break; }
     }
     const marked = found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true;
     // Records written before the flags existed (see the notes): a Force Stop that carries a limit, a spent figure, a checkpoint or a preparing/prepared step in its history took over earlier work (a pure Force Stop has none of them),
     // and a request settled as "unresolved work remains" got there through its ending.
     const forcedAfterPreparation = found.forced !== undefined && (found.forced.afterPreparation === true || found.spendBudget !== undefined || found.spent > 0 || found.prepared !== undefined || found.history.some((h) => h.phase === "preparing" || h.phase === "prepared"));
     const endingRan = found.ended === true || found.history.some((h) => h.note === "unresolved work remains");
-    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
+    // Only a request this build marked (`ended`) or one an open entry lists has its mark cleared by a sweep (see `sweep`); an older record's mark on no entry is kept for good.
+    const scanCut = !complete;
+    const markKept = marked && !ownPending && !scanCut && found.ended !== true && !listed;
+    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
@@ -561,11 +567,14 @@ export class StopService {
     }
     const now = (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
     if (now === undefined || (now.owed?.length ?? 0) > 0 || !TERMINAL.includes(now.phase) || now.outcome?.unresolved.includes(CLEANUP_UNPAID) !== true) return;
+    // The mark is taken off only after the WHOLE index was read: a scan cut at `RETRY_PAGES` pages may have missed the entry that lists the request, so the mark is kept then (a later sweep looks again).
+    let complete = false;
     for (let after: string | undefined, pages = 0; pages < RETRY_PAGES; pages++) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const rec of page) { after = rec.id; if ((rec.body as unknown as OpenBody).intents.includes(id)) return; }
-      if (page.length < 100) break;
+      if (page.length < 100) { complete = true; break; }
     }
+    if (!complete) return;
     await this.#update(id, (x) => (x.outcome === undefined || (x.owed?.length ?? 0) > 0 || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
   }
 
@@ -677,8 +686,9 @@ export class StopService {
     const cleared = new Set<string>();
     const stuck = new Set<string>();
     const finished: { attemptId: string; revision: number }[] = [];
-    // Only the open entries are read (not every charge record ever written); a sweep takes up to RETRY_PAGES x 100 of them and the rest wait for the next sweep.
-    for (let after: string | undefined, pages = 0; pages < RETRY_PAGES; pages++) {
+    // Only the open entries are read (not every charge record ever written); a sweep pays up to RETRY_PAGES x 100 of them and the rest wait for the next sweep.
+    let after: string | undefined, complete = false;
+    for (let pages = 0; pages < RETRY_PAGES; pages++) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const rec of page) {
         after = rec.id;
@@ -697,7 +707,13 @@ export class StopService {
         for (const intentId of open.intents) { if (ok) cleared.add(intentId); else stuck.add(intentId); }
         if (ok) finished.push({ attemptId: rec.id, revision: rec.revision });
       }
-      if (page.length < 100) break;
+      if (page.length < 100) { complete = true; break; }
+    }
+    // An entry past the cut was not paid by this sweep, so every request it lists is held back too (its mark stays): the rest of the index is read (only read, nothing is paid) to find them.
+    while (!complete) {
+      const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const rec of page) { after = rec.id; for (const intentId of (rec.body as unknown as OpenBody).intents) stuck.add(intentId); }
+      if (page.length < 100) complete = true;
     }
     for (const intentId of cleared) {
       if (stuck.has(intentId)) continue;
