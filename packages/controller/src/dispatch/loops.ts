@@ -50,6 +50,8 @@ export function probeLoops(cutover: Pick<CutoverService, "downTargets" | "probe"
 
 const ROUNDS = 10;
 const PAGE = 100;
+/** Pages of concern records the automatic recovery steps read a tick, at most (card V02c). */
+const AUTO_ROUNDS = 5;
 
 async function drain(step: () => Promise<{ more?: boolean } | void>): Promise<void> {
   for (let round = 0; round < ROUNDS; round++) { const r = await step(); if (r === undefined || r.more !== true) return; }
@@ -177,10 +179,13 @@ export function reviewLoops(reviews: Pick<ReviewService, "sweep">, projects: () 
  * L01b: the reconciler's pass (repairs, inbox admission with the pause lookup, effect recovery, wait deadlines) and stall detection. The scan needs the dedicated `recovery.stall-scan` right; a dispatcher
  * without it is told once (`missing`) and the scan is skipped, so the tick does not fail every time.
  */
-export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "escalateUndecided" | "markEscalationNotified">>, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>, notifyEscalation?: (concern: { id: string; taskId: string; projectId: string; kind: string; detail: string; escalatedAt?: string; escalatedTo?: string; escalationLevel?: number }) => Promise<void>): DispatcherLoop[] {
+export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "escalateUndecided" | "markEscalationNotified" | "autoStep">>, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>, notifyEscalation?: (concern: { id: string; taskId: string; projectId: string; kind: string; detail: string; escalatedAt?: string; escalatedTo?: string; escalationLevel?: number }) => Promise<void>): DispatcherLoop[] {
   let said = false;
   // The scan continues where the last tick stopped and wraps at the end, so every assignment is reached however many there are.
   let cursor: string | undefined;
+  // The automatic recovery steps go round the concerns the same way, at most AUTO_ROUNDS pages a tick (card V02c).
+  let autoCursor: string | undefined;
+  const autoStep = stall.autoStep?.bind(stall);
   return [
     { name: "recovery.reconcile", run: async () => { await reconciler.runPass(); } },
     { name: "recovery.stall-scan", run: async (tickBy) => {
@@ -205,6 +210,18 @@ export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<S
         if (!said) { await missing(); said = true; }
       }
     } },
+    // The controller's automatic recovery steps (card V02c): off unless the owner switched them on, when nothing is read. Its own loop, so a failing escalation notice does not hold it back. A dispatcher without the
+    // scan right is already told about by the scan loop above; here it simply takes no step.
+    ...(autoStep === undefined ? [] : [{ name: "recovery.auto-step", run: async (tickBy: Principal) => {
+      const by = renew === undefined ? tickBy : await renew();
+      try {
+        for (let round = 0; round < AUTO_ROUNDS; round++) {
+          const r = await autoStep(by, autoCursor === undefined ? {} : { afterId: autoCursor });
+          autoCursor = r.next;
+          if (r.next === undefined || r.stepped + r.refused > 0) break;
+        }
+      } catch (error) { if (!(error instanceof DomainError && error.code === "forbidden")) throw error; }
+    } }]),
   ];
 }
 

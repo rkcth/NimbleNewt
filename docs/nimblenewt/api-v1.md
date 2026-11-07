@@ -166,7 +166,7 @@ Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `enabled`, `levels` (the owner's actions for level 0, 1, 2 ...; a level not listed uses the defaults), `owner` (actions at the owner's level) and `defaults`.
+Result: `{ item }`: `revision`, `enabled`, `levels` (the owner's actions for level 0, 1, 2 ...; a level not listed uses the defaults), `owner` (actions at the owner's level), `minGapMinutes`, `autoStep` (whether the controller takes the next rung by itself when nobody answers), `autoStepMinutes` (the owner's time, or null), `autoStepDefaultMinutes` and `defaults`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -2050,7 +2050,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `recovery.ladder.set`
 
-The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `pause`, `reassign`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off. Fields left out stay.
+The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `pause`, `reassign`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off; `autoStep` turns on or off the controller taking the next allowed rung by itself when the concern's holder has not answered for `autoStepMinutes` (off by default): one rung at a time, each recorded, in the holder's name and only with the holder's own rights and level list, never choosing a new holder (reassign is passed), never on a concern the owner holds, and stopping when the concern is decided, clears or is handed to the owner. Fields left out stay.
 
 Arguments:
 
@@ -2058,6 +2058,8 @@ Arguments:
 - `owner` (optional): for example `["stop"]`
 - `enabled` (optional): true or false
 - `minGapMinutes` (optional): the least minutes between two recovery steps by agents on one concern; 0 or null for none (the default)
+- `autoStep` (optional): true or false: whether the controller takes the next rung by itself when nobody answers (default false)
+- `autoStepMinutes` (optional): the minutes an unanswered concern waits before each automatic rung, 1 to 10080; null for the default (240)
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.

@@ -257,7 +257,7 @@ test("the tick runs the reconciler and stall detection; stall detection needs th
     const owner = await c.services.principals.authenticate((await c.services.principals.bootstrapOwner({ name: "rob" })).token);
     const ran = async () => (await c.dispatch!.dispatcher.tick()).loops.filter((l) => l.name.startsWith("recovery."));
     const notices = async () => (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("recovery.stall-scan")).length;
-    assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.reconcile", true], ["recovery.stall-scan", true]], "no failing loop without the right");
+    assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.reconcile", true], ["recovery.stall-scan", true], ["recovery.auto-step", true]], "no failing loop without the right");
     await ran();
     assert.equal(await notices(), 1, "the owner is told once");
     // The owner grants the narrow right: the scan now runs, and the right is not the broad one.
@@ -265,7 +265,7 @@ test("the tick runs the reconciler and stall detection; stall detection needs th
     const dispatcher = (await c.services.principals.get("service:dispatcher"))!;
     assert.equal((await c.services.grants.explain(dispatcher as never, "recovery.stall-scan", "*", new Date().toISOString())).allowed, true);
     assert.equal((await c.services.grants.explain(dispatcher as never, "recovery.read", "*", new Date().toISOString())).allowed, false, "the narrow right does not give the broad one");
-    assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.reconcile", true], ["recovery.stall-scan", true]]);
+    assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.reconcile", true], ["recovery.stall-scan", true], ["recovery.auto-step", true]]);
     assert.equal(await notices(), 1);
   } finally {
     await c.close();

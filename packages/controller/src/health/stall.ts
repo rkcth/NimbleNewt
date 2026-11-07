@@ -8,7 +8,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { WaitService } from "../domain/waits.js";
 import { AGENT_LIMITS, type AgentBody } from "../agents/agents.js";
 import { DEFAULT_LADDER_HOURS } from "./escalation-ladder.js";
-import { RECOVERY_ACTIONS, allowedAt, rungOf, type RecoveryAction, type RecoveryEffects, type RecoveryPolicy } from "./recovery-ladder.js";
+import { RECOVERY_ACTIONS, allowedAt, autoStepMs, rungOf, type RecoveryAction, type RecoveryEffects, type RecoveryPolicy } from "./recovery-ladder.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type HostBody } from "../hosts/hosts.js";
 import { DEFAULT_CONTRACT, DIFFICULTIES, type ContractBody, type Difficulty } from "../planning/contracts.js";
 import { allows, allowsExactly } from "../security/access.js";
@@ -73,9 +73,9 @@ export interface ConcernBody {
   readonly recoveryPending?: RecoveryPending;
 }
 
-export interface RecoveryPending { readonly action: RecoveryAction; readonly rung: number; readonly key: string; readonly by: string; readonly at: string; readonly level: number | "owner"; readonly cmd: string; readonly text?: string; readonly to?: string; readonly skipped?: readonly { readonly action: RecoveryAction; readonly reason: string }[] }
+export interface RecoveryPending { readonly action: RecoveryAction; readonly rung: number; readonly key: string; readonly by: string; readonly at: string; readonly level: number | "owner"; readonly cmd: string; readonly text?: string; readonly to?: string; readonly skipped?: readonly { readonly action: RecoveryAction; readonly reason: string }[]; /** Begun by the controller's automatic stepping, in the name and with the rights of `by` (the holder who did not answer). */ readonly auto?: true }
 
-export interface RecoveryStep { readonly n: number; readonly action: RecoveryAction; readonly by: string; readonly at: string; readonly level: number | "owner"; readonly text?: string; readonly to?: string; readonly warnings?: readonly string[]; /** The rung was passed, not taken (the actor could not take it, or the service refused it on a precondition); `reason` says why. */ readonly skipped?: boolean; readonly reason?: string; /** The caller's (scoped) command ID, so a repeat is answered as recorded. */ readonly cmd?: string }
+export interface RecoveryStep { readonly n: number; readonly action: RecoveryAction; readonly by: string; readonly at: string; readonly level: number | "owner"; readonly text?: string; readonly to?: string; readonly warnings?: readonly string[]; /** The rung was passed, not taken (the actor could not take it, or the service refused it on a precondition); `reason` says why. */ readonly skipped?: boolean; readonly reason?: string; /** The caller's (scoped) command ID, so a repeat is answered as recorded. */ readonly cmd?: string; /** Taken by the controller's automatic stepping (the owner's `autoStep` setting) because `by`, the holder, had not answered in time; `by`'s own rights applied. */ readonly auto?: true }
 
 export interface EscalationStep { readonly level: number; readonly to: string; readonly at: string; readonly skipped?: readonly { readonly id: string; readonly reason: string }[] }
 const TRAIL_KEEP = 20;
@@ -128,6 +128,35 @@ export interface StallOptions extends RunnerOptions {
 }
 
 export interface ScanReport { readonly checked: number; readonly opened: number; readonly reopened: number; readonly cleared: number; readonly contended: number; readonly next?: string }
+
+/** One call of the automatic stepping: concerns read, steps finished, steps refused or lost to a race, and where the next call goes on. */
+export interface AutoStepReport { readonly checked: number; readonly stepped: number; readonly refused: number; readonly next?: string }
+
+/** Bounds of one call of the automatic stepping: concern records read (a page, default 100), and steps taken (so a backlog after an outage is worked off over several ticks, not in one burst). */
+export const AUTO_STEP_LIMITS = { page: 100, maxPage: 500, steps: 20 } as const;
+
+/** The words of each automatic step (fixed, so a retry of the same step is the same request). */
+const AUTO_TEXT: Readonly<Record<RecoveryAction, string>> = {
+  nudge: "Automatic recovery step: the concern that this task looks stuck has had no answer in time. Please report your progress, or say what blocks you.",
+  rebrief: "Automatic recovery step: the concern that this task looks stuck still has no answer. Read the task's brief and acceptance criteria again, then go on or say what blocks you.",
+  pause: "Automatic recovery step: the task is paused because the concern that it looks stuck had no answer in time.",
+  reassign: "Automatic recovery step.",
+  stop: "Automatic recovery step: the task is stopped because the concern that it looks stuck had no answer in time.",
+  "hand-to-owner": "Automatic recovery step: the concern that this task looks stuck had no answer in time and is handed to the owner.",
+};
+/** Why the automatic stepping passes `reassign`: it never chooses who takes a task over. */
+const AUTO_NO_TARGET = "the automatic recovery steps never choose who takes the task over; a person must";
+/** When the wait for the next automatic rung began: the last change of the concern (opened, reopened, re-routed or a recovery step), or the time it climbed to its current holder, whichever is later. */
+const autoSince = (c: ConcernBody): number => Math.max(Date.parse(c.lastChangedAt), c.escalatedAt === undefined ? 0 : Date.parse(c.escalatedAt), c.recoverySteps?.at(-1)?.at === undefined ? 0 : Date.parse(c.recoverySteps.at(-1)!.at));
+/** Who holds the concern now: the agent it climbed to, the owner, or the supervisor it was routed to. */
+const holderOf = (c: ConcernBody): string => c.escalatedTo ?? (c.route.via === "supervisor" ? `agent:${c.route.to.id}` : "owner");
+/** The actor's own level on the ladder: the owner its own; the first supervisor 0; a holder up the chain its climb level; anyone else (a manager) the concern's level; never above the concern's level. */
+const actorLevel = (c: ConcernBody, by: Principal): number | "owner" => {
+  if (by.kind === "owner") return "owner";
+  const concernLevel = c.escalationLevel ?? 0;
+  const rank = `agent:${c.route.to.id}` === by.id ? 0 : (c.escalationTrail?.find((t) => t.to === by.id)?.level ?? concernLevel);
+  return Math.min(rank, concernLevel);
+};
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const safe = (value: unknown, field: string, max: number): string => {
@@ -582,6 +611,15 @@ export class StallService {
    * The owner may replace a pending step: the pending step is dropped and the new one begun in the same call, from the revision the owner read.
    */
   async recover(by: Principal, command: NoActor & { concernId: string; expectedRevision: number; action: RecoveryAction; text?: string; to?: string }): Promise<{ id: string; revision: number; replayed: boolean; step?: RecoveryStep }> {
+    return this.#recover(by, command, false);
+  }
+
+  /**
+   * The step itself. `auto`: taken by the controller's automatic stepping in the name of `by`, the concern's holder who did not answer (see `autoStep`): every rule of a manual step by `by` applies (rights, level list, on/off switch, gap, order),
+   * and besides, inside the guarded write, the concern must still be suspected, still held by `by`, automatic stepping must be on and the wait must be over; a `reassign` on the way is passed (the controller never picks a new holder); and just before
+   * the effect the concern is read again: if it was answered meanwhile, nothing is done and the step is recorded as skipped with that reason.
+   */
+  async #recover(by: Principal, command: NoActor & { concernId: string; expectedRevision: number; action: RecoveryAction; text?: string; to?: string }, auto: boolean): Promise<{ id: string; revision: number; replayed: boolean; step?: RecoveryStep }> {
     onlyKnown(command, ["commandId", "concernId", "expectedRevision", "action", "text", "to"]);
     if (this.#recoveryPolicy === undefined || this.#recoveryEffects === undefined) throw new DomainError("unavailable", "recovery steps are not available");
     const found = await this.#concern(command.concernId);
@@ -649,12 +687,18 @@ export class StallService {
           if (!(by.kind === "owner" || (!own && (supervisor || manager)))) throw new DomainError("forbidden", `${by.id} may not take recovery steps on that concern`);
           if (by.kind !== "owner" && !policy.enabled) throw new DomainError("forbidden", "recovery steps by agents are switched off (the owner can switch them on)");
           // The actor's own level, never the concern's alone: the first supervisor is 0, a holder up the chain its climb level, anyone else (a manager) the concern's level, and never above it.
-          const concernLevel = cb.escalationLevel ?? 0;
-          const rank = by.kind === "owner" ? "owner" as const : `agent:${cb.route.to.id}` === by.id ? 0 : (cb.escalationTrail?.find((t) => t.to === by.id)?.level ?? concernLevel);
-          const level: number | "owner" = rank === "owner" ? "owner" : Math.min(rank, concernLevel);
+          const level = actorLevel(cb, by);
           const last = cb.recoveryRung ?? -1;
           const rung = rungOf(action);
           const at = this.#runner.now();
+          if (auto) {
+            // Checked again under the revision guard: an answer, a climb or a change of the setting since the tick read the concern stops the step.
+            const waitMs = autoStepMs(policy);
+            if (waitMs === undefined) throw new DomainError("forbidden", "automatic recovery steps are switched off");
+            if (cb.state !== "suspected") throw new DomainError("invalid_transition", `the concern is ${cb.state}: it was answered`);
+            if (by.kind === "owner" || holderOf(cb) !== by.id) throw new DomainError("invalid_transition", "the concern is held by someone else now");
+            if (Date.parse(at) - autoSince(cb) < waitMs) throw new DomainError("invalid_transition", "the concern's holder still has time to answer");
+          }
           const skipped: { action: RecoveryAction; reason: string }[] = [];
           const ctx = { by, taskId: cb.taskId, projectId: cb.projectId, concernId: found.id, ...(pinned === undefined ? {} : { agent: pinned }), ...(command.to === undefined ? {} : { to: command.to }) };
           if (by.kind !== "owner") {
@@ -663,7 +707,7 @@ export class StallService {
             if (rung <= last) throw new DomainError("invalid_transition", `the next step is ${RECOVERY_ACTIONS.find((a) => rungOf(a) > last && allowed.includes(a)) ?? "none"}, not ${action}`);
             // Rungs between the last step and this one may be passed only when the actor cannot take them.
             for (const between of RECOVERY_ACTIONS.filter((a) => rungOf(a) > last && rungOf(a) < rung && allowed.includes(a))) {
-              const why = between === "hand-to-owner" ? undefined : await effects.unavailable?.(between, ctx);
+              const why = between === "hand-to-owner" ? undefined : auto && between === "reassign" ? AUTO_NO_TARGET : await effects.unavailable?.(between, ctx);
               if (why === undefined) throw new DomainError("invalid_transition", `the next step is ${between}, not ${action}`);
               skipped.push({ action: between, reason: why.slice(0, 200) });
             }
@@ -672,7 +716,7 @@ export class StallService {
             if (gapMs > 0 && lastAt !== undefined && Date.parse(at) - Date.parse(lastAt) < gapMs) throw new DomainError("invalid_transition", `the last recovery step was at ${lastAt}; the next one may be taken ${Math.ceil((gapMs - (Date.parse(at) - Date.parse(lastAt))) / 60_000)} minute(s) from now`);
           } else if (rung <= last) throw new DomainError("invalid_transition", `${RECOVERY_ACTIONS[last]} was already taken; take a higher step`);
           const key = keyOf(found.id, rung, cb.reopened, cb.recoveryGen ?? 0);
-          const next: ConcernBody = { ...cb, ...(pinned === undefined ? {} : { stalledAgent: pinned }), recoveryPending: { action, rung, key, by: by.id, at, level, cmd: scoped, ...(reason === undefined ? {} : { text: reason }), ...(command.to === undefined ? {} : { to: command.to }), ...(skipped.length === 0 ? {} : { skipped }) } };
+          const next: ConcernBody = { ...cb, ...(pinned === undefined ? {} : { stalledAgent: pinned }), recoveryPending: { action, rung, key, by: by.id, at, level, cmd: scoped, ...(reason === undefined ? {} : { text: reason }), ...(command.to === undefined ? {} : { to: command.to }), ...(skipped.length === 0 ? {} : { skipped }), ...(auto ? { auto: true as const } : {}) } };
           const { id: _i, revision: _r, ...stored } = next as ConcernBody & { id?: string; revision?: number };
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { taskId: cb.taskId, kind: cb.kind, state: cb.state, generation: cb.generation, action, begun: true } };
         },
@@ -685,10 +729,17 @@ export class StallService {
     // `command_conflict` means the key was used by an earlier different request: the step is re-keyed once; any other failure leaves the step pending for a retry.
     let warnings: readonly string[] | undefined;
     let refused: string | undefined;
-    if (p.action !== "hand-to-owner") {
+    // An automatic step is not made once the concern has been answered (or has cleared) since it was begun: the answer wins, and the step is recorded as passed with the reason.
+    if (p.auto === true) {
+      const now = await this.#concern(found.id);
+      if (now !== undefined && now.state !== "suspected") refused = `the concern was answered (it is ${now.state}) before the automatic step was made; nothing was done`;
+    }
+    if (p.action !== "hand-to-owner" && refused === undefined) {
       for (let round = 0; ; round++) {
         const act = p.action; if (act === "hand-to-owner") break;
         try { warnings = (await effects.run(act, { by, key: p.key, taskId: body.taskId, projectId: body.projectId, concernId: found.id, text: p.text ?? "", ...(body.stalledAgent === undefined ? {} : { agent: body.stalledAgent }), ...(p.to === undefined ? {} : { to: p.to }) })).warnings; break; } catch (error) {
+          // For an automatic step a refusal is a rung the holder cannot take: it is passed and recorded (left free, the next tick would only begin it and be refused again, tick after tick).
+          if (error instanceof DomainError && error.code === "forbidden" && p.auto === true) { refused = error.message.slice(0, 200); break; }
           if (error instanceof DomainError && error.code === "forbidden") {
             const dropping = p;
             await this.#runner.command("stall.recover.refused", { commandId: sub(`refused:${dropping.key}`), actor: by.id }, async () => ({
@@ -743,12 +794,12 @@ export class StallService {
             if (cb.recoveryPending?.key !== pend.key) throw new DomainError("invalid_transition", "that recovery step is no longer pending");
             const at = this.#runner.now();
             let n = (cb.recoverySteps?.at(-1)?.n ?? 0);
-            const made: RecoveryStep[] = (pend.skipped ?? []).map((s) => ({ n: ++n, action: s.action, by: pend.by, at, level: pend.level, skipped: true, reason: s.reason }));
-            step = { n: ++n, action: pend.action, by: pend.by, at, level: pend.level, cmd: pend.cmd, ...(pend.text === undefined ? {} : { text: pend.text }), ...(pend.to === undefined ? {} : { to: pend.to }), ...(refused === undefined ? {} : { skipped: true, reason: refused }), ...(warnings === undefined || warnings.length === 0 ? {} : { warnings: warnings.slice(0, 5).map((w) => w.slice(0, 200)) }) };
+            const made: RecoveryStep[] = (pend.skipped ?? []).map((s) => ({ n: ++n, action: s.action, by: pend.by, at, level: pend.level, skipped: true, reason: s.reason, ...(pend.auto === true ? { auto: true as const } : {}) }));
+            step = { n: ++n, action: pend.action, by: pend.by, at, level: pend.level, cmd: pend.cmd, ...(pend.auto === true ? { auto: true as const } : {}), ...(pend.text === undefined ? {} : { text: pend.text }), ...(pend.to === undefined ? {} : { to: pend.to }), ...(refused === undefined ? {} : { skipped: true, reason: refused }), ...(warnings === undefined || warnings.length === 0 ? {} : { warnings: warnings.slice(0, 5).map((w) => w.slice(0, 200)) }) };
             const { recoveryPending: _p, ...rest } = cb;
             let next: ConcernBody = { ...rest, recoveryRung: pend.rung, recoverySteps: [...(cb.recoverySteps ?? []), ...made, step].slice(-TRAIL_KEEP), lastChangedAt: at };
-            // Handing the concern to the owner parks it there and has the owner told once (a concern already with the owner, or already told, is not told again).
-            if (pend.action === "hand-to-owner" && cb.escalatedTo !== "owner") {
+            // Handing the concern to the owner parks it there and has the owner told once (a concern already with the owner, or already told, is not told again). A hand-over passed as skipped hands nothing.
+            if (pend.action === "hand-to-owner" && refused === undefined && cb.escalatedTo !== "owner") {
               const { notifiedAt: _n, ...kept } = next;
               const climb: EscalationStep = { level: (cb.escalationLevel ?? 0) + 1, to: "owner", at };
               next = { ...kept, escalatedAt: at, escalatedTo: "owner", escalationLevel: climb.level, escalationTrail: [...(cb.escalationTrail ?? []), climb].slice(-TRAIL_KEEP) };
@@ -768,6 +819,83 @@ export class StallService {
       this.#onNote?.(`recovery step ${pend.action} (${pend.key}) on ${found.id} was made but could not be marked done (${error instanceof Error ? error.message : String(error)}); repeating the step marks it done without making it again`);
       throw error;
     }
+  }
+
+  /**
+   * The controller's automatic stepping of the recovery ladder (card V02c), one call a tick. Off unless the owner switched it on (`recovery.ladder` `autoStep`), and never while agents' recovery steps are switched off (`enabled`): then no concern is read.
+   * A suspected concern held by an agent (the supervisor it was routed to, or the one it climbed to) whose holder has not answered for the owner's time (`autoStepMinutes`, counted from the concern's last change, its last recovery step or its last climb,
+   * whichever is later) gets the next rung that holder would be allowed to take, one rung a concern a call: the step is taken through `recover` in the HOLDER's name and with the holder's own rights and level list, so the controller can never do what
+   * the holder could not, and it is recorded like any step, marked `auto`. A rung the holder cannot take is passed with the reason, as for a manual step; `reassign` is always passed (the controller never chooses a new holder). A concern held by the owner
+   * (handed to it, or routed to it) is the owner's: nothing is taken for it. It stops when the concern is decided (confirmed or dismissed), clears, or is handed to the owner.
+   * Replay- and crash-safe: the step's command ID is derived from the concern, the rung, its episode and the revision read, so two ticks racing on one concern begin the same step once (the other loses on the revision); a step begun and not finished
+   * (a crash between the effect and its record, or a failing effect) is finished by the next call under the same effect key, so the effect is made once. Bounded: one page of concern records (`limit`, at most 500) and at most 20 steps a call;
+   * `next` says where the next call goes on. Needs the same right as the scan.
+   */
+  async autoStep(by: Principal, page: { afterId?: string; limit?: number } = {}): Promise<AutoStepReport> {
+    this.#mayScan(by);
+    const limit = page.limit ?? AUTO_STEP_LIMITS.page;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > AUTO_STEP_LIMITS.maxPage) invalid("limit", `must be a whole number from 1 to ${AUTO_STEP_LIMITS.maxPage}`);
+    if (this.#recoveryPolicy === undefined || this.#recoveryEffects === undefined) return { checked: 0, stepped: 0, refused: 0 };
+    const policy = await this.#recoveryPolicy();
+    const waitMs = autoStepMs(policy);
+    // Off, or agents' steps switched off: nothing is read and nothing is taken.
+    if (waitMs === undefined || !policy.enabled) return { checked: 0, stepped: 0, refused: 0 };
+    const effects = this.#recoveryEffects;
+    const rows = await this.#runner.list("stall-concern", { ...(page.afterId === undefined ? {} : { afterId: page.afterId }), limit });
+    let checked = 0; let stepped = 0; let refused = 0;
+    let failure: unknown;
+    let next: string | undefined = rows.length === limit ? rows.at(-1)?.id : undefined;
+    for (const row of rows) {
+      // The step budget of a call is spent: the next call goes on from this concern.
+      if (stepped + refused >= AUTO_STEP_LIMITS.steps) { next = rows[rows.indexOf(row) - 1]?.id ?? page.afterId; break; }
+      checked++;
+      const c = readConcern(row.body as unknown as ConcernBody);
+      const pending = c.recoveryPending;
+      let actorId: string;
+      let action: RecoveryAction;
+      let text: string | undefined;
+      if (pending !== undefined) {
+        // A step begun by the automatic stepping and not finished is finished (in the name it was begun in); one begun by a person is theirs to finish.
+        if (pending.auto !== true) continue;
+        actorId = pending.by; action = pending.action; text = pending.text;
+      } else {
+        if (c.state !== "suspected" || c.route.via !== "supervisor" || c.escalatedTo === "owner") continue;
+        if (Date.parse(this.#runner.now()) - autoSince(c) < waitMs) continue;
+        actorId = holderOf(c);
+        const actor = await this.#agentPrincipal(actorId);
+        if (actor === undefined) continue;
+        const allowed = allowedAt(policy, actorLevel(c, actor));
+        const last = c.recoveryRung ?? -1;
+        const ctx = { by: actor, taskId: c.taskId, projectId: c.projectId, concernId: row.id, ...(c.stalledAgent === undefined ? {} : { agent: c.stalledAgent }) };
+        let chosen: RecoveryAction | undefined;
+        for (const a of RECOVERY_ACTIONS.filter((x) => rungOf(x) > last && allowed.includes(x))) {
+          if (a === "reassign") continue;
+          if (a === "hand-to-owner" || (await effects.unavailable?.(a, ctx)) === undefined) { chosen = a; break; }
+        }
+        if (chosen === undefined) continue;
+        action = chosen; text = AUTO_TEXT[chosen];
+      }
+      const actor = await this.#agentPrincipal(actorId);
+      if (actor === undefined) continue;
+      const commandId = `auto-${createHash("sha256").update(`${row.id}|${rungOf(action)}|${c.reopened}|${c.recoveryGen ?? 0}|${row.revision}`).digest("hex").slice(0, 40)}`;
+      try {
+        await this.#recover(actor, { commandId, concernId: row.id, expectedRevision: row.revision, action, ...(text === undefined ? {} : { text }) }, true);
+        stepped++;
+      } catch (error) {
+        // A refusal (an answer, a climb or another tick came first; the holder lacks the right; the service is down and the step stays pending) is counted and the next concern is looked at; anything else is raised after the page.
+        if (error instanceof DomainError) refused++; else failure ??= error;
+      }
+    }
+    if (failure !== undefined) throw failure;
+    return { checked, stepped, refused, ...(next === undefined ? {} : { next }) };
+  }
+
+  /** The agent principal with its effective rights now, or undefined when it is not an active agent identity. */
+  async #agentPrincipal(id: string): Promise<Principal | undefined> {
+    if (!id.startsWith("agent:")) return undefined;
+    const stored = (await this.#runner.get("principal", id))?.body as unknown as PrincipalBody | undefined;
+    if (stored === undefined || stored.state !== "active" || stored.kind !== "agent") return undefined;
+    return effectiveOf(this.#runner, { id, kind: "agent", name: stored.name, grants: stored.grants }, this.#runner.now());
   }
 
   /**

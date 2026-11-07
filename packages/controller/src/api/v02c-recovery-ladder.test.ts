@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
+import { PI } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
-import { CHAT_OPS } from "../chat/commands.js";
+import { CHAT_OPS, acceptedArgs } from "../chat/commands.js";
+import { ScriptedInterpreter } from "../chat/index.js";
+import { ModelInterpreter } from "../chat/model-interpreter.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -117,4 +120,101 @@ test("end to end with the real effects: a supervisor's steps nudge, pause and re
     await c.close();
     rmSync(d, { recursive: true, force: true });
   }
+});
+
+test("automatic recovery steps through the composed controller: off by default; the owner switches them on in free-form chat (shown first); the dispatcher's tick, on the controller's clock, takes one rung per interval in the supervisor's name with the real effects, records each, passes reassign and stops at the owner (card V02c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-recovery-auto-"));
+  let clock = Date.parse("2026-11-02T08:00:00.000Z");
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    dispatch: { timer: new ManualTimer(), manual: true, clock: () => new Date(clock).toISOString() },
+  } as never);
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message?: string } }>;
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    // Ann works the task; Boss supervises her and may see and manage the task (so may pause it); a host reports Ann's progress.
+    const boss = (await c.services.agents.create(rob, { commandId: "a-boss", friendlyName: "Boss" } as never)).id;
+    const ann = (await c.services.agents.create(rob, { commandId: "a-ann", friendlyName: "Ann", supervisorId: boss } as never)).id;
+    for (const a of ["task.read", "assignment.read", "assignment.manage"]) await c.services.grants.grant(rob, { commandId: `g-${a}`, grantee: `agent:${boss}`, action: a, project, source: "direct", basis: "test" } as never);
+    await c.services.grants.grant(rob, { commandId: "g-ann", grantee: `agent:${ann}`, action: "task.read", project, source: "direct", basis: "test" } as never);
+    await c.services.principals.enroll(rob, { commandId: "e-pc", kind: "host", name: "pc", grants: [{ action: "attempt.work", project }] });
+    const host = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "host:pc")).token);
+    const task = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Build" })).id;
+    await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as", actor: rob.id, taskId: task, owner: { kind: "agent", id: ann } });
+    const a0 = (await c.services.assignments.getAssignment(task))!;
+    await c.services.assignments.admitAttempt({ commandId: "ad", actor: rob.id, taskId: task, expectedRevision: a0.revision, generation: a0.generation, owner: { kind: "agent", id: ann }, harness: "pi" } as never);
+    await c.services.projects.transitionTask({ commandId: "ip", actor: rob.id, taskId: task, expectedRevision: (await c.services.projects.getTask(task))!.revision, to: "in_progress" });
+    let k = 0;
+    // The same action over and over, reported as it happens: a loop, never silence.
+    const busy = async (): Promise<void> => { for (let i = 0; i < 6; i++) await c.services.stall.report(host, { commandId: `rep-${k++}`, taskId: task, generation: a0.generation, event: { type: "step", label: "run tests", actionKey: "tests" } }); };
+    await busy();
+    // Stall detection needs its right; the automatic steps run in the same loop family.
+    await c.services.grants.grant(rob, { commandId: "g-scan", grantee: "service:dispatcher", action: "recovery.stall-scan", project: "*", source: "direct", basis: "test" } as never);
+    await call(boot.token, "recovery.ladder.set", { levels: [["nudge", "pause", "reassign", "hand-to-owner"]] }, "lad");
+    await c.dispatch.dispatcher.tick();
+    const concern = async () => (await c.services.stall.list(rob, { taskId: task })).items.find((x) => x.kind === "loop")!;
+    assert.equal((await concern()).route.to.id, boss);
+    // Off by default: an hour and more with no answer takes nothing.
+    clock += 2 * 3_600_000; await busy();
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await concern()).recoverySteps, undefined);
+    assert.equal((await call(boot.token, "recovery.ladder.get", {})).result.item.autoStep, false);
+    // The owner says it in their own words; the chat shows it first, and applies it on the owner's word.
+    const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes as any[]; };
+    const text = "when nobody answers a stuck agent for an hour, let the controller take the next recovery step by itself";
+    const shown = await turn("m1", text, [{ kind: "command", op: "recovery.ladder.set", args: { autoStep: true, autoStepMinutes: 60 }, evidence: text, basis: "owner" }]);
+    assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await concern()).recoverySteps, undefined, "nothing while it waits for the owner");
+    const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]);
+    assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
+    const setting = (await call(boot.token, "recovery.ladder.get", {})).result.item;
+    assert.deepEqual([setting.autoStep, setting.autoStepMinutes, setting.levels], [true, 60, [["nudge", "pause", "reassign", "hand-to-owner"]]], "the other fields are kept");
+    // The concern has waited past the hour: the first rung, the nudge, a real notice to Ann in Boss's name.
+    await c.dispatch.dispatcher.tick();
+    let held = await concern();
+    assert.deepEqual(held.recoverySteps!.map((x) => [x.action, x.by, x.auto]), [["nudge", `agent:${boss}`, true]]);
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await concern()).recoverySteps!.length, 1, "one rung per interval");
+    clock += 59 * 60_000; await busy();
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await concern()).recoverySteps!.length, 1, "the next rung waits its full hour");
+    clock += 60_000; await busy();
+    await c.dispatch.dispatcher.tick();
+    held = await concern();
+    assert.deepEqual(held.recoverySteps!.map((x) => x.action), ["nudge", "pause"]);
+    assert.equal((await c.services.pauses.gate(rob, { kind: "task", id: task }))?.intent, "pause", "the task is paused, with Boss's own right to");
+    // Reassign is passed (the controller never chooses who takes over) and the concern goes to the owner, who is told.
+    clock += 60 * 60_000;
+    await c.dispatch.dispatcher.tick();
+    held = await concern();
+    assert.deepEqual(held.recoverySteps!.map((x) => [x.action, x.skipped === true]), [["nudge", false], ["pause", false], ["reassign", true], ["hand-to-owner", false]]);
+    assert.equal(held.escalatedTo, "owner");
+    await c.dispatch.dispatcher.tick();
+    assert.ok((await concern()).notifiedAt !== undefined, "the owner was told");
+    // Nothing more: the owner holds it.
+    clock += 24 * 3_600_000;
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await concern()).recoverySteps!.length, 4);
+    assert.equal((await c.storage.listAggregates("pause-request", { limit: 50 })).filter((r) => (r.body as any).scope.kind === "task").length, 1, "paused once");
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("the chat interpreter is told about automatic recovery steps: recovery.ladder.set lists autoStep and autoStepMinutes and says what they do (card V02c)", async () => {
+  assert.ok(acceptedArgs("recovery.ladder.set")!.includes("autoStep"));
+  assert.ok(acceptedArgs("recovery.ladder.set")!.includes("autoStepMinutes"));
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
+  await m.interpret({ text: "hello", quoted: [], focus: {}, proposals: [] } as never);
+  assert.match(system, /recovery\.ladder\.set\([^)]*autoStep, autoStepMinutes[^)]*\) - [^;]*whether the controller takes the next one by itself after a time with no answer/);
+  assert.equal(CHAT_OPS["recovery.ladder.set"]?.mode, "propose", "switching it on is shown first");
 });

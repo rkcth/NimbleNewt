@@ -1407,4 +1407,182 @@ for (const backend of backends) {
     assert.equal(agents.length, 1);
     assert.ok((await svc.get(c.owner, concernId))!.stalledAgent !== undefined);
   });
+
+  /** The automatic stepping (card V02c): a world with the ladder setting, recording effects and a service wired to them. */
+  const autoWorld = async (c: Ctx, more: { unavailable?: (action: RecoveryAction) => string | undefined; run?: (action: RecoveryAction, key: string) => Promise<void> } = {}) => {
+    const w = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    const calls: { action: RecoveryAction; by: string; key: string; text: string }[] = [];
+    const effects: RecoveryEffects = {
+      run: async (action, ctx) => { calls.push({ action, by: ctx.by.id, key: ctx.key, text: ctx.text }); await more.run?.(action, ctx.key); return {}; },
+      unavailable: async (action) => more.unavailable?.(action),
+    };
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
+    const concern = async () => (await svc.get(c.owner, w.concernId))!;
+    return { ...w, setting, calls, effects, svc, concern };
+  };
+
+  suite("automatic recovery steps: off by default; when on, one rung per interval, each only after its interval, in the holder's name and recorded as automatic; reassign is passed; it stops at the owner (card V02c)", async (c) => {
+    const { boss, setting, calls, svc, concern } = await autoWorld(c);
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "pause", "reassign", "hand-to-owner"]] });
+    // Off by default: hours with no answer take nothing, and not one concern record is read.
+    now += 10 * HOUR;
+    assert.deepEqual(await svc.autoStep(c.owner), { checked: 0, stepped: 0, refused: 0 });
+    assert.equal((await setting.get(c.owner)).autoStep, false);
+    assert.equal((await setting.get(c.owner)).autoStepDefaultMinutes, 240);
+    // Only the scan's right may run it.
+    await refuses("forbidden", async () => svc.autoStep(boss.principal));
+    // On, with an hour between rungs. The concern has waited ten hours already: the first rung is taken at once, and only one.
+    await setting.set(c.owner, { commandId: cid("s"), autoStep: true, autoStepMinutes: 60 });
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0, "one rung per interval, however long it waited");
+    const expect: RecoveryAction[] = ["nudge"];
+    assert.deepEqual(calls.map((x) => x.action), expect);
+    for (const action of ["rebrief", "pause"] as const) {
+      now += 59 * MIN;
+      assert.equal((await svc.autoStep(c.owner)).stepped, 0, `${action} waits for its full interval`);
+      now += MIN;
+      assert.equal((await svc.autoStep(c.owner)).stepped, 1, action);
+      expect.push(action);
+      assert.deepEqual(calls.map((x) => x.action), expect);
+    }
+    // Reassign is never taken by the controller (it would have to choose who takes the task): it is passed with the reason, and hand-to-owner is the next rung.
+    now += 60 * MIN;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    const held = await concern();
+    assert.deepEqual(held.recoverySteps!.map((x) => [x.action, x.skipped === true, x.auto === true, x.by]), [["nudge", false, true, boss.principal.id], ["rebrief", false, true, boss.principal.id], ["pause", false, true, boss.principal.id], ["reassign", true, true, boss.principal.id], ["hand-to-owner", false, true, boss.principal.id]]);
+    assert.match(held.recoverySteps![3]!.reason!, /never choose who takes the task over/);
+    assert.equal(held.escalatedTo, "owner", "handed to the owner, who is told once");
+    assert.ok(calls.every((x) => x.by === boss.principal.id), "the effects ran in the holder's name, with the holder's rights");
+    assert.ok(calls.every((x) => /Automatic recovery step/.test(x.text)));
+    assert.equal(new Set(calls.map((x) => x.key)).size, calls.length, "each rung has its own effect key");
+    // The owner holds it now: nothing more is taken, however long it waits.
+    now += 48 * HOUR;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0);
+    assert.equal((await concern()).recoverySteps!.length, 5);
+    assert.deepEqual((await svc.escalateUndecided(c.owner)).map((x) => x.id), [held.id]);
+    // Bounds of the call.
+    await refuses("invalid_command", async () => svc.autoStep(c.owner, { limit: 0 }));
+    await refuses("invalid_command", async () => svc.autoStep(c.owner, { limit: 501 }));
+  });
+
+  suite("automatic recovery steps: an answer stops them; agents' steps switched off stop them; the holder's level list and rights bound them (a rung the holder cannot take, and the owner's own rungs, are never taken); switched off, nothing (card V02c)", async (c) => {
+    const { boss, setting, calls, svc, concern } = await autoWorld(c, { unavailable: (a) => (a === "pause" ? "agent:boss may not pause the task" : undefined) });
+    // Level 0 may nudge, re-brief and pause; stop is the owner's own rung.
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "pause"]], owner: ["stop"], autoStep: true, autoStepMinutes: 30 });
+    now += 31 * MIN;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    // Agents' recovery steps switched off: no step, and no concern is read.
+    await setting.set(c.owner, { commandId: cid("s"), enabled: false });
+    now += 31 * MIN;
+    assert.deepEqual(await svc.autoStep(c.owner), { checked: 0, stepped: 0, refused: 0 });
+    await setting.set(c.owner, { commandId: cid("s"), enabled: true });
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    // The holder may not pause (the service says why) and nothing above pause is allowed at level 0: the controller takes nothing more; the owner's stop is never taken.
+    now += 10 * HOUR;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0);
+    assert.deepEqual(calls.map((x) => x.action), ["nudge", "rebrief"]);
+    // With hand-to-owner allowed, it would be next (pause passed with the reason); but the supervisor answers first, and nothing more is taken.
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "pause", "hand-to-owner"]] });
+    await svc.decide(boss.principal, { commandId: cid("d"), concernId: (await concern()).id, expectedRevision: (await concern()).revision, decision: "confirm", reason: "it is stuck; I am on it" });
+    now += 10 * HOUR;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0);
+    assert.equal((await concern()).recoverySteps!.length, 2, "an answered concern takes no more rungs");
+    assert.equal((await concern()).escalatedTo, undefined);
+    // Switched off by the owner; bad values are refused; only the owner sets it.
+    await setting.set(c.owner, { commandId: cid("s"), autoStep: false });
+    assert.equal((await setting.policy()).autoStep, undefined);
+    await refuses("invalid_command", async () => setting.set(c.owner, { commandId: cid("s"), autoStepMinutes: 0 }));
+    await refuses("invalid_command", async () => setting.set(c.owner, { commandId: cid("s"), autoStepMinutes: 10_081 }));
+    await refuses("invalid_command", async () => setting.set(c.owner, { commandId: cid("s"), autoStep: "yes" }));
+    await refuses("forbidden", async () => setting.set(boss.principal, { commandId: cid("s"), autoStep: true }));
+  });
+
+  suite("automatic recovery steps: a concern held by the owner, or routed to it, is never stepped; a holder that is not an active agent is not acted for (card V02c)", async (c) => {
+    const { boss, setting, calls, svc, concern } = await autoWorld(c);
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "hand-to-owner"]], autoStep: true, autoStepMinutes: 30 });
+    const id = (await concern()).id;
+    await patch(c, "stall-concern", id, (b) => ({ ...b, escalatedTo: "owner", escalatedAt: at() }));
+    now += 10 * HOUR;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0, "parked with the owner");
+    await patch(c, "stall-concern", id, (b) => { const { escalatedTo: _t, escalatedAt: _a, ...rest } = b; void _t; void _a; return { ...rest, route: { to: { kind: "owner", id: "owner" }, via: "owner", reason: "no supervisor" } }; });
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0, "routed to the owner");
+    // Back with the supervisor, whose identity is disabled: nobody is acted for.
+    await patch(c, "stall-concern", id, (b) => ({ ...b, route: { to: { kind: "agent", id: boss.id }, via: "supervisor", reason: "supervises" } }));
+    const p = (await c.storage.getAggregate({ kind: "principal", id: boss.principal.id }))!;
+    await c.principals.disable(c.owner, { commandId: cid("x"), principalId: boss.principal.id, expectedRevision: p.revision });
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0, "a disabled holder");
+    assert.deepEqual(calls, []);
+  });
+
+  suite("automatic recovery steps: a crash between a rung's effect and its record is finished by the next tick under the same effect key, once; an answer while a step is pending wins (card V02c)", async (c) => {
+    let crash = 0;
+    const { setting, calls, svc, concern } = await autoWorld(c, { run: async () => { if (crash > 0) { crash--; throw new Error("the controller stopped after the effect was made"); } } });
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "hand-to-owner"]], autoStep: true, autoStepMinutes: 30 });
+    now += 31 * MIN;
+    crash = 1;
+    await assert.rejects(svc.autoStep(c.owner), /stopped after the effect/);
+    const pending = (await concern()).recoveryPending!;
+    assert.deepEqual([pending.action, pending.auto], ["nudge", true]);
+    assert.equal((await concern()).recoverySteps, undefined, "not recorded yet");
+    // A restarted controller (a new service on the same store) finishes it at once, without waiting a new interval, under the same key.
+    const restarted = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: { run: async (action, ctx) => { calls.push({ action, by: ctx.by.id, key: ctx.key, text: ctx.text }); return {}; } } });
+    assert.equal((await restarted.autoStep(c.owner)).stepped, 1);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.key, calls[1]!.key, "the effect key is the step's, so the service makes it once");
+    const done = await concern();
+    assert.deepEqual([done.recoveryPending, done.recoverySteps!.map((x) => [x.action, x.auto])], [undefined, [["nudge", true]]]);
+    assert.equal((await restarted.autoStep(c.owner)).stepped, 0, "and the next rung waits its interval");
+    // The next rung's effect fails (the service is down) and stays pending; the supervisor answers meanwhile: the step is recorded as passed, and the effect is not made again.
+    now += 31 * MIN;
+    const down = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: { run: async (action, ctx) => { calls.push({ action, by: ctx.by.id, key: ctx.key, text: ctx.text }); throw new DomainError("unavailable", "the message service is down"); } } });
+    assert.deepEqual(await down.autoStep(c.owner), { checked: 1, stepped: 0, refused: 1 });
+    assert.equal((await concern()).recoveryPending!.action, "rebrief");
+    const made = calls.length;
+    await svc.decide(c.owner, { commandId: cid("d"), concernId: done.id, expectedRevision: (await concern()).revision, decision: "dismiss", reason: "the agent is fine" });
+    assert.equal((await restarted.autoStep(c.owner)).stepped, 1);
+    assert.equal(calls.length, made, "no effect after the answer");
+    const last = (await concern()).recoverySteps!.at(-1)!;
+    assert.deepEqual([last.action, last.skipped, last.auto], ["rebrief", true, true]);
+    assert.match(last.reason!, /answered/);
+    assert.equal((await concern()).recoveryPending, undefined);
+    // An automatic hand-over left pending (a crash before its record) on a concern answered since hands nothing: recorded as passed, the concern stays where it is.
+    await patch(c, "stall-concern", done.id, (b) => ({ ...b, recoveryPending: { action: "hand-to-owner", rung: 5, key: "rec-test", by: last.by, at: at(), level: 0, cmd: "x", text: "Automatic recovery step: handed to the owner.", auto: true } }));
+    assert.equal((await restarted.autoStep(c.owner)).stepped, 1);
+    const handed = await concern();
+    assert.deepEqual([handed.recoverySteps!.at(-1)!.action, handed.recoverySteps!.at(-1)!.skipped, handed.escalatedTo, handed.recoveryPending], ["hand-to-owner", true, undefined, undefined]);
+  });
+
+  suite("automatic recovery steps: a rung the service refuses to the holder (forbidden) is passed and recorded, not begun again tick after tick (card V02c)", async (c) => {
+    const { boss, setting, calls, svc, concern } = await autoWorld(c, { run: async (action) => { if (action === "nudge") throw new DomainError("forbidden", "the agent cannot be told about that task"); } });
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "hand-to-owner"]], autoStep: true, autoStepMinutes: 30 });
+    now += 31 * MIN;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    const first = await concern();
+    assert.deepEqual(first.recoverySteps!.map((x) => [x.action, x.skipped, x.auto, x.by]), [["nudge", true, true, boss.principal.id]]);
+    assert.match(first.recoverySteps![0]!.reason!, /cannot be told/);
+    const revision = first.revision;
+    for (let i = 0; i < 3; i++) await svc.autoStep(c.owner);
+    assert.equal((await concern()).revision, revision, "nothing is written while the next rung waits");
+    assert.equal(calls.length, 1, "the refused effect was asked once");
+    now += 31 * MIN;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    assert.deepEqual((await concern()).recoverySteps!.map((x) => x.action), ["nudge", "rebrief"]);
+  });
+
+  suite("automatic recovery steps: two controllers ticking at once on one concern take ONE rung (card V02c)", async (c) => {
+    const { setting, calls, effects, concern } = await autoWorld(c);
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "hand-to-owner"]], autoStep: true, autoStepMinutes: 30 });
+    const one = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
+    const two = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
+    for (const [round, action] of (["nudge", "rebrief", "hand-to-owner"] as const).entries()) {
+      now += 31 * MIN;
+      const reports = await Promise.all([one.autoStep(c.owner), two.autoStep(c.owner), one.autoStep(c.owner)]);
+      const steps = (await concern()).recoverySteps!;
+      assert.equal(steps.length, round + 1, `one rung in round ${round}: ${JSON.stringify(reports)}`);
+      assert.equal(steps.at(-1)!.action, action);
+      assert.equal(new Set(calls.filter((x) => x.action === action).map((x) => x.key)).size, action === "hand-to-owner" ? 0 : 1, "any repeat of the effect carries the same key");
+    }
+    assert.equal((await concern()).recoveryPending, undefined);
+  });
 }

@@ -50,7 +50,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
   // How long a stuck agent's concern waits at each supervisor before it climbs is an escalation policy (owner decision 2026-10-30, supervisor ladder): shown first in every profile (provisional).
   // Which recovery actions may be taken on a stuck agent (pausing, stopping, giving its task away) is authority over work: shown first in every profile (provisional, card V02c). Turning the steps off only narrows; on widens.
-  "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level", mode: "propose" },
+  // Letting the controller take the next recovery step by itself when nobody answers (autoStep, autoStepMinutes) is set through the same operation, so it is shown first too (card V02c).
+  "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level, and whether the controller takes the next one by itself after a time with no answer (autoStep true or false; autoStepMinutes, the wait in minutes, null for the default)", mode: "propose" },
   "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
   "replay.limits.set": { verb: "Change how much of a task's record one replay reads", mode: "apply" },
   "replay.limits.enable": { verb: "Bound how much of a task's record one replay reads", mode: "apply" },
