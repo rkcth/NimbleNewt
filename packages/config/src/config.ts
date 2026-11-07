@@ -11,6 +11,11 @@ export type ControllerStorage =
   | { readonly kind: "sqlite"; readonly path: string }
   | { readonly kind: "postgres"; readonly url: SecretRef; readonly maxConnections: number };
 
+/** A destination for a controller database transfer. A PostgreSQL address holds a password, so it is only ever a reference to a named secret. */
+export type TransferTargetEntry =
+  | { readonly name: string; readonly kind: "sqlite"; readonly path: string }
+  | { readonly name: string; readonly kind: "postgres"; readonly url: SecretRef; readonly schema?: string; /** The most bytes the destination database may hold; free room is this minus the size the server reports. */ readonly maxBytes?: number };
+
 export interface Provider {
   /** Which adapter talks to this provider (for example `fake`, `openai-compatible`). */
   readonly adapter: string;
@@ -41,7 +46,7 @@ export interface NimbleNewtConfig {
     readonly dataDir: string;
     readonly workspaces: Readonly<Record<string, { readonly path: string }>>;
   };
-  readonly controller: { readonly storage: ControllerStorage };
+  readonly controller: { readonly storage: ControllerStorage; /** Databases the owner may move the controller database to from chat (card F04l). Absent or empty: no transfer is possible. */ readonly databaseTransfer?: { readonly targets: readonly TransferTargetEntry[] } };
   readonly limits: { readonly productiveAttempts: number; readonly perHost: number; readonly inquirySlots: number };
   readonly execution: {
     readonly isolation: "strong" | "trusted-host";
@@ -83,7 +88,23 @@ const SCHEMA: Schema = {
     },
     controller: {
       kind: "object",
+      optional: ["databaseTransfer"],
       props: {
+        databaseTransfer: {
+          kind: "object",
+          props: {
+            targets: {
+              kind: "array", maxItems: 16,
+              items: {
+                kind: "variant", discriminator: "kind",
+                variants: {
+                  sqlite: { kind: "object", props: { name: text({ pattern: /^[a-z0-9-]{1,64}$/, hint: "1 to 64 characters of a-z, 0-9 and '-'" }), kind: { kind: "literal", value: "sqlite" }, path: text() } },
+                  postgres: { kind: "object", optional: ["schema", "maxBytes"], props: { name: text({ pattern: /^[a-z0-9-]{1,64}$/, hint: "1 to 64 characters of a-z, 0-9 and '-'" }), kind: { kind: "literal", value: "postgres" }, url: secretRef, schema: text({ pattern: /^[a-z][a-z0-9_]{0,40}$/, hint: "lower-case letters, digits and underscores, starting with a letter (at most 41 characters)" }), maxBytes: { kind: "integer", min: 1 } } },
+                },
+              },
+            },
+          },
+        },
         storage: {
           kind: "variant",
           discriminator: "kind",
@@ -200,6 +221,7 @@ export function secretRefsOf(config: NimbleNewtConfig): { name: string; usedBy: 
   const found: { name: string; usedBy: string }[] = [];
   const add = (ref: SecretRef | undefined, usedBy: string) => { if (ref !== undefined) found.push({ name: ref.secret, usedBy }); };
   if (config.controller.storage.kind === "postgres") add(config.controller.storage.url, "controller.storage.url");
+  (config.controller.databaseTransfer?.targets ?? []).forEach((t, i) => { if (t.kind === "postgres") add(t.url, `controller.databaseTransfer.targets[${i}].url`); });
   for (const [name, provider] of Object.entries(config.models.providers)) add(provider.credential, `models.providers.${name}.credential`);
   return found;
 }
@@ -250,7 +272,13 @@ function crossChecks(config: NimbleNewtConfig): ConfigError[] {
     if (earlier !== undefined && earlier !== name) add(usedBy, `secret names "${name}" and "${earlier}" differ only by letter case; the secret store treats them as the same, so use one spelling`);
     else seenRefs.set(key, name);
   }
+  const transferNames = new Set<string>();
+  (config.controller.databaseTransfer?.targets ?? []).forEach((t, i) => {
+    if (transferNames.has(t.name)) add(`controller.databaseTransfer.targets[${i}].name`, `"${t.name}" is used by another transfer target`);
+    transferNames.add(t.name);
+  });
   if (config.profile === "public") {
+    if (config.controller.databaseTransfer !== undefined) add("controller.databaseTransfer", "a public profile must not name database transfer destinations; they are places of one installation");
     const mustBePlaceholder = (path: string, value: string) => { if (!PLACEHOLDER.test(value)) add(path, "a public profile must use a {{placeholder}} here, not a real location; real paths belong to one machine"); };
     mustBePlaceholder("installation.dataDir", config.installation.dataDir);
     for (const [name, workspace] of Object.entries(config.installation.workspaces)) mustBePlaceholder(`installation.workspaces.${name}.path`, workspace.path);

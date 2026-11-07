@@ -153,3 +153,92 @@ test("a path the file system cannot resolve is refused as such, naming the entry
     (error: Error) => error.message.includes("targets[0]") && error.message.includes("cannot be resolved") && !error.message.includes("yyyy"),
   );
 });
+
+// ------------------------------------------------------------------------------- PostgreSQL entries (card F04l)
+
+const ADDRESS = "postgres://nnuser:hunter2%2Fx@db.example.com:5433/nimble?sslmode=require";
+const pgDeps = (over: Partial<NonNullable<SqliteTargetDeps["postgres"]>> = {}): SqliteTargetDeps => ({
+  ...deps,
+  postgres: {
+    resolveSecret: async (name) => (name === "transfer.pg-url" ? ADDRESS : undefined),
+    openStorage: async () => { throw new Error(`could not connect to ${ADDRESS}: password hunter2/x was refused for nnuser`); },
+    databaseBytes: async () => 1_000,
+    dropSchema: async () => undefined,
+    ...over,
+  },
+});
+const pgEntry = (over: Record<string, unknown> = {}) => ({ name: "main-pg", kind: "postgres", url: { secret: "transfer.pg-url" }, ...over });
+
+test("a PostgreSQL entry builds a target from a secret reference: the place is host, port, database and schema, never the user or password (card F04l)", async () => {
+  const [t] = await sqliteTargetsFromConfig([pgEntry({ schema: "nn_b" })], pgDeps());
+  assert.equal(t!.kind, "postgres");
+  assert.equal(t!.name, "main-pg");
+  assert.equal(t!.fingerprint, "postgres:db.example.com:5433/nimble#nn_b");
+  assert.ok(!t!.fingerprint.includes("hunter2") && !t!.fingerprint.includes("nnuser"));
+  const [d] = await sqliteTargetsFromConfig([pgEntry()], pgDeps());
+  assert.equal(d!.fingerprint, "postgres:db.example.com:5433/nimble#nimblenewt", "the schema defaults to nimblenewt");
+});
+
+test("a PostgreSQL entry that is not a secret reference is refused and the address is not echoed; so is everything else malformed (card F04l)", async () => {
+  const bad = async (entry: unknown, ...parts: string[]): Promise<Error> => {
+    let caught: Error | undefined;
+    await assert.rejects(sqliteTargetsFromConfig([entry], pgDeps()), (error: Error) => { caught = error; return parts.every((p) => error.message.includes(p)); });
+    for (const leak of ["hunter2", "nnuser", "db.example.com", "postgres://"]) assert.ok(!caught!.message.includes(leak), `${leak} is not in "${caught!.message}"`);
+    return caught!;
+  };
+  await bad(pgEntry({ url: ADDRESS }), "targets[0]", "url", "secret reference");
+  await bad(pgEntry({ url: undefined }), "targets[0]", "url");
+  await bad(pgEntry({ url: { secret: "a", extra: ADDRESS } }), "targets[0]", "url");
+  await bad(pgEntry({ url: { secret: "bad name" } }), "targets[0]", "url");
+  await bad(pgEntry({ url: { secret: "a__b" } }), "targets[0]", "url");
+  await bad(pgEntry({ schema: "Bad-Schema" }), "targets[0]", "schema");
+  await bad(pgEntry({ schema: 7 }), "targets[0]", "schema");
+  await bad(pgEntry({ maxBytes: 0 }), "targets[0]", "maxBytes");
+  await bad(pgEntry({ maxBytes: 1.5 }), "targets[0]", "maxBytes");
+  await bad(pgEntry({ maxBytes: "1000" }), "targets[0]", "maxBytes");
+  await bad(pgEntry({ path: "/srv/x.sqlite" }), "targets[0]", "path", "postgres");
+  await bad({ name: "one", kind: "sqlite", path: join(tmpdir(), "nn-pg-s.sqlite"), schema: "x" }, "targets[0]", "schema");
+  await bad(pgEntry({ name: "Main" }), "targets[0]", "name");
+});
+
+test("an unavailable secret stops the build and names the secret, not its value; so does a value that is not a PostgreSQL address (card F04l)", async () => {
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry({ url: { secret: "other.secret" } })], pgDeps()), (error: Error) => error.message === "transfer targets[0]: url: the secret other.secret is not available");
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry()], pgDeps({ resolveSecret: async () => "" })), /is not available/);
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry()], pgDeps({ resolveSecret: async () => { throw new Error(`store said ${ADDRESS}`); } })), (error: Error) => error.message === "transfer targets[0]: url: the secret transfer.pg-url could not be read");
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry()], pgDeps({ resolveSecret: async () => "mysql://u:p@h/db" })), (error: Error) => /does not hold a postgres:\/\/ address/.test(error.message) && !error.message.includes("mysql"));
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry()], pgDeps({ resolveSecret: async () => "postgres:///nodatabase-or-server" })), (error: Error) => /readable PostgreSQL address/.test(error.message) && !error.message.includes("nodatabase"));
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry()], deps), /targets\[0\]: kind: "postgres" targets cannot be built here/);
+});
+
+test("two entries for one PostgreSQL place (same server, database and schema) or one name are refused at the second, also across kinds (card F04l)", async () => {
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry(), pgEntry({ name: "again" })], pgDeps()), (error: Error) => error.message === "transfer targets[1]: url: is the same place as entry 0");
+  const ok = await sqliteTargetsFromConfig([pgEntry(), pgEntry({ name: "other-schema", schema: "nn_b" })], pgDeps());
+  assert.equal(ok.length, 2);
+  await assert.rejects(sqliteTargetsFromConfig([{ name: "main-pg", kind: "sqlite", path: join(tmpdir(), "nn-pg-n.sqlite") }, pgEntry()], pgDeps()), /targets\[1\]: name: main-pg is used by another entry/);
+});
+
+test("whatever the open, the size read or the drop fails with, the address, its password and its user are hidden from the text (card F04l)", async () => {
+  const boom = (): never => { throw new Error(`failed for ${ADDRESS} pass hunter2/x also hunter2%2Fx and postgresql://other:pw@h/d`); };
+  const [t] = await sqliteTargetsFromConfig([pgEntry({ maxBytes: 5_000 })], pgDeps({ databaseBytes: boom, dropSchema: boom }));
+  for (const [what, run] of [["open", () => t!.open()], ["freeBytes", () => t!.freeBytes!()], ["discard", () => t!.discard!()]] as const) {
+    await assert.rejects(run(), (error: Error) => {
+      for (const leak of ["hunter2", "db.example.com", "postgres://", "postgresql://", "pw@h"]) assert.ok(!error.message.includes(leak), `${what}: ${leak} is not in "${error.message}"`);
+      assert.match(error.message, /failed for|could not connect/);
+      assert.equal(error.stack?.includes("hunter2"), false, `${what}: the stack does not carry it either`);
+      return true;
+    });
+  }
+  assert.equal(t!.redact!(`x ${ADDRESS} y hunter2/x`), "x [address hidden] y [address hidden]");
+});
+
+test("freeBytes of a PostgreSQL entry is the cap less the server's size, never below zero, and nothing without a cap (card F04l)", async () => {
+  const sized = (bytes: number) => pgDeps({ databaseBytes: async () => bytes });
+  const [a] = await sqliteTargetsFromConfig([pgEntry({ maxBytes: 10_000 })], sized(2_500));
+  assert.equal(await a!.freeBytes!(), 7_500);
+  const [b] = await sqliteTargetsFromConfig([pgEntry({ maxBytes: 10_000 })], sized(12_000));
+  assert.equal(await b!.freeBytes!(), 0);
+  let asked = 0;
+  const [c] = await sqliteTargetsFromConfig([pgEntry()], pgDeps({ databaseBytes: async () => { asked++; return 1; } }));
+  assert.equal(await c!.freeBytes!(), undefined);
+  assert.equal(asked, 0, "without a cap the server is not asked");
+});

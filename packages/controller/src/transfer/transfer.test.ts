@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { MaintenanceBarrier } from "../backup/barrier.js";
-import { PostgresStorage } from "../storage/postgres/index.js";
+import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes } from "../storage/postgres/index.js";
+import { transferTargetsFromConfig } from "./targets.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
@@ -388,7 +389,7 @@ test("the source is checked before anything is copied: IDs, counters, receipts, 
       ["a policy that is not an object", (t, r) => (t === "aggregates" ? r.map((x) => (x["kind"] === "policy" ? { ...x, body: "[1]" } : x)) : r), /body of installation is not a JSON object/],
       ["a timer with a bad time", (t, r) => (t === "timers" ? r.map((x) => ({ ...x, due_at: "tomorrow" })) : r), /due_at "tomorrow" is not a timestamp/],
       ["a missing artifact file", (_t, r) => r, /artifact file sha256:d+ is not in the artifact store/, { references: { artifacts: async (d) => [...d] } }],
-      ["a missing checkpoint", (_t, r) => r, /checkpoint of recovery point rp-1 is not in the conversation store/, { references: { checkpoints: async (p) => p.map((x) => x.id) } }],
+      ["a missing checkpoint", (_t, r) => r, /checkpoint of recovery point rp-1 is not in the conversation store, or does not match it/, { references: { checkpoints: async (p) => p.map((x) => x.id) } }],
     ];
     for (const [name, edit, expect, extra] of cases) {
       const svc = await service(f, [target], { storage: doctored(f.src, edit), ...(extra ?? {}) });
@@ -613,4 +614,81 @@ test("a destination that does not read back what was written is not switched to:
       assert.equal(f.barrier.held, false, name);
     } finally { await finish(f); }
   }
+});
+
+// ------------------------------------------------------------------------------- PostgreSQL destinations built from configuration (card F04l)
+
+const PG_PASSWORD = "nn-test-password";
+/** A PostgreSQL destination written as the configuration writes it: a secret reference; the address comes from the secret store (here a map). */
+async function configuredPg(f: Fixture, entry: Record<string, unknown> = {}): Promise<{ target: TransferTarget; url: string; schema: string }> {
+  const s = await server();
+  const schema = `xc_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
+  const url = s.url();
+  f.cleanup.push(async () => { await dropPostgresSchema(url, schema); });
+  const [target] = await transferTargetsFromConfig([{ name: "pg", kind: "postgres", url: { secret: "transfer.pg-url" }, schema, ...entry }], {
+    openStorage: (path) => SqliteStorage.open({ path }), statfs: async () => { throw new Error("not used"); },
+    postgres: { resolveSecret: async (name) => (name === "transfer.pg-url" ? url : undefined), openStorage: (u, sch) => PostgresStorage.open({ connectionString: u, schema: sch }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema },
+  });
+  return { target: target!, url, schema };
+}
+
+test("a configured PostgreSQL destination reads its free room from the server: the cap minus the size the server reports, nothing claimed without a cap (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const cap = 400_000_000;
+    const { target, url } = await configuredPg(f, { maxBytes: cap });
+    const used = await postgresDatabaseBytes(url);
+    assert.ok(used > 1_000_000, "the server reports a real size for a database");
+    const free = await target.freeBytes!();
+    assert.ok(free !== undefined && Math.abs(cap - used - free) < 2_000_000, `free ${String(free)} is the cap less the server's size ${used}`);
+    const none = await configuredPg(f);
+    assert.equal(await none.target.freeBytes!(), undefined, "without a cap the room is not known, and nothing is guessed");
+    assert.equal(await (await configuredPg(f, { maxBytes: 1 })).target.freeBytes!(), 0, "a database already over its cap has no room");
+    const svc = await service(f, [target]);
+    const plan = await svc.preview("pg");
+    assert.equal(plan.ok, true, JSON.stringify(plan.findings));
+    assert.ok(plan.freeBytes !== undefined && plan.freeBytes <= cap && plan.freeBytes > cap - used - 2_000_000, "the plan shows the room the server's figures give");
+  } finally { await finish(f); }
+});
+
+test("a configured PostgreSQL destination without room for the copy is refused by the preview and by apply; one without a cap only warns (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const used = await postgresDatabaseBytes((await server()).url());
+    const small = await configuredPg(f, { maxBytes: used + 10 });
+    const svc = await service(f, [small.target]);
+    const plan = await svc.preview("pg");
+    assert.equal(plan.ok, false);
+    assert.match(plan.findings.map((x) => x.text).join("\n"), /not enough room at the destination/);
+    await assert.rejects(svc.apply("pg", plan.token), /not enough room/);
+    assert.equal(f.barrier.held, false);
+    const open = await configuredPg(f);
+    const warn = await (await service(f, [open.target])).preview("pg");
+    assert.equal(warn.ok, true);
+    assert.ok(warn.findings.some((x) => x.severity === "warning" && /free room on the PostgreSQL server is not checked from here/.test(x.text)));
+  } finally { await finish(f); }
+});
+
+test("a move to a configured PostgreSQL destination arrives whole; when the copy fails the schema is emptied through the server, and neither the journal nor the error carries the address or its password (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const { target, url, schema } = await configuredPg(f);
+    let armed = true;
+    const svc = await service(f, [target], { pageSize: 2, inject: (p) => { if (armed && p === "copy:deliveries") throw new Error(`lost the connection to ${url} (password ${PG_PASSWORD})`); } });
+    const plan = await svc.preview("pg");
+    await assert.rejects(svc.apply("pg", plan.token), (e: Error) => { assert.ok(!e.message.includes(PG_PASSWORD) && !e.message.includes(url), e.message); assert.match(e.message, /lost the connection/); return true; });
+    const journalText = readFileSync(join(st(f), "database-transfer-journal.json"), "utf8");
+    assert.equal((JSON.parse(journalText) as { phase: string }).phase, "failed");
+    assert.equal((JSON.parse(journalText) as { failure: { destinationClean: boolean } }).failure.destinationClean, true);
+    for (const secret of [PG_PASSWORD, url, "postgres://"]) assert.ok(!journalText.includes(secret), `the journal does not hold ${secret.slice(0, 12)}`);
+    const left = await withClient(url, async (c) => (await c.query("SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = $1", [schema])).rows[0]!.n as number);
+    assert.equal(left, 0, "the schema was dropped by the target's discard");
+    armed = false;
+    const second = await svc.preview("pg");
+    const done = await svc.apply("pg", second.token);
+    assert.equal(done.restartRequired, true);
+    const authority = readFileSync(join(st(f), "storage-authority.json"), "utf8");
+    for (const secret of [PG_PASSWORD, url]) assert.ok(!authority.includes(secret), "the authority file does not hold the address or its password");
+    assert.equal((await readAuthority(st(f)))?.active.fingerprint, target.fingerprint);
+  } finally { await finish(f); }
 });

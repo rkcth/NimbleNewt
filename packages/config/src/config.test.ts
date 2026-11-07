@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   CURRENT_CONFIG_VERSION, DEFAULT_LIMITS, Secret, describeConfig, directorySecrets, environmentSecrets, exportProfile, formatErrors, importProfile,
-  loadConfig, memorySecrets, migrateConfig, resolveSecrets, secretReferences, validateConfig, type ConfigMigration, type NimbleNewtConfig,
+  loadConfig, memorySecrets, migrateConfig, resolveSecrets, secretReferences, transferOptionsFromConfig, validateConfig, type ConfigMigration, type NimbleNewtConfig,
 } from "./index.js";
 
 const example = (name: string): string => readFileSync(fileURLToPath(new URL(`../examples/${name}.example.json`, import.meta.url)), "utf8");
@@ -428,4 +428,19 @@ test("a public profile uses placeholders for locations and may not point at priv
   assert.match(found, /installation\.dataDir: a public profile must use a \{\{placeholder\}\}/);
   assert.match(found, /installation\.workspaces\.main\.path: a public profile must use/);
   assert.match(found, /controller\.storage\.path: a public profile must use/);
+});
+
+test("the start gets the transfer destinations as written and a secret lookup that answers only the secrets those destinations name (card F04l)", async () => {
+  const doc = parsed("private");
+  doc.controller.databaseTransfer = { targets: [{ name: "backup-file", kind: "sqlite", path: "/srv/nn/other.sqlite" }, { name: "main-pg", kind: "postgres", url: { secret: "transfer.pg-url" } }] };
+  const config = loadOk(doc);
+  const all = memorySecrets({ "transfer.pg-url": "postgres://u:p@h/db", "example-cloud.api-key": "key-value-123", "controller.database-url": "postgres://x" });
+  const options = transferOptionsFromConfig(config, all);
+  assert.deepEqual(options.targetEntries, doc.controller.databaseTransfer.targets);
+  assert.equal(await options.secrets("transfer.pg-url"), "postgres://u:p@h/db");
+  assert.equal(await options.secrets("example-cloud.api-key"), undefined, "a provider's key is not handed to the transfer");
+  assert.equal(await options.secrets("controller.database-url"), undefined, "nor is the controller's own database address");
+  const none = transferOptionsFromConfig(loadOk(parsed("private")), all);
+  assert.deepEqual(none.targetEntries, []);
+  assert.equal(await none.secrets("transfer.pg-url"), undefined);
 });

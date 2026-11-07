@@ -81,3 +81,13 @@ export async function resolveSecrets(config: NimbleNewtConfig, resolver: SecretR
 export function describeConfig(config: NimbleNewtConfig): string {
   return JSON.stringify(config, null, 2);
 }
+
+/**
+ * What the controller's start needs to offer database transfers (card F04l): the destinations as the configuration lists them, and a secret lookup that answers ONLY the secrets those destinations
+ * name (the controller is not handed the whole secret store). No destinations: an empty list and a lookup that answers nothing. The entries are the validated configuration, passed on as they are.
+ */
+export function transferOptionsFromConfig(config: NimbleNewtConfig, resolver: SecretResolver): { readonly targetEntries: readonly unknown[]; readonly secrets: (name: string) => Promise<string | undefined> } {
+  const entries = config.controller.databaseTransfer?.targets ?? [];
+  const allowed = new Set(entries.flatMap((t) => (t.kind === "postgres" ? [t.url.secret] : [])));
+  return { targetEntries: structuredClone(entries) as readonly unknown[], secrets: async (name) => (allowed.has(name) ? resolver.resolve(name) : undefined) };
+}

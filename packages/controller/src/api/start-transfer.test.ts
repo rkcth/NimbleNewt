@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { ScriptedInterpreter } from "../chat/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { SqliteStorage } from "../storage/index.js";
-import { readAuthority, sqliteTarget } from "../transfer/index.js";
+import { PostgresStorage } from "../storage/postgres/index.js";
+import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
+import { postgresFingerprint, readAuthority, sqliteTarget } from "../transfer/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -221,9 +223,89 @@ test("a recovery point whose conversation checkpoint the host cannot find refuse
     say[text] = [{ kind: "command", op: "database.transfer.apply", args: { target: "moved" }, evidence: text, basis: "owner" }];
     const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
     assert.equal(shown[0]!.status, "refused", JSON.stringify(shown));
-    assert.match(JSON.stringify(shown[0]), /checkpoint of recovery point rp-1 is not in the conversation store/);
+    assert.match(JSON.stringify(shown[0]), /checkpoint of recovery point rp-1 is not in the conversation store, or does not match it/);
     assert.deepEqual(asked, [{ id: "rp-1", attemptId: "att-1", checkpoint: '"ck-1"' }], "the host gets each checkpoint as the JSON text the record holds");
     assert.equal(await readAuthority(d), undefined, "nothing was moved");
   } finally { await c.close().catch(() => undefined); }
   rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+});
+
+// ------------------------------------------------------------------------------- PostgreSQL destinations from configuration, through a real start (card F04l)
+
+let pgServer: Promise<TestServer> | undefined;
+const pg = (): Promise<TestServer> => (pgServer ??= startTestServer());
+after(async () => { if (pgServer !== undefined) await (await pgServer).stop(); });
+const PG_USER_PASSWORD = "nn-test-password";
+
+test("a real start with a PostgreSQL destination in the configuration (address only as a secret reference) moves the database from chat; the address and its password appear in no chat answer, print line, journal or authority file, and a start without the secret is refused naming it (card F04l)", async () => {
+  const s = await pg();
+  const url = s.url();
+  const schema = `xs_${process.pid}_${Math.random().toString(36).slice(2, 7)}`;
+  const d = mkdtempSync(join(tmpdir(), "nn-xfp-"));
+  const say: Record<string, unknown[]> = {};
+  const printed: string[] = [];
+  const entries = [{ name: "big-pg", kind: "postgres", url: { secret: "transfer.pg-url" }, schema, maxBytes: 900_000_000 }];
+  const open = (secrets?: (name: string) => Promise<string | undefined>) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: (line: string) => { printed.push(line); }, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    transfer: { stateDirectory: d, targets: [], targetEntries: entries, ...(secrets === undefined ? {} : { secrets }) } } as never);
+  try {
+    await assert.rejects(open(), (e: Error) => /transfer targets\[0\]: kind: "postgres" targets cannot be built here/.test(e.message) && !e.message.includes(PG_USER_PASSWORD));
+    await assert.rejects(open(async () => undefined), (e: Error) => e.message === "transfer targets[0]: url: the secret transfer.pg-url is not available");
+    const c = await open(async (name) => (name === "transfer.pg-url" ? url : undefined));
+    let seen = "";
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      await c.api.handle(boot.token, { v: 1, op: "project.create", commandId: "p1", args: { name: "Garden" } } as never);
+      const status = JSON.stringify(await c.api.handle(boot.token, { v: 1, op: "database.transfer.status", args: {} } as never));
+      assert.match(status, /"name":"big-pg","kind":"postgres","direction":"sqlite to postgres"/);
+      const text = "move the database to big-pg";
+      say[text] = [{ kind: "command", op: "database.transfer.apply", args: { target: "big-pg" }, evidence: text, basis: "owner" }];
+      const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
+      const proposalId = (shown[0] as { proposalId?: string }).proposalId;
+      assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+      seen += JSON.stringify(shown) + status;
+      const done = await c.chat!.applyProposal(boot.token, { commandId: "ap-p1", proposalId: proposalId! });
+      assert.equal(done.applied, true, JSON.stringify(done));
+      seen += JSON.stringify(done);
+      const authority = await readAuthority(d);
+      assert.equal(authority?.active.name, "big-pg"); assert.equal(authority?.active.kind, "postgres");
+      assert.equal(authority?.active.fingerprint, postgresFingerprint(url, schema));
+    } finally { await c.close().catch(() => undefined); }
+    const files = ["database-transfer-journal.json", "storage-authority.json"].map((n) => readFileSync(join(d, n), "utf8")).join("\n");
+    for (const [where, text] of [["chat", seen], ["print", printed.join("\n")], ["state files", files]] as const) {
+      for (const leak of [PG_USER_PASSWORD, url, "postgres://"]) assert.ok(!text.includes(leak), `${where} holds ${leak.slice(0, 10)}`);
+    }
+    // The data is in the PostgreSQL schema the entry named.
+    const moved = await PostgresStorage.open({ connectionString: url, schema });
+    try { assert.ok((await moved.listAggregates("project", { limit: 10 })).some((p) => JSON.stringify(p).includes("Garden"))); } finally { await moved.close(); }
+  } finally {
+    await withClient(url, async (client) => { await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }).catch(() => undefined);
+    rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a PostgreSQL controller moves to a SQLite file named in the configuration, the other way round (card F04l)", async () => {
+  const s = await pg();
+  const url = s.url();
+  const schema = `xr_${process.pid}_${Math.random().toString(36).slice(2, 7)}`;
+  const d = mkdtempSync(join(tmpdir(), "nn-xfq-"));
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({ storage: { kind: "postgres", url, schema }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    transfer: { stateDirectory: d, targets: [], targetEntries: [{ name: "to-file", kind: "sqlite", path: join(d, "back.sqlite") }] } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    await c.api.handle(boot.token, { v: 1, op: "project.create", commandId: "p1", args: { name: "Orchard" } } as never);
+    const text = "move the database to to-file";
+    say[text] = [{ kind: "command", op: "database.transfer.apply", args: { target: "to-file" }, evidence: text, basis: "owner" }];
+    const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
+    assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    const done = await c.chat!.applyProposal(boot.token, { commandId: "ap-q1", proposalId: (shown[0] as { proposalId: string }).proposalId });
+    assert.equal(done.applied, true, JSON.stringify(done));
+    assert.equal((await readAuthority(d))?.active.kind, "sqlite");
+  } finally {
+    await c.close().catch(() => undefined);
+    await withClient(url, async (client) => { await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }).catch(() => undefined);
+    rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 });

@@ -44,7 +44,7 @@ import { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanS
 import { InquiryService } from "../inquiries/index.js";
 import { GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
 import { SqliteStorage, probeSqliteLibrary } from "../storage/sqlite/index.js";
-import { PostgresStorage, probePostgresLibrary } from "../storage/postgres/index.js";
+import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, probePostgresLibrary } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { BeforeUpgrade } from "../storage/snapshot.js";
 import { SetupReadinessService } from "../setup/index.js";
@@ -90,7 +90,7 @@ import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublish
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { canon } from "../backup/canon.js";
-import { DatabaseTransferService, assertNotFenced, acquireStateLock, guardStart, withStateLock, postgresFingerprint, recordFirstStart, sqliteFingerprint, sqliteTargetsFromConfig, type TransferPoint, type TransferReferences, type TransferSource, type TransferTarget } from "../transfer/index.js";
+import { DatabaseTransferService, assertNotFenced, acquireStateLock, guardStart, withStateLock, postgresFingerprint, recordFirstStart, sqliteFingerprint, transferTargetsFromConfig, type TransferPoint, type TransferReferences, type TransferSource, type TransferTarget } from "../transfer/index.js";
 import { ConversationTransport, MCP_ENABLED_SETTING, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
@@ -104,8 +104,10 @@ export interface StartOptions {
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
    */
   readonly transfer?: { /** ONE fixed folder for the transfer journal and authority file, independent of every database path (mandatory when targets are given). */ readonly stateDirectory?: string; readonly targets: readonly TransferTarget[];
-    /** SQLite destinations as the configuration lists them, `{ name, kind: "sqlite", path }` (card F04l): checked and built here, so a host passes the configuration's entries as they are. They are added to `targets`; a name or a place used twice is refused. */
+    /** Destinations as the configuration lists them, `{ name, kind: "sqlite", path }` or `{ name, kind: "postgres", url: { secret }, schema?, maxBytes? }` (card F04l): checked and built here, so a host passes the configuration's entries as they are. They are added to `targets`; a name or a place used twice is refused. */
     readonly targetEntries?: readonly unknown[];
+    /** Turns a secret name into its value (the host's secret store). Needed for PostgreSQL entries: their address is only a reference in the configuration. The value is used to open, size and empty the destination and is hidden from every error, log and journal text. */
+    readonly secrets?: (name: string) => Promise<string | undefined>;
     /** Checks outside the database, answered by the host (card F04l): `checkpoints` answers which recovery points' conversation checkpoints are MISSING from the agents' stores. The controller does not know the layout of Pi's stores, so it cannot check them itself. Each point's `checkpoint` is given as the JSON text the recovery-point record holds. */
     readonly references?: Pick<TransferReferences, "checkpoints">; readonly inject?: (point: TransferPoint) => void | Promise<void>; readonly onSwitched?: () => void };
   /** Where releases are staged and activated (card K02): off unless given. The release root holds `incoming`, `releases` and the activation pointer; the launcher reads the pointer. */
@@ -345,7 +347,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   if (stateInput !== undefined && !isAbsolute(stateInput)) throw new Error("transfer.stateDirectory must be an absolute path (it is the one fixed place of the transfer journal and authority file)");
   const stateDirectory = stateInput === undefined ? undefined : await canon(stateInput);
   // Destinations from the configuration are built now (a bad entry stops the start with its index and problem), and joined to the ones the host gave.
-  const configuredTargets = options.transfer?.targetEntries === undefined ? [] : await sqliteTargetsFromConfig(options.transfer.targetEntries, { openStorage: (path) => SqliteStorage.open({ path }), statfs: (path) => statfs(path) });
+  const configuredTargets = options.transfer?.targetEntries === undefined ? [] : await transferTargetsFromConfig(options.transfer.targetEntries, { openStorage: (path) => SqliteStorage.open({ path }), statfs: (path) => statfs(path),
+    ...(options.transfer.secrets === undefined ? {} : { postgres: { resolveSecret: options.transfer.secrets, openStorage: (url: string, schema: string) => PostgresStorage.open({ connectionString: url, schema }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema } }) });
   const transferTargets: readonly TransferTarget[] = [...(options.transfer?.targets ?? []), ...configuredTargets];
   for (const [i, t] of transferTargets.entries()) {
     const twin = transferTargets.findIndex((o, j) => j < i && (o.name === t.name || o.fingerprint === t.fingerprint));

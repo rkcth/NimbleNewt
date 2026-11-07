@@ -56,6 +56,10 @@ export function exportProfile(config: NimbleNewtConfig): ExportedProfile {
   replace(document.installation, "name", "installationName", "installation.name");
   replace(document.installation, "dataDir", "dataDir", "installation.dataDir");
   for (const name of Object.keys(document.installation.workspaces)) replace(document.installation.workspaces[name], "path", `workspace.${name}`, `installation.workspaces.${name}.path`);
+  if (document.controller.databaseTransfer !== undefined) {
+    delete document.controller.databaseTransfer;
+    omitted.push({ path: "controller.databaseTransfer", reason: "database transfer destinations are places of one installation" });
+  }
   if (document.controller.storage.kind === "sqlite") replace(document.controller.storage, "path", "sqlitePath", "controller.storage.path");
 
   for (const [name, provider] of Object.entries(document.models.providers as Record<string, Record<string, any>>)) {

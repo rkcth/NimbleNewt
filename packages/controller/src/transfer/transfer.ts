@@ -37,6 +37,8 @@ export interface TransferTarget {
   freeBytes?(): Promise<number | undefined>;
   /** Empties the destination after a failed copy (the store is closed first). Absent: the owner is told the destination is dirty. */
   discard?(): Promise<void>;
+  /** Hides what must never be shown from a text that is about to reach the journal, a log or chat (a PostgreSQL address with its password). */
+  redact?(text: string): string;
 }
 
 export interface TransferSource { readonly kind: StorageKind; readonly fingerprint: string; readonly name: string }
@@ -457,7 +459,7 @@ export class DatabaseTransferService {
     if (this.#o.references?.checkpoints !== undefined && points.length > 0) {
       let missing: readonly string[] = [];
       try { missing = await this.#o.references.checkpoints(points.map((p) => ({ id: p.id, attemptId: p.attemptId, checkpoint: p.checkpoint }))); } catch (error) { err(`conversation checkpoints could not be checked: ${error instanceof Error ? error.message.slice(0, 120) : "failed"}`); }
-      for (const id of missing.slice(0, 10)) err(`checkpoint of recovery point ${id} is not in the conversation store`);
+      for (const id of missing.slice(0, 10)) err(`checkpoint of recovery point ${id} is not in the conversation store, or does not match it`);
     }
     return { digests: hashes, rows, bytes, findings, uncertain, intended, claims };
   }
@@ -621,7 +623,7 @@ export class DatabaseTransferService {
         try { this.#o.onSwitched?.(authority); } catch { /* the host's notice must not undo a switch */ }
         return { id, direction: plan.direction, to: target.name, rows: plan.totalRows, claimsReleased: plan.claimsReleased, uncertainEffects: plan.uncertainEffects, restartRequired: true, findings: plan.findings };
       } catch (error) {
-        const reason = error instanceof Error ? error.message.slice(0, 500) : "the transfer failed";
+        const reason = target.redact !== undefined ? target.redact(error instanceof Error ? error.message.slice(0, 500) : "the transfer failed") : error instanceof Error ? error.message.slice(0, 500) : "the transfer failed";
         if (snap !== undefined) await snap.close().catch(() => undefined);
         if (dest !== undefined) await dest.close().catch(() => undefined);
         if (!fenced) {
