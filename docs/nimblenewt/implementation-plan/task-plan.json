@@ -2111,7 +2111,7 @@
         "C07f",
         "L03"
       ],
-      "deliverable": "Added 2026-11-03 after an independent code audit of the Paperclip failure in which a task passed between agents accumulates ever-larger notes and every handoff gets slower. A repeated-handoff test, with a retention check as important as the size check: a task is handed A to B to A about 50 times with retries, lease timeouts, resumes, a fallback to a smaller-window route and compactions, and at each hop the test records what the next agent is actually given (the first-call size sent, the handoff package size, the stored conversation size and the resume note) and what survives in it. Size: every hop stays under the first-call limit, the average of the last 10 hops is no more than 5 percent above the first 10, and the package stays within its fixed sections. Retention, so that bounding never starves the agent that has to fix the problem: at every hop the owner's words, permissions, the current goal and acceptance criteria, open blockers and questions, the most recent failure with its diagnosis, the next action and every recorded decision are still present whole or retrievable by the reference the prompt carries, and a seeded early decision and a seeded early failure detail are found again after 50 hops. Anything cut leaves a visible marker and an archived original that can be read back, so a cut is never silent. The test is the deliverable; where it shows a path unbounded or a cut that loses essentials (the audit's candidates: a route with an unknown window admits everything, the remote worker host has no first-call check, a handoff section is cut with a plain slice and no marker, the brief is cut at its tail, the compaction lineage cap of 200 makes later captures fail, and the controller's own summariser and handoff note are never used), each is recorded as a finding and split into its own follow-up card rather than fixed inside this one",
+      "deliverable": "Narrowed 2026-11-06 to the hand-off package (first slice, built): the 50-hand-off test drives the real hand-off service and the real controller package source on both storage backends, checking the package size ceiling, the fixed sections, the owner's words, goal, acceptance criteria and next action at every hop, and the seeded early decision and failure after the last hop. Findings it showed, each with its own card: a section is cut at its tail with a plain slice, no marker and no archive, so the newest decisions and the latest diagnosis are lost once decisions pile up (C07j); the package grows with every hand-off until it reaches the section limit and nothing summarises the decisions (C07k). The first-call size sent to a worker, the stored conversation size, the resume note, and the lease-timeout, compaction and smaller-window-fallback hops are C07l. Original text: Added 2026-11-03 after an independent code audit of the Paperclip failure in which a task passed between agents accumulates ever-larger notes and every handoff gets slower. A repeated-handoff test, with a retention check as important as the size check: a task is handed A to B to A about 50 times with retries, lease timeouts, resumes, a fallback to a smaller-window route and compactions, and at each hop the test records what the next agent is actually given (the first-call size sent, the handoff package size, the stored conversation size and the resume note) and what survives in it. Size: every hop stays under the first-call limit, the average of the last 10 hops is no more than 5 percent above the first 10, and the package stays within its fixed sections. Retention, so that bounding never starves the agent that has to fix the problem: at every hop the owner's words, permissions, the current goal and acceptance criteria, open blockers and questions, the most recent failure with its diagnosis, the next action and every recorded decision are still present whole or retrievable by the reference the prompt carries, and a seeded early decision and a seeded early failure detail are found again after 50 hops. Anything cut leaves a visible marker and an archived original that can be read back, so a cut is never silent. The test is the deliverable; where it shows a path unbounded or a cut that loses essentials (the audit's candidates: a route with an unknown window admits everything, the remote worker host has no first-call check, a handoff section is cut with a plain slice and no marker, the brief is cut at its tail, the compaction lineage cap of 200 makes later captures fail, and the controller's own summariser and handoff note are never used), each is recorded as a finding and split into its own follow-up card rather than fixed inside this one",
       "acceptance_and_verification": "The simulation runs in the integration suite on both storage backends and in the exhaustive run; it fails when a hop exceeds the ceiling or the size trend rises, when any retention item is missing or cannot be retrieved, or when a cut has no marker or no archived original; deliberately removing a bound, or deliberately cutting a retained item, makes it fail (mutation check recorded); the findings list names each unbounded path or lossy cut with the file and line, and each has a follow-up card; the production watch on the same figure is C07i",
       "status": "planned",
       "research_evidence": null,
@@ -2130,6 +2130,57 @@
       ],
       "deliverable": "Split from C07h (2026-11-03): the repeated-handoff test proves the bound in a simulation; this card watches the real thing. Each attempt records the size of the first call it was given, keyed by task and by how many handoffs the task has had, with the limit for its route and the share of the limit used. The owner sees an alert, and the task gets a visible warning, when a task's starting size has risen over several consecutive handoffs or passes 80 percent of its limit, so a slowdown is noticed while it is still small. The alert names the task, the trend and the largest contributors (stored conversation, handoff package, notes, project rules) and links the archived originals, and it never trims, cuts or compacts anything itself, so watching cannot cost the agent information it needs",
       "acceptance_and_verification": "An attempt on a task whose starting size rises over a configurable number of consecutive handoffs raises one alert (not one per attempt) with the trend and the contributors; passing 80 percent of the limit raises a warning before the 25 percent refusal; a flat or falling trend raises nothing; the figure is recorded for local and remote workers and for a route with an unknown window, which is shown as unknown and not as zero; the alert thresholds are configurable and validated; the alert changes no task content and leaves every cut original retrievable; the recorded figures are read through the state API and bounded themselves (older points are rolled up, not kept without limit)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07j",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Mark every hand-off cut and keep the original so the newest decisions are not silently lost",
+      "depends_on": [
+        "C07h"
+      ],
+      "deliverable": "Split from C07h (2026-11-06), finding 1: lifecycle/handoff.ts #collect cuts each section with a plain slice to 4000 characters, from the tail, with no marker and no archived original; in the 50-hand-off test the completed-work section (the decisions) is cut from hop 26 and the latest diagnosis is lost from hop 27. The audit's other candidates (a route with an unknown window admits everything, the remote worker host has no first-call check, the brief cut at its tail, the compaction lineage cap of 200) are checked under C07l",
+      "acceptance_and_verification": "A section that does not fit keeps its most recent entries and the entries the owner marked, leaves a visible marker that says what was cut and how many entries, and archives the original so it can be read back through the state API; the 50-hand-off test's latest-diagnosis and cut-marker checks pass and lose their todo",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07k",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Summarise accumulated decisions so a hand-off package stops growing with the number of hand-offs",
+      "depends_on": [
+        "C07j"
+      ],
+      "deliverable": "Split from C07h (2026-11-06), finding 2: the package source lists every decision the run recorded, so the package grows with each hand-off (first ten hops average 1411 characters, last ten 4545) until it reaches the section limit; the controller's own summariser is never used for it",
+      "acceptance_and_verification": "Older decisions are summarised into a bounded digest that keeps each decision's reference to its original; the average package size of the last 10 hops in the 50-hand-off test is no more than 5 percent above the first 10, with no decision lost and the seeded early decision and failure still found; the check loses its todo",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07l",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Extend the 50-hand-off test to the first call, the stored conversation and the resume note",
+      "depends_on": [
+        "C07h"
+      ],
+      "deliverable": "Split from C07h (2026-11-06): the first slice measures the hand-off package. This adds what the next agent is actually given in a call: the first-call size sent, the stored conversation size and the resume note, with retries, lease timeouts, resumes, a fallback to a smaller-window route and compactions in the 50 hops, and checks the audit's other candidates (a route with an unknown window admits everything, the remote worker host has no first-call check, the brief cut at its tail, the compaction lineage cap of 200, the controller's own summariser and handoff note never used) with file and line for each, each becoming its own card",
+      "acceptance_and_verification": "Every hop's first call stays under the limit for its route and the last 10 hops average no more than 5 percent above the first 10; retention items are present whole or retrievable by reference at every hop; deliberately removing a bound or cutting a retained item makes the test fail (mutation check recorded); each unbounded path or lossy cut found has a follow-up card with file and line",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8888,6 +8939,9 @@
         "C07g",
         "C07h",
         "C07i",
+        "C07j",
+        "C07k",
+        "C07l",
         "L02b",
         "H08b",
         "U06b",
