@@ -477,6 +477,18 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `continuation.latest`
+
+The latest complete continuation of a task (for those who may work on it or read its history), or nothing when none was captured or none was durable.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }` (absent when there is none).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.get`
 
 A resume check, with what changed, the verdicts and the history.
@@ -2703,6 +2715,29 @@ Arguments:
 
 Result: `{ advanced: [id], failed: [id] }`.
 
+#### `continuation.capture`
+
+A host records the continuation of a task's run at a boundary: the conversation identity, the adapter's checkpoint reference, the result of its durability check, what the run still needs (artifacts, decisions, pending effects, budget, next step) and the manifest of what the context was built from. Only a host, service or the owner can vouch that the durability check passed; an agent's own word is recorded as not verified, and a capture that is not durable is stored as incomplete and is never resumed from.
+
+Arguments:
+
+- `taskId`: the task
+- `identity`: the conversation's identity (the same for every capture of the task)
+- `agent`: the agent whose run it is
+- `boundary`: { kind: turn-complete, timeout, manual or shutdown, turnInProgress? }
+- `checkpoint`: { conversationId, at, digest, runtime: { name, version }, format }
+- `durable`: { verified, error? } from the host's durability check
+- `continuation`: { artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }
+- `manifest`: { summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }
+- `nonCheckpointableTools`: [{ name, reason }]
+- `scratchRecords`: record IDs
+- `credentialRefs`: credential names only
+- `commandId`: required
+
+Result: `{ id, seq, status: complete or incomplete, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.start`
 
 Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.
@@ -2729,6 +2764,19 @@ Arguments:
 - `commandId`: required
 
 Result: `{ item }`.
+
+#### `resume.approve`
+
+The owner lets a task go on after a resume check that holds changes judged to matter to its work (owner only): the task's current check, when it is ready, is committed. A check already done answers as it is; one that is not ready is refused with where it stands.
+
+Arguments:
+
+- `taskId`: the task
+- `commandId`: required
+
+Result: `{ item }`: the check, `phase` done when it was approved.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `resume.retry`
 

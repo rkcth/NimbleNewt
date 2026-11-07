@@ -68,6 +68,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "retention.archive": { verb: "Archive a finished task's records", mode: "propose" },
   "retention.restore": { verb: "Restore a task's archived records", mode: "propose" },
   "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
+  // Letting a task go on after a resume check found changes that matter to it: shown first in every profile, because the owner is accepting that the work continues on changed inputs.
+  "resume.approve": { verb: "Let a task go on after a resume check found changes that matter to it", mode: "propose" },
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
   // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.
   "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },

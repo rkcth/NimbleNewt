@@ -65,6 +65,7 @@ import type { ReplayService } from "../activity/replay.js";
 import type { ReplayLimitsService } from "../activity/replay-limits.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
+import type { ContinuationService } from "../continuation/continuation.js";
 import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { QuietHostService } from "../remote/quiet-hosts.js";
 import type { CatalogPolicyService } from "../catalog/policy.js";
@@ -161,7 +162,8 @@ export interface Context {
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
+  readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve">;
   /** Absent when the controller runs without deliverable reads (card U13). */
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
@@ -284,6 +286,7 @@ const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => {
   const screenedOpt = <A extends unknown[]>(run: (...a: A) => Promise<View<TaskHandoffBody> | undefined>) => async (...a: A) => { const v = await run(...a); return v === undefined ? v : h.screen(c.principal, v); };
   return { ...h, prepare: screened(h.prepare.bind(h)), complete: screened(h.complete.bind(h)), takeover: screened(h.takeover.bind(h)), choose: screened(h.choose.bind(h)), cancel: screened(h.cancel.bind(h)), advance: screened(h.advance.bind(h)), get: screenedOpt(h.get.bind(h)), forTask: screenedOpt(h.forTask.bind(h)), sweep: h.sweep.bind(h), screen: h.screen.bind(h) } as NonNullable<Context["handoffs"]>;
 };
+const continuationsOf = (c: Context): NonNullable<Context["continuations"]> => c.continuations ?? unavailable("continuation capture");
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
 const deliverablesOf = (c: Context): NonNullable<Context["deliverables"]> => c.deliverables ?? unavailable("deliverable reads");
 const replayLimitsOf = (c: Context): NonNullable<Context["replayLimits"]> => c.replayLimits ?? unavailable("replay limits");
@@ -707,12 +710,20 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["handoffId"]); const item = await handoffsOf(c).get(c.principal, a["handoffId"] as string); if (item === undefined) throw new DomainError("not_found", "no such hand-off"); return asJson({ item }); } },
   { name: "handoff.sweep", kind: "command", summary: "Owner only: carries unfinished hand-offs on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps hand-offs"); return asJson(await handoffsOf(c).sweep(c.principal)); } },
+  { name: "continuation.capture", kind: "command", summary: "A host records the continuation of a task's run at a boundary: the conversation identity, the adapter's checkpoint reference, the result of its durability check, what the run still needs (artifacts, decisions, pending effects, budget, next step) and the manifest of what the context was built from. Only a host, service or the owner can vouch that the durability check passed; an agent's own word is recorded as not verified, and a capture that is not durable is stored as incomplete and is never resumed from.", args: { taskId: "the task", identity: "the conversation's identity (the same for every capture of the task)", agent: "the agent whose run it is", boundary: "{ kind: turn-complete, timeout, manual or shutdown, turnInProgress? }", checkpoint: "{ conversationId, at, digest, runtime: { name, version }, format }", durable: "{ verified, error? } from the host's durability check", continuation: "{ artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }", manifest: "{ summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }", nonCheckpointableTools: "[{ name, reason }]", scratchRecords: "record IDs", credentialRefs: "credential names only", commandId: "required" },
+    result: "`{ id, seq, status: complete or incomplete, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "identity", "agent", "boundary", "checkpoint", "durable", "continuation", "manifest", "nonCheckpointableTools", "scratchRecords", "credentialRefs"]); return asJson(await continuationsOf(c).capture(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "continuation.latest", kind: "query", summary: "The latest complete continuation of a task (for those who may work on it or read its history), or nothing when none was captured or none was durable.", args: { taskId: "the task" }, result: "`{ item }` (absent when there is none).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["taskId"]); const item = await continuationsOf(c).latest(c.principal, a["taskId"] as string); return asJson(item === undefined ? {} : { item }); } },
   { name: "resume.start", kind: "command", summary: "Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.", args: { taskId: "the task", model: "{ provider, id } the resume will run on", "previousModel?": "{ provider, id } it ran on before", after: "restart, model-change or continue", commandId: "required" },
     result: "`{ item: { id, phase, delta, verdicts, blocked? } }`.",
     run: async (c, a, id) => { only(a, ["taskId", "model", "previousModel", "after"]); return asJson({ item: await resumesOf(c).start(c.principal, { commandId: need(id), ...a } as never) }); } },
   { name: "resume.commit", kind: "command", summary: "Commits a ready resume: the inputs are checked once more, and if anything changed since the review the check starts over (and stops as a blocker after three rounds). Otherwise the resume is recorded with how the context came back and what that cannot promise.", args: { checkId: "the check", "restoredBy?": "native-restore, reconstruction or restart", "limits?": "what the restoration cannot promise, as short statements", commandId: "required" },
     result: "`{ item }`.",
     run: async (c, a, id) => { only(a, ["checkId", "restoredBy", "limits"]); return asJson({ item: await resumesOf(c).commit(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "resume.approve", kind: "command", summary: "The owner lets a task go on after a resume check that holds changes judged to matter to its work (owner only): the task's current check, when it is ready, is committed. A check already done answers as it is; one that is not ready is refused with where it stands.", args: { taskId: "the task", commandId: "required" },
+    result: "`{ item }`: the check, `phase` done when it was approved.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId"]); return asJson({ item: await resumesOf(c).approve(c.principal, { commandId: need(id), taskId: a["taskId"] as string }) }); } },
   { name: "resume.retry", kind: "command", summary: "Starts a blocked resume check over once the reason has been dealt with.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).retry(c.principal, { checkId: a["checkId"] as string }) }); } },
   { name: "resume.cancel", kind: "command", summary: "Cancels a resume check that has not been committed.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",

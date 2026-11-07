@@ -273,6 +273,9 @@ interface Live { readonly handle: WorkerHandle; readonly host: WorkerHost; reado
  * with the recovery gate (R03, F08), the budget, the grants the task needs, the host, and last the place (H03). A check that fails for a lasting reason opens a blocker that names who can change it;
  * one that fails for a passing reason only skips the attempt for this tick.
  */
+/** A ready resume check that has passed everything else and is committed just before the start. */
+interface PendingResumeCommit { readonly checkId: string; readonly commandId: string }
+
 export class DispatcherService {
   readonly #runner: CommandRunner;
   readonly #deps: DispatcherDeps;
@@ -986,7 +989,7 @@ export class DispatcherService {
    * The check's key names the attempt, the checkpoint and the model it is about to run on, so a re-chosen route is a different check (the service refuses a command ID reused with other content). A live check of the task that is not this attempt's
    * is stale and is cancelled; a cancelled check of this attempt is started again under a new key, at most RESUME_RESTARTS times, and then the owner gets a blocker; a blocked check whose blocker is dealt with is retried here.
    */
-  async #resumeCheck(attemptId: string, taskId: string, route: string): Promise<string | undefined> {
+  async #resumeCheck(attemptId: string, taskId: string, projectId: string, route: string): Promise<string | { commit: PendingResumeCommit } | undefined> {
     const resumes = this.#deps.resumes;
     const b = (await this.#load(attemptId))?.body;
     if (resumes === undefined || b === undefined || b.resumeFrom === undefined) return undefined;
@@ -1024,7 +1027,12 @@ export class DispatcherService {
       const key = keys[n]!;
       let check = await resumes.start(by, { commandId: key, taskId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
       if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
-      if (check.phase === "ready") check = await resumes.commit(by, { commandId: `${key}-commit`, checkId: check.id });
+      if (check.phase === "ready") {
+        // A check that holds changes judged to matter is not committed by the dispatcher: the owner decides (`resume.approve`). The commit itself comes last, just before the start (card L04c).
+        const relevant = (check.delta?.changed ?? []).filter((i) => check.verdicts[i.id]?.relevant === true);
+        if (relevant.length > 0) return this.#holdForReview(attemptId, taskId, projectId, check, relevant);
+        return { commit: { checkId: check.id, commandId: `${key}-commit` } };
+      }
       if (check.phase === "done") return undefined;
       if (check.phase === "blocked" && resumes.exhausted(check)) {
         // No blocker will ever resolve and no retry is left: the owner is told once (the command ID is stable).
@@ -1039,10 +1047,33 @@ export class DispatcherService {
     }
   }
 
+  /** A ready resume check that holds changes judged to matter waits for the owner. The owner is told once (the command ID is the check's), in words that match the stored check. */
+  async #holdForReview(attemptId: string, taskId: string, projectId: string, check: { id: string }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
+    const names = relevant.slice(0, 3).map((i) => `${i.kind} ${i.key} (${i.status})`).join(", ");
+    const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
+    await this.#deps.notifications?.emitFromController({
+      commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: taskId }, projectId,
+      detail: `Task ${taskId} is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve the resume to let it go on.`.slice(0, 200),
+    }).catch((error: unknown) => this.#options.onError?.(error));
+    return `the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); the owner approves it (resume.approve) or cancels it before attempt ${attemptId} starts`.slice(0, 500);
+  }
+
+  /** Commits the resume check just before the attempt starts. Returns why it did not finish, or nothing when the check is done (the commit is recorded once however often this runs). */
+  async #commitResume(pending: PendingResumeCommit): Promise<string | undefined> {
+    const resumes = this.#deps.resumes;
+    if (resumes === undefined) return undefined;
+    try {
+      const check = await resumes.commit(this.#deps.principal, { commandId: pending.commandId, checkId: pending.checkId });
+      return check.phase === "done" ? undefined : `the resume check ${check.id} is ${check.phase} after the commit; it is looked at again on the next tick`;
+    } catch (error) {
+      return `the resume check ${pending.checkId} could not be committed: ${errorText(error)}`.slice(0, 500);
+    }
+  }
+
   /**
    * The checks before a claim, in their fixed order. `current` says the attempt is the task's active one at the current generation. Returns what the claim needs, or why the attempt is skipped or blocked.
    */
-  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string } }> {
+  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; resume?: PendingResumeCommit }> {
     const taskId = task.id;
     const skip = (check: DispatchCheck, reason: string): ClaimOutcome => ({ kind: "skipped", check, reason });
     const block = async (check: DispatchCheck, type: "grant_needed" | "dispatch_blocked", reason: string, resolver = "owner"): Promise<ClaimOutcome> => {
@@ -1112,8 +1143,8 @@ export class DispatcherService {
     const gap = this.#deps.harnesses.checkAttempt(recovery, chosen.harness);
     if (gap !== undefined) return block("harness", "dispatch_blocked", gap);
     // 5b. A checked resume (card L04c): an attempt that carries earlier work back is checked first, with the model it is about to run on.
-    const resumed = await this.#resumeCheck(attemptId, taskId, chosen.route);
-    if (resumed !== undefined) return skip("resume", resumed);
+    const resumed = await this.#resumeCheck(attemptId, taskId, task.projectId, chosen.route);
+    if (typeof resumed === "string") return skip("resume", resumed);
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {
       const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);
@@ -1183,7 +1214,7 @@ export class DispatcherService {
     }
     this.#pinnedWaits.delete(attemptId);
     this.#refusedWaits.delete(attemptId);
-    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host };
+    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed === undefined ? {} : { resume: resumed.commit }) };
   }
 
   /**
@@ -1330,6 +1361,11 @@ export class DispatcherService {
     // Card R05b: the allowance is held before the attempt starts, so two attempts of sibling tasks cannot count on the same money or compute. Nothing to reserve with: nothing is held.
     const held = await this.#reserve(d);
     if (held !== undefined) { await this.#giveBack(d); return held; }
+    // The checked resume is committed last, once the place and the allowance are held, so an attempt that waited for them has recorded nothing (card L04c).
+    if (pre.resume !== undefined) {
+      const why = await this.#commitResume(pre.resume);
+      if (why !== undefined) { await this.#giveBack(d); return { kind: "skipped", check: "resume", reason: why }; }
+    }
     // The place is held and the allowance reserved: the checkout is pinned now, just before the start, so a task that only waited (for a place or an allowance) holds no pin (card P01).
     if (this.#deps.checkouts !== undefined) {
       let pinned: Awaited<ReturnType<NonNullable<DispatcherDeps["checkouts"]>["dispatchCheckout"]>>;

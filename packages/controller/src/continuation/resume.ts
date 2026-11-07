@@ -157,6 +157,9 @@ export class ResumeCheckService {
     const b = found.body as unknown as ResumeCheckBody;
     if (b.phase === "done" || b.phase === "executing") return this.advance(by, { checkId: command.checkId });
     if (b.phase !== "ready") throw new DomainError("invalid_command", `the resume check is ${b.phase}; it can be committed when it is ready`, { field: "checkId" });
+    // Changes judged to matter are the owner's to accept: neither the dispatcher nor the agent being resumed commits over them (card L04c).
+    const matter = (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id]?.relevant === true);
+    if (matter.length > 0 && by.kind !== "owner") throw new DomainError("forbidden", `${matter.length} change(s) were judged to matter to the work; only the owner commits the resume (resume.approve)`);
     const now = await this.#verify(by, b);
     if (now.stale !== undefined) {
       // The inputs moved after the review: nothing is committed.
@@ -167,6 +170,20 @@ export class ResumeCheckService {
     await this.#update(command.checkId, (x) => ({ ...x, phase: "executing", restore: { method: command.restoredBy ?? "reconstruction", limits }, history: this.#push(x, "executing", by.id, `committing; restored by ${command.restoredBy ?? "reconstruction"}`) }), ["ready"]);
     void at;
     return this.advance(by, { checkId: command.checkId, commandId: String(command.commandId) });
+  }
+
+  /**
+   * The owner's decision to let a task go on although changes were judged to matter (card L04c). It commits the task's current check when that is ready; a check already done answers as it is (a repeat is safe), anything else is refused
+   * with where it stands, so the owner is never told a resume was approved when it was not.
+   */
+  async approve(by: Principal, command: NoActor & { taskId: string }): Promise<View<ResumeCheckBody>> {
+    onlyKnown(command, ["commandId", "taskId"]);
+    if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner approves a resume that holds changes judged to matter");
+    const check = await this.forTask(by, command.taskId);
+    if (check === undefined) throw new DomainError("not_found", "that task has no resume check");
+    if (check.phase === "done") return check;
+    if (check.phase !== "ready") throw new DomainError("invalid_command", `the task's resume check is ${check.phase}; only a ready one can be approved`, { field: "taskId" });
+    return this.commit(by, { commandId: `rck-approve-${check.id.slice(4)}`, checkId: check.id });
   }
 
   /** Starts a blocked check over from the beginning, once whoever blocked it has dealt with the reason. */

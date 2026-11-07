@@ -61,6 +61,7 @@ import type { ReplayService } from "../activity/replay.js";
 import type { ReplayLimitsService } from "../activity/replay-limits.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
+import type { ContinuationService } from "../continuation/continuation.js";
 import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { QuietHostService } from "../remote/quiet-hosts.js";
 import type { CatalogPolicyService } from "../catalog/policy.js";
@@ -176,7 +177,8 @@ export interface StateApiDeps {
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
+  readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
@@ -338,6 +340,7 @@ export class StateApi {
         ...(this.#deps.replay === undefined ? {} : { replay: this.#deps.replay }),
         ...(this.#deps.replayLimits === undefined ? {} : { replayLimits: this.#deps.replayLimits }),
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
+        ...(this.#deps.continuations === undefined ? {} : { continuations: this.#deps.continuations }),
         ...(this.#deps.handoffs === undefined ? {} : { handoffs: this.#deps.handoffs }),
         ...(this.#deps.cutover === undefined ? {} : { cutover: this.#deps.cutover }),
         ...(this.#deps.modelBudget === undefined ? {} : { modelBudget: this.#deps.modelBudget }),
