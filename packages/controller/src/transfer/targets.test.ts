@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { canon } from "../backup/canon.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
+import { dropPostgresSchema } from "../storage/postgres/index.js";
 import { sqliteTargetsFromConfig, type SqliteTargetDeps } from "./index.js";
 
 const deps: SqliteTargetDeps = { openStorage: (path) => SqliteStorage.open({ path }), statfs };
@@ -190,8 +191,8 @@ test("a PostgreSQL entry that is not a secret reference is refused and the addre
   await bad(pgEntry({ url: ADDRESS }), "targets[0]", "url", "secret reference");
   await bad(pgEntry({ url: undefined }), "targets[0]", "url");
   await bad(pgEntry({ url: { secret: "a", extra: ADDRESS } }), "targets[0]", "url");
-  await bad(pgEntry({ url: { secret: "bad name" } }), "targets[0]", "url");
-  await bad(pgEntry({ url: { secret: "a__b" } }), "targets[0]", "url");
+  await bad(pgEntry({ url: { secret: "bad name" } }), "targets[0]", "url", "secret reference");
+  await bad(pgEntry({ url: { secret: "a__b" } }), "targets[0]", "url", "secret reference");
   await bad(pgEntry({ schema: "Bad-Schema" }), "targets[0]", "schema");
   await bad(pgEntry({ schema: 7 }), "targets[0]", "schema");
   await bad(pgEntry({ maxBytes: 0 }), "targets[0]", "maxBytes");
@@ -263,4 +264,8 @@ test("a failed copy drops a PostgreSQL schema only when this target's open creat
   await fresh.discard!();
   await fresh.discard!();
   assert.deepEqual(dropped, ["nn_x", "nn_x"], "the schema its own open created is dropped (and again after a later failed copy)");
+});
+
+test("the schema drop refuses a name it could not place in its statement safely, before it connects anywhere (card F04l)", async () => {
+  for (const schema of ["x; drop database nimble", "Public", "a-b", "", `a${"b".repeat(41)}`]) await assert.rejects(dropPostgresSchema("postgres://u:p@127.0.0.1:1/none", schema), /invalid PostgreSQL schema name/);
 });
