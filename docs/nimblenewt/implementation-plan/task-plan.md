@@ -1457,6 +1457,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12e — Route Pi model calls through the cache adapter
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `5a4846bb`, `8c3d9b45`, `65f043ae`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Pi's model calls go through the C06 cache adapter in the composed controller: an end-to-end test with the real worker process and the simulated llama-server shows real reuse inside a project, none across projects, no degraded mode while the adapter is there, and budget accounting equal to the server's hit figures per task and project (also on all four storage backends through the dispatcher, a resent report charged once). Fixed: a turn whose process died lost its figures; the composer degraded slotted servers when no endpoint state was given. Slot assignment is never released (C06 limit); nothing creates a project's pin markers yet. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12, C06b.
 - **Deliverable:** Pi's own HTTP calls go through the C06 CacheAdapter and its per-endpoint state so slot partitioning, markers and pins apply.
 - **Acceptance and verification:** Slotted servers get real reuse for the same project and none across projects; the degraded no-reuse mode is used only when the adapter is unavailable; cache hit figures from the backend reach the budget accounting; tested against the simulated servers.

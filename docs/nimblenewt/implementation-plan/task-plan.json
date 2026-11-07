@@ -4017,12 +4017,23 @@
       ],
       "deliverable": "Pi's own HTTP calls go through the C06 CacheAdapter and its per-endpoint state so slot partitioning, markers and pins apply",
       "acceptance_and_verification": "Slotted servers get real reuse for the same project and none across projects; the degraded no-reuse mode is used only when the adapter is unavailable; cache hit figures from the backend reach the budget accounting; tested against the simulated servers",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "5a4846bb",
+          "8c3d9b45",
+          "65f043ae"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Pi's model calls go through the C06 cache adapter in the composed controller: an end-to-end test with the real worker process and the simulated llama-server shows real reuse inside a project, none across projects, no degraded mode while the adapter is there, and budget accounting equal to the server's hit figures per task and project (also on all four storage backends through the dispatcher, a resent report charged once). Fixed: a turn whose process died lost its figures; the composer degraded slotted servers when no endpoint state was given. Slot assignment is never released (C06 limit); nothing creates a project's pin markers yet. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "H12f",
