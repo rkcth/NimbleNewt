@@ -64,6 +64,11 @@ export const STALE_CANCEL = "stale-by-dispatcher" as const;
 export const RETRY_BACKOFF_MS = 5 * 60_000;
 export const RESUME_LIMITS = { rounds: 3, advances: 10, history: 40, note: 300, limits: 10 } as const;
 const validRounds = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 1 && n <= 10;
+/**
+ * Who records the continuation resume of a committed check. The record's command ID is scoped by the recorder, so it must be the same whoever carries the check on: the owner's approval, the dispatcher's
+ * commit and the start-up sweep after a crash all record the one resume (card L04c). Who committed is kept in the check's own history.
+ */
+const RESUMER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
 const KIND = "resume-check";
 const ACTIVE = "resume-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -158,7 +163,7 @@ export class ResumeCheckService {
     if (b.phase === "done" || b.phase === "executing") return this.advance(by, { checkId: command.checkId });
     if (b.phase !== "ready") throw new DomainError("invalid_command", `the resume check is ${b.phase}; it can be committed when it is ready`, { field: "checkId" });
     // Changes judged to matter are the owner's to accept: neither the dispatcher nor the agent being resumed commits over them (card L04c).
-    const matter = (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id]?.relevant === true);
+    const matter = relevantChanges(b);
     if (matter.length > 0 && by.kind !== "owner") throw new DomainError("forbidden", `${matter.length} change(s) were judged to matter to the work; only the owner commits the resume (resume.approve)`);
     const now = await this.#verify(by, b);
     if (now.stale !== undefined) {
@@ -167,7 +172,11 @@ export class ResumeCheckService {
       return this.advance(by, { checkId: command.checkId });
     }
     const at = this.#runner.now();
-    await this.#update(command.checkId, (x) => ({ ...x, phase: "executing", restore: { method: command.restoredBy ?? "reconstruction", limits }, history: this.#push(x, "executing", by.id, `committing; restored by ${command.restoredBy ?? "reconstruction"}`) }), ["ready"]);
+    // The check may have been started over and reviewed again since it was read (verdicts change only then, or on a retry): nothing is written unless it is still the check whose hold was judged above.
+    await this.#update(command.checkId, (x) => {
+      if (x.round !== b.round || x.blocks !== b.blocks || x.revisionSet?.digest !== b.revisionSet?.digest) throw new DomainError("invalid_transition", "the resume check was started over while it was being committed; it is looked at again before anything is committed");
+      return { ...x, phase: "executing", restore: { method: command.restoredBy ?? "reconstruction", limits }, history: this.#push(x, "executing", by.id, `committing; restored by ${command.restoredBy ?? "reconstruction"}`) };
+    }, ["ready"]);
     void at;
     return this.advance(by, { checkId: command.checkId, commandId: String(command.commandId) });
   }
@@ -182,8 +191,13 @@ export class ResumeCheckService {
     const check = await this.forTask(by, command.taskId);
     if (check === undefined) throw new DomainError("not_found", "that task has no resume check");
     if (check.phase === "done") return check;
+    // Committed already but not finished (a crash while recording it): carried on, as a commit would.
+    if (check.phase === "executing") return this.advance(by, { checkId: check.id });
     if (check.phase !== "ready") throw new DomainError("invalid_command", `the task's resume check is ${check.phase}; only a ready one can be approved`, { field: "taskId" });
-    return this.commit(by, { commandId: `rck-approve-${check.id.slice(4)}`, checkId: check.id });
+    const after = await this.commit(by, { commandId: `rck-approve-${check.id.slice(4)}`, checkId: check.id });
+    // The inputs moved while approving: the check started over, so what the owner approved is not what would run. Nothing was committed, and the owner is told so.
+    if (after.phase !== "done") throw new DomainError("invalid_transition", `not approved: the task's inputs changed while approving, so its resume check was started over and is ${after.phase}${after.phase === "ready" ? `; ${relevantChanges(after).length} change(s) judged to matter are held, approve again to let it go on` : ""}`);
+    return after;
   }
 
   /** Starts a blocked check over from the beginning, once whoever blocked it has dealt with the reason. */
@@ -258,7 +272,7 @@ export class ResumeCheckService {
       }
       if (b.phase === "executing") {
         // Repeatable: the continuation resume is recorded under this check's own command ID, so a restart records it once.
-        const r = await this.#continuations.resume(by, { commandId: `${id}-resume`, taskId: b.taskId, ...(b.continuationId === undefined ? {} : { continuationId: b.continuationId }), model: b.model, ...(b.previousModel === undefined ? {} : { previousModel: b.previousModel }), after: b.after, ...(b.restore === undefined ? {} : { restoredBy: b.restore.method }) });
+        const r = await this.#continuations.resume(RESUMER, { commandId: `${id}-resume`, taskId: b.taskId, ...(b.continuationId === undefined ? {} : { continuationId: b.continuationId }), model: b.model, ...(b.previousModel === undefined ? {} : { previousModel: b.previousModel }), after: b.after, ...(b.restore === undefined ? {} : { restoredBy: b.restore.method }) });
         await this.#update(id, (x) => ({ ...x, phase: "done", history: this.#push(x, "done", by.id, `resumed from ${r.continuation.id}`) }), ["executing"]);
         continue;
       }
@@ -291,6 +305,30 @@ export class ResumeCheckService {
     const current = (active?.body as unknown as { checkId?: string } | undefined)?.checkId;
     const found = current === undefined ? undefined : await this.#runner.get(KIND, current);
     return found === undefined ? undefined : view<ResumeCheckBody>(found);
+  }
+
+  /**
+   * The checks that wait for the owner (card L04c): each task's current check when it is ready and holds changes judged to matter. Owner only (anyone else: none). Read through the tasks' check pointers,
+   * at most `limit` found and 2000 pointers looked at; `truncated` says there may be more.
+   */
+  async held(by: Principal, limit: number): Promise<{ items: { checkId: string; taskId: string; projectId: string; since: string; changes: DeltaItem[] }[]; truncated: boolean }> {
+    if (by.kind !== "owner") return { items: [], truncated: false };
+    const items: { checkId: string; taskId: string; projectId: string; since: string; changes: DeltaItem[] }[] = [];
+    let seen = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list(ACTIVE, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const pointer of page) {
+        after = pointer.id;
+        if (++seen > 2000 || items.length >= limit) return { items, truncated: true };
+        const checkId = (pointer.body as unknown as { checkId?: string }).checkId;
+        const found = checkId === undefined ? undefined : await this.#runner.get(KIND, checkId);
+        const b = found?.body as unknown as ResumeCheckBody | undefined;
+        if (found === undefined || b === undefined || b.phase !== "ready") continue;
+        const changes = relevantChanges(b);
+        if (changes.length > 0) items.push({ checkId: found.id, taskId: b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes });
+      }
+      if (page.length < 200) return { items, truncated: false };
+    }
   }
 
   /** Whether a complete continuation exists for the task at all: a resume with none has nothing to verify (the dispatcher then starts from the checkpoint as before). */
@@ -398,4 +436,6 @@ export class ResumeCheckService {
 }
 
 const digestOf = (item: DeltaItem): string => sha(`${item.status}\0${item.detail}`);
+/** The changes of a check that were judged to matter to the work: while there are any, only the owner commits it. */
+export const relevantChanges = (b: Pick<ResumeCheckBody, "delta" | "verdicts">): DeltaItem[] => (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id]?.relevant === true);
 

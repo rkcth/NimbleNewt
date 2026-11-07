@@ -2767,7 +2767,7 @@ Result: `{ item }`.
 
 #### `resume.approve`
 
-The owner lets a task go on after a resume check that holds changes judged to matter to its work (owner only): the task's current check, when it is ready, is committed. A check already done answers as it is; one that is not ready is refused with where it stands.
+The owner lets a task go on after a resume check that holds changes judged to matter to its work (owner only): the task's current check, when it is ready, is committed. A check already done answers as it is (one left half-recorded by a crash is finished); one that is not ready is refused with where it stands, and an approval during which the task's inputs changed again is refused (`invalid_transition`) and the check stays held for a new look.
 
 Arguments:
 

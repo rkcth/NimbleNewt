@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { ResumeCheckService, type ResumePorts } from "../continuation/index.js";
+import { DomainError } from "../domain/errors.js";
+import { NotificationService } from "../notifications/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { buildWorld, workGrants, type DispatchWorld } from "./testing/world.js";
 import type { DispatcherDeps } from "./dispatcher.js";
@@ -26,7 +28,10 @@ class Fakes {
       return { identity: "conv", continuation: { id: "cnt-aaaaaaaaaaaaaaaaaaaa" } as never, modelChanged: false, replayed: false };
     },
   };
-  dependencies = { check: async () => [{ id: "dep-1", kind: "file" as const, key: "/src/a.ts", status: "changed" as never, detail: "now changed" }] as never };
+  detail = "now changed";
+  /** Runs once, inside the next dependency check (to move the inputs while something else is in progress). */
+  during: (() => Promise<void>) | undefined;
+  dependencies = { check: async () => { const run = this.during; this.during = undefined; await run?.(); return [{ id: "dep-1", kind: "file" as const, key: "/src/a.ts", status: "changed" as never, detail: this.detail }] as never; } };
   blockers = { getBlocker: async (id: string) => ({ id, state: "open" }) as never, openBlocker: async (c: { commandId: string }) => { const id = this.seen.get(c.commandId) ?? `blk-${this.seen.size + 1}`; this.seen.set(c.commandId, id); return { id } as never; } };
   ports: ResumePorts = {
     observe: async () => ({}), missingContext: async () => [], uncertainEffects: async () => [],
@@ -83,6 +88,9 @@ for (const backend of backends) {
     assert.deepEqual(t1.failures, [], "a fault in the commit is a wait, not a failure of the attempt");
     assert.equal(t1.skipped[0]!.check, "resume");
     assert.equal(f.resumeRecorded.size, 0, "nothing was recorded by the failed commit");
+    const waiting = (await d.get(c.owner, a.attemptId))!;
+    assert.equal(waiting.requestId, undefined, "the place is given back while the attempt waits");
+    assert.equal(waiting.reservationId, undefined, "and so is the allowance");
     const t2 = await d.tick();
     await d.idle();
     assert.deepEqual(t2.started, [a.attemptId], t2.skipped.map((s) => s.reason).join("; "));
@@ -107,22 +115,34 @@ for (const backend of backends) {
 
   suite("changes judged to matter hold the attempt for the owner: not committed by the dispatcher, the owner told once, started after the owner approves", async (c, f, real, a, go) => {
     f.relevant = true;
-    const d = go();
-    for (let n = 0; n < 2; n++) {
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+    const held = async () => (await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check");
+    let d = go({ notifications });
+    for (let n = 0; n < 3; n++) {
+      // A restarted dispatcher tells the owner no second time either.
+      if (n === 2) d = go({ notifications });
       const t = await d.tick();
       assert.deepEqual(t.started, []);
       assert.deepEqual(t.failures, []);
       assert.equal(t.skipped[0]!.check, "resume");
       assert.match(t.skipped[0]!.reason, /ready but holds 1 change\(s\) judged to matter \(file \/src\/a\.ts \(changed\)\)/);
     }
-    const held = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
-    assert.equal(held.phase, "ready", "the stored check is exactly as the owner is told: ready and uncommitted");
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.equal(check.phase, "ready", "the stored check is exactly as the owner is told: ready and uncommitted");
     assert.deepEqual(f.resumeCalls, []);
-    assert.equal(new Set(f.told.map((x) => x.commandId)).size, 1, "one notification identity however many ticks");
-    assert.equal(f.told[0]!.level, "needs-you");
-    assert.match(f.told[0]!.detail, /1 change\(s\) since it stopped matter to it: file \/src\/a\.ts \(changed\)/);
+    // The held list is the owner's: the needs-you answer reads it, nobody else does.
+    assert.deepEqual((await real.held(c.owner, 10)).items.map((h) => [h.checkId, h.changes.map((x) => x.key)]), [[check.id, ["/src/a.ts"]]]);
+    assert.deepEqual((await real.held(c.dispatcherPrincipal, 10)).items, []);
+    const told = await held();
+    assert.equal(told.length, 1, "one notification however many ticks");
+    assert.deepEqual([told[0]!.level, told[0]!.ref.id, told[0]!.count], ["needs-you", check.id, 1]);
+    assert.match(told[0]!.detail ?? "", new RegExp(`Task ${a.taskId} is held before it resumes: 1 change\\(s\\) since it stopped matter to it: file /src/a\\.ts \\(changed\\)`));
     // The dispatcher (a service) and the agent cannot get past the hold by committing the check themselves.
-    await assert.rejects(real.commit(c.dispatcherPrincipal, { commandId: "bypass", checkId: held.id }), /only the owner commits/);
+    // Refused before anything is looked at again, even when the inputs moved meanwhile: a refused commit does not start the check over.
+    f.detail = "moved meanwhile";
+    await assert.rejects(real.commit(c.dispatcherPrincipal, { commandId: "bypass", checkId: check.id }), /only the owner commits/);
+    assert.equal((await real.get(c.owner, check.id))!.round, check.round, "the refused commit changed nothing");
+    f.detail = "now changed";
     // Only the owner approves; a repeat is safe.
     await assert.rejects(real.approve(c.dispatcherPrincipal, { commandId: "no", taskId: a.taskId }), /only the owner approves/);
     const approved = await real.approve(c.owner, { commandId: "ok", taskId: a.taskId });
@@ -133,6 +153,44 @@ for (const backend of backends) {
     await d.idle();
     assert.deepEqual(t.started, [a.attemptId], t.skipped.map((s) => s.reason).join("; "));
     assert.equal(f.resumeRecorded.size, 1, "starting after the approval records no second resume");
+    assert.deepEqual(await held(), [], "once approved, the inbox no longer says the task is held");
+    assert.deepEqual((await real.held(c.owner, 10)).items, [], "nor does the needs-you list");
+  });
+
+  suite("an approval while the inputs move is refused and commits nothing; a crash while recording the approved resume is finished by approving again", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.equal(check.phase, "ready");
+    // The file changes again after the owner was told: what the owner approves is not what would run, so nothing is committed and the owner is told so.
+    f.detail = "changed again";
+    await assert.rejects(real.approve(c.owner, { commandId: "a1", taskId: a.taskId }), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && /not approved: .*started over and is ready; 1 change\(s\) judged to matter are held/.test(e.message));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready");
+    assert.deepEqual(f.resumeCalls, [], "nothing was committed");
+    // The controller fails while recording the approved resume: the check is left executing; approving again finishes it, once.
+    f.failResumeOnce = true;
+    await assert.rejects(real.approve(c.owner, { commandId: "a2", taskId: a.taskId }), /disk hiccup/);
+    assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
+    assert.equal((await real.approve(c.owner, { commandId: "a3", taskId: a.taskId })).phase, "done");
+    assert.equal(f.resumeRecorded.size, 1);
+    assert.equal(new Set(f.resumeCalls).size, 1, "one command ID for the resume, whoever carries the check on");
+  });
+
+  suite("a commit by anyone but the owner is refused when the check was reviewed again while it was being committed", async (c, f, real, a, go) => {
+    await go({ workspaceBusy: async () => true }).tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.equal(check.phase, "ready");
+    assert.deepEqual(Object.values(check.verdicts).map((v) => v.relevant), [false]);
+    // While the dispatcher's commit looks at the inputs, they move, the owner's commit starts the check over and the reviewer now judges the change to matter; then the inputs move back.
+    f.during = async () => {
+      f.detail = "moved"; f.relevant = true;
+      assert.equal((await real.commit(c.owner, { commandId: "o", checkId: check.id })).phase, "ready");
+      f.detail = "now changed";
+    };
+    await assert.rejects(real.commit(c.dispatcherPrincipal, { commandId: "d", checkId: check.id }), (e: unknown) => e instanceof DomainError && (e.code === "invalid_transition" || e.code === "forbidden"));
+    const after = (await real.get(c.owner, check.id))!;
+    assert.equal(after.phase, "ready", "not committed over a verdict that matters");
+    assert.deepEqual(f.resumeCalls, []);
   });
 
   suite("approving a task with no resume check, or a check that is not ready, is refused with where it stands", async (c, f, real, a) => {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
-import { STALE_CANCEL, type ResumeCheckService } from "../continuation/resume.js";
+import { STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
 import type { EffectService } from "../domain/effects.js";
@@ -134,7 +134,8 @@ export interface DispatcherDeps {
    * Best effort: a step that cannot be recorded never stops the attempt or changes a call's result.
    */
   readonly activity?: (step: { commandId: string; taskId: string; kind: "model-selected" | "harness-selected" | "tool-call"; summary: string; refs: readonly { kind: string; id: string }[] }) => Promise<void>;
-  readonly notifications?: Pick<NotificationService, "emitFromController">;
+  /** `settleFromController` (optional) closes the owner's notice that a resume is held once the check is done or cancelled (card L04c). */
+  readonly notifications?: Pick<NotificationService, "emitFromController"> & Partial<Pick<NotificationService, "settleFromController">>;
   /**
    * Context enforcement (card C07b) at the end of an attempt: an attempt that failed for want of context is counted (repeated overflow opens a visible blocker), and an attempt that ended without a hand-off gets
    * one written by the controller from `handoffFacts` (default: the task's title, how the attempt ended and the last checkpoint position).
@@ -1011,12 +1012,14 @@ export class DispatcherService {
       const live = await resumes.forTask(by, taskId);
       if (live !== undefined && !mine.has(live.id) && !["done", "cancelled"].includes(live.phase)) {
         try { await resumes.cancel(by, { checkId: live.id, reason: STALE_CANCEL }); } catch (error) { return `an earlier resume check ${live.id} (${live.phase}) is still in progress and could not be cancelled: ${errorText(error)}`.slice(0, 500); }
+        await this.#settleHold(live.id, projectId);
       }
       let n = 0;
       let counted = 0;
       for (; n < keys.length; n++) {
         const existing = await resumes.get(by, resumes.checkIdFor(by, keys[n]!));
         if (existing === undefined || existing.phase !== "cancelled") break;
+        await this.#settleHold(existing.id, projectId);
         if (!resumes.cancelledAsStale(existing)) counted++;
         if (counted > RESUME_RESTARTS) { n = keys.length; break; }
       }
@@ -1029,11 +1032,11 @@ export class DispatcherService {
       if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
       if (check.phase === "ready") {
         // A check that holds changes judged to matter is not committed by the dispatcher: the owner decides (`resume.approve`). The commit itself comes last, just before the start (card L04c).
-        const relevant = (check.delta?.changed ?? []).filter((i) => check.verdicts[i.id]?.relevant === true);
+        const relevant = relevantChanges(check);
         if (relevant.length > 0) return this.#holdForReview(attemptId, taskId, projectId, check, relevant);
         return { commit: { checkId: check.id, commandId: `${key}-commit` } };
       }
-      if (check.phase === "done") return undefined;
+      if (check.phase === "done") { await this.#settleHold(check.id, projectId); return undefined; }
       if (check.phase === "blocked" && resumes.exhausted(check)) {
         // No blocker will ever resolve and no retry is left: the owner is told once (the command ID is stable).
         const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume-blocked:${check.id}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Attempt ${attemptId} cannot start: its resume check is blocked (${check.blocked?.type ?? "unknown"}: ${check.blocked?.reason ?? "no reason recorded"}) after ${check.blocks} tries and nothing will retry it. Look at why, then assign the task again.`.slice(0, 900), resolver: "owner" }).catch(() => undefined);
@@ -1052,10 +1055,15 @@ export class DispatcherService {
     const names = relevant.slice(0, 3).map((i) => `${i.kind} ${i.key} (${i.status})`).join(", ");
     const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
     await this.#deps.notifications?.emitFromController({
-      commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: taskId }, projectId,
+      commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: check.id }, projectId,
       detail: `Task ${taskId} is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve the resume to let it go on.`.slice(0, 200),
     }).catch((error: unknown) => this.#options.onError?.(error));
     return `the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); the owner approves it (resume.approve) or cancels it before attempt ${attemptId} starts`.slice(0, 500);
+  }
+
+  /** The owner's notice that a resume is held is closed once the check is done (approved) or cancelled, so the inbox never says a task waits that does not. Best effort; nothing open is a no-op. */
+  async #settleHold(checkId: string, projectId: string): Promise<void> {
+    await this.#deps.notifications?.settleFromController?.({ commandId: `dpa-ntf-done:resume-review:${checkId}`, kind: "maintenance", ref: { kind: "resume-check", id: checkId }, projectId }).catch((error: unknown) => this.#options.onError?.(error));
   }
 
   /** Commits the resume check just before the attempt starts. Returns why it did not finish, or nothing when the check is done (the commit is recorded once however often this runs). */
