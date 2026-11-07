@@ -2,8 +2,8 @@ import { dirname, isAbsolute } from "node:path";
 import { canon } from "../backup/canon.js";
 import type { StatsFs } from "node:fs";
 import type { ControllerStorage } from "../storage/types.js";
-import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes } from "../storage/postgres/index.js";
-import { postgresFingerprint, sqliteFingerprint, type TransferTarget } from "./transfer.js";
+import { PostgresStorage, discardPostgresTransferCopy, postgresDatabaseBytes } from "../storage/postgres/index.js";
+import { pendingHolder, postgresFingerprint, sqliteFingerprint, type TransferTarget } from "./transfer.js";
 
 /**
  * Transfer targets built from the host's configuration (card F04l). The entries may come from untrusted JSON, so every field is checked before a target exists.
@@ -39,13 +39,13 @@ export interface PostgresTargetDeps {
   openStorage(url: string, schema: string): Promise<ControllerStorage & { readonly createdSchema: boolean }>;
   /** The size in bytes the server reports for the whole database. */
   databaseBytes(url: string): Promise<number>;
-  /** Drops the schema and everything in it. */
-  dropSchema(url: string, schema: string): Promise<void>;
+  /** Empties the schema after a failed copy: only while its state row is the open's own or carries `pendingHolder`, only the controller tables and then the empty schema, never CASCADE (`discardPostgresTransferCopy`). */
+  discardCopy(url: string, schema: string, pendingHolder: string): Promise<void>;
 }
 
 /** The real PostgreSQL side of configured targets: the storage's own open (no unsupported-server override) and the server reads and clean-up of the storage folder. The start and the tests use this one wiring. */
 export function postgresTargetDeps(resolveSecret: (name: string) => Promise<string | undefined>): PostgresTargetDeps {
-  return { resolveSecret, openStorage: (url, schema) => PostgresStorage.open({ connectionString: url, schema }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema };
+  return { resolveSecret, openStorage: (url, schema) => PostgresStorage.open({ connectionString: url, schema }), databaseBytes: postgresDatabaseBytes, discardCopy: discardPostgresTransferCopy };
 }
 
 /** What building targets needs from outside: opening a store at a path, reading a file system's room, and (for PostgreSQL entries) the secret store and the server. */
@@ -144,16 +144,17 @@ export async function transferTargetsFromConfig(entries: readonly unknown[], dep
       // Set when an open of this target reports that its own transaction created the schema (learned from the open itself, so a schema someone else creates
       // before or during the open is never counted), and forgotten after the drop. Only such a schema is dropped after a failed copy: a schema that was there
       // before (the database's `public`, one the owner prepared with grants, or one holding other objects) is never dropped; the owner is told the destination
-      // is not clean instead. A failed open claims nothing.
+      // is not clean instead. A failed open claims nothing. Even then the drop is the narrow one (see PostgresTargetDeps.discardCopy): a schema someone else has
+      // since written to, added an object to, or made something depend on is left as it is and reported as not clean.
       let created = false;
       out.push({
         name, kind: "postgres", fingerprint,
         open: () => hiding(url, async () => { const store = await pg.openStorage(url, schema); if (store.createdSchema) created = true; return store; }),
         // The server's own figure for the database, against the cap the configuration gives: PostgreSQL cannot tell a client how much disk is left, so without a cap nothing is claimed.
         freeBytes: maxBytes === undefined ? async () => undefined : () => hiding(url, async () => Math.max(0, maxBytes - (await pg.databaseBytes(url)))),
-        discard: () => hiding(url, async () => {
+        discard: (transferId) => hiding(url, async () => {
           if (!created) throw new Error(`the schema ${schema} was not created by this controller's own open, so it is not dropped; empty it by hand`);
-          await pg.dropSchema(url, schema);
+          await pg.discardCopy(url, schema, pendingHolder(transferId));
           created = false; // a schema of this name made later is someone else's until an open of this target creates it again
         }),
         redact: (text) => hideAddress(text, url),

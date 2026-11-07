@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { MaintenanceBarrier } from "../backup/barrier.js";
-import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
+import { PostgresStorage, discardPostgresTransferCopy, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
 import { postgresTargetDeps, transferTargetsFromConfig } from "./targets.js";
 import { commitWhileWaiting, startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
+import { foreignChangeSurvives, makeForeignChange, stateHolder, tableRows } from "../storage/postgres/testing/transfer-copy.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
@@ -558,7 +559,7 @@ test("an ambiguous fence (the epoch was taken, the answer lost) counts as fenced
   try {
     let discards = 0;
     const base = await sqlTarget(h, "dest.sqlite");
-    const target: TransferTarget = { ...base, discard: async () => { discards += 1; await base.discard!(); } };
+    const target: TransferTarget = { ...base, discard: async (id) => { discards += 1; await base.discard!(id); } };
     // A participant that cannot be held: the barrier is refused before any row is written.
     h.barrier.add({ name: "busy", hold: async () => { throw new Error("an attempt is running"); } });
     const svc = await service(h, [target]);
@@ -711,6 +712,43 @@ test("a configured PostgreSQL destination whose schema existed before is not dro
   } finally { await finish(f); }
 });
 
+test("the clean-up after a failed copy into a configured PostgreSQL destination never cascades: a view elsewhere that depends on its tables, another table in the schema, someone else's state row or a taken epoch stops it, and nothing is dropped (card F04l)", async () => {
+  for (const change of ["view-elsewhere", "table-inside", "foreign-holder", "epoch-taken"] as const) {
+    const f = await fixture();
+    try {
+      const { target, url, schema } = await configuredPg(f);
+      const other = `${schema}_o`;
+      f.cleanup.push(async () => { await dropPostgresSchema(url, other); });
+      // Done while the copy runs (after the preview's open created the schema and the copy wrote rows), then the copy fails.
+      const svc = await service(f, [target], { pageSize: 2, inject: async (p) => { if (p === "copy:deliveries") { await makeForeignChange(url, schema, other, change); throw new Error("copy failed"); } } });
+      const plan = await svc.preview("pg");
+      assert.equal(plan.ok, true, `${change}: ${JSON.stringify(plan.findings)}`);
+      await assert.rejects(svc.apply("pg", plan.token), (e: Error) => { assert.match(e.message, /copy failed/, change); assert.match(e.message, /partial copy was not removed from the destination \(.*nothing was dropped.*\); empty it by hand/, change); assert.ok(!e.message.includes(url), change); return true; });
+      assert.equal((await readJournal(st(f)))?.failure?.destinationClean, false, `${change}: the journal says the destination is not clean`);
+      assert.ok(await tableRows(url, schema, "operations") > 0, `${change}: nothing was dropped, the copied rows included`);
+      assert.equal(await foreignChangeSurvives(url, schema, other, change), true, `${change}: what someone else made survives`);
+    } finally { await finish(f); }
+  }
+});
+
+test("the clean-up of a configured PostgreSQL destination drops every controller table and the schema its open created, whether or not the state row was copied, and a second run is a no-op (card F04l)", async () => {
+  for (const point of ["copy:deliveries", "copied"] as const) {
+    const f = await fixture();
+    try {
+      const { target, url, schema } = await configuredPg(f);
+      let seen: string | null | undefined;
+      const svc = await service(f, [target], { pageSize: 2, inject: async (p) => { if (p === point) { seen = await stateHolder(url, schema); throw new Error("copy failed"); } } });
+      const plan = await svc.preview("pg");
+      await assert.rejects(svc.apply("pg", plan.token), (e: Error) => !/not removed/.test(e.message));
+      const journal = await readJournal(st(f));
+      assert.equal(seen, point === "copied" ? `transfer-pending:${journal?.id}` : null, `${point}: the state row the clean-up found`);
+      assert.equal(journal?.failure?.destinationClean, true, point);
+      assert.equal(await postgresSchemaExists(url, schema), false, `${point}: the schema and everything the transfer made in it are gone`);
+      await discardPostgresTransferCopy(url, schema, `transfer-pending:${journal?.id}`); // the schema is already gone: nothing to do
+    } finally { await finish(f); }
+  }
+});
+
 test("PostgresStorage.open reports whether its own transaction created the schema (card F04l)", async () => {
   const url = (await server()).url();
   const schema = `xo_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
@@ -742,7 +780,7 @@ test("a schema someone else creates while a configured PostgreSQL destination is
     const t = await build(early);
     before = () => withClient(url, async (c) => { for (const statement of ownersSchema(early)) await c.query(statement); });
     await (await t.open()).close();
-    await assert.rejects(t.discard!(), /not dropped/);
+    await assert.rejects(t.discard!("xfer-t"), /not dropped/);
     await survives(early);
   } finally { await dropPostgresSchema(url, early); }
   // 2. Created by the owner in a transaction that commits while the open waits to create it: the open's CREATE SCHEMA fails, it claims nothing, and the next open finds the owner's schema.
@@ -754,7 +792,7 @@ test("a schema someone else creates while a configured PostgreSQL destination is
       () => t.open().then((store) => store.close().then(() => "opened" as const), (error: Error) => error));
     assert.ok(outcome instanceof Error, "the open that lost the race fails instead of taking the owner's schema as its own");
     await (await t.open()).close();
-    await assert.rejects(t.discard!(), /not dropped/);
+    await assert.rejects(t.discard!("xfer-t"), /not dropped/);
     await survives(racing);
   } finally { await dropPostgresSchema(url, racing); }
 });

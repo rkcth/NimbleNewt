@@ -21,6 +21,8 @@ import { SNAPSHOT_PAGE_MAX, SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTabl
  * Rollback to the source is allowed only while the destination has recorded nothing since the switch; after that the way back is a reverse transfer, which is the same operation in the other direction.
  */
 export const TRANSFER_JOURNAL = "database-transfer-journal.json";
+/** The holder a copy carries until the switch: a controller does not start on it, and the transfer's clean-up recognises its own copy by it. */
+export const pendingHolder = (transferId: string): string => `transfer-pending:${transferId}`;
 export const AUTHORITY_FILE = "storage-authority.json";
 
 export type StorageKind = "sqlite" | "postgres";
@@ -35,8 +37,8 @@ export interface TransferTarget {
   open(): Promise<ControllerStorage>;
   /** Bytes free where the database will be written; undefined when that cannot be known (a SQLite destination must know). */
   freeBytes?(): Promise<number | undefined>;
-  /** Empties the destination after a failed copy (the store is closed first). Absent: the owner is told the destination is dirty. */
-  discard?(): Promise<void>;
+  /** Empties the destination after a failed copy by the transfer `transferId` (the store is closed first); refuses (throws) when what is there may not be only that copy. Absent or refused: the owner is told the destination is not clean. */
+  discard?(transferId: string): Promise<void>;
   /** Hides what must never be shown from a text that is about to reach the journal, a log or chat (a PostgreSQL address with its password). */
   redact?(text: string): string;
 }
@@ -563,6 +565,7 @@ export class DatabaseTransferService {
       let dest: ControllerStorage | undefined;
       let snap: StorageSnapshot | undefined;
       let fenced = false, deposed = false;
+      let notClean = "";
       const originalHolder = await this.#holder(this.#o.storage);
       try {
         release = await this.#o.barrier.raise("a database transfer is running");
@@ -579,7 +582,7 @@ export class DatabaseTransferService {
         dest = await target.open();
         const occupied = await this.#notEmpty(dest);
         if (occupied !== undefined) throw new Error(occupied);
-        const stats = await this.#copy(snap, dest, `transfer-pending:${id}`);
+        const stats = await this.#copy(snap, dest, pendingHolder(id));
         await this.#at("copied");
         stage = "verifying";
         await this.#readBack(dest, stats);
@@ -634,12 +637,20 @@ export class DatabaseTransferService {
         if (!fenced) {
           // The source was never touched: the barrier comes down and the controller goes on.
           let clean = !this.#wrote;
-          if (this.#wrote && target.discard !== undefined) { try { await target.discard(); clean = true; } catch { clean = false; } }
+          let left = "";
+          if (this.#wrote) {
+            if (target.discard === undefined) left = " The partial copy is still at the destination; empty it by hand before another transfer there.";
+            else try { await target.discard(id); clean = true; } catch (refusal) {
+              const why = refusal instanceof Error ? refusal.message : "it could not be emptied";
+              left = ` The partial copy was not removed from the destination (${(target.redact !== undefined ? target.redact(why) : why).slice(0, 300)}); empty it by hand before another transfer there.`;
+            }
+          }
           await this.#journal(journal, { phase: "failed", failure: { at: this.#now(), phase: stage, reason, destinationClean: clean } }).catch(() => undefined);
+          notClean = left;
           if (release !== undefined && !deposed) await release().catch(() => undefined); else this.#release = release;
         } else this.#release = release; // fenced and not switched: the barrier stays up; the next start settles it from the journal
         if (error instanceof DomainError) throw error;
-        throw new DomainError("unavailable", `the database transfer failed while ${stage}: ${reason}. ${fenced ? "The current database was fenced; restart the controller to settle the transfer." : deposed ? "The controller must be restarted." : "The current database is as it was and work goes on."}`);
+        throw new DomainError("unavailable", `the database transfer failed while ${stage}: ${reason}. ${fenced ? "The current database was fenced; restart the controller to settle the transfer." : deposed ? "The controller must be restarted." : "The current database is as it was and work goes on."}${notClean}`);
       }
     } finally { this.#running = false; }
   }

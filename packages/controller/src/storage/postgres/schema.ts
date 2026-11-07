@@ -122,5 +122,11 @@ const split = (script: string): string[] => script.split(/;\s*\n/).map((statemen
 export const MIGRATIONS: readonly Migration[] = [{ version: 1, name: "initial_layout", statements: split(INITIAL_SQL) }];
 assertValidMigrations(MIGRATIONS);
 
+/**
+ * Every table the controller makes in its schema: the migration journal and each table a migration creates (read from the statements, so a new migration's table is
+ * included). A transfer's clean-up drops exactly these, never CASCADE; any other object a migration makes (an index goes with its table) must be added here.
+ */
+export const CONTROLLER_TABLES: readonly string[] = ["schema_migrations", ...MIGRATIONS.flatMap((m) => m.statements.flatMap((s) => /^CREATE TABLE (?:IF NOT EXISTS )?([a-z_][a-z0-9_]*)\s*\(/i.exec(s)?.[1] ?? []))];
+
 /** The newest layout this version knows. */
 export const LATEST_VERSION = MIGRATIONS.length;
