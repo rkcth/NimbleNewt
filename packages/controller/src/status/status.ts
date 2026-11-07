@@ -298,7 +298,7 @@ export interface StatusDeps {
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer. Absent: they are not listed. */
   readonly standups?: { recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>; briefs?(viewer: Principal, occurrenceId: string): Promise<readonly StandupBriefView[]> };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
-  readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }>;
+  readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text?: string; topic?: string }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
   readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
@@ -789,7 +789,7 @@ export class StatusService {
       const waiting = await this.#deps.meetingDecisions(by, 51);
       if (waiting.truncated || waiting.items.length > 50) truncated.push("meeting decisions");
       for (const m of waiting.items.slice(0, 50)) {
-        all.push({ text: `A meeting decision waits for you: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id });
+        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: "${shown(m.text).slice(0, 160)}"`}${m.topic === undefined ? "" : ` (topic ${shown(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.

@@ -741,7 +741,18 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("close-vote", "command", "Counts the vote and closes it.", "closeVote", ["motionId"], "`{ state, decisionId? }`."),
   recordOp("casting-vote", "command", "The chair breaks a tie.", "castingVote", ["motionId", "value", "reason"], "`{ state, decisionId? }`."),
   recordOp("apply", "command", "Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied. A change that was already started when the owner declined is finished by this call too (the owner's answer reports `stillApplying: true` when that could not be done just then).", "apply", ["decisionId"], "`{ applied, notApplied, pending }`.", "viewer"),
-  recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After a decline or an alternative, a change that had already started is finished at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, and the change stays applying until the decision is applied again).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying? }`: `applied` after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change."),
+  ((): Operation => {
+    const base = recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After a decline or an alternative, a change that had already started is finished at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, and the change stays applying until the decision is applied again).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying?, shown }`: `applied` (changes of the decision carried out, in all) after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change, `shown` plain lines saying what happened (for the chat).");
+    return { ...base, run: async (c, a, id) => {
+      const out = await base.run(c, a, id);
+      // What happened, in plain lines, for the owner who answered by chat (and any other reader of the answer).
+      const shown: string[] = [];
+      if (a["response"] === "agree") shown.push(out["applied"] === 0 ? "You agreed, but none of its changes could be carried out now (what they change had moved on)." : `You agreed. ${String(out["applied"])} change${out["applied"] === 1 ? " is" : "s are"} carried out.`);
+      else shown.push(a["response"] === "decline" ? "You declined. The changes not yet started are refused; those already done stay done." : `You chose your own decision instead${typeof out["ownerDecisionId"] === "string" ? ` (${out["ownerDecisionId"]})` : ""}. The changes not yet started are refused; those already done stay done.`);
+      if (out["stillApplying"] === true) shown.push("A change that had already started could not be finished just now; it stays applying until the decision is applied again.");
+      return { ...out, shown };
+    } };
+  })(),
   recordOp("finish", "command", "Ends the meeting; an interrupted meeting voids open votes and keeps the record.", "finish", ["recordId", "interrupted", "reason"], "`{ voided }`."),
   recordOp("summarize", "command", "Builds the summary from the record alone.", "summarize", ["recordId"], "`{ builds, overviewFailed? }`."),
   recordOp("outcomes", "command", "Returns the outcomes to the conversations they came from.", "returnOutcomes", ["recordId"], "`{ returned, pending }`.", "viewer"),
@@ -760,7 +771,7 @@ export const OPERATIONS: readonly Operation[] = [
       const svc = c.records ?? unavailable("meeting records");
       return asJson({ item: await svc.decisionLog(c.principal, a as never) } as object);
     } },
-  { name: "meeting.decisions.waiting", kind: "query", summary: "The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out and `applied` how many are done. `truncated: true` means more exist than were read.", args: { "limit?": "1 to 50, default 50" }, result: "`{ item: { items: [{ id, revision, projectId, since, left, applied, text, topic? }], truncated } }`.",
+  { name: "meeting.decisions.waiting", kind: "query", summary: "The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out (`applying` of them already started, which an answer still finishes) and `applied` how many are done. `truncated: true` means more exist than were read.", args: { "limit?": "1 to 50, default 50" }, result: "`{ item: { items: [{ id, revision, projectId, since, left, applied, applying, text, topic? }], truncated } }`.",
     run: async (c, a) => {
       only(a, ["limit"]);
       if (c.principal.kind !== "owner" || c.principal.taskScope !== undefined) throw new DomainError("forbidden", "only the owner reads the decisions waiting for them");

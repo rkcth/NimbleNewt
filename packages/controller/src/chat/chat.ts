@@ -3,7 +3,7 @@ import { BUILTIN_COMMANDS, OPERATION_BY_NAME } from "../api/operations.js";
 import { expandShorthand } from "./shorthand.js";
 import { parseInvocation } from "../commands/resolve.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
-import { GATE_TOPIC, normalTopic, notADecisionIn } from "../decisions/records.js";
+import { GATE_TOPIC, TOPIC, normalTopic, notADecision, notADecisionIn } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -518,7 +518,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
@@ -583,7 +583,7 @@ export class ChatService {
     }
     args[asked.field] = choice;
     // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word: it counts as said, like the project-creation answers.
-    work[asked.intentIndex] = { intent: { ...target.intent, args }, text: asked.field === "runningCalls" ? `${target.text}. ${choice}` : target.text };
+    work[asked.intentIndex] = { intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -814,7 +814,8 @@ export class ChatService {
       }
     }
     // The owner's answer to a meeting decision that waits for them (card M02h). The model gives the owner's words for the decision (`decisionTopic`: any part of what was decided or its topic) and the answer; the decision is found among those
-    // waiting, and anything unclear is asked, never guessed. An alternative is the owner's own wording (`alternativeStatement`, optionally `alternativeTopic`), recorded as their decision from this turn; the version it is based on is read here.
+    // waiting, and anything unclear is asked, never guessed (a `decisionId` the owner did not say or choose is asked about too when several wait). An alternative is the owner's own wording (`alternativeStatement`, optionally
+    // `alternativeTopic`), recorded as their decision from this turn; the checks the decision service will make on those words are made here first, so nothing is proposed that is bound to fail after the owner confirms.
     if (intent.op === "meeting.record.owner-respond") {
       const named = args["decisionTopic"];
       const statement = args["alternativeStatement"];
@@ -822,33 +823,52 @@ export class ChatService {
       delete args["decisionTopic"];
       delete args["alternativeStatement"];
       delete args["alternativeTopic"];
-      if (args["alternative"] !== undefined) return refuse("invalid_command", "give the alternative as alternativeStatement; its source and version are set by the controller");
       if (!["agree", "decline", "alternative"].includes(String(args["response"]))) return refuse("invalid_command", "response must be agree, decline or alternative");
       if ((named !== undefined && typeof named !== "string") || (statement !== undefined && typeof statement !== "string") || (topicWords !== undefined && typeof topicWords !== "string")) return refuse("invalid_command", "decisionTopic, alternativeStatement and alternativeTopic must be text");
       if (named !== undefined && args["decisionId"] !== undefined) return refuse("invalid_command", "give either decisionId or decisionTopic, not both");
       const isAlternative = args["response"] === "alternative";
       if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
-      if (isAlternative && (typeof statement !== "string" || statement.trim() === "")) return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
+      const instead = (reason: string): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; say what you decide instead as its own sentence (for example "Keep the staging server until May.").`);
+      const said = typeof statement === "string" ? statement.trim() : "";
+      if (isAlternative) {
+        if (said === "") return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
+        if (!evidenceStrong(said)) return instead("a decision needs at least two words");
+        if (said.length > 150) return instead("it is too long to show whole before you confirm (150 characters at most)");
+        const notDecision = notADecision(said) ?? notADecisionIn(words, said);
+        if (notDecision !== undefined) return instead(notDecision);
+      }
       const waitingList = await this.#get(token, "meeting.decisions.waiting", {});
       const waiting = (waitingList?.["items"] as Record<string, unknown>[] | undefined) ?? [];
+      const cut = waitingList?.["truncated"] === true;
+      const tooMany = "More meeting decisions wait for you than could be read at once; say more of the words of the one you mean.";
       let chosen: Record<string, unknown> | undefined;
+      if (waiting.length === 0) return refuse("not_found", "no meeting decision is waiting for your answer");
+      const pick = (d: Record<string, unknown>): string => `${String(d["id"])} (${String(d["text"]).slice(0, 60)})`;
+      const askWhich = (list: Record<string, unknown>[]): Resolved & { ok: false } => ({ ok: false, kind: "ask", question: "Which meeting decision are you answering?", options: list.slice(0, CHAT_LIMITS.options).map(pick), field: "decisionId", choices: list.slice(0, CHAT_LIMITS.options).map((d) => String(d["id"])) });
       if (typeof args["decisionId"] === "string") {
         chosen = waiting.find((d) => d["id"] === args["decisionId"]);
         if (chosen === undefined) return refuse("not_found", "that meeting decision is not waiting for your answer");
+        // An ID the owner did not say or pick from the question is the model's own: with several waiting, the owner is asked.
+        if (waiting.length > 1 && !words.includes(String(chosen["id"]))) return askWhich(waiting);
       } else {
-        const words = typeof named === "string" ? named : "";
-        if (waiting.length === 0) return refuse("not_found", "no meeting decision is waiting for your answer");
-        const matches = waiting.filter((d) => looseMatch(words, `${String(d["text"])} ${String(d["topic"] ?? "")}`));
-        if (matches.length === 0) return refuse("not_found", `no waiting meeting decision is about "${words.slice(0, 80)}"`);
-        const pick = (d: Record<string, unknown>): string => `${String(d["id"])} (${String(d["text"]).slice(0, 60)})`;
-        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which meeting decision are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map(pick), field: "decisionId", choices: matches.slice(0, CHAT_LIMITS.options).map((d) => String(d["id"])) };
+        const typed = typeof named === "string" ? named : "";
+        const text = (d: Record<string, unknown>): string => `${String(d["text"])} ${String(d["topic"] ?? "")}`;
+        let matches = waiting.filter((d) => decisionWordsMatch(typed, text(d), true));
+        if (matches.length === 0) matches = waiting.filter((d) => decisionWordsMatch(typed, text(d), false));
+        if (matches.length === 0) return refuse("not_found", cut ? tooMany : `no waiting meeting decision is about "${typed.slice(0, 80)}"`);
+        if (matches.length > 1) return askWhich(matches);
         chosen = matches[0]!;
         args["decisionId"] = String(chosen["id"]);
+        if (cut) fillNotes.push(tooMany);
       }
+      const started = Number(chosen["applying"] ?? 0);
       labels[String(args["decisionId"])] = `${String(chosen["text"]).slice(0, 100)}; ${String(chosen["left"])} change${chosen["left"] === 1 ? "" : "s"} left to carry out`;
+      labels[`started:${String(args["decisionId"])}`] = String(started);
       if (isAlternative) {
-        const topic = normalTopic((typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : String(chosen["text"])).replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).slice(0, 80).trim();
-        const alt: Record<string, unknown> = { projectId: chosen["projectId"], category: "decision", topic, statement: (statement as string).trim(), wording: (statement as string).trim() };
+        const raw = typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : String(chosen["text"]);
+        const topic = normalTopic(raw.replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).replace(/^[^a-z0-9]+/, "").slice(0, 80).trim();
+        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit; name one (for example: topic staging server)");
+        const alt: Record<string, unknown> = { projectId: chosen["projectId"], category: "decision", topic, statement: said, wording: said };
         const base = await this.#revisionFor(token, "decision", alt, undefined, new Map());
         if (!base.ok) return base;
         alt["basedOn"] = base.value;
@@ -1626,6 +1646,14 @@ export class ChatService {
         if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
         args["basedOn"] = await this.#decisionBase(token, typeof args["sourceTurnId"] === "string" ? args["sourceTurnId"] : "", args, typeof args["basedOn"] === "number" ? args["basedOn"] : undefined, fresh.value as number);
       }
+      if (step.op === "meeting.record.owner-respond" && isObject(args["alternative"])) {
+        // The owner's alternative is based on the version of its topic when it is recorded, as a decision step is, and decisions of this very message do not count as the topic having moved.
+        const alt = { ...(args["alternative"] as Record<string, unknown>) };
+        const fresh = await this.#revisionFor(token, "decision", alt, undefined, new Map());
+        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        alt["basedOn"] = await this.#decisionBase(token, String((alt["source"] as { turnId?: unknown } | undefined)?.turnId ?? ""), alt, typeof alt["basedOn"] === "number" ? alt["basedOn"] : undefined, fresh.value as number);
+        args["alternative"] = alt;
+      }
       const response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
       if (!response.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } };
       results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
@@ -1873,4 +1901,14 @@ function looseMatch(words: string, text: string): boolean {
   const haystack = text.toLowerCase();
   const wanted = words.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0 && !FILLER.has(w));
   return wanted.every((w) => haystack.includes(w));
+}
+
+/** Words that say nothing about which meeting decision is meant, besides those every title match ignores. */
+const DECISION_FILLER = new Set(["decision", "decisions", "change", "changes", "one", "ones", "thing", "things", "it", "that", "this", "those", "these", "motion", "vote", "proposal", "item", "agree", "decline", "yes", "no", "please", "go", "ahead", "with", "to", "on", "about", "and", "in"]);
+/** Whether the owner's words fit a held decision's wording or topic: every significant word (`all`), or at least one when `all` is false; a plural fits its singular. No significant word fits everything. */
+function decisionWordsMatch(words: string, text: string, all: boolean): boolean {
+  const haystack = text.toLowerCase();
+  const wanted = words.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0 && !FILLER.has(w) && !DECISION_FILLER.has(w));
+  const has = (w: string): boolean => haystack.includes(w) || (w.length > 3 && w.endsWith("s") && haystack.includes(w.slice(0, -1)));
+  return wanted.length === 0 || (all ? wanted.every(has) : wanted.some(has));
 }

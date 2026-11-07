@@ -303,7 +303,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (spec.mode === "propose" && op === "retention.settings.set") return "retention settings decide what may be deleted and how much room is kept back, so they are shown first";
   if (spec.mode === "propose" && op.startsWith("retention.")) return "deleting, archiving or restoring records is shown first";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.
-  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
   if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
@@ -318,7 +318,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["response", "decisionId", "section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest"]);
+const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest"]);
 
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
 export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
@@ -326,11 +326,14 @@ export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candi
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
-export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set()): string | undefined {
+/** Fixed choices and record references of one command only: `response` is one of three choices and `decisionId` is checked against the decisions waiting for the owner (card M02h). */
+export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "decisionId"]);
+
+export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set(), alsoExempt: ReadonlySet<string> = new Set()): string | undefined {
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
   const own = norm(ownText);
   const walk = (value: unknown, where: string, key: string): string | undefined => {
-    if (typeof value === "string") return (EXEMPT.has(key) && !strict.has(key)) || value.length === 0 || own.includes(norm(value)) ? undefined : where;
+    if (typeof value === "string") return ((EXEMPT.has(key) || alsoExempt.has(key)) && !strict.has(key)) || value.length === 0 || own.includes(norm(value)) ? undefined : where;
     if (Array.isArray(value)) { for (const [i, v] of value.entries()) { const bad = walk(v, `${where}[${i}]`, key); if (bad !== undefined) return bad; } return undefined; }
     if (value !== null && typeof value === "object") { for (const [k, v] of Object.entries(value)) { const bad = walk(v, `${where}.${k}`, k); if (bad !== undefined) return bad; } }
     return undefined;
@@ -356,16 +359,33 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   const spec = CHAT_OPS[op];
   const parts: string[] = [];
   // What a decision is (a gate and its kind above all) is said first, so a long text or label after it can never push it off the line.
-  const first = op === "decision.record" ? ["category", "gate"] : [];
+  const first = op === "decision.record" ? ["category", "gate"] : op === "meeting.record.owner-respond" ? ["response", "alternative"] : [];
   const ordered = [...first.filter((k) => k in args).map((k): [string, unknown] => [k, args[k]]), ...Object.entries(args).filter(([k]) => !first.includes(k))];
   for (const [key, value] of ordered) {
     if (key === "expectedRevision" || key === "expectedVersion") continue;
+    // The owner's own alternative is shown as the words they will have recorded and the topic they go under, never as the record's fields.
+    if (op === "meeting.record.owner-respond" && key === "alternative" && value !== null && typeof value === "object") {
+      const alt = value as Record<string, unknown>;
+      parts.push(`alternative="${String(alt["statement"])}" on topic "${String(alt["topic"])}"`);
+      continue;
+    }
     const label = typeof value === "string" ? labels[value] : undefined;
     parts.push(`${key}=${label === undefined ? short(value) : `"${label}"`}`);
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "meeting.record.owner-respond" ? (args["response"] === "agree" ? " (agreeing lets the changes still waiting be carried out)" : args["response"] === "decline" ? " (declining refuses the changes not yet carried out; those already done stay done)" : " (your own decision is recorded and the changes not yet carried out are refused)") : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : "";
+  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : "";
   const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   return line.length > CHAT_LIMITS.line ? `${line.slice(0, CHAT_LIMITS.line - 3)}...` : line;
+}
+
+/**
+ * What an answer to a held meeting decision does, said before it is given. A change already started is finished whatever the answer (only changes not yet started are refused), and the count of those comes from the decision.
+ * The count of started changes is read from `labels` (key `started:<decisionId>`), put there by the chat from the decision's record, so it is never an argument of the operation.
+ */
+function ownerRespondMeaning(args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
+  if (args["response"] === "agree") return " (agreeing lets the changes still waiting be carried out)";
+  const started = Number(labels[`started:${String(args["decisionId"])}`] ?? 0);
+  const tail = started > 0 ? `; ${started} already started will still be finished; those already done stay done` : "; those already done stay done";
+  return args["response"] === "decline" ? ` (declining refuses the changes not yet started${tail})` : ` (your own decision is recorded and the changes not yet started are refused${tail})`;
 }

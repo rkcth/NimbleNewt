@@ -731,13 +731,13 @@ Result: `{ item: { entries, next?, scanLimited? } }`.
 
 #### `meeting.decisions.waiting`
 
-The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out and `applied` how many are done. `truncated: true` means more exist than were read.
+The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out (`applying` of them already started, which an answer still finishes) and `applied` how many are done. `truncated: true` means more exist than were read.
 
 Arguments:
 
 - `limit` (optional): 1 to 50, default 50
 
-Result: `{ item: { items: [{ id, revision, projectId, since, left, applied, text, topic? }], truncated } }`.
+Result: `{ item: { items: [{ id, revision, projectId, since, left, applied, applying, text, topic? }], truncated } }`.
 
 #### `meeting.record.plan`
 
@@ -3086,7 +3086,7 @@ Arguments:
 - `alternative`: the owner's own decision instead
 - `commandId`: required
 
-Result: `{ ownerDecisionId?, applied?, stillApplying? }`: `applied` after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change.
+Result: `{ ownerDecisionId?, applied?, stillApplying?, shown }`: `applied` (changes of the decision carried out, in all) after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change, `shown` plain lines saying what happened (for the chat).
 
 #### `meeting.record.finish`
 
