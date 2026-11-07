@@ -68,6 +68,8 @@ export interface RetentionDeps {
   readonly ledger?: DeletionLedger;
   /** A test seam: called before each batch of removals. */
   readonly beforeBatch?: (batch: number) => Promise<void>;
+  /** A test seam: runs after the citations of a revoked executable record were read and before it is blanked (what a task does in that gap must keep the record). */
+  readonly beforeBlank?: (recordId: string) => Promise<void>;
 }
 
 const isOwner = (by: Principal): boolean => by.kind === "owner";
@@ -372,6 +374,7 @@ export class RetentionService {
     if (typeof body["body"] !== "string" || createHash("sha256").update(body["body"]).digest("hex") !== r.digest || found.revision !== r.revision) return false;
     // Something may cite it since the preview.
     if ((await RetainedMaterial.build(this.#runner.storage)).why("desk-record", r.recordId) !== undefined) return false;
+    await this.#deps.beforeBlank?.(r.recordId);
     const at = this.#runner.now();
     const deletionId = cmdId("rtb", r.versionId, r.recordId);
     try {
@@ -380,6 +383,8 @@ export class RetentionService {
         build: async (): Promise<Built> => {
           const fresh = await this.#runner.get("desk-record", r.recordId);
           if (fresh === undefined || fresh.revision !== found.revision) throw new DomainError("stale_revision", "changed since the preview");
+          // Writing a dependency manifest that cites the record does not change the record's revision, so the citations are read again here, as the last thing before the guarded write: a task that took the record after the first read keeps it.
+          if ((await RetainedMaterial.build(this.#runner.storage)).why("desk-record", r.recordId) !== undefined) throw new DomainError("stale_revision", "something cites it since the preview");
           const ref = { kind: "desk-record", id: r.recordId };
           const stub = stubDeskBody(body, { at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), contentDigest: digestOf({ title: body["title"] ?? "", body: body["body"] ?? "" }) });
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: fresh.revision, body: stub as JsonObject }], detail: { rule: "revoked-bytes-days", name: r.name, version: r.version } };

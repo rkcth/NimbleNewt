@@ -265,9 +265,9 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
 export interface StatusDeps {
-  /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
+  /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
   readonly assignments: AssignmentService;
   readonly waits: WaitService;
