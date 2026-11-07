@@ -117,7 +117,7 @@ export interface TurnBody {
   readonly status: "planned" | "done";
   readonly plan: readonly PlanItem[];
   /** When part of the message waits for an answer: the held commands, in plan order, each with the words it was said in; an `answer` intent resumes them. */
-  readonly held?: readonly { readonly intent: Intent; readonly text: string }[];
+  readonly held?: readonly { readonly intent: Intent; readonly text: string; /** The turn the words were said in, when it is not this one (the commands were held through a question). */ readonly from?: string }[];
   /** The turn whose held commands this one carries on (it is closed once this one is done). */
   readonly resumes?: string;
   readonly resumedBy?: string;
@@ -381,10 +381,10 @@ export class ChatService {
     try { return (await this.#deps.policy?.effective(owner))?.profile ?? "strict"; } catch { return "strict"; }
   }
 
-  async #plan(owner: Principal, token: string, turnId: string, text: string, intents: Intent[], focus: { projectId?: string; projectName?: string }, focusProjectId: string | undefined, hasQuoted: boolean): Promise<{ items: PlanItem[]; projectId: string | undefined; held: { intent: Intent; text: string }[] | undefined; resumes: string | undefined }> {
+  async #plan(owner: Principal, token: string, turnId: string, text: string, intents: Intent[], focus: { projectId?: string; projectName?: string }, focusProjectId: string | undefined, hasQuoted: boolean): Promise<{ items: PlanItem[]; projectId: string | undefined; held: { intent: Intent; text: string; from?: string }[] | undefined; resumes: string | undefined }> {
     if (intents.length === 0) return { items: [{ i: 0, kind: "asked", question: "I could not tell what you want done. Which project or task do you mean, and what should change?", options: [] }], projectId: focusProjectId, held: undefined, resumes: undefined };
     // Work to plan: each intent with the owner's words it was said in. An `answer` to an earlier question is replaced by that turn's held commands with the answer filled in.
-    const work: { intent: Intent; text: string; trusted: boolean; quoted: boolean }[] = [];
+    const work: { intent: Intent; text: string; trusted: boolean; quoted: boolean; from?: string }[] = [];
     let resumes: string | undefined;
     const early: PlanItem[] = [];
     for (const intent of intents) {
@@ -403,7 +403,7 @@ export class ChatService {
     // Several commands in one message that change the same record: each write moves its revision on by one, so a later command expects the revision the earlier ones will have left.
     const pending = new Map<string, number>();
     let coordinatorRevision: number | undefined;
-    for (const [n, { intent, text: words, trusted, quoted }] of work.entries()) {
+    for (const [n, { intent, text: words, trusted, quoted, from }] of work.entries()) {
       const i = items.length;
       const push = (item: PlanItem): void => { items.push(item); workOf.push(n); };
       if (intent.kind === "clarify") { push({ i, kind: "asked", question: intent.question, options: intent.options ?? [] }); continue; }
@@ -526,8 +526,8 @@ export class ChatService {
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       projectId = resolved.projectId ?? projectId;
       // A captured topic is linked to this very turn (set here, after the interpreter's arguments were checked, so it cannot be named by anyone else).
-      // An alternative to a meeting decision is the owner's own decision from this very turn (the same link as a decision stated in chat), under a command ID of the turn.
-      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" || st.op === "decision.record" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st.op === "meeting.record.owner-respond" && isObject(st.args["alternative"]) ? { ...st, args: { ...st.args, alternative: { ...(st.args["alternative"] as Record<string, unknown>), source: { channel: "chat", turnId }, commandId: `${turnId}-alt${i}` } } } : st));
+      // An alternative to a meeting decision is the owner's own decision from the turn the words were said in (the same link as a decision stated in chat; after a question that is the turn before the answer), under a command ID of this turn.
+      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" || st.op === "decision.record" ? { ...st, args: { ...st.args, sourceTurnId: from ?? turnId } } : st.op === "meeting.record.owner-respond" && isObject(st.args["alternative"]) ? { ...st, args: { ...st.args, alternative: { ...(st.args["alternative"] as Record<string, unknown>), source: { channel: "chat", turnId: from ?? turnId }, commandId: `${turnId}-alt${i}` } } } : st));
       if (resolved.reason === undefined) {
         // An explicit order applies now, one API command per step (a first step such as setting the repository, then the order itself).
         const last = steps.length - 1;
@@ -552,19 +552,19 @@ export class ChatService {
       // What was refused stays refused: it is kept as a no-op, so an answer cannot let it through. A model's own question cannot be answered by the owner's choice, so it is not resumable.
       const refusedWork = new Set(items.flatMap((it, k) => (it.kind === "refused" ? [workOf[k] as number] : [])));
       const resumable = !work.some((w) => w.intent.kind === "clarify") && early.length === 0;
-      return { items: held, projectId, held: resumable ? work.map((w, n) => (refusedWork.has(n) ? { intent: { kind: "none", reason: "refused earlier" } as Intent, text: w.text } : { intent: w.intent, text: w.text })) : undefined, resumes };
+      return { items: held, projectId, held: resumable ? work.map((w, n) => (refusedWork.has(n) ? { intent: { kind: "none", reason: "refused earlier" } as Intent, text: w.text } : { intent: w.intent, text: w.text, ...(w.from === undefined ? {} : { from: w.from }) })) : undefined, resumes };
     }
     return { items, projectId, held: undefined, resumes };
   }
 
   /** The commands an earlier, unanswered turn held, with the owner's answer filled in; or why they cannot be carried on. */
-  async #expandAnswer(owner: Principal, turnId: string, choice: string): Promise<{ work: { intent: Intent; text: string }[]; quoted: boolean } | { refuse: string }> {
+  async #expandAnswer(owner: Principal, turnId: string, choice: string): Promise<{ work: { intent: Intent; text: string; from: string }[]; quoted: boolean } | { refuse: string }> {
     const old = typeof turnId === "string" ? await this.#turn(turnId) : undefined;
     if (old === undefined || old.ownerId !== owner.id || old.held === undefined) return { refuse: "there is no unanswered question to carry on" };
     if (old.resumedBy !== undefined) return { refuse: "that question was already answered" };
     const asked = old.plan.find((it): it is Extract<PlanItem, { kind: "asked" }> => it.kind === "asked" && it.field !== undefined);
     if (asked === undefined || asked.intentIndex === undefined || asked.field === undefined || !(asked.choices ?? []).includes(choice)) return { refuse: "that is not one of the answers offered" };
-    const work = old.held.map((h) => ({ ...h }));
+    const work = old.held.map((h) => ({ ...h, from: h.from ?? turnId }));
     const target = work[asked.intentIndex];
     if (target === undefined || target.intent.kind !== "command") return { refuse: "the held command is gone" };
     const args: Record<string, unknown> = { ...target.intent.args };
@@ -578,12 +578,12 @@ export class ChatService {
       const key = asked.field.slice("integration.".length);
       const value: unknown = key === "refreshRounds" && choice !== "default" ? Number(choice) : key === "requiredChecks" && choice !== "default" ? choice.split("+") : choice;
       args["integration"] = { ...((args["integration"] as Record<string, unknown> | undefined) ?? {}), [key]: value };
-      work[asked.intentIndex] = { intent: { ...target.intent, args }, text: `${target.text}. ${choice}` };
+      work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: `${target.text}. ${choice}` };
       return { work, quoted: old.quotedCount > 0 };
     }
     args[asked.field] = choice;
     // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word: it counts as said, like the project-creation answers.
-    work[asked.intentIndex] = { intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" ? `${target.text}. ${choice}` : target.text };
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -828,7 +828,8 @@ export class ChatService {
       if (named !== undefined && args["decisionId"] !== undefined) return refuse("invalid_command", "give either decisionId or decisionTopic, not both");
       const isAlternative = args["response"] === "alternative";
       if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
-      const instead = (reason: string): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; say what you decide instead as its own sentence (for example "Keep the staging server until May.").`);
+      // What to do next depends on why: the words are the owner's to rephrase, a topic is theirs to name, a conflict is theirs to settle.
+      const instead = (reason: string, next = 'say what you decide instead as its own sentence (for example "Keep the staging server until May.")'): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
       const said = typeof statement === "string" ? statement.trim() : "";
       if (isAlternative) {
         if (said === "") return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
@@ -838,12 +839,17 @@ export class ChatService {
         if (notDecision !== undefined) return instead(notDecision);
       }
       const waitingList = await this.#get(token, "meeting.decisions.waiting", {});
-      const waiting = (waitingList?.["items"] as Record<string, unknown>[] | undefined) ?? [];
+      const everyone = (waitingList?.["items"] as Record<string, unknown>[] | undefined) ?? [];
+      // A project the owner named narrows the decisions to that project.
+      const waiting = projectId === undefined ? everyone : everyone.filter((d) => d["projectId"] === projectId);
       const cut = waitingList?.["truncated"] === true;
       const tooMany = "More meeting decisions wait for you than could be read at once; say more of the words of the one you mean.";
       let chosen: Record<string, unknown> | undefined;
-      if (waiting.length === 0) return refuse("not_found", "no meeting decision is waiting for your answer");
-      const pick = (d: Record<string, unknown>): string => `${String(d["id"])} (${String(d["text"]).slice(0, 60)})`;
+      if (waiting.length === 0) return refuse("not_found", cut ? "More meeting decisions exist than could be read at once, and none of those read waits for you; say more of the words of the one you mean." : everyone.length > 0 ? "no meeting decision of that project is waiting for your answer" : "no meeting decision is waiting for your answer");
+      // Decisions of several projects are told apart by the project's name.
+      const names = new Map<string, string>();
+      if (new Set(waiting.map((d) => String(d["projectId"]))).size > 1) for (const id of new Set(waiting.map((d) => String(d["projectId"])))) names.set(id, ((await this.#get(token, "project.get", { projectId: id }))?.["name"] as string | undefined)?.slice(0, 40) ?? id);
+      const pick = (d: Record<string, unknown>): string => `${String(d["id"])} (${String(d["text"]).slice(0, 60)}${names.has(String(d["projectId"])) ? `, in ${names.get(String(d["projectId"]))}` : ""})`;
       const askWhich = (list: Record<string, unknown>[]): Resolved & { ok: false } => ({ ok: false, kind: "ask", question: "Which meeting decision are you answering?", options: list.slice(0, CHAT_LIMITS.options).map(pick), field: "decisionId", choices: list.slice(0, CHAT_LIMITS.options).map((d) => String(d["id"])) });
       if (typeof args["decisionId"] === "string") {
         chosen = waiting.find((d) => d["id"] === args["decisionId"]);
@@ -859,7 +865,7 @@ export class ChatService {
         if (matches.length > 1) return askWhich(matches);
         chosen = matches[0]!;
         args["decisionId"] = String(chosen["id"]);
-        if (cut) fillNotes.push(tooMany);
+        if (cut) fillNotes.push("Not every waiting decision could be read; check this is the one you mean.");
       }
       const started = Number(chosen["applying"] ?? 0);
       labels[String(args["decisionId"])] = `${String(chosen["text"]).slice(0, 80)}; ${String(chosen["left"])} change${chosen["left"] === 1 ? "" : "s"} left to carry out`;
@@ -867,16 +873,17 @@ export class ChatService {
       if (isAlternative) {
         // The topic is the owner's words or the topic the decision answered; the wording of a motion (an agent's text) is never made into a topic.
         const raw = typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : undefined;
-        if (raw === undefined) return instead("the decision has no topic of its own, so name one for yours (for example: topic staging server)");
+        if (raw === undefined) return instead("the decision has no topic of its own", "name a topic for yours (for example: topic staging server), or decline the meeting's decision");
         const topic = normalTopic(raw.replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).replace(/^[^a-z0-9]+/, "").slice(0, 80).trim();
-        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit; name one (for example: topic staging server)");
+        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit", "name one (for example: topic staging server)");
         // What the decision service would refuse on the topic is read now, so nothing bound to fail is proposed: another kind of decision on the topic, a conflict not yet settled, the same words already decided.
         const history = ((await this.#get(token, "decision.history", { projectId: chosen["projectId"], topic })) as unknown as Record<string, unknown>[] | undefined) ?? [];
         const kindHeld = history.find((e) => typeof e["category"] === "string" && e["category"] !== "decision");
-        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind; name another topic`);
-        const live = history.filter((e) => e["state"] !== "superseded" && e["taskId"] === undefined);
-        if (live.some((e) => e["state"] === "disputed")) return instead(`the topic "${topic}" has a conflict between two of your instructions that you must settle first`);
-        if (live.some((e) => typeof e["statement"] === "string" && normalText(e["statement"]) === normalText(said) && e["gate"] === undefined)) return instead(`you have already decided exactly this on the topic "${topic}"; it stands`);
+        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours (for example: topic hosting plan)");
+        const live = history.filter((e) => e["state"] !== "superseded");
+        // Any unsettled conflict on the topic stops a project-wide decision, a task's own included.
+        if (live.some((e) => e["state"] === "disputed")) return instead(`the topic "${topic}" has a conflict between two of your instructions`, "settle that conflict first, or decline the meeting's decision");
+        if (live.some((e) => e["taskId"] === undefined && typeof e["statement"] === "string" && normalText(e["statement"]) === normalText(said) && e["gate"] === undefined)) return instead(`you have already decided exactly this on the topic "${topic}"; it stands`, "decline the meeting's decision if that is what you mean, or say something different");
         const alt: Record<string, unknown> = { projectId: chosen["projectId"], category: "decision", topic, statement: said, wording: said };
         const base = await this.#revisionFor(token, "decision", alt, undefined, new Map());
         if (!base.ok) return base;
@@ -1490,10 +1497,11 @@ export class ChatService {
           // The version a decision is based on is read when it is applied, after the earlier steps of this message were (a restatement that changes nothing, or a decision for another task, moves nothing or moves it by its own scope): predicting it from the plan is only right for a proposal that waits for the owner.
           // A turn run again (after a crash, or sent twice at once) has this step's decision already: it is the same command, answered from the record, not sent again with a version that now includes itself.
           // Found only if it is this turn's own record (a direct decision that happens to use the same command ID is not).
+          const sourceTurn = typeof item.args["sourceTurnId"] === "string" ? item.args["sourceTurnId"] : turnId;
           const known = async (): Promise<Record<string, unknown> | undefined> => {
             const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
             const src = done?.["source"] as { turnId?: string } | undefined;
-            if (done === undefined || src?.turnId !== turnId) return undefined;
+            if (done === undefined || src?.turnId !== sourceTurn) return undefined;
             const text = done["state"] === "disputed" ? `Recorded decision version ${String(done["version"])}, but it conflicts with a decision made after the version it was based on: nothing on that topic is in force until you choose.` : `Recorded decision version ${String(done["version"])} on "${String(done["topic"] ?? "the gate")}": ${String(done["statement"] ?? "")}`;
             return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: done["id"] as string, shown: [text.slice(0, 600)], accepted: true, completed: true } as Record<string, unknown>;
           };
@@ -1501,14 +1509,14 @@ export class ChatService {
           if (already !== undefined) return already as never;
           const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
           if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
-          args = { ...args, basedOn: await this.#decisionBase(token, turnId, args, item.planBase, fresh.value as number) };
+          args = { ...args, basedOn: await this.#decisionBase(token, sourceTurn, args, item.planBase, fresh.value as number) };
         }
         const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args });
         if (!response.ok && response.error.code === "command_conflict" && item.op === "decision.record") {
           // The same turn was sent twice at once and the other copy recorded this step between the look and the send: it is done.
           const recorded = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
           const src = recorded?.["source"] as { turnId?: string } | undefined;
-          if (recorded !== undefined && src?.turnId === turnId) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on "${String(recorded["topic"] ?? "the gate")}".`], accepted: true, completed: true } as never;
+          if (recorded !== undefined && src?.turnId === (typeof item.args["sourceTurnId"] === "string" ? item.args["sourceTurnId"] : turnId)) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on "${String(recorded["topic"] ?? "the gate")}".`], accepted: true, completed: true } as never;
         }
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
         return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
@@ -1916,9 +1924,11 @@ function looseMatch(words: string, text: string): boolean {
 const DECISION_FILLER = new Set(["decision", "decisions", "change", "changes", "one", "ones", "thing", "things", "it", "that", "this", "those", "these", "motion", "vote", "proposal", "item", "agree", "decline", "yes", "no", "please", "go", "ahead", "with", "to", "on", "about", "and", "in"]);
 /** Whether the owner's words fit a held decision's wording or topic: every significant word (`all`), or at least one when `all` is false; whole words only, a plural fits its singular. No significant word fits everything. */
 function decisionWordsMatch(words: string, text: string, all: boolean): boolean {
-  const have = new Set(text.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0));
-  const wanted = words.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length > 0 && !FILLER.has(w) && !DECISION_FILLER.has(w));
-  // Whole words only ("art" is not "start"); a plural fits its singular and the other way round.
-  const has = (w: string): boolean => have.has(w) || (w.length > 3 && w.endsWith("s") && have.has(w.slice(0, -1))) || (w.length > 2 && have.has(`${w}s`));
+  // Words are letters and digits only, so "staging-server" is "staging server".
+  const split = (x: string): string[] => x.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 0);
+  const have = new Set(split(text));
+  const wanted = split(words).filter((w) => !FILLER.has(w) && !DECISION_FILLER.has(w));
+  // Whole words only ("art" is not "start"); a plural fits its singular and the other way round ("boxes" and "box", "builds" and "build").
+  const has = (w: string): boolean => have.has(w) || (w.length > 3 && w.endsWith("s") && have.has(w.slice(0, -1))) || (w.length > 4 && w.endsWith("es") && have.has(w.slice(0, -2))) || (w.length > 2 && (have.has(`${w}s`) || have.has(`${w}es`)));
   return wanted.length === 0 || (all ? wanted.every(has) : wanted.some(has));
 }

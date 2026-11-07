@@ -13,7 +13,7 @@ after(stopServer);
 
 const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ kind: "command", op, args, evidence, basis: "owner" });
 const OP = "meeting.record.owner-respond";
-const STILL = "A change that was carried out or finished just now failed and stays applying. Nothing applies it again by itself: it is finished when the decision is applied again through the API (meeting.record.apply); you have no chat command for that yet.";
+const STILL = "1 change started but could not be carried out just now and stays applying. Nothing applies it again by itself: it is finished when the decision is applied again through the API (meeting.record.apply); you have no chat command for that yet.";
 
 interface Ctl {
   project: string; mgrToken: string; hostToken: string; crewTokens: string[];
@@ -22,11 +22,13 @@ interface Ctl {
   crash: { n: number; plain: number };
   /** What the approval policy says to a widening change: allow, or ask (the decision then waits for the owner). */
   policy: { value: "allow" | "ask" };
+  /** When set, the decision guard cannot be read (a pass that throws before any change starts). */
+  authFail: { on: boolean };
   /** When set, the list of waiting decisions the chat reads is cut to this one and says it was cut. */
   cutTo: { id?: string };
   decision(id: string): Promise<DecisionRecordBody & { id: string }>;
   /** An adopted decision with one task change that waits for the owner, who joined before it was applied. With `started`, its change was started (and crashed) before the owner joined. */
-  pending(wording: string, topic: string, title: string, o?: { started?: boolean; kinds?: ("task.update" | "task.retitle")[]; join?: boolean; agendaTopic?: string }): Promise<{ id: string; taskId: string; taskIds: string[] }>;
+  pending(wording: string, topic: string, title: string, o?: { project?: string; started?: boolean; kinds?: ("task.update" | "task.retitle")[]; join?: boolean; agendaTopic?: string }): Promise<{ id: string; taskId: string; taskIds: string[] }>;
   title(taskId: string): Promise<string>;
 }
 
@@ -45,6 +47,9 @@ for (const backend of backends) {
       } }) as MeetingRecordService;
       const w = await openWorld(backend, script, undefined, { records: lazy });
       const grants = GrantService.withEpoch(w.world.storage, w.projects.epoch, options);
+      const authFail = { on: false };
+      const realGuard = w.decisions.guard.bind(w.decisions);
+      (w.decisions as { guard: typeof w.decisions.guard }).guard = async (...a) => { if (authFail.on) throw new DomainError("unavailable", "the decision guard could not be read"); return realGuard(...a); };
       const authority = async (id: string) => { const p = await w.principals.get(id); return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, options.clock()); };
       const crash = { n: 0, plain: 0 };
       const policy: { value: "allow" | "ask" } = { value: "allow" };
@@ -54,12 +59,12 @@ for (const backend of backends) {
       holder.r = MeetingRecordService.withEpoch(w.world.storage, w.projects.epoch, { meetings: w.meetings, decisions: w.decisions }, { ...options, authority, appliers: { "task.update": crashing, "task.retitle": plainOne }, widening: async () => policy.value, shareable: async () => false });
       const records = holder.r;
       const project = await w.project("A");
-      const mgr = await w.agent("mgr", [{ action: "meeting.manage", project }]);
+      const mgr = await w.agent("mgr", [{ action: "meeting.manage", project: "*" }]);
       await w.principals.enroll(w.owner, { commandId: cid("e"), kind: "host", name: "h1", grants: [] });
       const hostToken = (await w.principals.issueCredential(w.owner, "host:h1")).token;
-      const crew = [await w.agent("ann", [{ action: "task.read", project }, { action: "meeting.attend", project }, { action: "task.update", project }]), await w.agent("bob", [{ action: "task.read", project }, { action: "meeting.attend", project }]), await w.agent("cy", [{ action: "task.read", project }, { action: "meeting.attend", project }])];
+      const crew = [await w.agent("ann", [{ action: "task.read", project: "*" }, { action: "meeting.attend", project: "*" }, { action: "task.update", project: "*" }]), await w.agent("bob", [{ action: "task.read", project: "*" }, { action: "meeting.attend", project: "*" }]), await w.agent("cy", [{ action: "task.read", project: "*" }, { action: "meeting.attend", project: "*" }])];
       const ctl: Ctl = {
-        project, mgrToken: mgr.token, hostToken, crewTokens: crew.map((c) => c.token), records, crash, policy, cutTo,
+        project, mgrToken: mgr.token, hostToken, crewTokens: crew.map((c) => c.token), records, crash, policy, cutTo, authFail,
         decision: async (id) => (await records.decision(w.owner, id)) as unknown as DecisionRecordBody & { id: string },
         pending: async (wording, topic, title, o = {}) => {
           const kinds = o.kinds ?? ["task.update"];
@@ -67,13 +72,13 @@ for (const backend of backends) {
           const changes: Record<string, unknown>[] = [];
           for (const [n, kind] of kinds.entries()) {
             const name = n === 0 ? title : `${title} ${n + 1}`;
-            const taskId = await w.task(project, name);
+            const taskId = await w.task(o.project ?? project, name);
             taskIds.push(taskId);
             changes.push({ kind, agent: crew[0]!.principal.id, target: { kind: "task", id: taskId }, expectedRevision: (await w.projects.getTask(taskId))!.revision, patch: { title: `${name} v2` }, summary: `retitle ${name}` });
           }
           // The agenda item carries the topic; the motion names none (as a motion that answers an agenda item usually does not).
-          const item = (await w.meetings.addAgendaItem(w.owner, { commandId: cid("it"), projectId: project, topic: o.agendaTopic ?? topic, question: "What do we do?", urgency: "urgent", intent: "delegated-decision" })).id;
-          const occ = (await w.meetings.callUrgent(mgr.principal, { commandId: cid("urg"), projectId: project, title: "Sync", reason: "decide", roster: crew.map((c) => c.principal.id) })).id;
+          const item = (await w.meetings.addAgendaItem(w.owner, { commandId: cid("it"), projectId: o.project ?? project, topic: o.agendaTopic ?? topic, question: "What do we do?", urgency: "urgent", intent: "delegated-decision" })).id;
+          const occ = (await w.meetings.callUrgent(mgr.principal, { commandId: cid("urg"), projectId: o.project ?? project, title: "Sync", reason: "decide", roster: crew.map((c) => c.principal.id) })).id;
           const rec = (await records.open(mgr.principal, { commandId: cid("open"), occurrenceId: occ })).id;
           for (const c of crew) await records.join(c.principal, { commandId: cid("j"), recordId: rec });
           const motion = (await records.move(crew[1]!.principal, { commandId: cid("mv"), recordId: rec, text: wording, agendaItemId: item, changes } as never)).id;
@@ -267,7 +272,7 @@ for (const backend of backends) {
     const chat = w.chat();
     await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: ctl.project });
     w.profile.value = "autonomous";
-    const said = "Use midnight for the nightly build. I would rather keep the nightly build at midnight until March.";
+    const said = "For build hours, use midnight for the nightly build. I would rather keep the nightly build at midnight until March, as the nightly schedule.";
     script[said] = [
       cmd("decision.record", { projectId: ctl.project, category: "decision", topic: "nightly build", statement: "Use midnight for the nightly build", wording: "Use midnight for the nightly build" }, "Use midnight for the nightly build"),
       cmd(OP, { response: "alternative", decisionTopic: "nightly", alternativeStatement: "keep the nightly build at midnight until March", alternativeTopic: "nightly build" }, "keep the nightly build at midnight until March"),
@@ -400,14 +405,14 @@ for (const backend of backends) {
   });
 
   test("the lines told after an answer give the true reason for every kind of change that was not carried out", () => {
-    const reasons: Record<string, RegExp> = { conflict: /moved on/, unauthorized: /no longer holds the right/, gate: /project gate/, missing: /no longer exists/, failed: /failed when it was carried out/, recommendation: /only a recommendation/ };
+    const reasons: Record<string, RegExp> = { conflict: /moved on/, unauthorized: /no one with the right/, gate: /project's rules or a later decision/, missing: /no longer exists/, failed: /could not be carried out/, recommendation: /only a recommendation/ };
     for (const [code, re] of Object.entries(reasons)) {
       const lines = ownerAnswerLines("agree", { carriedOut: 0, refused: [code, code], alreadyDone: 0, stillOpen: 0 });
       assert.match(lines[1]!, new RegExp(`^2 changes not carried out: .*${re.source}`), code);
     }
-    assert.deepEqual(ownerAnswerLines("agree", { carriedOut: 2, refused: [], alreadyDone: 1, stillOpen: 1 }), ["You agreed. 2 changes carried out now. 1 change had been done before.", "1 change still waiting to be carried out."]);
+    assert.deepEqual(ownerAnswerLines("agree", { carriedOut: 2, refused: [], alreadyDone: 1, stillOpen: 1 }), ["You agreed. 2 changes carried out now. 1 change had been done before.", "1 change still waits to be carried out."]);
     assert.deepEqual(ownerAnswerLines("decline", { carriedOut: 0, refused: ["owner", "owner"], alreadyDone: 0, stillOpen: 0 }), ["You declined. The changes not yet started are refused; those already done stay done."], "the owner's own refusal is not listed as a failure");
-    assert.equal(ownerAnswerLines("decline", { carriedOut: 0, refused: ["conflict"], alreadyDone: 0, stillOpen: 0, stillApplying: true }).length, 3);
+    assert.equal(ownerAnswerLines("decline", { carriedOut: 0, refused: ["conflict"], alreadyDone: 0, stillOpen: 1, applying: 1, stillApplying: true }).length, 3);
   });
 
   suite("a decision with no topic of its own is not given a topic made from an agent's words: the owner is asked to name one", async (w, script, ctl) => {
@@ -417,7 +422,187 @@ for (const backend of backends) {
     const said = "I would rather keep the nightly build at midnight until March.";
     script[said] = [cmd(OP, { response: "alternative", decisionTopic: "nightly", alternativeStatement: "keep the nightly build at midnight until March" }, "keep the nightly build at midnight until March")];
     const refused = only((await say(w, chat, said)).outcomes);
-    assert.match(String(refused.message), /^Nothing was proposed: the decision has no topic of its own, so name one for yours/);
+    assert.match(String(refused.message), /^Nothing was proposed: the decision has no topic of its own\. The meeting decision still waits for your answer; name a topic for yours/);
+  });
+
+  const REPORT = "Keep the nightly report weekly.";
+
+  suite("after the question which decision, an alternative and a decision stated in the same message are linked to the message the words were said in, and confirm", async (w, script, ctl) => {
+    w.profile.value = "autonomous";
+    const a = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const b = await ctl.pending(REPORT, "nightly report", "Report task");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: ctl.project });
+    const said = "For build hours, use midnight for the nightly build. I would rather keep the nightly build at midnight until March, as the nightly schedule.";
+    script[said] = [
+      cmd("decision.record", { projectId: ctl.project, category: "decision", topic: "build hours", statement: "use midnight for the nightly build", wording: "use midnight for the nightly build" }, "use midnight for the nightly build"),
+      cmd(OP, { response: "alternative", decisionTopic: "nightly", alternativeStatement: "keep the nightly build at midnight until March", alternativeTopic: "nightly schedule" }, "keep the nightly build at midnight until March"),
+    ];
+    const first = await say(w, chat, said);
+    assert.ok(first.outcomes.some((o) => o.status === "asked"), JSON.stringify(first.outcomes));
+    assert.equal(first.outcomes.filter((o) => o.status === "applied").length, 0, "nothing runs while the question is open");
+    script["The build one."] = [{ kind: "answer", turnId: first.turnId, choice: a.id, evidence: "The build one", basis: "owner" }];
+    const answered = (await say(w, chat, "The build one.")).outcomes;
+    // The decision stated in the first message is recorded from that message, not from the answer.
+    const recordedStep = answered.find((o) => o.op === "decision.record")!;
+    assert.equal(recordedStep.status, "applied", JSON.stringify(answered));
+    const rec = (await call(w, w.ownerToken, "decision.get", { decisionId: recordedStep.id })).result.item;
+    assert.equal(rec.source.turnId, first.turnId);
+    const proposal = answered.find((o) => o.status === "proposed")!;
+    assert.ok(proposal, JSON.stringify(answered));
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposal.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal((await ctl.decision(a.id)).ownerResponse, "alternative");
+    assert.equal((await ctl.decision(b.id)).ownerResponse, "pending");
+  });
+
+  suite("a list cut short with nothing read, or with one match, says so and is not read as empty", async (w, script, ctl) => {
+    const a = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    await ctl.pending(STAGING, "staging server", "Staging task");
+    const chat = w.chat();
+    ctl.cutTo.id = "mdn-nothing";
+    script["Agree with the nightly build."] = [cmd(OP, { response: "agree", decisionTopic: "nightly build" }, "Agree with the nightly build")];
+    const none = only((await say(w, chat, "Agree with the nightly build.")).outcomes);
+    assert.match(String(none.message), /More meeting decisions exist than could be read at once, and none of those read waits for you/);
+    ctl.cutTo.id = a.id;
+    const one = only((await say(w, chat, "Agree with the nightly build.")).outcomes);
+    assert.equal(one.status, "proposed", JSON.stringify(one));
+    assert.ok((one.preview as unknown as string[]).some((l) => /^Not every waiting decision could be read; check this is the one you mean\.$/.test(l)), JSON.stringify(one.preview));
+  });
+
+  suite("an agreement whose pass fails before any change starts says the changes still wait and what finishes them; a repeated answer says it was already given", async (w, script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const chat = w.chat();
+    script["Agree with the nightly build."] = [cmd(OP, { response: "agree", decisionTopic: "nightly build" }, "Agree with the nightly build")];
+    const proposed = only((await say(w, chat, "Agree with the nightly build.")).outcomes);
+    ctl.authFail.on = true;
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposed.proposalId! });
+    ctl.authFail.on = false;
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.deepEqual(applied.results[0]!.shown, ["You agreed. None of its changes was carried out now.", "Carrying out the changes failed before any of them started; 1 change still waits. Nothing applies it again by itself; the decision must be applied again through the API (meeting.record.apply), which you have no chat command for yet."]);
+    assert.equal((await ctl.decision(d.id)).changes[0]!.state, "adopted", "nothing was started, so nothing is reported as applying");
+    // The same answer sent again (same command ID) is told to be already given.
+    const once = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "same-answer");
+    assert.equal(once.ok, false, "the decision was answered above, so a new command is refused");
+    const e = await ctl.pending(STAGING, "staging server", "Staging task");
+    const first = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "decline" }, "answer-once");
+    assert.equal(first.result.shown[0], "You declined. The changes not yet started are refused; those already done stay done.");
+    const again = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "decline" }, "answer-once");
+    assert.deepEqual([again.result.replayed, again.result.shown], [true, ["This answer (decline) was already given; nothing more was done now."]]);
+  });
+
+  test("started changes and other waiting changes are both told", () => {
+    const lines = ownerAnswerLines("agree", { carriedOut: 0, refused: [], alreadyDone: 0, stillOpen: 3, applying: 1, stillApplying: true });
+    assert.deepEqual(lines.slice(1), [STILL, "2 more changes still wait to be carried out."]);
+  });
+
+  suite("a topic with a conflict of any scope, a task-level one included, is not proposed for; each refusal says what to do", async (w, script, ctl) => {
+    const a = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const chat = w.chat();
+    const task = a.taskId;
+    const decide = (statement: string) => w.decisions.record(w.owner, { commandId: cid("dec"), projectId: ctl.project, taskId: task, category: "decision", topic: "nightly build", statement, wording: statement, source: { channel: "direct" }, basedOn: 0 } as never);
+    await decide("Run the nightly build at one");
+    await decide("Run the nightly build at two");
+    const text = "I would rather keep the nightly build at midnight until March.";
+    script[text] = [cmd(OP, { response: "alternative", decisionTopic: "nightly", alternativeStatement: "keep the nightly build at midnight until March" }, "keep the nightly build at midnight until March")];
+    const refused = only((await say(w, chat, text)).outcomes);
+    assert.match(String(refused.message), /^Nothing was proposed: the topic "nightly build" has a conflict between two of your instructions\. The meeting decision still waits for your answer; settle that conflict first, or decline the meeting's decision\.$/);
+  });
+
+  suite("words match whole words across hyphens and es-plurals, and decisions of different projects are told apart by project, or narrowed by the project the owner names", async (w, script, ctl) => {
+    const other = await w.project("B");
+    const a = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const b = await ctl.pending(REPORT, "nightly report", "Report task", { project: other });
+    const boxes = await ctl.pending("Replace the old boxes on Friday.", "hardware refresh", "Hardware task");
+    const chat = w.chat();
+    script["Agree with the staging-server."] = [cmd(OP, { response: "agree", decisionTopic: "nightly-build" }, "Agree with the staging-server")];
+    // (the words are not in the message above on purpose: refused, nothing matched by accident)
+    assert.equal(only((await say(w, chat, "Agree with the staging-server.")).outcomes).code, "unsupported_value");
+    script["Agree with the nightly-build one."] = [cmd(OP, { response: "agree", decisionTopic: "nightly-build" }, "Agree with the nightly-build one")];
+    const hyphen = only((await say(w, chat, "Agree with the nightly-build one.")).outcomes);
+    assert.equal(hyphen.status, "proposed", JSON.stringify(hyphen));
+    assert.match(String(hyphen.preview), /nightly build to one in the morning/);
+    script["Agree with the box one."] = [cmd(OP, { response: "agree", decisionTopic: "box" }, "Agree with the box one")];
+    const es = only((await say(w, chat, "Agree with the box one.")).outcomes);
+    assert.match(String(es.preview), /old boxes/);
+    // Two projects: the question names them.
+    script["Agree with the nightly one."] = [cmd(OP, { response: "agree", decisionTopic: "nightly" }, "Agree with the nightly one")];
+    const asked = only((await say(w, chat, "Agree with the nightly one.")).outcomes);
+    assert.equal(asked.status, "asked");
+    assert.ok((asked.options as string[]).some((o) => o.startsWith(a.id) && o.endsWith(", in A)")) && (asked.options as string[]).some((o) => o.startsWith(b.id) && o.endsWith(", in B)")), JSON.stringify(asked.options));
+    // A project the owner names narrows the choice.
+    script["Agree with the nightly one in B."] = [cmd(OP, { response: "agree", decisionTopic: "nightly", projectName: "B" }, "Agree with the nightly one in B")];
+    const narrowed = only((await say(w, chat, "Agree with the nightly one in B.")).outcomes);
+    assert.equal(narrowed.status, "proposed", JSON.stringify(narrowed));
+    assert.match(String(narrowed.preview), /nightly report weekly/);
+    assert.ok(boxes.id);
+  });
+
+  // A seeded sample of the flow: 1 to 3 waiting decisions, a response, a name that is unique or shared (so the owner is asked and picks in any order), a list cut short, a failing applier.
+  // For every sample: nothing is applied before the owner confirms, the confirm is never refused as invalid for a proposal the chat made, and what the owner is told matches what the record holds.
+  suite("seeded samples of answering held decisions by chat keep their promises", async (w, script, ctl) => {
+    w.profile.value = "autonomous";
+    const nouns = ["nightly build", "staging server", "backup job", "billing export", "release notes", "cache warmup", "audit trail", "label printer", "mail relay", "search index", "log rotation", "image resize", "tax report", "door badge", "feed import", "queue limit", "spam filter", "disk quota", "chat export", "map tiles", "video proxy", "form archive", "user import", "help pages"];
+    let seed = 20261107;
+    const next = (n: number): number => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % n; };
+    const chat = w.chat();
+    for (let k = 0; k < 8; k++) {
+      const count = 1 + next(3);
+      const made: { id: string; noun: string; taskId: string }[] = [];
+      for (let n = 0; n < count; n++) {
+        const noun = nouns[(k * 3 + n) % nouns.length]!;
+        const d = await ctl.pending(`Tune the ${noun} schedule.`, noun, `Task ${k}-${n}`);
+        made.push({ id: d.id, noun, taskId: d.taskId });
+      }
+      const target = made[next(count)]!;
+      const response = (["agree", "decline", "alternative"] as const)[next(3)]!;
+      const shared = count > 1 && next(2) === 0;
+      const cut = next(3) === 0;
+      const fail = response === "agree" && next(2) === 0;
+      const name = shared ? "schedule" : target.noun;
+      const month = ["March", "April", "May", "June", "July", "August", "September", "October"][k]!;
+      const keep = `keep the ${target.noun} at midnight until ${month}`;
+      const text = response === "alternative" ? `Sample ${k}: I would rather ${keep} than that ${name} change.` : `Sample ${k}: ${response === "agree" ? "Agree with" : "No to"} the ${name} change.`;
+      script[text] = [cmd(OP, { response, decisionTopic: name, ...(response === "alternative" ? { alternativeStatement: keep } : {}) }, response === "alternative" ? keep : text.slice(text.indexOf(":") + 2, -1))];
+      if (cut) ctl.cutTo.id = target.id;
+      const first = await say(w, chat, text);
+      delete ctl.cutTo.id;
+      for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${k} ${JSON.stringify({ response, shared, cut, fail, count, m: m.noun })}: nothing is answered before the owner confirms`);
+      let outcomes = first.outcomes;
+      const mustAsk = shared && !cut;
+      assert.equal(outcomes.some((o) => o.status === "asked"), mustAsk, `sample ${k}: ${JSON.stringify(outcomes)}`);
+      if (mustAsk) {
+        script[`Sample ${k} pick.`] = [{ kind: "answer", turnId: first.turnId, choice: target.id, evidence: `Sample ${k} pick`, basis: "owner" }];
+        outcomes = (await say(w, chat, `Sample ${k} pick.`)).outcomes;
+      }
+      const proposal = outcomes.find((o) => o.status === "proposed");
+      assert.ok(proposal, `sample ${k}: a proposal, not a refusal: ${JSON.stringify(outcomes)}`);
+      for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${k}: the proposal changes nothing`);
+      if (fail) ctl.crash.n = 1;
+      const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposal!.proposalId! });
+      ctl.crash.n = 0;
+      assert.equal(applied.applied, true, `sample ${k}: ${JSON.stringify(applied)}`);
+      const told = (applied.results[0]!.shown ?? []).join("\n");
+      const rec = await ctl.decision(target.id);
+      assert.equal(rec.ownerResponse, response === "agree" ? "agreed" : response === "decline" ? "declined" : "alternative", `sample ${k}`);
+      for (const m of made.filter((x) => x.id !== target.id)) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${k}: the others still wait`);
+      const state = rec.changes[0]!.state;
+      if (response === "agree") {
+        assert.equal(state, fail ? "applying" : "applied", `sample ${k}`);
+        assert.equal(/stays applying/.test(told), fail, `sample ${k}: ${told}`);
+        assert.equal(/1 change carried out now/.test(told), !fail, `sample ${k}: ${told}`);
+      } else {
+        assert.equal(state, "not-applied", `sample ${k}`);
+        assert.match(told, response === "decline" ? /^You declined/ : /^You chose your own decision instead/, `sample ${k}`);
+        if (response === "alternative") {
+          const own = await call(w, w.ownerToken, "decision.get", { decisionId: rec.ownerDecisionId });
+          assert.equal(own.result.item.statement, keep, `sample ${k}: the owner's own words are the decision`);
+          assert.equal(own.result.item.source.turnId, first.turnId, `sample ${k}: linked to the message the words were said in`);
+        }
+      }
+      // Leave nothing waiting for the next sample.
+      for (const m of made.filter((x) => x.id !== target.id)) await call(w, w.ownerToken, OP, { decisionId: m.id, response: "decline" }, `clear-${k}-${m.id}`);
+    }
   });
 
   suite("only the owner sees or answers the held decisions: an agent, a host and a task-scoped owner credential are refused, and the chat is the owner's alone", async (w, _script, ctl) => {

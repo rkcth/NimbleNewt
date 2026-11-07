@@ -284,7 +284,7 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  *   private record is marked unverifiable for readers who cannot be shown it.
  */
 /** What an owner's answer to a decision did: `applied` (changes applied in all, after an agreement), `stillApplying` (a started change could not be finished just now), and from the record before and after: changes carried out by this answer, the codes of those it refused, those done before, those still open. */
-export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; carriedOut: number; refused: string[]; alreadyDone: number; stillOpen: number }
+export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; carriedOut: number; refused: string[]; alreadyDone: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
   readonly #runner: CommandRunner;
@@ -1227,7 +1227,7 @@ export class MeetingRecordService {
       if (!recorded.recorded) invalid("alternative", recorded.reason);
       else ownerDecisionId = recorded.id;
     }
-    await this.#cmd("meeting.decision.owner", by, command.commandId, async () => ({
+    const answered = await this.#cmd("meeting.decision.owner", by, command.commandId, async () => ({
       payload: clean({ decisionId, response: command.response, ownerDecisionId }),
       build: async () => {
         const found = await this.#runner.get("meeting-decision", decisionId);
@@ -1258,13 +1258,17 @@ export class MeetingRecordService {
     }
     // What this answer did to the changes, from the record before and after (the changes keep their order).
     const after = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
-    const was = before?.changes ?? [];
     const now = after?.changes ?? [];
+    // A repeat of an answer already given has nothing to count: what the first call did is not known now, and changes another pass finished meanwhile are not this answer's.
+    const was = answered.replayed ? now : (before?.changes ?? []);
     const carriedOut = now.filter((c, n) => c.state === "applied" && was[n]?.state !== "applied").length;
     const refused = now.flatMap((c, n) => (c.state === "not-applied" && was[n]?.state !== "not-applied" ? [c.code ?? "failed"] : []));
+    // `stillApplying` is true only when a change really was started and stays applying; a pass that threw before starting anything leaves the changes adopted (`passFailed`).
+    const applyingNow = now.filter((c) => c.state === "applying").length;
     return {
-      ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(applied === undefined ? {} : { applied }), ...(stillApplying ? { stillApplying: true as const } : {}),
-      carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length,
+      ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(applied === undefined ? {} : { applied }), ...(stillApplying && applyingNow > 0 ? { stillApplying: true as const } : {}), ...(stillApplying && applyingNow === 0 ? { passFailed: true as const } : {}),
+      ...(answered.replayed ? { replayed: true as const } : {}),
+      carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length, applying: applyingNow,
     };
   }
 

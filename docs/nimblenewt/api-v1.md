@@ -3086,7 +3086,7 @@ Arguments:
 - `alternative`: the owner's own decision instead
 - `commandId`: required
 
-Result: `{ ownerDecisionId?, applied?, stillApplying?, carriedOut, refused, alreadyDone, stillOpen, shown }`: `applied` (changes of the decision carried out, in all) after an agreement; `stillApplying` when a change could not be carried out or finished just now; `carriedOut` the changes this answer carried out, `refused` the codes of those it refused, `alreadyDone` those done before, `stillOpen` those still adopted or applying; `shown` plain lines saying what happened (for the chat).
+Result: `{ ownerDecisionId?, applied?, stillApplying?, passFailed?, replayed?, carriedOut, refused, alreadyDone, stillOpen, applying, shown }`: `applied` (changes of the decision carried out, in all) after an agreement; `stillApplying` when a change that was started could not be carried out or finished just now and stays applying; `passFailed` when carrying out failed before any change started (they stay adopted); `replayed` for a repeat of an answer already given (the counts are then not this call's); `carriedOut` the changes this answer carried out, `refused` the codes of those it refused, `alreadyDone` those done before, `stillOpen` those still adopted or applying; `shown` plain lines saying what happened (for the chat).
 
 #### `meeting.record.finish`
 
