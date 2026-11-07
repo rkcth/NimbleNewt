@@ -53,7 +53,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -94,7 +94,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1268,6 +1268,19 @@ for (const backend of backends) {
     const texts = (await status.needsYou(c.owner))!.lines.map((l) => l.text);
     assert.ok(texts.includes('A meeting decision waits for you: "Move the nightly build to one in the morning." (topic nightly build): 1 change left to carry out (agree, decline or choose another); since 2000-01-01T00:00:00.000Z.'), JSON.stringify(texts));
     assert.ok(texts.includes('A meeting decision waits for you: "Retire the old staging server on Friday.": 2 changes left to carry out (1 already done) (agree, decline or choose another); since 2000-01-02T00:00:00.000Z.'), JSON.stringify(texts));
+  });
+
+  suite("a resume held for the owner is named in the needs-you list with what to do, and a cut list says held resumes may be missing (card L04c)", async (c) => {
+    const one = { checkId: "rck-held", taskId: "task-held", since: "2000-01-01T00:00:00.000Z", changes: [{ kind: "file", key: "/src/a.ts", status: "changed" }] };
+    const whole = (await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: false }) }).needsYou(c.owner))!;
+    assert.ok(whole.lines.some((l) => l.text === "Task task-held is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a.ts (changed) (approve the resume to let it go on, or decline it, which releases the task); since 2000-01-01T00:00:00.000Z."), JSON.stringify(whole.lines.map((l) => l.text)));
+    assert.ok(!whole.truncated.includes("held resumes"));
+    const cut = (await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: true }) }).needsYou(c.owner))!;
+    assert.ok(cut.truncated.includes("held resumes"), "a source that had more than was read is named");
+    const many = Array.from({ length: 51 }, (_, i) => ({ ...one, checkId: `rck-${i}`, taskId: `task-${i}` }));
+    const over = (await c.rebuild({}, { heldResumes: async () => ({ items: many, truncated: false }) }).needsYou(c.owner, 50))!;
+    assert.ok(over.truncated.includes("held resumes"), "more than fifty found is named as cut too");
+    assert.equal(over.lines.filter((l) => /held before it resumes/.test(l.text)).length, 50);
   });
 
   suite("a task's activity is told step by step in plain lines, the last few on request, and what the caller may not read reads as missing (card C09h)", async (c) => {

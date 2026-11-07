@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
-import { STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
+import { ENDED_CANCEL, STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
 import type { EffectService } from "../domain/effects.js";
@@ -1028,7 +1028,7 @@ export class DispatcherService {
         return `the resume check was cancelled ${counted} times; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
       }
       const key = keys[n]!;
-      let check = await resumes.start(by, { commandId: key, taskId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
+      let check = await resumes.start(by, { commandId: key, taskId, attemptId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
       if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
       if (check.phase === "ready") {
         // A check that holds changes judged to matter is not committed by the dispatcher: the owner decides (`resume.approve`). The commit itself comes last, just before the start (card L04c).
@@ -1056,14 +1056,30 @@ export class DispatcherService {
     const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
     await this.#deps.notifications?.emitFromController({
       commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: check.id }, projectId,
-      detail: `Task ${taskId} is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve the resume to let it go on.`.slice(0, 200),
+      detail: `Task ${taskId} is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve to let it go on, or decline to release it.`.slice(0, 200),
     }).catch((error: unknown) => this.#options.onError?.(error));
-    return `the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); the owner approves it (resume.approve) or cancels it before attempt ${attemptId} starts`.slice(0, 500);
+    return `the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); attempt ${attemptId} waits until the owner approves the resume (resume.approve) or declines it, which releases the task (resume.decline)`.slice(0, 500);
   }
 
   /** The owner's notice that a resume is held is closed once the check is done (approved) or cancelled, so the inbox never says a task waits that does not. Best effort; nothing open is a no-op. */
   async #settleHold(checkId: string, projectId: string): Promise<void> {
     await this.#deps.notifications?.settleFromController?.({ commandId: `dpa-ntf-done:resume-review:${checkId}`, kind: "maintenance", ref: { kind: "resume-check", id: checkId }, projectId }).catch((error: unknown) => this.#options.onError?.(error));
+  }
+
+  /**
+   * An attempt that ends before it started (released, transferred, replaced, expired) leaves no resume check behind: its own live check is cancelled and the owner's notice that it is held is closed (card L04c).
+   * Only this attempt's check is touched (the task's current check may already be a newer attempt's). Best effort: a fault is reported and the end goes on; `held` and `approve` also refuse such a check.
+   */
+  async #dropResumeCheck(attemptId: string, taskId: string, projectId: string): Promise<void> {
+    const resumes = this.#deps.resumes;
+    if (resumes === undefined) return;
+    try {
+      const check = await resumes.forTask(this.#deps.principal, taskId);
+      if (check === undefined || check.attemptId !== attemptId || check.phase === "executing") return;
+      // An approved (done) check's notice is closed too: the attempt ended before a tick saw the approval.
+      if (check.phase !== "cancelled" && check.phase !== "done") await resumes.cancel(this.#deps.principal, { checkId: check.id, reason: ENDED_CANCEL });
+      await this.#settleHold(check.id, projectId);
+    } catch (error) { this.#options.onError?.(error); }
   }
 
   /** Commits the resume check just before the attempt starts. Returns why it did not finish, or nothing when the check is done (the commit is recorded once however often this runs). */
@@ -1737,6 +1753,7 @@ export class DispatcherService {
     await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
     if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
+    if (b.resumeFrom !== undefined) await this.#dropResumeCheck(attemptId, b.taskId, b.projectId);
     await this.#update(attemptId, (x) => ({ ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
     // A worker registered while this end was running (its start answered after the end began) is let go too.
     const late = this.#live.get(attemptId);

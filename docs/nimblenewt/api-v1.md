@@ -2778,6 +2778,19 @@ Result: `{ item }`: the check, `phase` done when it was approved.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `resume.decline`
+
+The owner does not let a task go on after a resume check that holds changes judged to matter (owner only): the task's current check is cancelled, the task is released (its waiting attempt ends; nothing works on it until it is assigned again) and the notice that it is held is closed. A repeat answers as it is; a check in any other state is refused with where it stands, and one approved meanwhile is refused (`invalid_transition`).
+
+Arguments:
+
+- `taskId`: the task
+- `commandId`: required
+
+Result: `{ item }`: the check, `phase` cancelled.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.retry`
 
 Starts a blocked resume check over once the reason has been dealt with.

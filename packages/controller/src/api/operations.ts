@@ -163,7 +163,7 @@ export interface Context {
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
   readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline">;
   /** Absent when the controller runs without deliverable reads (card U13). */
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
@@ -724,6 +724,9 @@ export const OPERATIONS: readonly Operation[] = [
   { name: "resume.approve", kind: "command", summary: "The owner lets a task go on after a resume check that holds changes judged to matter to its work (owner only): the task's current check, when it is ready, is committed. A check already done answers as it is (one left half-recorded by a crash is finished); one that is not ready is refused with where it stands, and an approval during which the task's inputs changed again is refused (`invalid_transition`) and the check stays held for a new look.", args: { taskId: "the task", commandId: "required" },
     result: "`{ item }`: the check, `phase` done when it was approved.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["taskId"]); return asJson({ item: await resumesOf(c).approve(c.principal, { commandId: need(id), taskId: a["taskId"] as string }) }); } },
+  { name: "resume.decline", kind: "command", summary: "The owner does not let a task go on after a resume check that holds changes judged to matter (owner only): the task's current check is cancelled, the task is released (its waiting attempt ends; nothing works on it until it is assigned again) and the notice that it is held is closed. A repeat answers as it is; a check in any other state is refused with where it stands, and one approved meanwhile is refused (`invalid_transition`).", args: { taskId: "the task", commandId: "required" },
+    result: "`{ item }`: the check, `phase` cancelled.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId"]); return asJson({ item: await resumesOf(c).decline(c.principal, { commandId: need(id), taskId: a["taskId"] as string }) }); } },
   { name: "resume.retry", kind: "command", summary: "Starts a blocked resume check over once the reason has been dealt with.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).retry(c.principal, { checkId: a["checkId"] as string }) }); } },
   { name: "resume.cancel", kind: "command", summary: "Cancels a resume check that has not been committed.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",

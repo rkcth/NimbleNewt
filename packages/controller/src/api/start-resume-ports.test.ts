@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { DependencyService } from "../dependencies/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
+import { PI } from "../dispatch/testing/world.js";
 import { startController, type StartOptions } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -50,6 +51,10 @@ for (const store of stores) {
       const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
       await c.services.principals.enroll(rob, { commandId: "e-zed", kind: "agent", name: "zed", grants: [] });
       const zed = (await c.services.principals.issueCredential(rob, "agent:zed")).token;
+      // Full working rights, but in another project: no more than a stranger here.
+      const other = (await call(boot.token, "project.create", { name: "Orchard" }, "p2")).result.id as string;
+      await c.services.principals.enroll(rob, { commandId: "e-yan", kind: "agent", name: "yan", grants: [{ action: "task.read", project: other }, { action: "attempt.work", project: other }] });
+      const yan = (await c.services.principals.issueCredential(rob, "agent:yan")).token;
 
       assert.equal((await call(host, "continuation.latest", { taskId: task })).result.item, undefined, "nothing captured yet");
       const first = await call(host, "continuation.capture", { taskId: task, ...capture(true) }, "cap1");
@@ -70,6 +75,8 @@ for (const store of stores) {
       // Refusals: no rights, an unknown field, a missing command ID.
       assert.equal((await call(zed, "continuation.capture", { taskId: task, ...capture(true) }, "cap4")).error.code, "forbidden");
       assert.equal((await call(zed, "continuation.latest", { taskId: task })).result.item, undefined, "a stranger sees nothing");
+      assert.equal((await call(yan, "continuation.capture", { taskId: task, ...capture(true) }, "cap6")).error.code, "forbidden", "rights in another project do not reach this one");
+      assert.equal((await call(yan, "continuation.latest", { taskId: task })).result.item, undefined, "nor does reading");
       assert.equal((await call(host, "continuation.capture", { taskId: task, ...capture(true), extra: 1 }, "cap5")).error.code, "invalid_command");
       assert.equal((await call(host, "continuation.capture", { taskId: task, ...capture(true) })).ok, false, "a command needs its ID");
     } finally { await c.close(); await db.close(); }
@@ -125,6 +132,7 @@ for (const store of stores) {
           const needs = await call(boot.token, "status.ask", { request: { kind: "needs_you" } });
           const said = (needs.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
           assert.match(said, new RegExp(`Task ${task} is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a\\.ts \\(changed\\) \\(approve the resume`));
+          assert.equal((await call(ann, "resume.decline", { taskId: task }, "a4")).error.code, "forbidden", "declining is the owner's too");
           const ok = await call(boot.token, "resume.approve", { taskId: task }, "o1");
           assert.equal(ok.result.item.phase, "done");
           assert.equal((await call(boot.token, "resume.approve", { taskId: task }, "o2")).result.item.phase, "done");
@@ -139,4 +147,45 @@ for (const store of stores) {
       } finally { await c.close(); await db.close(); }
     });
   }
+
+  test(`${store.name}: the owner declines a held resume through the API: the check is cancelled, the task released and no longer said to be held`, async () => {
+    const db = await store.open();
+    const c = await startController({
+      storage: db.storage, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+      resume: { observe: async () => ({}), review: async ({ changes }) => Object.fromEntries(changes.map((x) => [x.id, { relevant: true, rationale: "the task edits this file" }])) },
+    });
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const rob = await c.services.principals.authenticate(boot.token);
+      const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+      const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+      const task = (await call(boot.token, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+      await c.services.principals.enroll(rob, { commandId: "e-host", kind: "host", name: "h1", grants: [] });
+      const hostP = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "host:h1")).token);
+      await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "task.read", project }, { action: "attempt.work", project }] });
+      const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
+      await c.services.continuations.capture(hostP, { commandId: "cap1", taskId: task, ...capture(true) });
+      await DependencyService.withEpoch(c.storage, c.epoch).record(rob, { commandId: "d1", taskId: task, dependencies: [{ kind: "file", key: "/src/a.ts", hash: `sha256:${"1".repeat(64)}` }] });
+      // The task's attempt, and a check started for it as the dispatcher starts one.
+      await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId: task, expectedRevision: (await c.services.projects.getTask(task))!.revision, to: "ready" });
+      await c.services.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId: task, owner: { kind: "agent", id: "ann" } });
+      const asg = (await c.services.assignments.getAssignment(task))!;
+      await c.services.assignments.admitAttempt({ commandId: "ad1", actor: rob.id, taskId: task, expectedRevision: asg.revision, generation: asg.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" });
+      const attemptId = (await c.services.assignments.getAssignment(task))!.activeAttemptId!;
+      assert.ok(attemptId !== undefined);
+      const check = await c.services.resumes.start(rob, { commandId: "k1", taskId: task, attemptId, model: { provider: "local", id: "m1" }, after: "restart" });
+      assert.equal(check.phase, "ready");
+      const before = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[];
+      assert.ok(before.some((l) => l.text.includes("held before it resumes") && l.text.includes("or decline it, which releases the task")), JSON.stringify(before));
+      assert.equal((await call(ann, "resume.decline", { taskId: task }, "a1")).error.code, "forbidden");
+      const declined = await call(boot.token, "resume.decline", { taskId: task }, "o1");
+      assert.ok(declined.ok, JSON.stringify(declined));
+      assert.equal(declined.result.item.phase, "cancelled");
+      assert.equal((await c.services.assignments.getAssignment(task))!.state, "released", "the task is released");
+      assert.equal((await call(boot.token, "resume.decline", { taskId: task }, "o2")).result.item.phase, "cancelled", "a repeat answers as it is");
+      const after = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[];
+      assert.ok(after.every((l) => !l.text.includes("held before it resumes")), "no longer said to be held");
+      assert.equal((await call(boot.token, "resume.approve", { taskId: task }, "o3")).error.code, "invalid_command", "a declined resume cannot be approved");
+    } finally { await c.close(); await db.close(); }
+  });
 }

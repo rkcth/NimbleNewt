@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { BlockerService } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
+import { attemptId as checkAttemptId, type AttemptBody } from "../domain/assignment-model.js";
 import { onlyKnown, taskId as checkTaskId, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { DependencyCheck, DependencyService, Observation } from "../dependencies/dependencies.js";
@@ -35,6 +36,11 @@ export interface ResumePorts {
 export interface ResumeCheckBody {
   readonly taskId: string;
   readonly projectId: string;
+  /**
+   * The attempt the check was started for (the dispatcher's checks, card L04c). While it is set, the check stands only while that attempt is the task's active one: once the task is released, transferred or given another
+   * attempt, the check is not listed as held, cannot be committed or approved, and the dispatcher cancels it. Absent on a check started through `resume.start`.
+   */
+  readonly attemptId?: string;
   readonly phase: ResumePhase;
   /** How many times the inputs changed between review and commit and the check started over. */
   readonly round: number;
@@ -60,6 +66,10 @@ export interface ResumeCheckBody {
 
 /** Reason code of a cancel the dispatcher makes when a check of another route is superseded; such a cancel does not count toward the restart budget. */
 export const STALE_CANCEL = "stale-by-dispatcher" as const;
+/** Reason code of a cancel the dispatcher makes when the attempt the check was for ended (released, transferred, replaced or expired) before it started. */
+export const ENDED_CANCEL = "attempt-ended" as const;
+/** The history note of a check the owner declined (`decline`). */
+export const DECLINED = "declined by the owner" as const;
 /** A blocked check without a blocker is retried no sooner than this many milliseconds times its number of blocks after it blocked. */
 export const RETRY_BACKOFF_MS = 5 * 60_000;
 export const RESUME_LIMITS = { rounds: 3, advances: 10, history: 40, note: 300, limits: 10 } as const;
@@ -70,6 +80,7 @@ const validRounds = (n: unknown): n is number => typeof n === "number" && Number
  */
 const RESUMER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
 const KIND = "resume-check";
+const ORPHANED = "not committed: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so nothing is resumed";
 const ACTIVE = "resume-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -82,6 +93,17 @@ const checkModel = (v: unknown, field: string): { provider: string; id: string }
   if (typeof m["provider"] !== "string" || !MODEL.test(m["provider"]) || typeof m["id"] !== "string" || !MODEL.test(m["id"])) return invalid(field, "must be { provider, id } of plain names");
   return { provider: m["provider"], id: m["id"] };
 };
+
+export interface ResumeCheckDeps {
+  readonly continuations: Pick<ContinuationService, "latest" | "resume">;
+  readonly dependencies: Pick<DependencyService, "check">;
+  readonly blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
+  readonly ports: ResumePorts;
+  /** Releases the task whose held resume the owner declined, while `attemptId` is still its active attempt (card L04c). Must be repeatable (a command ID derived from the attempt). Absent: `decline` is unavailable for a dispatcher's check. */
+  readonly release?: (by: Principal, taskId: string, attemptId: string) => Promise<void>;
+  /** Closes the owner's notice that the check is held (best effort), when the owner approves or declines it. */
+  readonly settle?: (checkId: string, projectId: string) => Promise<void>;
+}
 
 /**
  * Checked resume (card L04): collect, verify, review, commit. A task is not carried on from its stored context just because the context exists. The check collects the latest complete continuation
@@ -98,12 +120,14 @@ export class ResumeCheckService {
   readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
   readonly #ports: ResumePorts;
   readonly #rounds: number | (() => Promise<number>);
+  readonly #release: ResumeCheckDeps["release"];
+  readonly #settle: ResumeCheckDeps["settle"];
 
-  private constructor(runner: CommandRunner, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, rounds: number | (() => Promise<number>)) {
-    this.#runner = runner; this.#continuations = deps.continuations; this.#dependencies = deps.dependencies; this.#blockers = deps.blockers; this.#ports = deps.ports; this.#rounds = rounds;
+  private constructor(runner: CommandRunner, deps: ResumeCheckDeps, rounds: number | (() => Promise<number>)) {
+    this.#runner = runner; this.#continuations = deps.continuations; this.#dependencies = deps.dependencies; this.#blockers = deps.blockers; this.#ports = deps.ports; this.#rounds = rounds; this.#release = deps.release; this.#settle = deps.settle;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, options: RunnerOptions & { maxRounds?: number; /** Read once per new check (the owner's setting); wins over `maxRounds`. */ rounds?: () => Promise<number> } = {}): ResumeCheckService {
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: ResumeCheckDeps, options: RunnerOptions & { maxRounds?: number; /** Read once per new check (the owner's setting); wins over `maxRounds`. */ rounds?: () => Promise<number> } = {}): ResumeCheckService {
     // A supplied rounds() is read for each new check; a fixed maxRounds is then ignored, so it is not even validated.
     const rounds = options.rounds ?? options.maxRounds ?? RESUME_LIMITS.rounds;
     if (typeof rounds === "number" && !validRounds(rounds)) throw new RangeError("maxRounds must be a whole number from 1 to 10");
@@ -113,8 +137,9 @@ export class ResumeCheckService {
   // ---- requests ------------------------------------------------------------------------------------------------------------
 
   /** Begins a checked resume of a task. One at a time per task; the same command again answers where it stands. Returns after one pass. */
-  async start(by: Principal, command: NoActor & { taskId: string; model: unknown; previousModel?: unknown; after: "restart" | "model-change" | "continue" }): Promise<View<ResumeCheckBody>> {
-    onlyKnown(command, ["commandId", "taskId", "model", "previousModel", "after"]);
+  async start(by: Principal, command: NoActor & { taskId: string; model: unknown; previousModel?: unknown; after: "restart" | "model-change" | "continue"; attemptId?: string }): Promise<View<ResumeCheckBody>> {
+    onlyKnown(command, ["commandId", "taskId", "model", "previousModel", "after", "attemptId"]);
+    const attemptId = command.attemptId === undefined ? undefined : checkAttemptId(command.attemptId);
     const taskId = checkTaskId(command.taskId);
     const projectId = await this.#authorize(by, taskId);
     if (!["restart", "model-change", "continue"].includes(command.after)) invalid("after", "must be restart, model-change or continue");
@@ -123,6 +148,7 @@ export class ResumeCheckService {
     const id = derivedId("rck", scopedCommandId(by.id, command.commandId));
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("rck", `active\0${taskId}`) };
     await this.#runner.command("resume.start", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      // The attempt is kept out of the payload: a check started before it was recorded answers the same command again instead of conflicting (the dispatcher's command ID names the attempt anyway).
       payload: { taskId, model: model as unknown as JsonObject, previousModel: (previousModel ?? null) as unknown as JsonObject, after: command.after },
       build: async () => {
         const at = this.#runner.now();
@@ -136,7 +162,7 @@ export class ResumeCheckService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: ResumeCheckBody = {
-          taskId, projectId, phase: "collecting", round: 0, blocks: 0, maxRounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
+          taskId, projectId, ...(attemptId === undefined ? {} : { attemptId }), phase: "collecting", round: 0, blocks: 0, maxRounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
           requestedBy: by.id, requestedAt: at, history: [{ phase: "collecting", at, by: by.id, note: "resume check started" }],
         };
         const pointer = clean({ checkId: id });
@@ -162,6 +188,8 @@ export class ResumeCheckService {
     const b = found.body as unknown as ResumeCheckBody;
     if (b.phase === "done" || b.phase === "executing") return this.advance(by, { checkId: command.checkId });
     if (b.phase !== "ready") throw new DomainError("invalid_command", `the resume check is ${b.phase}; it can be committed when it is ready`, { field: "checkId" });
+    // A check for an attempt that is no longer the task's active one (released, transferred, replaced) carries nothing on: no resume is recorded for an attempt that will never run.
+    if (!(await this.#forCurrentAttempt(b))) throw new DomainError("invalid_transition", ORPHANED);
     // Changes judged to matter are the owner's to accept: neither the dispatcher nor the agent being resumed commits over them (card L04c).
     const matter = relevantChanges(b);
     if (matter.length > 0 && by.kind !== "owner") throw new DomainError("forbidden", `${matter.length} change(s) were judged to matter to the work; only the owner commits the resume (resume.approve)`);
@@ -190,14 +218,42 @@ export class ResumeCheckService {
     if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner approves a resume that holds changes judged to matter");
     const check = await this.forTask(by, command.taskId);
     if (check === undefined) throw new DomainError("not_found", "that task has no resume check");
-    if (check.phase === "done") return check;
+    if (check.phase === "done") { await this.#settle?.(check.id, check.projectId).catch(() => undefined); return check; }
     // Committed already but not finished (a crash while recording it): carried on, as a commit would.
     if (check.phase === "executing") return this.advance(by, { checkId: check.id });
     if (check.phase !== "ready") throw new DomainError("invalid_command", `the task's resume check is ${check.phase}; only a ready one can be approved`, { field: "taskId" });
+    if (!(await this.#forCurrentAttempt(check))) throw new DomainError("invalid_transition", "not approved: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so there is nothing to let go on");
     const after = await this.commit(by, { commandId: `rck-approve-${check.id.slice(4)}`, checkId: check.id });
     // The inputs moved while approving: the check started over, so what the owner approved is not what would run. Nothing was committed, and the owner is told so.
+    if (after.phase === "done") await this.#settle?.(check.id, check.projectId).catch(() => undefined);
     if (after.phase !== "done") throw new DomainError("invalid_transition", `not approved: the task's inputs changed while approving, so its resume check was started over and is ${after.phase}${after.phase === "ready" ? `; ${relevantChanges(after).length} change(s) judged to matter are held, approve again to let it go on` : ""}`);
     return after;
+  }
+
+  /**
+   * The owner's decision NOT to let a held task go on (card L04c): the task's current check, held for changes judged to matter, is cancelled and the task is released (its waiting attempt ends and nothing
+   * works on it until it is assigned again), and the owner's notice that it is held is closed. A repeat answers as it is (and releases the task if that did not happen the first time); a check in any
+   * other state is refused with where it stands. Releasing needs the controller's `release` (absent: refused as unavailable for a check the dispatcher holds).
+   */
+  async decline(by: Principal, command: NoActor & { taskId: string }): Promise<View<ResumeCheckBody>> {
+    onlyKnown(command, ["commandId", "taskId"]);
+    if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner declines a resume that holds changes judged to matter");
+    const check = await this.forTask(by, command.taskId);
+    if (check === undefined) throw new DomainError("not_found", "that task has no resume check");
+    const repeat = check.phase === "cancelled" && check.history.at(-1)?.note === DECLINED;
+    if (!repeat) {
+      if (check.phase === "done" || check.phase === "executing") throw new DomainError("invalid_command", "the task's resume check was already approved and committed; there is nothing to decline", { field: "taskId" });
+      if (check.phase !== "ready" || relevantChanges(check).length === 0) throw new DomainError("invalid_command", `the task's resume check is ${check.phase}${check.phase === "ready" ? " and holds no change judged to matter" : ""}; only a resume held for changes judged to matter can be declined`, { field: "taskId" });
+    }
+    if (check.attemptId !== undefined && this.#release === undefined) throw new DomainError("unavailable", "declining a held resume needs the task release, which this controller does not run");
+    // Cancelled first, so an approval racing the decline cannot commit afterwards; then the task is released, so the dispatcher does not start a new check and hold it again.
+    if (!repeat && !(await this.#update(check.id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, DECLINED) }), ["ready"]))) {
+      const now = await this.#get(by, check.id);
+      throw new DomainError("invalid_transition", `not declined: the task's resume check changed meanwhile and is ${(now.body as unknown as ResumeCheckBody).phase}`);
+    }
+    if (check.attemptId !== undefined && await this.#forCurrentAttempt(check)) await this.#release!(by, check.taskId, check.attemptId);
+    await this.#settle?.(check.id, check.projectId).catch(() => undefined);
+    return view<ResumeCheckBody>((await this.#runner.get(KIND, check.id))!);
   }
 
   /** Starts a blocked check over from the beginning, once whoever blocked it has dealt with the reason. */
@@ -209,12 +265,15 @@ export class ResumeCheckService {
     return this.advance(by, { checkId: command.checkId });
   }
 
-  /** `reason` "stale-by-dispatcher" marks a cancel the dispatcher made because another route took over; it is not a failure of the check (see `cancelledAsStale`). */
-  async cancel(by: Principal, command: { checkId: string; reason?: typeof STALE_CANCEL }): Promise<View<ResumeCheckBody>> {
+  /**
+   * `reason` "stale-by-dispatcher" marks a cancel the dispatcher made because another route took over; it is not a failure of the check (see `cancelledAsStale`). "attempt-ended" marks one the dispatcher made
+   * because the attempt the check was for ended before it started.
+   */
+  async cancel(by: Principal, command: { checkId: string; reason?: typeof STALE_CANCEL | typeof ENDED_CANCEL }): Promise<View<ResumeCheckBody>> {
     const found = await this.#get(by, command.checkId);
     const b = found.body as unknown as ResumeCheckBody;
     if (b.phase === "executing" || b.phase === "done") throw new DomainError("invalid_command", `the resume check is ${b.phase}; it can no longer be cancelled`, { field: "checkId" });
-    if (!TERMINAL.includes(b.phase)) await this.#update(command.checkId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, command.reason === STALE_CANCEL ? STALE_CANCEL : "cancelled") }), ["collecting", "verifying", "reviewing", "ready", "blocked"]);
+    if (!TERMINAL.includes(b.phase)) await this.#update(command.checkId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, command.reason ?? "cancelled") }), ["collecting", "verifying", "reviewing", "ready", "blocked"]);
     return view<ResumeCheckBody>((await this.#runner.get(KIND, command.checkId))!);
   }
 
@@ -308,7 +367,7 @@ export class ResumeCheckService {
   }
 
   /**
-   * The checks that wait for the owner (card L04c): each task's current check when it is ready and holds changes judged to matter. Owner only (anyone else: none). Read through the tasks' check pointers,
+   * The checks that wait for the owner (card L04c): each task's current check when it is ready, holds changes judged to matter and (for a dispatcher's check) its attempt is still the task's active one. Owner only (anyone else: none). Read through the tasks' check pointers,
    * at most `limit` found and 2000 pointers looked at; `truncated` says there may be more.
    */
   async held(by: Principal, limit: number): Promise<{ items: { checkId: string; taskId: string; projectId: string; since: string; changes: DeltaItem[] }[]; truncated: boolean }> {
@@ -325,7 +384,7 @@ export class ResumeCheckService {
         const b = found?.body as unknown as ResumeCheckBody | undefined;
         if (found === undefined || b === undefined || b.phase !== "ready") continue;
         const changes = relevantChanges(b);
-        if (changes.length > 0) items.push({ checkId: found.id, taskId: b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes });
+        if (changes.length > 0 && await this.#forCurrentAttempt(b)) items.push({ checkId: found.id, taskId: b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes });
       }
       if (page.length < 200) return { items, truncated: false };
     }
@@ -370,6 +429,15 @@ export class ResumeCheckService {
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined || !(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not resume that task`);
     return task.projectId;
+  }
+
+  /**
+   * Whether the check still stands for its attempt: one with no attempt always does; one with an attempt only while that attempt is active. Every way an attempt stops being the task's active one
+   * (release, transfer, finish, a new generation) ends the attempt in the same write as the assignment, so the attempt's own state is enough.
+   */
+  async #forCurrentAttempt(b: Pick<ResumeCheckBody, "attemptId">): Promise<boolean> {
+    if (b.attemptId === undefined) return true;
+    return ((await this.#runner.get("attempt", b.attemptId))?.body as unknown as AttemptBody | undefined)?.state === "active";
   }
 
   async #get(by: Principal, checkId: string) {

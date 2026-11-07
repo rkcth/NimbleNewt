@@ -689,7 +689,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const resumeSettings = ResumeSettingsService.withEpoch(storage, epoch, undefined, { warn: async (d) => { await notifications.emitFromController({ commandId: `resume-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-settings", id: "main" }, detail: d.detail }); } });
     // What happens when a host stops reporting while it holds work: warn, then (unless the owner turned it off) re-place after the grace period. The owner's setting over the start-up defaults (12 hours, on).
     const quietHostSettings = QuietHostSettingsService.withEpoch(storage, epoch, undefined, { warn: async (d) => { await notifications.emitFromController({ commandId: `quiet-host-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "quiet-host-settings", id: "main" }, detail: d.detail }); } });
-    const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage, options.resume) }, { rounds: () => resumeSettings.effective() });
+    const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage, options.resume),
+      // The owner's decline releases the task while the held attempt is still its active one, and closes the dispatcher's notice that it is held (card L04c).
+      release: async (by, taskId, attemptId) => {
+        const a = await assignments.getAssignment(taskId);
+        if (a === undefined || a.state !== "assigned" || a.activeAttemptId !== attemptId) return;
+        await assignments.releaseTask({ commandId: `rck-decline-release:${attemptId}`, actor: by.id, taskId, expectedRevision: a.revision, reason: "the owner declined to resume it on inputs that changed" });
+      },
+      settle: async (checkId, projectId) => { await notifications.settleFromController({ commandId: `dpa-ntf-done:resume-review:${checkId}`, kind: "maintenance", ref: { kind: "resume-check", id: checkId }, projectId }); },
+    }, { rounds: () => resumeSettings.effective() });
     resumesLive = resumes;
     // The identity that carries out what a meeting decided and was allowed: a service with no grants of its own (the carrying agent's rights are checked separately).
     const meetingController = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal;
