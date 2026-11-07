@@ -2480,9 +2480,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N13 / AII-263.
 - **Status:** implemented; commits `817e699`, `a2137bf`, `dad6c52`, `5121b0e`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
-- **Progress note:** A running catalogue tool call follows the owner-chosen finish or cancel policy when its version is revoked (cancel when the policy cannot be read), and the owner revokes a version by chat. Retention, a pause policy and runs on other processes are T02c.
+- **Progress note:** A running catalogue tool call follows the owner-chosen finish or cancel policy when its version is revoked (cancel when the policy cannot be read), and the owner revokes a version by chat. Retention and a pause policy are T02c; runs on other processes are T02d.
 - **Blockers:** T02.
-- **Deliverable:** Split from T02 (2026-10-30): what happens to a catalogue tool call already running when its version is revoked (finish or cancel, chosen by the owner, fail-closed when the policy cannot be read), and revoking a tool version by chat. Retention, the pause policy and other-process runs moved to T02c (2026-10-30)..
+- **Deliverable:** Split from T02 (2026-10-30): what happens to a catalogue tool call already running when its version is revoked (finish or cancel, chosen by the owner, fail-closed when the policy cannot be read), and revoking a tool version by chat. Retention and the pause policy moved to T02c (2026-10-30); other-process runs moved on to T02d (2026-10-31).
 - **Acceptance and verification:** A revoked version's running calls follow the chosen policy and a new run of it is refused.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2490,7 +2490,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N13 / AII-263.
 - **Blockers:** T02b.
-- **Deliverable:** Split from T02b (2026-10-30), built 2026-10-31: retention of old and stale referenced tool versions as a K06 setting (catalogVersionsKept, off by default; the latest, revoked versions and any a resumable task ran stay), pause as a third in-flight policy plus a chat-settable standing policy for revokes that name no choice, and a chat view of past revocations.
+- **Deliverable:** Split from T02b (2026-10-30), built 2026-10-31: retention of old and stale referenced tool versions as a K06 setting (catalogVersionsKept, off by default, automatic drops only with catalogAutoDrop; the latest, the highest live and the newest unrevoked versions, revoked versions, and any a resumable task ran, pinned or lists, or an environment holds, stay; revoked executable text blanked only with revokedBytesBlank), pause as a third in-flight policy plus a chat-settable standing policy for revokes that name no choice, and a chat view of past revocations.
 - **Acceptance and verification:** Old versions are kept or dropped by the retention rule, a revocation can pause the tasks of running calls, and the owner reads past revocations in chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
