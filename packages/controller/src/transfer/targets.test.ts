@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { canon } from "../backup/canon.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
-import { dropPostgresSchema } from "../storage/postgres/index.js";
-import { sqliteTargetsFromConfig, type SqliteTargetDeps } from "./index.js";
+import { databaseSizeFrom, dropPostgresSchema } from "../storage/postgres/index.js";
+import { hideAddress, sqliteTargetsFromConfig, type SqliteTargetDeps } from "./index.js";
 
 const deps: SqliteTargetDeps = { openStorage: (path) => SqliteStorage.open({ path }), statfs };
 const enoent = (p: string): never => { const e: NodeJS.ErrnoException = new Error(`enoent: ${p}`); e.code = "ENOENT"; throw e; };
@@ -165,7 +165,6 @@ const pgDeps = (over: Partial<NonNullable<SqliteTargetDeps["postgres"]>> = {}): 
     openStorage: async () => { throw new Error(`could not connect to ${ADDRESS}: password hunter2/x was refused for nnuser`); },
     databaseBytes: async () => 1_000,
     dropSchema: async () => undefined,
-    schemaExists: async () => false,
     ...over,
   },
 });
@@ -217,12 +216,16 @@ test("two entries for one PostgreSQL place (same server, database and schema) or
   const ok = await sqliteTargetsFromConfig([pgEntry(), pgEntry({ name: "other-schema", schema: "nn_b" })], pgDeps());
   assert.equal(ok.length, 2);
   await assert.rejects(sqliteTargetsFromConfig([{ name: "main-pg", kind: "sqlite", path: join(tmpdir(), "nn-pg-n.sqlite") }, pgEntry()], pgDeps()), /targets\[1\]: name: main-pg is used by another entry/);
+  await assert.rejects(sqliteTargetsFromConfig([pgEntry(), { name: "main-pg", kind: "sqlite", path: join(tmpdir(), "nn-pg-n.sqlite") }], pgDeps()), /targets\[1\]: name: main-pg is used by another entry/, "a PostgreSQL entry's name is taken too");
 });
 
 test("whatever the open, the size read or the drop fails with, the address, its password and its user are hidden from the text (card F04l)", async () => {
   const boom = (): never => { throw new Error(`failed for ${ADDRESS} pass hunter2/x also hunter2%2Fx and postgresql://other:pw@h/d`); };
   const [t] = await sqliteTargetsFromConfig([pgEntry({ maxBytes: 5_000 })], pgDeps({ databaseBytes: boom, dropSchema: boom }));
-  for (const [what, run] of [["open", () => t!.open()], ["freeBytes", () => t!.freeBytes!()], ["discard", () => t!.discard!()]] as const) {
+  // A second target whose open created the schema, so its discard reaches the drop.
+  const [d] = await sqliteTargetsFromConfig([pgEntry()], pgDeps({ openStorage: async () => ({ createdSchema: true }) as never, dropSchema: boom }));
+  await d!.open();
+  for (const [what, run] of [["open", () => t!.open()], ["freeBytes", () => t!.freeBytes!()], ["discard", () => d!.discard!()]] as const) {
     await assert.rejects(run(), (error: Error) => {
       for (const leak of ["hunter2", "db.example.com", "postgres://", "postgresql://", "pw@h"]) assert.ok(!error.message.includes(leak), `${what}: ${leak} is not in "${error.message}"`);
       assert.match(error.message, /failed for|could not connect/);
@@ -245,25 +248,97 @@ test("freeBytes of a PostgreSQL entry is the cap less the server's size, never b
   assert.equal(asked, 0, "without a cap the server is not asked");
 });
 
-test("a failed copy drops a PostgreSQL schema only when this target's open created it; a schema that was there before is never dropped (card F04l)", async () => {
-  const dropped: string[] = [];
-  const asked: string[] = [];
-  const build = async (exists: boolean) => (await sqliteTargetsFromConfig([pgEntry({ schema: "nn_x" })], pgDeps({
-    openStorage: async () => ({}) as never, dropSchema: async (_u, schema) => { dropped.push(schema); }, schemaExists: async (_u, schema) => { asked.push(schema); return exists; },
-  })))[0]!;
-  const before = await build(true);
-  await assert.rejects(before.discard!(), /nn_x existed before this controller opened it, so it is not dropped/);
-  await before.open();
-  await before.open();
-  await assert.rejects(before.discard!(), (e: Error) => /not dropped/.test(e.message) && !e.message.includes("hunter2") && !e.message.includes("db.example.com"));
-  assert.deepEqual(dropped, [], "an existing schema (public, one prepared by the owner, another installation's) is left alone");
-  assert.deepEqual(asked, ["nn_x", "nn_x"], "every open asks until one finds the schema absent");
-  const fresh = await build(false);
-  await assert.rejects(fresh.discard!(), /not dropped/, "nothing was opened yet, so nothing was created");
-  await fresh.open();
-  await fresh.discard!();
-  await fresh.discard!();
-  assert.deepEqual(dropped, ["nn_x", "nn_x"], "the schema its own open created is dropped (and again after a later failed copy)");
+/** A fake PostgreSQL server for the drop rule: one schema, which this target's open, the owner, or nobody may have created. */
+function fakeServer() {
+  const server = { exists: false, dropped: [] as string[], failNextOpen: undefined as string | undefined };
+  const deps = pgDeps({
+    openStorage: async () => {
+      if (server.failNextOpen !== undefined) { const reason = server.failNextOpen; server.failNextOpen = undefined; throw new Error(reason); }
+      const createdSchema = !server.exists;
+      server.exists = true;
+      return { createdSchema } as never;
+    },
+    dropSchema: async (_u, schema) => { server.dropped.push(schema); server.exists = false; },
+  });
+  return { server, build: async () => (await sqliteTargetsFromConfig([pgEntry({ schema: "nn_x" })], deps))[0]! };
+}
+
+test("a failed copy drops a PostgreSQL schema only when this target's own open created it; a schema that was there before is never dropped (card F04l)", async () => {
+  const before = fakeServer();
+  before.server.exists = true;
+  const t = await before.build();
+  await assert.rejects(t.discard!(), /nn_x was not created by this controller's own open, so it is not dropped/);
+  await t.open();
+  await t.open();
+  await assert.rejects(t.discard!(), (e: Error) => /not dropped/.test(e.message) && !e.message.includes("hunter2") && !e.message.includes("db.example.com"));
+  assert.deepEqual(before.server.dropped, [], "an existing schema (public, one prepared by the owner, another installation's) is left alone");
+  const fresh = fakeServer();
+  const f = await fresh.build();
+  await assert.rejects(f.discard!(), /not dropped/, "nothing was opened yet, so nothing was created");
+  await f.open();
+  await f.open(); // the apply opens the schema the preview created: still this target's
+  await f.discard!();
+  assert.deepEqual(fresh.server.dropped, ["nn_x"], "the schema its own open created is dropped");
+  await assert.rejects(f.discard!(), /not dropped/, "after the drop nothing is claimed until an open creates the schema again");
+  await f.open();
+  await f.discard!();
+  assert.deepEqual(fresh.server.dropped, ["nn_x", "nn_x"], "an open that created it again makes it droppable again");
+});
+
+test("an open that fails claims nothing: a schema someone else makes afterwards is not dropped (card F04l)", async () => {
+  const { server, build } = fakeServer();
+  const t = await build();
+  server.failNextOpen = "connection reset";
+  await assert.rejects(t.open(), /connection reset/);
+  server.exists = true; // the owner creates the schema, with grants or objects of their own
+  await t.open();
+  await assert.rejects(t.discard!(), /not dropped/);
+  assert.deepEqual(server.dropped, []);
+});
+
+test("after a drop, a schema of the same name made by someone else is not dropped by the next failed copy (card F04l)", async () => {
+  const { server, build } = fakeServer();
+  const t = await build();
+  await t.open();
+  await t.discard!();
+  server.exists = true; // someone else creates it
+  await t.open();
+  await assert.rejects(t.discard!(), /not dropped/);
+  assert.deepEqual(server.dropped, ["nn_x"], "only the schema this target created");
+});
+
+test("an address with a password as a query parameter is refused without echoing it, and hideAddress hides such a password anyway (card F04l)", async () => {
+  for (const address of ["postgres://nnuser@db.example.com/nimble?password=qp-secret", "postgres://nnuser:pw@db.example.com/nimble?sslmode=require&sslpassword=qp-secret", "postgres://nnuser@db.example.com/nimble?PASSWORD=qp-secret"]) {
+    await assert.rejects(sqliteTargetsFromConfig([pgEntry()], pgDeps({ resolveSecret: async () => address })), (error: Error) =>
+      error.message === "transfer targets[0]: url: the secret transfer.pg-url holds a password as a query parameter (password= or sslpassword=); put the password in the user:password@ part of the address");
+  }
+  for (const [address, secret] of [["postgres://u@h/db?password=qp-secret", "qp-secret"], ["postgres://u@h/db?sslpassword=a%20b%2Fc", "a b/c"], ["postgres://u@h/db?password=a+b", "a b"]] as const) {
+    const out = hideAddress(`said ${secret} and ${encodeURIComponent(secret)} and ${new URLSearchParams([["p", secret]]).toString().slice(2)}`, address);
+    assert.equal(out, "said [address hidden] and [address hidden] and [address hidden]", address);
+  }
+});
+
+test("a failure whose message holds no address is rethrown without its stack or other properties, which may hold it (card F04l)", async () => {
+  const sneaky = (): never => {
+    const e = new Error("the server said no") as Error & { detail?: string; extra?: string };
+    e.detail = `while connecting to ${ADDRESS}`; e.extra = "hunter2/x"; e.stack = `Error: the server said no\n    at ${ADDRESS} hunter2/x`;
+    throw e;
+  };
+  const [t] = await sqliteTargetsFromConfig([pgEntry({ maxBytes: 5_000 })], pgDeps({ openStorage: sneaky, databaseBytes: sneaky }));
+  for (const run of [() => t!.open(), () => t!.freeBytes!()]) {
+    await assert.rejects(run(), (error: Error) => {
+      assert.equal(error.message, "the server said no");
+      assert.deepEqual(Object.keys(error), [], "no extra property is carried over");
+      assert.ok(!(error.stack ?? "").includes("hunter2") && !(error.stack ?? "").includes("db.example.com"), "the original stack is not carried over");
+      return true;
+    });
+  }
+});
+
+test("the server's size answer must be a whole number of bytes: anything else is an error, never a NaN that passes every room check (card F04l)", () => {
+  assert.equal(databaseSizeFrom("12345"), 12_345);
+  assert.equal(databaseSizeFrom("0"), 0);
+  for (const answer of [undefined, null, "", "abc", "NaN", "-5", "1e3", "9".repeat(400), 12]) assert.throws(() => databaseSizeFrom(answer), /did not report a database size/, String(answer).slice(0, 20));
 });
 
 test("the schema drop refuses a name it could not place in its statement safely, before it connects anywhere (card F04l)", async () => {

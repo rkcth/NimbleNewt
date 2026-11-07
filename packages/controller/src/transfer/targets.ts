@@ -2,7 +2,7 @@ import { dirname, isAbsolute } from "node:path";
 import { canon } from "../backup/canon.js";
 import type { StatsFs } from "node:fs";
 import type { ControllerStorage } from "../storage/types.js";
-import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
+import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes } from "../storage/postgres/index.js";
 import { postgresFingerprint, sqliteFingerprint, type TransferTarget } from "./transfer.js";
 
 /**
@@ -35,18 +35,17 @@ export interface PostgresTargetEntry {
 /** What building PostgreSQL targets needs from outside. The address is passed in, resolved; none of these may log it. */
 export interface PostgresTargetDeps {
   resolveSecret(name: string): Promise<string | undefined>;
-  openStorage(url: string, schema: string): Promise<ControllerStorage>;
+  /** Opens (creating if absent) the schema's store. `createdSchema` is whether this open's own transaction created the schema, as PostgresStorage reports it. */
+  openStorage(url: string, schema: string): Promise<ControllerStorage & { readonly createdSchema: boolean }>;
   /** The size in bytes the server reports for the whole database. */
   databaseBytes(url: string): Promise<number>;
   /** Drops the schema and everything in it. */
   dropSchema(url: string, schema: string): Promise<void>;
-  /** Whether the schema exists on the server. Asked before the first open, so a failed copy drops only a schema that this controller created. */
-  schemaExists(url: string, schema: string): Promise<boolean>;
 }
 
 /** The real PostgreSQL side of configured targets: the storage's own open (no unsupported-server override) and the server reads and clean-up of the storage folder. The start and the tests use this one wiring. */
 export function postgresTargetDeps(resolveSecret: (name: string) => Promise<string | undefined>): PostgresTargetDeps {
-  return { resolveSecret, openStorage: (url, schema) => PostgresStorage.open({ connectionString: url, schema }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema, schemaExists: postgresSchemaExists };
+  return { resolveSecret, openStorage: (url, schema) => PostgresStorage.open({ connectionString: url, schema }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema };
 }
 
 /** What building targets needs from outside: opening a store at a path, reading a file system's room, and (for PostgreSQL entries) the secret store and the server. */
@@ -69,6 +68,9 @@ export const TARGET_PATH_MAX = 4096;
 /** Absolute on this machine: on Windows a drive or UNC root (a path rooted on the current drive names a different file per working directory). */
 const absolute = (p: string): boolean => isAbsolute(p) && p.length <= TARGET_PATH_MAX && !p.includes("\0") && (process.platform !== "win32" || /^(?:[a-zA-Z]:[\\/]|[\\/]{2})/.test(p));
 
+/** Query parameters that would carry a password in an address. */
+const QUERY_PASSWORD = /^(?:ssl)?password$/i;
+
 /** Hides a PostgreSQL address from a text: the address itself, its password in any spelling, and anything shaped like a connection URL. */
 export function hideAddress(text: string, address: string): string {
   const secrets = new Set<string>([address]);
@@ -79,6 +81,11 @@ export function hideAddress(text: string, address: string): string {
       secrets.add(u.password); secrets.add(encodeURIComponent(u.password));
       try { secrets.add(decodeURIComponent(u.password)); } catch { /* the raw spelling is hidden anyway */ }
       if (u.username !== "") secrets.add(`${u.username}:${u.password}@`);
+    }
+    // A password given as a query parameter (the driver honours ?password=; a target entry refuses both spellings, but this function hides them whatever text it is given).
+    for (const [key, value] of u.searchParams) {
+      if (!QUERY_PASSWORD.test(key) || value === "") continue;
+      secrets.add(value); secrets.add(encodeURIComponent(value)); secrets.add(new URLSearchParams([["x", value]]).toString().slice(2));
     }
   } catch { /* an address that does not parse is hidden whole */ }
   let out = text;
@@ -125,23 +132,29 @@ export async function transferTargetsFromConfig(entries: readonly unknown[], dep
       if (address === undefined || address === "") refuse(i, `url: the secret ${secretName} is not available`);
       const url = address as string;
       if (!/^postgres(?:ql)?:\/\//i.test(url)) refuse(i, `url: the secret ${secretName} does not hold a postgres:// address`);
+      // One rule for where the password goes: the user:password@ part. A query-string password (honoured by the driver) or an SSL key passphrase is refused, without echoing it.
+      let queryPassword = false;
+      try { queryPassword = [...new URL(url).searchParams.keys()].some((key) => QUERY_PASSWORD.test(key)); } catch { /* an unreadable address is refused just below */ }
+      if (queryPassword) refuse(i, `url: the secret ${secretName} holds a password as a query parameter (password= or sslpassword=); put the password in the user:password@ part of the address`);
       let fingerprint: string;
       try { fingerprint = postgresFingerprint(url, schema); } catch { refuse(i, `url: the secret ${secretName} does not hold a readable PostgreSQL address`); throw new Error("unreachable"); }
       const earlier = places.get(fingerprint);
       if (earlier !== undefined) refuse(i, `url: is the same place as entry ${earlier}`);
       names.add(name); places.set(fingerprint, i);
-      // Set when an open of this target found the schema absent, so the open created it. Only such a schema is dropped after a failed copy: a schema that was
-      // there before (the database's `public`, one the owner prepared with grants, or one holding other objects) is never dropped; the owner is told the
-      // destination is not clean instead.
+      // Set when an open of this target reports that its own transaction created the schema (learned from the open itself, so a schema someone else creates
+      // before or during the open is never counted), and forgotten after the drop. Only such a schema is dropped after a failed copy: a schema that was there
+      // before (the database's `public`, one the owner prepared with grants, or one holding other objects) is never dropped; the owner is told the destination
+      // is not clean instead. A failed open claims nothing.
       let created = false;
       out.push({
         name, kind: "postgres", fingerprint,
-        open: () => hiding(url, async () => { if (!created && !(await pg.schemaExists(url, schema))) created = true; return pg.openStorage(url, schema); }),
+        open: () => hiding(url, async () => { const store = await pg.openStorage(url, schema); if (store.createdSchema) created = true; return store; }),
         // The server's own figure for the database, against the cap the configuration gives: PostgreSQL cannot tell a client how much disk is left, so without a cap nothing is claimed.
         freeBytes: maxBytes === undefined ? async () => undefined : () => hiding(url, async () => Math.max(0, maxBytes - (await pg.databaseBytes(url)))),
         discard: () => hiding(url, async () => {
-          if (!created) throw new Error(`the schema ${schema} existed before this controller opened it, so it is not dropped; empty it by hand`);
+          if (!created) throw new Error(`the schema ${schema} was not created by this controller's own open, so it is not dropped; empty it by hand`);
           await pg.dropSchema(url, schema);
+          created = false; // a schema of this name made later is someone else's until an open of this target creates it again
         }),
         redact: (text) => hideAddress(text, url),
       });

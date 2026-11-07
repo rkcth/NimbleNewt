@@ -14,11 +14,14 @@ async function withClient<T>(connectionString: string, work: (client: import("pg
 
 /** The size in bytes the server reports for the whole database the address names (all its schemas, indexes and TOAST data). */
 export async function postgresDatabaseBytes(connectionString: string): Promise<number> {
-  return withClient(connectionString, async (c) => {
-    const n = Number((await c.query("SELECT pg_database_size(current_database())::text AS n")).rows[0]?.n);
-    if (!Number.isFinite(n) || n < 0) throw new Error("the server did not report a database size");
-    return n;
-  });
+  return withClient(connectionString, async (c) => databaseSizeFrom((await c.query("SELECT pg_database_size(current_database())::text AS n")).rows[0]?.n));
+}
+
+/** The server's size answer as a number of bytes; anything that is not a whole, non-negative number is an error (a NaN would make every room check pass). */
+export function databaseSizeFrom(answer: unknown): number {
+  const n = typeof answer === "string" && /^\d+$/.test(answer) ? Number(answer) : Number.NaN;
+  if (!Number.isFinite(n) || n < 0) throw new Error("the server did not report a database size");
+  return n;
 }
 
 /** Empties a destination after a failed copy: drops the schema and everything in it. The name is checked against the same rule the storage uses, so it can be placed in the statement. */

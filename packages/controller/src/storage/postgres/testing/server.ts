@@ -258,4 +258,25 @@ async function withClient<T>(url: string, fn: (client: import("pg").Client) => P
   try { return await fn(client); } finally { await client.end(); }
 }
 
-export { withClient };
+/**
+ * Runs `statements` in a transaction that is left open while `start()` runs, waits until a session of `application` is blocked on a lock in a statement
+ * beginning with `waiterPrefix` (blocked by that transaction), then commits and returns what `start()` settles to. For tests of a race between two sessions.
+ */
+async function commitWhileWaiting<T>(url: string, statements: readonly string[], application: string, waiterPrefix: string, start: () => Promise<T>, timeoutMs = 10_000): Promise<T> {
+  return withClient(url, async (owner) => {
+    await owner.query("BEGIN");
+    for (const statement of statements) await owner.query(statement);
+    const started = start();
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const waiting = Number((await withClient(url, async (c) => c.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock' AND starts_with(query, $2)", [application, waiterPrefix]))).rows[0]?.n);
+      if (waiting > 0) break;
+      if (Date.now() > deadline) { await owner.query("ROLLBACK"); await started.catch(() => undefined); throw new Error(`no ${application} session waited on "${waiterPrefix}" within ${timeoutMs} ms`); }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await owner.query("COMMIT");
+    return started;
+  });
+}
+
+export { commitWhileWaiting, withClient };

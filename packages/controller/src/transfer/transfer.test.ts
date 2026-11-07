@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { MaintenanceBarrier } from "../backup/barrier.js";
 import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
 import { postgresTargetDeps, transferTargetsFromConfig } from "./targets.js";
-import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
+import { commitWhileWaiting, startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
@@ -708,6 +708,69 @@ test("a configured PostgreSQL destination whose schema existed before is not dro
     assert.equal(await postgresSchemaExists(url, schema), true, "a schema the transfer did not create is not dropped");
     const kept = await withClient(url, async (c) => (await c.query("SELECT to_regclass($1)::text AS t", [`${schema}.owners_own`])).rows[0]?.t as string | null);
     assert.equal(kept, `${schema}.owners_own`, "the owner's own object in that schema survives");
+  } finally { await finish(f); }
+});
+
+test("PostgresStorage.open reports whether its own transaction created the schema (card F04l)", async () => {
+  const url = (await server()).url();
+  const schema = `xo_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    const first = await PostgresStorage.open({ connectionString: url, schema });
+    try { assert.equal(first.createdSchema, true, "the schema was absent, so this open created it"); } finally { await first.close(); }
+    const second = await PostgresStorage.open({ connectionString: url, schema });
+    try { assert.equal(second.createdSchema, false, "the schema was there, so this open did not create it"); } finally { await second.close(); }
+  } finally { await dropPostgresSchema(url, schema); }
+});
+
+test("a schema someone else creates while a configured PostgreSQL destination is being opened is never dropped by the target (card F04l)", async () => {
+  const s = await server();
+  const url = s.url();
+  const real = postgresTargetDeps(async (name) => (name === "transfer.pg-url" ? url : undefined));
+  let before: (() => Promise<void>) | undefined;
+  const build = async (schema: string): Promise<TransferTarget> => (await transferTargetsFromConfig([{ name: "pg", kind: "postgres", url: { secret: "transfer.pg-url" }, schema }], {
+    openStorage: (path) => SqliteStorage.open({ path }), statfs: async () => { throw new Error("not used"); },
+    postgres: { ...real, openStorage: async (u, sc) => { const hook = before; before = undefined; if (hook !== undefined) await hook(); return real.openStorage(u, sc); } },
+  }))[0]!;
+  const ownersSchema = (schema: string): string[] => [`CREATE SCHEMA ${schema}`, `CREATE SEQUENCE ${schema}.owners_own`];
+  const survives = async (schema: string): Promise<void> => {
+    const kept = await withClient(url, async (c) => (await c.query("SELECT to_regclass($1)::text AS t", [`${schema}.owners_own`])).rows[0]?.t as string | null);
+    assert.equal(kept, `${schema}.owners_own`, "the owner's schema and what it holds survive");
+  };
+  // 1. Created by the owner after the target last looked and before the open reads pg_namespace: the open finds it there and claims nothing.
+  const early = `xr_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    const t = await build(early);
+    before = () => withClient(url, async (c) => { for (const statement of ownersSchema(early)) await c.query(statement); });
+    await (await t.open()).close();
+    await assert.rejects(t.discard!(), /not dropped/);
+    await survives(early);
+  } finally { await dropPostgresSchema(url, early); }
+  // 2. Created by the owner in a transaction that commits while the open waits to create it: the open's CREATE SCHEMA fails, it claims nothing, and the next open finds the owner's schema.
+  const racing = `xr_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    const t = await build(racing);
+    // The open is blocked on the owner's uncommitted schema, then the owner commits.
+    const outcome = await commitWhileWaiting(url, ownersSchema(racing), "nimblenewt-controller", `CREATE SCHEMA ${racing}`,
+      () => t.open().then((store) => store.close().then(() => "opened" as const), (error: Error) => error));
+    assert.ok(outcome instanceof Error, "the open that lost the race fails instead of taking the owner's schema as its own");
+    await (await t.open()).close();
+    await assert.rejects(t.discard!(), /not dropped/);
+    await survives(racing);
+  } finally { await dropPostgresSchema(url, racing); }
+});
+
+test("a failed copy's reason is redacted whole and then cut, so a password at the cut does not survive as a prefix (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const inner = await sqlTarget(f, "dest.sqlite");
+    const target: TransferTarget = { ...inner, redact: (text) => text.split("hunter2secret").join("[hidden]") };
+    const message = `${"x".repeat(484)} password hunter2secret and more`;
+    assert.ok(message.indexOf("hunter2secret") < 500 && message.indexOf("hunter2secret") + "hunter2secret".length > 500, "the password straddles the cut");
+    const svc = await service(f, [target], { pageSize: 2, inject: (p) => { if (p === "copy:deliveries") throw new Error(message); } });
+    const plan = await svc.preview("sqlite2");
+    await assert.rejects(svc.apply("sqlite2", plan.token), (e: Error) => { assert.ok(!e.message.includes("hunt"), e.message.slice(-60)); return true; });
+    const reason = (await readJournal(st(f)))?.failure?.reason ?? "";
+    assert.ok(reason.length === 500 && reason.endsWith("password [hidde") && !reason.includes("hunt"), reason.slice(-60));
   } finally { await finish(f); }
 });
 

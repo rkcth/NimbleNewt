@@ -627,7 +627,8 @@ export class DatabaseTransferService {
         try { this.#o.onSwitched?.(authority); } catch { /* the host's notice must not undo a switch */ }
         return { id, direction: plan.direction, to: target.name, rows: plan.totalRows, claimsReleased: plan.claimsReleased, uncertainEffects: plan.uncertainEffects, restartRequired: true, findings: plan.findings };
       } catch (error) {
-        const reason = target.redact !== undefined ? target.redact(error instanceof Error ? error.message.slice(0, 500) : "the transfer failed") : error instanceof Error ? error.message.slice(0, 500) : "the transfer failed";
+        // Redacted whole, then cut: cutting first could leave the start of a password at the cut, which the redaction no longer recognises.
+        const reason = (target.redact !== undefined ? target.redact(error instanceof Error ? error.message : "the transfer failed") : error instanceof Error ? error.message : "the transfer failed").slice(0, 500);
         if (snap !== undefined) await snap.close().catch(() => undefined);
         if (dest !== undefined) await dest.close().catch(() => undefined);
         if (!fenced) {

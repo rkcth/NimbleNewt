@@ -37,8 +37,9 @@ test("a checkpoint the store still holds is not missing; every way a checkpoint 
     ref("not-json", "{not json"),
     ref("not-an-object", "[1,2]"),
     ref("old-runtime", { ...good, runtime: { name: "pi-durable", version: "0.0.1" } }),
+    ref("other-history-format", { ...good, historyFormat: "other" }),
   ];
-  assert.deepEqual(await missingCheckpoints(adapter, points), ["stored-wrong-digest", "stored-other-runtime", "no-checkpoint-recorded", "other-conversation", "no-such-entry", "history-changed", "not-json", "not-an-object", "old-runtime"]);
+  assert.deepEqual(await missingCheckpoints(adapter, points), ["stored-wrong-digest", "stored-other-runtime", "no-checkpoint-recorded", "other-conversation", "no-such-entry", "history-changed", "not-json", "not-an-object", "old-runtime", "other-history-format"]);
 });
 
 test("nothing to check answers nothing missing, and a store that cannot be read is an error, never 'nothing missing' (card F04l)", async () => {

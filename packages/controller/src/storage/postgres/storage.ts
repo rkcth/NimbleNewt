@@ -130,6 +130,7 @@ export class PostgresStorage implements ControllerStorage {
   readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>;
   readonly #version: { readonly allowUnsupported: boolean; readonly minimum: number | undefined };
   #unsupportedServer: Problem | undefined;
+  #createdSchema = false;
   #closed = false;
   #poolError: Error | undefined;
 
@@ -142,6 +143,13 @@ export class PostgresStorage implements ControllerStorage {
 
   /** The reason the server is older than the supported minimum, when it was accepted anyway because `allowUnsupportedServer` was set; undefined otherwise. Start-up prints and audits it. */
   get unsupportedServer(): Problem | undefined { return this.#unsupportedServer; }
+
+  /**
+   * Whether this open's own transaction created the schema (it was absent from pg_namespace under the migration lock, and the CREATE SCHEMA committed). False when
+   * the schema was already there, whoever made it; a schema created by another session at the same moment makes this open's CREATE SCHEMA fail instead. A database
+   * transfer drops a destination schema after a failed copy only when this is true (card F04l).
+   */
+  get createdSchema(): boolean { return this.#createdSchema; }
 
   /** Connects, verifies the server settings, and creates or checks the schema. */
   static async open(options: PostgresOptions): Promise<PostgresStorage> {
@@ -251,7 +259,8 @@ export class PostgresStorage implements ControllerStorage {
         // 1. The schema and its journal. A schema with tables but no journal is somebody else's.
         await q("BEGIN");
         try {
-          if ((await q("SELECT 1 AS x FROM pg_namespace WHERE nspname = $1", [name])).length === 0) await q(`CREATE SCHEMA ${name}`);
+          let creating = false;
+          if ((await q("SELECT 1 AS x FROM pg_namespace WHERE nspname = $1", [name])).length === 0) { await q(`CREATE SCHEMA ${name}`); creating = true; }
           const journalExists = (await q("SELECT to_regclass($1) AS t", [`${name}.schema_migrations`]))[0]!.t !== null;
           if (!journalExists) {
             if (count((await q("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1", [name]))[0]!, "n") > 0) {
@@ -260,6 +269,7 @@ export class PostgresStorage implements ControllerStorage {
             await q(JOURNAL_SQL);
           }
           await q("COMMIT");
+          if (creating) this.#createdSchema = true;
         } catch (error) {
           await q("ROLLBACK").catch(() => undefined);
           throw error;
