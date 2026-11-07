@@ -351,7 +351,6 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         await process.close().catch(() => undefined);
         throw error;
       }
-      let closed = false;
       let contextTokens: number | undefined = typeof nn?.["contextTokens"] === "number" ? (nn["contextTokens"] as number) : undefined;
       // A checkpoint that did not say how big the conversation is (taken in the middle of a turn) is not an empty one: the stored conversation's own size is the estimate (it counts what the model no longer sees too, so it errs towards refusing and compacting).
       if (contextTokens === undefined) { const stored = estimateStoredTokens(join(entry.workspace.home, "pi")); if (stored !== undefined) contextTokens = stored; }
@@ -365,9 +364,9 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           let result;
           try { result = await process.run(requestId, content); } catch (error) {
             const failed = { status: "failed" as const, error: String((error as Error)?.message ?? error).slice(0, 2000) };
-            // The model calls a turn made before its process died were real work: their cache figures are reported with the failure (card H12e), under a number of their own, or they would be lost with the attempt.
-            // A process this host closed on purpose (a stop, a restart for a recipe change) leaves them to whoever continues the attempt, which takes them with its next turn.
-            if (closed) return failed;
+            // The model calls a turn made before its process ended were real work: their cache figures are reported with the failure (card H12e), under a number of their own, or they would be lost with the attempt.
+            // That holds for a process this host closed on purpose too (a stop, a restart for a recipe change): a restart that fails ends the attempt with this result, so figures left in the attempt's cache would never be taken.
+            // After a restart that succeeds the local worker adds them to the continued turn's figures (the same number: the continued turn starts from the checkpoint's), and the cache hands each figure out once, so nothing is counted twice.
             const figures = await cache?.takeUsage?.().catch(() => undefined);
             if (figures === undefined) return failed;
             turnSeq += 1;
@@ -398,7 +397,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           contextTokens = compacted.contextTokens ?? (await process.checkpoint().then((c) => c.contextTokens, () => undefined)) ?? contextTokens;
         },
         async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },
-        async close() { closed = true; await process.close(); },
+        async close() { await process.close(); },
       };
     },
   };

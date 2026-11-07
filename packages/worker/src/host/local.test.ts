@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { WORKER_CHANNEL_VERSION, encodeMessage, type FromChild, type ToChild } from "@nimblenewt/contracts";
+import type { LaunchRequest, RunResult, SandboxRun } from "../sandbox/launcher.js";
 import { estimateStoredTokens, localWorkerParts, recoveryFor, type HostOrder } from "./local.js";
 
 // Card H12b: the recipe the dispatcher states (named reaches and limits) becomes a real recipe when the sandbox is opened. Nothing is launched here; the launcher's own checks run on the recipe at open.
@@ -112,6 +114,73 @@ test("a checkpoint that does not say how big the conversation is is estimated fr
   assert.equal(estimateStoredTokens(join(root, "no-such-dir")), undefined);
   writeFileSync(join(store, "a.jsonl"), "x".repeat(3000)); mkdirSync(join(store, "sub")); writeFileSync(join(store, "sub", "b.jsonl"), "y".repeat(6000));
   assert.equal(estimateStoredTokens(store), 3000);
+});
+
+// Card H12e (review): a turn whose process ends before it answers still reports the cache figures its model calls produced, under a turn number of its own: a crash, and a process the host closed (a stop, a restart for a recipe change, which the local worker continues).
+/** A launcher whose process the test plays: ready at the start, a turn that never answers, and an exit on `close` (or when the test ends it). */
+function playedProcess() {
+  let finish!: (r: RunResult) => void;
+  const result = new Promise<RunResult>((ok) => { finish = ok; });
+  const exit = (extra: Partial<RunResult> = {}) => finish({ exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "", stderr: "", stdoutTruncated: false, ...extra } as RunResult);
+  let emit!: (m: FromChild) => void;
+  let turnStarted!: () => void;
+  const running = new Promise<void>((ok) => { turnStarted = ok; });
+  const run = {
+    result, kill: () => exit({ killed: true, exitCode: null }), endInput: () => undefined,
+    write: async (text: string) => {
+      for (const m of text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as ToChild)) {
+        if (m.t === "start") queueMicrotask(() => emit({ t: "ready", v: WORKER_CHANNEL_VERSION }));
+        if (m.t === "run") turnStarted();
+        if (m.t === "close") exit();
+      }
+    },
+  } as unknown as SandboxRun;
+  const launcher = { launch: async (request: LaunchRequest) => { emit = (m) => request.stream!.onStdout(Buffer.from(encodeMessage(m))); return run; } };
+  return { launcher, running, crash: () => exit({ exitCode: 1, stderr: "killed" }) };
+}
+const figures = (cachedTokens: number) => ({ backend: "llama-cpp", route: "r", cachedTokens, computedTokens: 3, writtenTokens: 0 });
+
+test("a turn whose process dies after its model calls reports their cache figures with the failure, under the next turn number after the checkpoint's (card H12e)", async () => {
+  const played = playedProcess();
+  const pending = [figures(40)];
+  const p = localWorkerParts<unknown>({
+    launcher: played.launcher as never, app, protectedPaths: [], workspace: () => work, requireEnforced: false,
+    model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }),
+    namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+    cache: () => ({ takeUsage: async () => pending.shift() }),
+  });
+  const session = await p.sandbox.open(order([]).recipe, order([]));
+  const runtime = await p.runtimes.open(order([]), {}, { nn: { turnSeq: 3 } });
+  const turn = runtime.run("go", "req-1");
+  await played.running;
+  played.crash();
+  const result = await turn;
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /exit code 1/);
+  assert.deepEqual(result.usage, { turnSeq: 4, cache: figures(40) }, "the figures are reported once, under the turn after the checkpoint's");
+  assert.equal(pending.length, 0);
+  await runtime.close().catch(() => undefined);
+  await session.close();
+});
+
+test("a turn cut by the host closing its process (a stop, a restart for a recipe change) also reports the figures its model calls produced: a restart that fails ends the attempt with this result, so they would otherwise never be taken (card H12e)", async () => {
+  const played = playedProcess();
+  const pending = [figures(25)];
+  const p = localWorkerParts<unknown>({
+    launcher: played.launcher as never, app, protectedPaths: [], workspace: () => work, requireEnforced: false,
+    model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }),
+    namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+    cache: () => ({ takeUsage: async () => pending.shift() }),
+  });
+  const session = await p.sandbox.open(order([]).recipe, order([]));
+  const runtime = await p.runtimes.open(order([]), {}, undefined);
+  const turn = runtime.run("go", "req-1");
+  await played.running;
+  await runtime.close();
+  const result = await turn;
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.usage, { turnSeq: 1, cache: figures(25) }, "taken from the attempt's cache and reported, not left behind");
+  await session.close();
 });
 
 test.after(() => { rmSync(root, { recursive: true, force: true }); void dirname; });

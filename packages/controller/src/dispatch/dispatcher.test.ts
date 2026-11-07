@@ -1690,7 +1690,9 @@ for (const backend of backends) {
     const recording = { send: async (r: Parameters<LlamaSim["send"]>[0]) => { const a = await server.send(r); const t = (a.body as { timings?: { cache_n: number; prompt_n: number } }).timings; if (t !== undefined) answered.push({ slot: r.body["id_slot"], cached: t.cache_n, computed: t.prompt_n }); return a; } };
     const prompt = (turns: number) => JSON.stringify({ model: "local", stream: true, messages: [{ role: "system", content: "shared project document ".repeat(60) }, ...Array.from({ length: turns }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", content: `turn ${i}` }))] });
     const taken = new Map<string, unknown[]>();
+    const held = new Map<string, string | undefined>();
     c.worker.script = async ({ order, gateway }) => {
+      held.set(order.taskId, (await c.dispatcher.get(c.owner, order.attemptId))!.reservationId);
       const attempt = await policies.forAttempt({ projectId: order.projectId, route: order.route });
       assert.equal(attempt.routed, true);
       const call = async (turns: number) => { await (await attempt.policy.fetch!(simulatedFetch(recording))("http://127.0.0.1:8080/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" }, body: prompt(turns) })).text(); };
@@ -1707,10 +1709,10 @@ for (const backend of backends) {
       taken.set(order.taskId, [one, two]);
       return { status: "completed", text: "x", usage: { turnSeq: 2, cache: two } };
     };
-    // One task at a time, so the order of the calls is known; the first task has a budget open and the others none (both are charged).
+    // One task at a time, so the order of the calls is known; the first task has a budget open with a compute limit, so its attempt runs on a held allowance (the reserved path, where the amounts go to the attempt's tally and the cache figures must still be charged turn by turn), and the others none (both are charged).
     const runOne = async (title: string, agent: { aid: string }, project = c.project) => {
       const t = await c.task(title, agent, { project });
-      if (title === "t1") await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000 });
+      if (title === "t1") await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
       const from = answered.length;
       assert.deepEqual((await c.run()).started, [t.attemptId]);
       assert.equal((await c.dispatcher.get(c.owner, t.attemptId!))!.usageError, undefined);
@@ -1719,6 +1721,9 @@ for (const backend of backends) {
     const sum = (list: { cached: number; computed: number }[]) => ({ cachedTokens: list.reduce((x, a) => x + a.cached, 0), computedTokens: list.reduce((x, a) => x + a.computed, 0), writtenTokens: 0 });
     const first = await runOne("t1", ann), second = await runOne("t2", ann), other = await runOne("t3", bob, kitchen);
     const a1 = first.list, a2 = second.list, b1 = other.list;
+    assert.ok(held.get(first.taskId) !== undefined, "the first task's attempt ran on a held allowance");
+    assert.deepEqual([held.get(second.taskId), held.get(other.taskId)], [undefined, undefined], "the others held none");
+    assert.deepEqual((await c.budgets.report(c.owner, first.taskId))!.reservedInFlight, { costMicros: 0, computeMs: 0 }, "the hold is settled at the end");
     assert.equal(a1[0]!.cached, 0, "an empty slot serves nothing");
     assert.ok(a1.slice(1).every((a) => a.cached > 0) && a2.every((a) => a.cached > 0), `the project reuses its own slot, across turns and attempts (${JSON.stringify([a1, a2])})`);
     assert.ok(b1.every((a) => typeof a.slot === "number" && a.slot !== a1[0]!.slot), `the other project gets its own slot (${JSON.stringify(b1)})`);

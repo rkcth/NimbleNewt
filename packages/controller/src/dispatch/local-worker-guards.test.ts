@@ -272,7 +272,7 @@ test("card H12b: a recipe change in the middle of a turn ends the old process on
   const bad = new LocalWorker({
     hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
     sandbox: { open: async (recipe) => { if (++sandboxes === 2) throw new Error("no sandbox for the new recipe"); return { revision: recipe.revision, close: async () => undefined }; } },
-    runtimes: { open: async () => ({ run: async () => { began(); await stuck; return { status: "failed", error: "closed" }; }, checkpoint: async () => ({}), close: async () => { go(); } }) },
+    runtimes: { open: async () => ({ run: async () => { began(); await stuck; return { status: "failed", error: "closed", usage: { turnSeq: 1, cache: { backend: "vllm", route: "llama/local", cachedTokens: 6, computedTokens: 2, writtenTokens: 0 } } }; }, checkpoint: async () => ({}), close: async () => { go(); } }) },
   });
   const h2 = await bad.start(order());
   const t2 = h2.run(gateway());
@@ -280,6 +280,8 @@ test("card H12b: a recipe change in the middle of a turn ends the old process on
   await assert.rejects(h2.restart({ revision: "r2", reach: [] } as never, {}), /no sandbox for the new recipe/);
   const after = await t2;
   assert.deepEqual([after.status, after.error], ["failed", "closed"]);
+  // The figures the cut turn's calls produced end the attempt with it, once (card H12e): the attempt is over, so nothing else would take them.
+  assert.deepEqual(after.usage, { turnSeq: 1, cache: { backend: "vllm", route: "llama/local", cachedTokens: 6, computedTokens: 2, writtenTokens: 0 } });
 });
 
 test("card H12f: a restarted sandbox's conversation is admitted again; one that cannot fit is refused and the restart fails, leaving the attempt for the dispatcher to keep frozen", async () => {
