@@ -1695,7 +1695,7 @@ Result: `{ item }`.
 
 #### `retention.check`
 
-Owner only: whether a record is held by a resumable task or a replay (it then shows as retained, with why, and is never deleted).
+Owner only: whether a record is held, and why (it then shows as retained and is never deleted). Held material is what a resumable task or a replay needs: its records, summaries, artifacts and checkpoints, its dependency records, and the tool versions it ran, pinned a call to or lists as a dependency. The full list of holds is in `retention/references.ts` (`RetainedMaterial`).
 
 Arguments:
 
@@ -2284,12 +2284,12 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.policy.change`
 
-The owner sets the standing answer for running calls when a version is revoked with no choice named (owner only): `finish` lets them end, `cancel` aborts them, `pause` aborts each running call and pauses its task. `null` clears to the default (`finish`). It counts from the next revocation; an explicit choice on a revoke always wins.
+The owner sets the standing answer for running calls when a version is revoked with no choice named (owner only): `finish` lets them end, `cancel` aborts them, `pause` aborts each running call and pauses its task. `null` clears to the default (`finish`). It counts from the next revocation; an explicit choice on a revoke always wins, and an operator's startup option beats this setting (`source` says which applies).
 
 Arguments:
 
 - `runningCalls`: `finish`, `cancel`, `pause` or null to clear
-- `expectedRevision` (optional): the revision you read (0 when never set)
+- `expectedRevision` (optional): the revision you read (0 when never set); the chat fills it in for the owner
 
 Result: `{ revision, old, new, effective, source }` (`source` as in `catalog.policy.get`).
 
@@ -2297,14 +2297,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.revoke`
 
-The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed, `pause` aborts each running call, then pauses its task (the pause stops what the agent writes until the owner resumes the task). Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets the standing policy (`catalog.policy.get`, default `finish`). `finish` cannot be changed to `cancel` later: a version is revoked once, and a second revoke is refused. `cancel` and `pause` reach every running call of the version at the moment it is carried out, including calls that started between the preview and the acceptance.
+The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed, `pause` aborts each running call, then pauses its task (the pause stops what the agent writes until the owner resumes the task). Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets the standing policy in force (`catalog.policy.get`: the operator's startup option, else the owner's setting, else `finish`). `finish` cannot be changed to `cancel` later: a version is revoked once, and a second revoke is refused. `cancel` and `pause` reach every running call of the version at the moment it is carried out, including calls that started between the preview and the acceptance.
 
 Arguments:
 
 - `name`: the canonical tool name
 - `version`: major.minor.patch
 - `reason`: why it is withdrawn
-- `runningCalls` (optional): `finish`, `cancel` or `pause`; default: the standing policy, `finish` unless set
+- `runningCalls` (optional): `finish`, `cancel` or `pause`; default: the standing policy in force (`catalog.policy.get`: the operator's startup option, else the owner's setting, else `finish`)
 
 Result: `{}`; a repeat with the same commandId and the same arguments answers again, with a different `runningCalls` it is a conflict.
 

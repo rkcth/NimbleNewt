@@ -282,7 +282,7 @@ export class CatalogService {
     return { versionId, name: canonical, digest };
   }
 
-  /** The owner withdraws a version for good. It is no longer chosen and a run of it is refused; nothing is deleted. */
+  /** The owner withdraws a version for good. It is no longer chosen and a run of it is refused; nothing is deleted (retention may later blank its executable text, never its record, digest or the revocation). */
   async revoke(owner: Principal, command: NoActor & { name: string; version: string; reason: string; runningCalls?: RunningCallsChoice }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner revokes a version`);
     onlyKnown(command, ["commandId", "name", "version", "reason", "runningCalls"]);

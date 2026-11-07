@@ -185,7 +185,7 @@ export class RetentionService {
     return all.sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? 1 : -1) : a.createdAt < b.createdAt ? 1 : -1)).slice(0, n);
   }
 
-  /** Whether the record is held by a resumable task or a replay, and why. */
+  /** Whether the record is held, and why: by a resumable task or a replay (its records, checkpoints, dependency records, and the tool versions it ran, pinned a call to or lists as a dependency; the full list is in `RetainedMaterial`). */
   async check(by: Principal, ref: { kind: string; id: string }): Promise<{ kind: string; id: string; retained: boolean; reasons: string[] }> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not ask what is retained`);
     if (typeof ref.kind !== "string" || typeof ref.id !== "string") invalid("ref", "needs a kind and an id");

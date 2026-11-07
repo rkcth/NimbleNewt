@@ -20,7 +20,7 @@ export interface CatalogPolicyView {
 
 /**
  * The owner's standing answer to "a version is revoked while calls of it run" (card T02c): `finish` (default), `cancel` or `pause` (the running call is stopped and its task is paused so the owner decides).
- * It is used only when a revoke names no choice of its own (an owner's chat choice always wins). Owner only, race-safe (`expectedRevision`), replay-safe (command ID); `null` clears to the default.
+ * It is used only when a revoke names no choice of its own (an owner's chat choice always wins), and an operator's startup answer beats it (`get` says which applies). Owner only, race-safe (`expectedRevision`), replay-safe (command ID); `null` clears to the default.
  * A damaged record reads as `cancel` (a revocation is a safety act) and `get` says so.
  */
 export class CatalogPolicyService {
