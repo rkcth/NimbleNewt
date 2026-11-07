@@ -63,7 +63,7 @@ export interface StopIntentBody {
   readonly prepared?: { readonly at: string; readonly checkpointId: string };
   /** Set when the request was made as a Stop after a finished Suspend and went on from that Suspend's checkpoint instead of preparing: the ID of the Suspend. Written once, at creation (the capped history cannot say it reliably). */
   readonly reusedFrom?: string;
-  /** Set once the ending of execution (terminate) has run and its cost has been charged. */
+  /** Set once the ending of execution (terminate) has run and its cost was billed (a charge that failed leaves the request marked unpaid). */
   readonly ended?: true;
   readonly inventory: readonly InventoryItem[];
   /** The attempts the runtime saw for the scope while preparing (so a process of one that ended meanwhile is still asked about after a restart). */
@@ -235,7 +235,7 @@ export class StopService {
     if (command.choice === "wait") {
       const extend = command.extendMs ?? STOP_LIMITS.deadlineMs.default;
       if (!Number.isSafeInteger(extend) || extend < 1 || extend > STOP_LIMITS.deadlineMs.max) invalid("extendMs", `must be a whole number from 1 to ${STOP_LIMITS.deadlineMs.max}`);
-      await this.#update(String(command.intentId), (b) => ({ ...b, phase: b.blocked?.resume ?? "preparing", blocked: undefined, deadlineAt: new Date(Date.parse(at) + extend).toISOString(), spent: 0, history: this.#push(b, b.blocked?.resume ?? "preparing", by.id, `waiting ${extend} ms more`) }), ["blocked"]);
+      await this.#update(String(command.intentId), (b) => ({ ...b, phase: b.blocked?.resume ?? "preparing", blocked: undefined, deadlineAt: new Date(Date.parse(at) + extend).toISOString(), ...((b.blocked?.resume ?? "preparing") === "preparing" ? { spent: 0 } : {}), history: this.#push(b, b.blocked?.resume ?? "preparing", by.id, `waiting ${extend} ms more`) }), ["blocked"]);
       return { phase: body.blocked?.resume ?? "preparing" };
     }
     await this.#observe(by, body.scope, String(command.intentId), "recovery-required", "restart from an earlier boundary chosen; the scope is not suspended");
@@ -396,11 +396,20 @@ export class StopService {
     const found = id === undefined ? undefined : (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
     if (found === undefined || id === undefined) return undefined;
     const attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] = [];
+    let ownPending = false;
     for (const attemptId of (found.attempts ?? []).slice(0, STOP_LIMITS.inventory)) {
       const charge = (await this.#runner.get(CHARGE, attemptId))?.body as unknown as ChargeBody | undefined;
-      if (charge !== undefined) attempts.push({ attemptId, costMicros: charge.costMicros, computeMs: charge.computeMs, pending: charge.pending !== undefined });
+      if (charge === undefined) continue;
+      attempts.push({ attemptId, costMicros: charge.costMicros, computeMs: charge.computeMs, pending: charge.pending !== undefined });
+      // A pending note belongs to the request that wrote it; another request's further charge on the same attempt is not this request's debt.
+      if (charge.pending?.intentId === id) ownPending = true;
     }
-    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true || attempts.some((a) => a.pending), markOnly: found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true && !attempts.some((a) => a.pending), /* Records written before the flag existed: a Force Stop that carries a limit, a spent figure or a checkpoint took over earlier work (a pure Force Stop is created with none of them). */ forcedAfterPreparation: found.forced !== undefined && (found.forced.afterPreparation === true || found.spendBudget !== undefined || found.spent > 0 || found.prepared !== undefined), reusedCheckpoint: found.reusedFrom !== undefined, endingRan: found.ended === true, attempts };
+    const marked = found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true;
+    // Records written before the flags existed (see the notes): a Force Stop that carries a limit, a spent figure, a checkpoint or a preparing/prepared step in its history took over earlier work (a pure Force Stop has none of them),
+    // and a request settled as "unresolved work remains" got there through its ending.
+    const forcedAfterPreparation = found.forced !== undefined && (found.forced.afterPreparation === true || found.spendBudget !== undefined || found.spent > 0 || found.prepared !== undefined || found.history.some((h) => h.phase === "preparing" || h.phase === "prepared"));
+    const endingRan = found.ended === true || found.history.some((h) => h.note === "unresolved work remains");
+    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------

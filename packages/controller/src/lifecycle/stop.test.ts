@@ -556,6 +556,7 @@ for (const backend of backends) {
     await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
     const seen = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
     assert.deepEqual([seen?.intentId, seen?.mode, seen?.forcedAfterPreparation, seen?.spent, seen?.spendBudget, seen?.endingRan], [intentId, "force-stop", true, 5000, 100, true]);
+    assert.equal((await c.stops.get(c.owner, intentId))?.forced?.afterPreparation, true, "the flag itself is written (the inference for older records must not be what passes this)");
     // Prepared only: Suspend, then a reusing Stop, forced before anything advanced it.
     await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
     c.rt.items = []; c.rt.cleanups = [{ remaining: [] }];
@@ -566,6 +567,7 @@ for (const backend of backends) {
     await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" });
     const b = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
     assert.deepEqual([b?.intentId, b?.forcedAfterPreparation, b?.reusedCheckpoint], [reuse.intentId, true, true]);
+    assert.equal((await c.stops.get(c.owner, reuse.intentId))?.forced?.afterPreparation, true);
   });
 
   suite("a request written by an older build reads without false statements: a Force Stop with no flag but a limit or a figure still counts as after a preparation (card L02d review)", async (c) => {
@@ -597,6 +599,75 @@ for (const backend of backends) {
     await c.stops.sweep(c.owner);
     const after = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
     assert.deepEqual([after?.unpaid, after?.markOnly], [false, false], "the sweep takes the mark off");
+  });
+
+  suite("a wait after a failed ending keeps the preparation's figure; only a wait on a blocked preparation restarts the window (card L02d review)", async (c) => {
+    c.rt.seenAttempts = ["att-a"];
+    c.rt.items = [{ kind: "process", ref: "pid-7", state: "uncooperative" }];
+    c.rt.cleanups = [{ remaining: [{ kind: "process", ref: "pid-7", state: "uncooperative" }], costs: [{ attemptId: "att-a", costMicros: 5000, computeMs: 0 }] }];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x", spendBudget: 100 });
+    assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "blocked");
+    c.rt.throwOnTerminate = true;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" });
+    assert.equal((await c.stops.get(c.owner, intentId))?.blocked?.resume, "terminating");
+    await c.stops.choose(c.owner, { commandId: cid("c"), intentId, choice: "wait" });
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.spent, 5000, "the window that used 5000 came before the Force Stop; the wait did not restart it");
+    // A graceful Stop blocked at its ending, then waited on, keeps its preparation figure too.
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.throwOnTerminate = true; c.rt.items = []; c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 7000, computeMs: 0 }] }];
+    const g = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: g.intentId })).phase, "blocked");
+    const spentBefore = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.spent;
+    assert.ok(spentBefore !== undefined && spentBefore > 0);
+    await c.stops.choose(c.owner, { commandId: cid("c"), intentId: g.intentId, choice: "wait" });
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.spent, spentBefore);
+  });
+
+  suite("an older request that took over earlier work reads as having a preparation by each sign it can carry, and a pure Force Stop by none (card L02d review)", async (c) => {
+    // A Force Stop over a request that was still preparing, with no limit, no figure and no checkpoint: only its history shows it.
+    c.rt.items = [{ kind: "foreground", ref: "att-a/c1", state: "running" }];
+    c.rt.cleanups = [{ remaining: [{ kind: "foreground", ref: "att-a/c1", state: "running" }] }];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "preparing");
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" });
+    assert.equal((await c.stops.get(c.owner, intentId))?.forced?.afterPreparation, true);
+    const strip = (keep: "history" | "spendBudget" | "spent" | "prepared" | "none") => c.edit(intentId, (b) => {
+      const { afterPreparation: _a, ...forced } = b["forced"] as Record<string, unknown>;
+      const { spendBudget: _sb, prepared: _p, ...rest } = b;
+      const at = { at: "2026-10-28T10:00:00.000Z", by: "x" };
+      return { ...rest, forced, spent: keep === "spent" ? 123 : 0, ...(keep === "spendBudget" ? { spendBudget: 50 } : {}), ...(keep === "prepared" ? { prepared: { at: "2026-10-28T10:00:00.000Z", checkpointId: "cp-1" } } : {}),
+        history: keep === "history" ? [{ phase: "preparing", note: "suspend requested", ...at }, { phase: "terminating", note: "force stop: now", ...at }] : [{ phase: "terminating", note: "force stop: now", ...at }] };
+    });
+    for (const [keep, expected] of [["history", true], ["spendBudget", true], ["spent", true], ["prepared", true], ["none", false]] as const) {
+      await strip(keep);
+      assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.forcedAfterPreparation, expected, `only ${keep} is left of the signs`);
+    }
+    // An old Force Stop whose ending ran and left work unresolved: the settle's note shows the ending ran, though `ended` was never written.
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.unresolved = ["pid-9"]; c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 900, computeMs: 0 }];
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "again" });
+    const fresh = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([fresh.mode, fresh.phase, fresh.endingRan, fresh.forcedAfterPreparation, fresh.attempts.map((a) => a.costMicros)], ["force-stop", "recovery-required", true, false, [900]]);
+    await c.edit(fresh.intentId, (b) => { const { ended: _e, attempts: _t, ...rest } = b; return rest; });
+    const old = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([old.endingRan, old.forcedAfterPreparation, old.attempts], [true, false, []], "the ending is known to have run from the history; no attempt is listed, which the view words neutrally");
+  });
+
+  suite("an unpaid note written by another request on the same attempt is not this request's debt (card L02d review)", async (c) => {
+    c.rt.seenAttempts = ["att-a"];
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 500, computeMs: 0 }];
+    const first = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: first.intentId });
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+    // A later Stop of the agent charges more on the same attempt and that charge fails.
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 900, computeMs: 0 }];
+    c.rt.failCharges = 5;
+    const second = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "agent", id: c.agentA }, mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: second.intentId });
+    const mine = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([mine.unpaid, mine.markOnly, mine.attempts[0]?.pending], [false, false, true], "the attempt shows a charge being made; this request owes nothing");
+    const theirs = (await c.stops.cleanupSpend(c.owner, { kind: "agent", id: c.agentA }))!;
+    assert.equal(theirs.unpaid, true);
   });
 
   suite("a Force Stop after a wait keeps the limit and a spent figure of 0 (the window restarted) while the attempt shows what was charged; the view's wording carries that caveat (card L02d review)", async (c) => {

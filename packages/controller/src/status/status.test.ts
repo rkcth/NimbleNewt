@@ -1497,7 +1497,7 @@ for (const backend of backends) {
     // Unpaid only through the outcome's mark (another request paid the attempt): the view does not say anything is still uncharged.
     answer = { ...answer!, unpaid: true, markOnly: true, attempts: [{ attemptId: "att-1", costMicros: 500, computeMs: 0, pending: false }] };
     const marked = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
-    assert.equal(marked.at(-1), "A charge failed when the request ended; every attempt above is charged now, and the next sweep checks it again and clears this.");
+    assert.equal(marked.at(-1), "A charge failed when the request ended; this request has nothing left to charge, and the next sweep checks it again and clears this.");
     assert.ok(!marked.some((x) => /retried until/.test(x)));
     // The "ending is charged on top" clause belongs to a stop only: not a suspend, not a cancelled request; a Force Stop has no preparation figure.
     const first = async (): Promise<string> => (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines[0]!.text;
@@ -1508,7 +1508,7 @@ for (const backend of backends) {
     answer = { ...answer!, mode: "stop", phase: "done", endingRan: true };
     assert.match(await first(), /the cost of ending the work is charged on top\.$/);
     // No attempt was charged: the view says so.
-    assert.deepEqual((await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text).slice(1), ["No cleanup cost was reported for any attempt."]);
+    assert.deepEqual((await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text).slice(1), ["No attempt with a charged cleanup cost is recorded on this request."]);
     answer = { ...answer!, mode: "force-stop", phase: "recovery-required", spent: 0 };
     const forced = await first();
     assert.match(forced, /^The force stop of task .* is recovery-required\. A Force Stop has no preparation; what ending the work cost is charged to the attempts below\.$/);
@@ -1566,7 +1566,7 @@ for (const backend of backends) {
         if (mode === "force-stop") {
           assert.equal(text.endsWith("; what ending the work cost is charged to the attempts below."), ended, label);
           assert.equal(text.endsWith("; what ending the work costs, when it runs, is charged to the attempts below."), live, label);
-          assert.equal(text.endsWith("; the work was not ended by it."), !ended && !live, label);
+          assert.equal(text.endsWith("; no ending of the work is recorded."), !ended && !live, label);
         }
         assert.equal(text.includes("A Force Stop has no preparation"), mode === "force-stop", label);
         assert.equal(text.includes("budget window"), mode !== "force-stop", label);
@@ -1579,7 +1579,9 @@ for (const backend of backends) {
     answer = { ...base, mode: "force-stop", phase: "done", spent: 0, spendBudget: undefined, forcedAfterPreparation: true, reusedCheckpoint: true };
     assert.match(await head(task), /Its preparation was the checkpoint of an earlier Suspend \(that cost is in the attempt totals below\); what ending the work cost/);
     answer = { ...base, mode: "stop", phase: "done", endingRan: true, spent: 0, spendBudget: undefined, reusedCheckpoint: true };
-    assert.equal(await head(task), "The stop of task task-aaaaaaaaaaaaaaaaaaaa is done. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below; the cost of ending the work is charged on top.");
+    assert.equal(await head(task), "The stop of task task-aaaaaaaaaaaaaaaaaaaa is done. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below; the cost of ending the work is in them too.");
+    answer = { ...base, mode: "stop", phase: "blocked", endingRan: false, spent: 0, spendBudget: undefined, reusedCheckpoint: true };
+    assert.match(await head(task), /in the attempt totals below; the cost of ending the work, when it runs, is added to them\.$/);
     answer = { ...base, mode: "stop", phase: "cancelled", reusedCheckpoint: true };
     assert.doesNotMatch(await head(task), /charged on top|budget window/);
     // A Stop that never reached the ending (restart from an earlier boundary, a resume while terminating) does not say the ending was charged.
