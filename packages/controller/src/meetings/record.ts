@@ -283,8 +283,12 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  * - **Summary.** Built from the records alone: attendance, key updates, decisions with reasons and a link to the discussion, dissent, unresolved questions, actions, and the plan; adopted is kept apart from applied. A conclusion that rests on a
  *   private record is marked unverifiable for readers who cannot be shown it.
  */
-/** What an owner's answer to a decision did: `applied` (changes applied in all, after an agreement), `stillApplying` (a started change could not be finished just now), and from the record before and after: changes carried out by this answer, the codes of those it refused, those done before, those still open. */
-export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; stillOpen: number; applying: number }
+/**
+ * What an owner's answer to a decision did (card M02h). `ownerDecisionId` the owner's own decision when the answer was an alternative; `ownerDecisionDisputed` when that decision conflicts with another instruction on its topic.
+ * `applied` the changes carried out in all after an agreement; `stillApplying` a started change could not be finished just now; `passFailed` carrying out stopped with changes still adopted; `replayed` the same command sent again.
+ * From the record before and after the call, each change in exactly one count: `carriedOut` carried out by this call, `refused` the codes of those it refused, `alreadyDone` done before, `refusedBefore` refused before, `stillOpen` still adopted or applying (`applying` of them started).
+ */
+export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; refusedBefore: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
   readonly #runner: CommandRunner;
@@ -1223,8 +1227,17 @@ export class MeetingRecordService {
       const found = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
       if (found === undefined) throw new DomainError("not_found", "that decision does not exist");
       if (command.alternative.projectId !== found.projectId) invalid("alternative", "must be in the meeting's project");
-      if (found.ownerResponse === "alternative" && found.ownerDecisionId !== undefined) ownerDecisionId = found.ownerDecisionId;
-      // The same alternative sent again finds its decision already recorded and answered: it is not recorded twice, and the answer command below replays (a different command is refused there as already answered).
+      // The owner decision this alternative's command ID stands for, if it was recorded already (a call that crashed after recording it and before the answer was saved, or the same answer sent again).
+      // It is reused, never recorded twice; but only if it says what this call says: the same command ID with other words is a different command.
+      const altId = derivedId("dec", scopedCommandId(by.id, command.alternative.commandId));
+      const recordedAlt = await this.#deps.decisions.get(by, altId);
+      const plain = (x: unknown): string => String(x ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+      if (recordedAlt !== undefined) {
+        if (recordedAlt.projectId !== command.alternative.projectId || plain(recordedAlt.statement) !== plain(command.alternative.statement) || plain(recordedAlt.topic) !== plain(command.alternative.topic)) throw new DomainError("command_conflict", `command ID ${command.alternative.commandId.slice(0, 60)} was already used for a different decision`, { field: "alternative" });
+        ownerDecisionId = altId;
+      }
+      // An answer already given by an alternative stands only for the same alternative (a repeat); another one is refused (the answer command below would refuse it as already answered too).
+      if (found.ownerResponse === "alternative") { if (ownerDecisionId === undefined || found.ownerDecisionId !== ownerDecisionId) throw new DomainError("invalid_command", "the owner already answered (alternative)", { field: "decisionId" }); }
       else if (found.outcome !== "adopted" || found.scope !== "in-scope" || (found.ownerResponse !== "pending" && found.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", "that decision does not wait for the owner", { field: "decisionId" });
       if (ownerDecisionId === undefined) {
         const recorded = await this.#deps.decisions.record(by, command.alternative);
@@ -1275,7 +1288,7 @@ export class MeetingRecordService {
     return {
       ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(applied === undefined ? {} : { applied }), ...(stillApplying && applyingNow > 0 ? { stillApplying: true as const } : {}), ...(stillApplying && applyingNow === 0 ? { passFailed: true as const } : {}),
       ...(answered.replayed ? { replayed: true as const } : {}), ...(ownerDecisionDisputed ? { ownerDecisionDisputed: true as const } : {}),
-      carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length, applying: applyingNow,
+      carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, refusedBefore: was.filter((c) => c.state === "not-applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length, applying: applyingNow,
     };
   }
 
