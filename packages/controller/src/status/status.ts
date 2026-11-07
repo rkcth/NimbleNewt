@@ -581,7 +581,7 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
-  /** What a Suspend or Stop has spent on cleanup, as charged to the budgets (card L02d). A task (`taskId`) or a scope (`scope: { kind, id }`) is named; a scope with no request of its own gets one line saying so; one the asker may not control reads as nothing. */
+  /** What a Suspend or Stop has spent on cleanup, as charged to the budgets (card L02d). A task (`taskId`) or a scope (`scope: { kind, id }`, or flat as `scopeKind` and `scopeId`, the form chat uses) is named; a scope with no request of its own gets one line saying so; one the asker may not control reads as nothing. */
   async stopCleanupLines(by: Principal, asked: { readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.stops === undefined) return undefined;
     // The scope comes nested (`scope`) or flat (`scopeKind` and `scopeId`, the form chat uses); not both, and a flat one needs both parts.
@@ -611,20 +611,23 @@ export class StatusService {
     const used = `${money(r.spent)} (budget currency)${r.spendBudget === undefined ? ", with no limit set" : `, against a limit of ${money(r.spendBudget)}`}`;
     // The cost of ending the work is billed once the ending has run, and only a Stop (a force stop says it in its own sentence) has one to come. A Stop that never reached the ending (restart from an earlier boundary, a resume) says nothing about it.
     const live = r.phase === "preparing" || r.phase === "blocked" || r.phase === "prepared" || r.phase === "terminating";
-    const onTop = r.mode !== "stop" ? "" : r.endingRan ? "; the cost of ending the work is charged on top" : live ? "; the cost of ending the work, when it runs, is charged on top" : "";
+    // The ending has run when it was recorded as run, or the request is done as a stop (older records carry no flag; a stop is only done after its ending).
+    const ranEnding = r.endingRan || (r.phase === "done" && r.mode !== "suspend");
+    const onTop = r.mode !== "stop" ? "" : ranEnding ? "; the cost of ending the work is charged on top" : live ? "; the cost of ending the work, when it runs, is charged on top" : "";
+    const forceTail = ranEnding ? "what ending the work cost is charged to the attempts below" : live ? "what ending the work costs, when it runs, is charged to the attempts below" : "the work was not ended by it";
     const name = `${scope.kind} ${shown(scope.id, 80)}`;
     let head: string;
     if (r.mode === "force-stop") {
-      head = r.reusedCheckpoint ? `The force stop of ${name} is ${r.phase}. Its preparation was the checkpoint of an earlier Suspend (that cost is in the attempt totals below); what ending the work cost is charged to the attempts below.`
-        : !r.forcedAfterPreparation ? `The force stop of ${name} is ${r.phase}. A Force Stop has no preparation; what ending the work cost is charged to the attempts below.`
-          : `The force stop of ${name} is ${r.phase}. Its last cleanup budget window before the Force Stop (an extended wait starts it again) used ${used}; what ending the work cost is charged to the attempts below.`;
+      head = r.reusedCheckpoint ? `The force stop of ${name} is ${r.phase}. Its preparation was the checkpoint of an earlier Suspend (that cost is in the attempt totals below); ${forceTail}.`
+        : !r.forcedAfterPreparation ? `The force stop of ${name} is ${r.phase}. A Force Stop has no preparation; ${forceTail}.`
+          : `The force stop of ${name} is ${r.phase}. Its last cleanup budget window before the Force Stop (an extended wait starts it again) used ${used}; ${forceTail}.`;
     } else if (r.reusedCheckpoint) head = `The ${r.mode} of ${name} is ${r.phase}. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below${onTop}.`;
     else head = `The ${r.mode} of ${name} is ${r.phase}. Its cleanup budget window (an extended wait starts it again) has used ${used}${onTop}.`;
     const lines: Line[] = [line(head, cite("stop", r.intentId), where)];
     for (const a of r.attempts.slice(0, 20)) lines.push(line(`Attempt ${shown(a.attemptId, 80)}: ${money(a.costMicros)} and ${a.computeMs} ms of compute charged to its task's budget in all (every stop of it counted once)${a.pending ? "; a further charge is still being made" : ""}.`, cite("stop", r.intentId)));
     if (r.attempts.length > 20) lines.push(line(`${r.attempts.length - 20} more attempt(s) are not listed.`, cite("stop", r.intentId)));
     if (r.attempts.length === 0) lines.push(line("No cleanup cost was reported for any attempt.", cite("stop", r.intentId)));
-    if (r.unpaid) lines.push(line("Some of the cleanup spend is not charged yet; it is retried until it is.", cite("stop", r.intentId)));
+    if (r.unpaid) lines.push(line(r.markOnly ? "A charge failed when the request ended; every attempt above is charged now, and the next sweep checks it again and clears this." : "Some of the cleanup spend is not charged yet; it is retried until it is.", cite("stop", r.intentId)));
     return { observedAt: at, lines };
   }
 

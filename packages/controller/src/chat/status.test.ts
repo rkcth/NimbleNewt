@@ -78,7 +78,7 @@ for (const backend of backends) {
     const a = await w.project("A");
     const t = await w.task(a, "Order seeds");
     const asked: unknown[] = [];
-    const stops = { cleanupSpend: async (_by: unknown, scope: unknown) => { asked.push(scope); return { intentId: "stp-1", mode: "stop" as const, phase: "done" as const, endingRan: true, spent: 3000, unpaid: false, forcedAfterPreparation: false, reusedCheckpoint: false, attempts: [{ attemptId: "att-1", costMicros: 3500, computeMs: 10, pending: false }] }; } };
+    const stops = { cleanupSpend: async (_by: unknown, scope: unknown) => { asked.push(scope); return { intentId: "stp-1", mode: "stop" as const, phase: "done" as const, endingRan: true, spent: 3000, unpaid: false, markOnly: false, forcedAfterPreparation: false, reusedCheckpoint: false, attempts: [{ attemptId: "att-1", costMicros: 3500, computeMs: 10, pending: false }] }; } };
     const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, stops }, options);
     script["what did stopping Order seeds cost"] = [ask({ kind: "stop_cleanup", taskTitle: "Order seeds" }, "what did stopping Order seeds cost")];
     const chat = w.chat({ status });

@@ -1494,6 +1494,11 @@ for (const backend of backends) {
     assert.match(open[0]!, /with no limit set; the cost of ending the work is charged on top\.$/);
     assert.match(open[1]!, /a further charge is still being made/);
     assert.match(open[2]!, /not charged yet; it is retried/);
+    // Unpaid only through the outcome's mark (another request paid the attempt): the view does not say anything is still uncharged.
+    answer = { ...answer!, unpaid: true, markOnly: true, attempts: [{ attemptId: "att-1", costMicros: 500, computeMs: 0, pending: false }] };
+    const marked = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
+    assert.equal(marked.at(-1), "A charge failed when the request ended; every attempt above is charged now, and the next sweep checks it again and clears this.");
+    assert.ok(!marked.some((x) => /retried until/.test(x)));
     // The "ending is charged on top" clause belongs to a stop only: not a suspend, not a cancelled request; a Force Stop has no preparation figure.
     const first = async (): Promise<string> => (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines[0]!.text;
     answer = { ...answer!, mode: "suspend", phase: "done", unpaid: false, attempts: [] };
@@ -1531,7 +1536,7 @@ for (const backend of backends) {
   });
 
   suite("every sentence of the cleanup-spend view is true for each mode, phase and kind of scope (card L02d review)", async (c) => {
-    type A = { intentId: string; mode: string; phase: string; endingRan: boolean; spent: number; spendBudget?: number | undefined; unpaid: boolean; forcedAfterPreparation: boolean; reusedCheckpoint: boolean; attempts: unknown[] };
+    type A = { intentId: string; mode: string; phase: string; endingRan: boolean; markOnly?: boolean; spent: number; spendBudget?: number | undefined; unpaid: boolean; forcedAfterPreparation: boolean; reusedCheckpoint: boolean; attempts: unknown[] };
     const base: A = { intentId: "stp-1", mode: "stop", phase: "done", endingRan: false, spent: 5000, spendBudget: 100, unpaid: false, forcedAfterPreparation: false, reusedCheckpoint: false, attempts: [] };
     let answer: A | undefined;
     const status = c.rebuild({}, { stops: { cleanupSpend: async () => answer as never } });
@@ -1545,18 +1550,28 @@ for (const backend of backends) {
     assert.equal(await head({ kind: "installation", id: "installation" }), "No Suspend or Stop of the installation was requested.");
     // Mode and phase: the window sentence and the "ending on top" clause.
     for (const kind of ["task", "agent", "team", "installation"]) for (const mode of ["suspend", "stop", "force-stop"]) for (const phase of ["preparing", "blocked", "prepared", "terminating", "done", "recovery-required", "cancelled"]) {
-      const ran = mode === "stop" && (phase === "done" || phase === "recovery-required");
-      answer = { ...base, mode, phase, endingRan: ran, ...(mode === "force-stop" ? { spent: 0, spendBudget: undefined } : {}) };
-      const text = await head({ kind, id: kind === "installation" ? "installation" : "x-1" });
-      const label = `${mode}/${phase}/${kind}: ${text}`;
-      assert.match(text, new RegExp(`^The ${mode === "force-stop" ? "force stop" : mode} of ${kind} `), label);
-      assert.ok(text.includes(` is ${phase}.`), label);
-      assert.equal(text.includes("; the cost of ending the work is charged on top"), ran, label);
-      const live = ["preparing", "blocked", "prepared", "terminating"].includes(phase);
-      assert.equal(text.includes("the cost of ending the work, when it runs, is charged on top"), mode === "stop" && live, label);
-      assert.equal(text.includes("A Force Stop has no preparation"), mode === "force-stop", label);
-      assert.equal(text.includes("budget window"), mode !== "force-stop", label);
-      assert.equal(text.includes("against a limit of 0.0001"), mode !== "force-stop", label);
+      const flagged = [true, false];
+      for (const flag of flagged) {
+        const ran = mode !== "suspend" && (phase === "done" || phase === "recovery-required") && flag;
+        answer = { ...base, mode, phase, endingRan: ran, ...(mode === "force-stop" ? { spent: 0, spendBudget: undefined } : {}) };
+        const text = await head({ kind, id: kind === "installation" ? "installation" : "x-1" });
+        const label = `${mode}/${phase}/${kind}/flag ${flag}: ${text}`;
+        assert.match(text, new RegExp(`^The ${mode === "force-stop" ? "force stop" : mode} of ${kind} `), label);
+        assert.ok(text.includes(` is ${phase}.`), label);
+        // The ending ran when it was recorded as run, or the request is done as a stop or force stop (older records carry no flag).
+        const ended = ran || (mode !== "suspend" && phase === "done");
+        const live = ["preparing", "blocked", "prepared", "terminating"].includes(phase);
+        assert.equal(text.includes("; the cost of ending the work is charged on top"), mode === "stop" && ended, label);
+        assert.equal(text.includes("the cost of ending the work, when it runs, is charged on top"), mode === "stop" && live, label);
+        if (mode === "force-stop") {
+          assert.equal(text.endsWith("; what ending the work cost is charged to the attempts below."), ended, label);
+          assert.equal(text.endsWith("; what ending the work costs, when it runs, is charged to the attempts below."), live, label);
+          assert.equal(text.endsWith("; the work was not ended by it."), !ended && !live, label);
+        }
+        assert.equal(text.includes("A Force Stop has no preparation"), mode === "force-stop", label);
+        assert.equal(text.includes("budget window"), mode !== "force-stop", label);
+        assert.equal(text.includes("against a limit of 0.0001"), mode !== "force-stop", label);
+      }
     }
     // A Force Stop over a preparation keeps its figure and limit; one over a reused checkpoint points to the attempt totals; a reused-checkpoint Stop does not claim a window.
     answer = { ...base, mode: "force-stop", phase: "done", forcedAfterPreparation: true };
