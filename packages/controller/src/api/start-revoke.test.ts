@@ -222,7 +222,7 @@ test("guardedSignal: listeners that throw are contained, ordinary listeners stil
   } finally { process.off("uncaughtException", onCrash); }
 });
 
-test("in chat the revoke lists the running calls and asks whether they finish or are cancelled; the answer is the owner's, the proposal repeats the calls, nothing happens until it is accepted (card T02b)", async () => {
+test("in chat the revoke lists the running calls and asks whether they finish, are cancelled or their tasks are paused; the answer is the owner's, the proposal repeats the calls, nothing happens until it is accepted (card T02b; pause added by T02c)", async () => {
   const seen: Record<string, any> = {};
   const out = await scenario(async ({ c, name, say, call, owner }) => {
     const text = `revoke ${name} 1.0.0 because it is bad`;
@@ -465,7 +465,7 @@ test("the standing policy for running calls is a setting: owner only, race-safe,
   assert.deepEqual([seen.cleared.runningCalls, seen.cleared.effective], [null, "finish"]);
 });
 
-test("past revocations are read by the owner through the API and in chat; the policy is changed in chat with the revision read for the owner (card T02c)", async () => {
+test("past revocations are read by the owner through the API and in chat; the standing policy is asked for and changed in chat, with the revision read for the owner (card T02c)", async () => {
   const seen: Record<string, any> = {};
   await scenario(async ({ c, name, owner, agent, call, say, ownerPrincipal }) => {
     seen.empty = (await call(owner, "catalog.revocations", {})).result;

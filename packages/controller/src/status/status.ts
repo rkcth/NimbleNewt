@@ -506,7 +506,7 @@ export class StatusService {
     if (found.total === 0 && found.partial !== true) return { observedAt: at, lines: [line(query.name === undefined ? "No tool version has been revoked." : `No version of ${shown(query.name, 80)} has been revoked.`, cite("installation", "installation"))] };
     const lines: Line[] = found.items.map((r) => line(`${shown(r.name, 80)} ${shown(r.version, 20)} was revoked at ${shown(r.at, 40)} by ${shown(r.revokedBy, 80)}: ${shown(r.reason, 200)}.`, cite("catalog-revocation", derivedId("cav", `${r.name}|${r.version}`))));
     if (found.total > found.items.length) lines.push(line(`${found.total - found.items.length} more revocation(s) are not shown.`, cite("installation", "installation")));
-    if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more revocations than this list shows (name a tool to look at one).", cite("installation", "installation")));
+    if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more revocations than this list shows.", cite("installation", "installation")));
     return { observedAt: at, lines };
   }
 

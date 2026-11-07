@@ -136,7 +136,7 @@ test("a claim stamped in the future (the clock was set back) is void: runs start
   } finally { await c.close(); cleanup(d); }
 });
 
-test("revoked versions keep their record and digest; the executable text is blanked after revokedBytesDays (default 90, null keeps it), unless another live version uses the same text (card T02c fix)", async () => {
+test("revoked versions keep their record and digest; the executable text is blanked after revokedBytesDays (default 90, null keeps it), unless a version that is not revoked also uses the same text (card T02c fix)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
   let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
   const { c, s, boot, rob, ann, call, publish, note } = await world(d);
@@ -242,7 +242,7 @@ test("the executable record of a revoked version that a live task's dependency m
   } finally { await c.close(); cleanup(d); }
 });
 
-test("the words the owner reads for a preview and a run count dropped versions and blanked revoked texts apart from derived records (card T02c review)", async () => {
+test("the words the owner reads for a preview and a run count dropped versions and blanked revoked texts apart from expired records (card T02c review)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
   const { c, s, boot, rob, call, publish } = await world(d);
   try {
@@ -252,10 +252,10 @@ test("the words the owner reads for a preview and a run count dropped versions a
     await c.storage.applyOperation({ operationId: "age-w", epoch: c.epoch, actor: "test", correlationId: "age", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "catalog-revocation", id: row.id }, expectedRevision: row.revision, body: { ...(row.body as object), at: "2020-01-01T00:00:00.000Z" } as never }], audit: [{ type: "test.age", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
     assert.ok((await call(boot, "retention.settings.set", { catalogVersionsKept: 1, revokedBytesBlank: true }, "k1")).ok);
     const preview = (await call(boot, "retention.run", { dryRun: true }, "p1")).result;
-    assert.equal(preview.shown[0], `Retention preview: 0 derived record(s) would be removed, 0 kept because a resumable task or replay needs them, 2 old tool version(s) would be dropped, 1 revoked tool text(s) would be blanked. To run exactly this, confirm with digest ${preview.digest}.`);
+    assert.equal(preview.shown[0], `Retention preview: 0 expired record(s) (derived summaries, model replies, route records) would be removed, 0 kept because something still needs them (a resumable task, a replay or an agent's environment), 2 old tool version(s) would be dropped, 1 revoked tool text(s) would be blanked. To run exactly this, confirm with digest ${preview.digest}.`);
     const ran = (await call(boot, "retention.run", { dryRun: false, confirm: preview.digest }, "r1")).result;
     assert.equal(ran.removed, 3, "the report counts everything taken away");
-    assert.equal(ran.shown[0], "Retention ran: 0 derived record(s) removed, 2 old tool version(s) dropped, 1 revoked tool text(s) blanked; 0 kept because a resumable task or replay needs them.");
+    assert.equal(ran.shown[0], "Retention ran: 0 expired record(s) removed, 2 old tool version(s) dropped, 1 revoked tool text(s) blanked; 0 kept because something still needs them (a resumable task, a replay or an agent's environment).");
   } finally { await c.close(); cleanup(d); }
 });
 

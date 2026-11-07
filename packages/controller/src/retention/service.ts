@@ -49,14 +49,18 @@ export interface CatalogRetentionPort {
   dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }, holds?: (versionId: string) => Promise<readonly string[] | undefined>): Promise<{ dropped: boolean; held?: readonly string[] }>;
 }
 
-/** The one-line account of a run that the owner reads (chat and API): a preview says what would happen and how to confirm it, a real run says what happened. Dropped versions and blanked texts are counted apart from derived records. */
+/** How many held records (and, apart, held versions) a report lists; past it the held ones are still held but not listed. */
+const RETAINED_LISTED = 200;
+
+/** The one-line account of a run that the owner reads (chat and API): a preview says what would happen and how to confirm it, a real run says what happened. Dropped versions and blanked texts are counted apart from expired records (derived summaries, model replies, route records). */
 export function describeRun(r: RunReport): string {
-  // Held derived records and held tool versions both count as kept.
-  const kept = r.retained.length + (r.catalogVersions?.retained.length ?? 0);
-  if (r.dryRun) return `Retention preview: ${r.candidates.length} derived record(s) would be removed, ${kept} kept because a resumable task or replay needs them${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts`}. To run exactly this, confirm with digest ${r.digest}.`;
-  // `removed` counts everything taken away, so the dropped versions and blanked texts are taken out of the derived records.
+  // Held records and held tool versions both count as kept; each list stops at RETAINED_LISTED, so a full list means there may be more.
+  const heldVersions = r.catalogVersions?.retained.length ?? 0;
+  const kept = `${r.retained.length + heldVersions}${r.retained.length >= RETAINED_LISTED || heldVersions >= RETAINED_LISTED ? " or more" : ""}`;
+  if (r.dryRun) return `Retention preview: ${r.candidates.length} expired record(s) (derived summaries, model replies, route records) would be removed, ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment)${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts`}. To run exactly this, confirm with digest ${r.digest}.`;
+  // `removed` counts everything taken away, so the dropped versions and blanked texts are taken out of the expired records.
   const derived = r.removed - (r.catalogVersions?.removed ?? 0) - (r.revokedBytes?.blanked ?? 0);
-  return `Retention ran: ${derived} derived record(s) removed${r.backups?.deleted === undefined ? "" : `, ${r.backups.deleted.length} backup(s) deleted`}${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.removed} old tool version(s) dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.blanked} revoked tool text(s) blanked`}; ${kept} kept because a resumable task or replay needs them.`;
+  return `Retention ran: ${derived} expired record(s) removed${r.backups?.deleted === undefined ? "" : `, ${r.backups.deleted.length} backup(s) deleted`}${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.removed} old tool version(s) dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.blanked} revoked tool text(s) blanked`}; ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment).`;
 }
 
 export interface RetentionDeps {
@@ -209,7 +213,7 @@ export class RetentionService {
 
   /**
    * The retention runner. Preview (the default) lists what each rule would remove (derived data, model replies, route records, backups, old catalogue versions, revoked executable text), and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
-   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained.
+   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained (a revoked executable text that something cites is left out of `revokedBytes` and is not listed as retained).
    */
   async run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string } = {}): Promise<RunReport> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not run retention by hand`);
@@ -245,7 +249,7 @@ export class RetentionService {
           if (Date.parse(a.updatedAt) >= cutoff) return;
           const why = material.why(kind, a.id);
           const projectId = (a.body as { projectId?: unknown }).projectId;
-          if (why !== undefined) { if (retained.length < 200) retained.push({ kind, id: a.id, reasons: why }); return; }
+          if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind, id: a.id, reasons: why }); return; }
           candidates.push({ kind, id: a.id, revision: a.revision, projectId: typeof projectId === "string" ? projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
         });
         if (!complete) partial = true;
@@ -275,7 +279,7 @@ export class RetentionService {
           if (Date.parse(a.updatedAt) >= cutoff) return;
           if (kind === "ctx-admission" && (a.body as { type?: unknown }).type !== "route-change") return;
           const why = material.why(kind, a.id);
-          if (why !== undefined) { if (retained.length < 200) retained.push({ kind, id: a.id, reasons: why }); return; }
+          if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind, id: a.id, reasons: why }); return; }
           const projectId = (a.body as { projectId?: unknown }).projectId;
           candidates.push({ kind, id: a.id, revision: a.revision, projectId: typeof projectId === "string" ? projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
         });
@@ -289,7 +293,7 @@ export class RetentionService {
     if (keepVersions !== null && this.#deps.catalog !== undefined && (!auto || values.catalogAutoDrop)) {
       const found = await this.#deps.catalog.retentionCandidates(by, keepVersions, limit);
       const material = await RetainedMaterial.build(this.#runner.storage);
-      const free = found.items.filter((v) => { const why = material.why("catalog-version", v.versionId); if (why !== undefined) { if (versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); return false; } return true; });
+      const free = found.items.filter((v) => { const why = material.why("catalog-version", v.versionId); if (why !== undefined) { if (versionsRetained.length < RETAINED_LISTED) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); return false; } return true; });
       versions = { items: free, partial: found.partial };
       if (found.partial) partial = true;
     }
@@ -322,7 +326,7 @@ export class RetentionService {
       const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: candidates.slice(i, i + REMOVE_BATCH).some((c) => c.kind === "ctx-route-archive") });
       for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
         const why = material.why(c.kind, c.id);
-        if (why !== undefined) { if (retained.length < 200) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
+        if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
         const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
@@ -335,10 +339,10 @@ export class RetentionService {
         const material = await RetainedMaterial.build(this.#runner.storage);
         for (const v of versions.items.slice(i, i + REMOVE_BATCH)) {
           const why = material.why("catalog-version", v.versionId);
-          if (why !== undefined) { if (versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); continue; }
+          if (why !== undefined) { if (versionsRetained.length < RETAINED_LISTED) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); continue; }
           // The holds are read once more inside the drop, after the version is claimed and nothing new can start on it (a call or a task can take a version between the batch's read and here).
           const dropped = await this.#deps.catalog.dropVersion(by, { name: v.name, version: v.version, revision: v.revision, keep: keepVersions }, async (versionId) => (await RetainedMaterial.build(this.#runner.storage)).why("catalog-version", versionId));
-          if (dropped.held !== undefined && versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: [...dropped.held] });
+          if (dropped.held !== undefined && versionsRetained.length < RETAINED_LISTED) versionsRetained.push({ name: v.name, version: v.version, reasons: [...dropped.held] });
           if (dropped.dropped) { versionsRemoved += 1; removedIds.push(`catalog-version/${v.versionId}`); }
         }
       }

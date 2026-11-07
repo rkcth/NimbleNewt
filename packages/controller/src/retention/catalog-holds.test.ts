@@ -9,7 +9,7 @@ let n = 0;
 const op = (changes: OperationInput["changes"]): OperationInput => ({ operationId: `op-${++n}`, epoch: 1, actor: "a", correlationId: `c-${n}`, at: "2026-10-30T10:00:00.000Z", changes, audit: [{ type: "seed", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
 const create = (kind: string, id: string, body: object) => ({ type: "create" as const, ref: { kind, id }, body: body as never });
 
-test("a tool version that a resumable task has parked or approved, an environment lists, or a dependency record names is held (card T02c fix)", async () => {
+test("a tool version that a resumable task has a call pinned to (parked, approved or running), an environment lists, or a dependency record names is held (card T02c fix)", async () => {
   const raw = new MemoryStorage(); await raw.acquireEpoch({ holder: "t", at: "2026-10-30T10:00:00.000Z" });
   const id = (name: string, version: string): string => versionIdOf(name, version);
   await raw.applyOperation(op([
