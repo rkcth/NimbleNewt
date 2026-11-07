@@ -283,13 +283,13 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  * - **Summary.** Built from the records alone: attendance, key updates, decisions with reasons and a link to the discussion, dissent, unresolved questions, actions, and the plan; adopted is kept apart from applied. A conclusion that rests on a
  *   private record is marked unverifiable for readers who cannot be shown it.
  */
+/** The refusal when the owner's own decision was recorded under this command ID but the meeting decision no longer waits for an answer (answered meanwhile, or the ID is linked to another meeting decision): the owner is told the decision's id, topic and state, that it is not linked, and how to repair it. */
+const orphanError = (id: string, topic: string, state: string, response: string): DomainError => new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded under this command ID and ${state === "active" ? "is in force" : state === "disputed" ? "conflicts with another of your instructions, so nothing on that topic is in force until you choose" : "has since been replaced"}, but this meeting decision no longer waits for an answer (${response}); your decision is not linked to it${state === "active" ? `; if it should not stand, say what you decide on topic "${topic}" now (a later decision of yours replaces it)` : state === "disputed" ? "; settle that conflict to choose" : ""}`, { field: "alternative" });
 /**
  * What an owner's answer to a decision did (card M02h). `ownerDecisionId` the owner's own decision when the answer was an alternative; `ownerDecisionDisputed` when that decision conflicts with another instruction on its topic.
  * `applied` the changes carried out in all after an agreement; `stillApplying` a started change could not be finished just now; `passFailed` carrying out stopped with changes still adopted; `replayed` the same command sent again.
  * From the record before and after the call, each change in exactly one count: `carriedOut` carried out by this call, `refused` the codes of those it refused, `alreadyDone` done before, `refusedBefore` refused before, `stillOpen` still adopted or applying (`applying` of them started).
  */
-/** The refusal when the owner's own decision was recorded but the meeting decision was answered before it could be linked: the decision stands, and the owner is told so. */
-const orphanError = (id: string, topic: string, state: string, response: string): DomainError => new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded under this command ID and ${state === "active" ? "is in force" : state === "disputed" ? "conflicts with another of your instructions, so nothing on that topic is in force until you choose" : "has since been replaced"}, but this meeting decision no longer waits for an answer (${response}); your decision is not linked to it${state === "active" ? `; if it should not stand, say what you decide on topic "${topic}" now (a later decision of yours replaces it)` : state === "disputed" ? "; settle that conflict to choose" : ""}`, { field: "alternative" });
 export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; refusedBefore: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
@@ -1225,6 +1225,9 @@ export class MeetingRecordService {
     let ownerDecisionId: string | undefined;
     let ownerDecisionDisputed = false;
     if (command.alternative !== undefined) {
+      // The checks the decision service makes on a fresh call are made on a reused one too: no unknown field, and a version that is a whole number.
+      onlyKnown(command.alternative as unknown as Record<string, unknown>, ["commandId", "projectId", "taskId", "category", "topic", "statement", "wording", "gate", "source", "basedOn", "session", "stance"]);
+      if (!Number.isSafeInteger(command.alternative.basedOn) || command.alternative.basedOn < 0) invalid("alternative", "basedOn must be the version this session saw (0 if nothing was decided yet)");
       if (this.#deps.decisions === undefined) throw new DomainError("unavailable", "owner decisions are not available here");
       const found = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
       if (found === undefined) throw new DomainError("not_found", "that decision does not exist");

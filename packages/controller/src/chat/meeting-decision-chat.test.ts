@@ -1016,7 +1016,11 @@ for (const backend of backends) {
       ["another topic", { topic: "other topic" }, "command_conflict"],
       ["a chat source", { source: { channel: "chat", turnId: "turn-x" } }, "command_conflict"],
       ["a gate category", { category: "gate", gate: "planning-only" }, "command_conflict"],
+      ["a goal category", { category: "goal" }, "command_conflict"],
+      ["a permission category", { category: "permission" }, "command_conflict"],
       ["a session", { session: "phone" }, "command_conflict"],
+      ["an unknown field", { bogus: 1 }, "invalid_command"],
+      ["a basedOn that is not a version", { basedOn: -1 }, "invalid_command"],
       ["a brainstorm", { stance: "brainstorm" }, "invalid_command"],
     ];
     for (const [what, change, code] of variants) {
@@ -1038,6 +1042,28 @@ for (const backend of backends) {
     const r = await call(w, w.ownerToken, OP, { decisionId: x.id, response: "alternative", alternative: alt }, "ans-x2");
     assert.equal(r.ok, false);
     assert.match(r.error.message, /^your decision dec-\S+ on topic "nightly build" was recorded under this command ID and is in force, but this meeting decision no longer waits for an answer \(agreed\); your decision is not linked to it; if it should not stand/);
+  });
+
+  suite("the same alternative command ID for another project's meeting decision is a different decision", async (w, _script, ctl) => {
+    const other = await w.project("B");
+    const a = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const b = await ctl.pending(REPORT, "nightly report", "Report task", { project: other });
+    const alt = altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "alt-proj");
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: a.id, response: "alternative", alternative: alt }, "ans-proj")).ok, true);
+    const r = await call(w, w.ownerToken, OP, { decisionId: b.id, response: "alternative", alternative: { ...alt, projectId: other } }, "ans-proj-b");
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, "command_conflict");
+  });
+
+  suite("an owner decision that conflicts and is then orphaned is told with the way to settle it", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    await w.decisions.record(w.owner, { commandId: cid("later"), projectId: ctl.project, category: "decision", topic: "nightly build", statement: "Retire the nightly build in April", wording: "Retire the nightly build in April", source: { channel: "direct" }, basedOn: 0 } as never);
+    const alt = altArgs(ctl, "nightly build", "Keep the nightly build until May.", "alt-disp");
+    ctl.recordCrash.n = 1;
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, "ans-disp")).ok, false);
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "decline" }, "dec-disp")).ok, true);
+    const r = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, "ans-disp");
+    assert.match(r.error.message, /^your decision dec-\S+ on topic "nightly build" was recorded under this command ID and conflicts with another of your instructions, so nothing on that topic is in force until you choose, but this meeting decision no longer waits for an answer \(declined\); your decision is not linked to it; settle that conflict to choose$/);
   });
 
   test("a nothing-done repeat still tells that the owner's decision conflicts", () => {
