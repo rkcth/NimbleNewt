@@ -169,7 +169,7 @@ export interface Context {
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent">;
   readonly watchControl?: {
@@ -740,8 +740,8 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("cast-ballot", "command", "Casts or revises a ballot, with a reason.", "castBallot", ["motionId", "version", "value", "reason", "sources", "ownerMessageEntryId"], "`{ revised }`."),
   recordOp("close-vote", "command", "Counts the vote and closes it.", "closeVote", ["motionId"], "`{ state, decisionId? }`."),
   recordOp("casting-vote", "command", "The chair breaks a tie.", "castingVote", ["motionId", "value", "reason"], "`{ state, decisionId? }`."),
-  recordOp("apply", "command", "Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied.", "apply", ["decisionId"], "`{ applied, notApplied, pending }`.", "viewer"),
-  recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them.", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied? }`."),
+  recordOp("apply", "command", "Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied. A change that was already started when the owner declined is finished by this call too (the owner's answer reports `stillApplying: true` when that could not be done just then).", "apply", ["decisionId"], "`{ applied, notApplied, pending }`.", "viewer"),
+  recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After a decline or an alternative, a change that had already started is finished at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, and the change stays applying until the decision is applied again).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying? }`: `applied` after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change."),
   recordOp("finish", "command", "Ends the meeting; an interrupted meeting voids open votes and keeps the record.", "finish", ["recordId", "interrupted", "reason"], "`{ voided }`."),
   recordOp("summarize", "command", "Builds the summary from the record alone.", "summarize", ["recordId"], "`{ builds, overviewFailed? }`."),
   recordOp("outcomes", "command", "Returns the outcomes to the conversations they came from.", "returnOutcomes", ["recordId"], "`{ returned, pending }`.", "viewer"),
@@ -759,6 +759,15 @@ export const OPERATIONS: readonly Operation[] = [
       only(a, ["kind", "outcome", "projectId", "after", "limit"]);
       const svc = c.records ?? unavailable("meeting records");
       return asJson({ item: await svc.decisionLog(c.principal, a as never) } as object);
+    } },
+  { name: "meeting.decisions.waiting", kind: "query", summary: "The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out and `applied` how many are done. `truncated: true` means more exist than were read.", args: { "limit?": "1 to 50, default 50" }, result: "`{ item: { items: [{ id, revision, projectId, since, left, applied, text, topic? }], truncated } }`.",
+    run: async (c, a) => {
+      only(a, ["limit"]);
+      if (c.principal.kind !== "owner" || c.principal.taskScope !== undefined) throw new DomainError("forbidden", "only the owner reads the decisions waiting for them");
+      const limit = optNum(a, "limit") ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) invalid("args.limit", "must be 1 to 50");
+      const svc = c.records ?? unavailable("meeting records");
+      return asJson({ item: await svc.ownerPending(c.principal, limit) } as object);
     } },
   recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
   attendOp("admission", "query", "Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).", "admission", ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"], "`{ item }`."),

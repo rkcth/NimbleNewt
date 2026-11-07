@@ -62,3 +62,17 @@ test("the model is told what the revocation and policy questions are about: revo
   assert.doesNotMatch(system, /access that was revoked/);
   assert.match(system, /catalog_policy\(\) - what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting/);
 });
+
+test("the model is told how to answer a held meeting decision by chat: the operation with its arguments, no ID, and the owner's own words for an alternative (card M02h)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  const args = acceptedArgs("meeting.record.owner-respond")!;
+  for (const name of ["decisionId", "response", "decisionTopic", "alternativeStatement", "alternativeTopic"]) assert.ok(args.includes(name), `${name} is accepted`);
+  assert.ok(!args.includes("alternative"), "the controller's own alternative object is not the model's to give");
+  assert.ok(system.includes(`meeting.record.owner-respond(${args.filter((k) => k !== "projectName").join(", ")}) - Answer a meeting decision`), "the operation is listed with those argument names");
+  assert.match(system, /response is agree, decline or alternative; decisionTopic is the owner's own words for which decision/);
+  assert.match(system, /alternativeStatement is the owner's own decision in their words/);
+  assert.match(system, /the needs_you status lists them/);
+  assert.ok(Object.keys(STATUS_KINDS).includes("needs_you"));
+});

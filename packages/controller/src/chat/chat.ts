@@ -526,7 +526,8 @@ export class ChatService {
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       projectId = resolved.projectId ?? projectId;
       // A captured topic is linked to this very turn (set here, after the interpreter's arguments were checked, so it cannot be named by anyone else).
-      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" || st.op === "decision.record" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st));
+      // An alternative to a meeting decision is the owner's own decision from this very turn (the same link as a decision stated in chat), under a command ID of the turn.
+      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" || st.op === "decision.record" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st.op === "meeting.record.owner-respond" && isObject(st.args["alternative"]) ? { ...st, args: { ...st.args, alternative: { ...(st.args["alternative"] as Record<string, unknown>), source: { channel: "chat", turnId }, commandId: `${turnId}-alt${i}` } } } : st));
       if (resolved.reason === undefined) {
         // An explicit order applies now, one API command per step (a first step such as setting the repository, then the order itself).
         const last = steps.length - 1;
@@ -570,7 +571,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -810,6 +811,48 @@ export class ChatService {
         if (matches.length === 0) return refuse("not_found", words === "" ? "no agent is waiting for your answer" : `no waiting question is about "${words.slice(0, 80)}"`);
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which question are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["inquiryId"])} (${String(m["question"]).slice(0, 60)})`), field: "inquiryId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["inquiryId"])) };
         args["inquiryId"] = String(matches[0]!["inquiryId"]);
+      }
+    }
+    // The owner's answer to a meeting decision that waits for them (card M02h). The model gives the owner's words for the decision (`decisionTopic`: any part of what was decided or its topic) and the answer; the decision is found among those
+    // waiting, and anything unclear is asked, never guessed. An alternative is the owner's own wording (`alternativeStatement`, optionally `alternativeTopic`), recorded as their decision from this turn; the version it is based on is read here.
+    if (intent.op === "meeting.record.owner-respond") {
+      const named = args["decisionTopic"];
+      const statement = args["alternativeStatement"];
+      const topicWords = args["alternativeTopic"];
+      delete args["decisionTopic"];
+      delete args["alternativeStatement"];
+      delete args["alternativeTopic"];
+      if (args["alternative"] !== undefined) return refuse("invalid_command", "give the alternative as alternativeStatement; its source and version are set by the controller");
+      if (!["agree", "decline", "alternative"].includes(String(args["response"]))) return refuse("invalid_command", "response must be agree, decline or alternative");
+      if ((named !== undefined && typeof named !== "string") || (statement !== undefined && typeof statement !== "string") || (topicWords !== undefined && typeof topicWords !== "string")) return refuse("invalid_command", "decisionTopic, alternativeStatement and alternativeTopic must be text");
+      if (named !== undefined && args["decisionId"] !== undefined) return refuse("invalid_command", "give either decisionId or decisionTopic, not both");
+      const isAlternative = args["response"] === "alternative";
+      if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
+      if (isAlternative && (typeof statement !== "string" || statement.trim() === "")) return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
+      const waitingList = await this.#get(token, "meeting.decisions.waiting", {});
+      const waiting = (waitingList?.["items"] as Record<string, unknown>[] | undefined) ?? [];
+      let chosen: Record<string, unknown> | undefined;
+      if (typeof args["decisionId"] === "string") {
+        chosen = waiting.find((d) => d["id"] === args["decisionId"]);
+        if (chosen === undefined) return refuse("not_found", "that meeting decision is not waiting for your answer");
+      } else {
+        const words = typeof named === "string" ? named : "";
+        if (waiting.length === 0) return refuse("not_found", "no meeting decision is waiting for your answer");
+        const matches = waiting.filter((d) => looseMatch(words, `${String(d["text"])} ${String(d["topic"] ?? "")}`));
+        if (matches.length === 0) return refuse("not_found", `no waiting meeting decision is about "${words.slice(0, 80)}"`);
+        const pick = (d: Record<string, unknown>): string => `${String(d["id"])} (${String(d["text"]).slice(0, 60)})`;
+        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which meeting decision are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map(pick), field: "decisionId", choices: matches.slice(0, CHAT_LIMITS.options).map((d) => String(d["id"])) };
+        chosen = matches[0]!;
+        args["decisionId"] = String(chosen["id"]);
+      }
+      labels[String(args["decisionId"])] = `${String(chosen["text"]).slice(0, 100)}; ${String(chosen["left"])} change${chosen["left"] === 1 ? "" : "s"} left to carry out`;
+      if (isAlternative) {
+        const topic = normalTopic((typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : String(chosen["text"])).replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).slice(0, 80).trim();
+        const alt: Record<string, unknown> = { projectId: chosen["projectId"], category: "decision", topic, statement: (statement as string).trim(), wording: (statement as string).trim() };
+        const base = await this.#revisionFor(token, "decision", alt, undefined, new Map());
+        if (!base.ok) return base;
+        alt["basedOn"] = base.value;
+        args["alternative"] = alt;
       }
     }
     // A stand-up and an agent's brief named in the owner's own words (card M03h). The model gives the words (`meetingTopic`, `agentName`); the stand-up is looked up in the project's records by any part of its title, the agent by name,

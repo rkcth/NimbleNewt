@@ -1160,9 +1160,9 @@ export class MeetingRecordService {
    * The adopted decisions that wait for the owner's answer (agree, decline or an alternative), for the owner's "needs you" list (card M02g): decisions in scope whose response is pending and that still have a change left to carry out.
    * Owner only. Reads at most 10 pages of 100 decisions (the cost of one reply is capped there); `truncated` says decisions beyond them were not read. A pending index would replace the scan (card M02h).
    */
-  async ownerPending(by: Principal, limit = 50): Promise<{ items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }> {
+  async ownerPending(by: Principal, limit = 50): Promise<{ items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text: string; topic?: string }[]; truncated: boolean }> {
     if (by.kind !== "owner" || by.taskScope !== undefined) return { items: [], truncated: false };
-    const items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[] = [];
+    const items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text: string; topic?: string }[] = [];
     let after: string | undefined;
     for (let pages = 0; pages < 10; pages++) {
       const page = await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
@@ -1173,7 +1173,7 @@ export class MeetingRecordService {
         const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
         if (left === 0) continue;
         if (items.length >= limit) return { items, truncated: true };
-        items.push({ id: a.id, revision: a.revision, projectId: d.projectId, since: d.concludedAt, left, applied: d.changes.filter((c) => c.state === "applied").length });
+        items.push({ id: a.id, revision: a.revision, projectId: d.projectId, since: d.concludedAt, left, applied: d.changes.filter((c) => c.state === "applied").length, text: d.text.slice(0, 300), ...(d.topic === undefined ? {} : { topic: d.topic.slice(0, 80) }) });
       }
       if (page.length < 100) return { items, truncated: false };
     }

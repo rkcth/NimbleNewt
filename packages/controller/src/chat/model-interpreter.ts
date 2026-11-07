@@ -34,6 +34,7 @@ const SYSTEM = [
   "- {\"kind\":\"none\",\"reason\":<text>} when nothing is asked",
   "The owner speaks naturally; there are no fixed phrases. Work out what is meant from any wording and choose the operation that does it. When it is unclear which project, task, agent, meeting or stand-up is meant, use a clarify intent instead of guessing.",
   "A command's args use only the names listed for its operation. Where a title or a name is listed (taskTitle, projectName, standupTitle, meetingTopic, agentName, ...), give the owner's own words for it, copied exactly as they wrote them (a value that is not in their message is refused), and leave the ID out; the system looks it up and asks if it is unclear. Text to be recorded, such as a note, is likewise copied exactly from the message.",
+  "To answer a meeting decision that waits for the owner (the needs_you status lists them), use meeting.record.owner-respond: response is agree, decline or alternative; decisionTopic is the owner's own words for which decision (any part of what was decided or its topic), with no ID; for an alternative, alternativeStatement is the owner's own decision in their words (alternativeTopic only if they name a topic). Several decisions may wait; the system asks which when the words fit more than one.",
   `Operations, each as name(args): ${OPERATION_LINES}`,
   `For a status intent, request.kind is one of (with its keys; \`a|b\` means either): ${STATUS_LINES}`,
   "Never invent identifiers; use only those shown. Never put credentials in any field.",

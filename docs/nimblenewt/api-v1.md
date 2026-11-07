@@ -729,6 +729,16 @@ Arguments:
 
 Result: `{ item: { entries, next?, scanLimited? } }`.
 
+#### `meeting.decisions.waiting`
+
+The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out and `applied` how many are done. `truncated: true` means more exist than were read.
+
+Arguments:
+
+- `limit` (optional): 1 to 50, default 50
+
+Result: `{ item: { items: [{ id, revision, projectId, since, left, applied, text, topic? }], truncated } }`.
+
 #### `meeting.record.plan`
 
 The project's latest plan from a meeting.
@@ -3056,7 +3066,7 @@ Result: `{ state, decisionId? }`.
 
 #### `meeting.record.apply`
 
-Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied.
+Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied. A change that was already started when the owner declined is finished by this call too (the owner's answer reports `stillApplying: true` when that could not be done just then).
 
 Arguments:
 
@@ -3067,7 +3077,7 @@ Result: `{ applied, notApplied, pending }`.
 
 #### `meeting.record.owner-respond`
 
-The owner agrees, declines or answers with an alternative to a decision that needs them.
+The owner agrees, declines or answers with an alternative to a decision that needs them. After a decline or an alternative, a change that had already started is finished at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, and the change stays applying until the decision is applied again).
 
 Arguments:
 
@@ -3076,7 +3086,7 @@ Arguments:
 - `alternative`: the owner's own decision instead
 - `commandId`: required
 
-Result: `{ ownerDecisionId?, applied? }`.
+Result: `{ ownerDecisionId?, applied?, stillApplying? }`: `applied` after an agreement, `stillApplying` after a decline or an alternative that could not finish a started change.
 
 #### `meeting.record.finish`
 
