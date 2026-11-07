@@ -485,6 +485,7 @@ test("past revocations are read by the owner through the API and in chat; the po
     const say2 = "from now on pause the tasks of running calls when I revoke a tool";
     const proposed = await say("s2", say2, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "pause" }, evidence: say2, basis: "owner" }]);
     seen.proposed = proposed.outcomes[0];
+    seen.proposedWhy = proposed.outcomes[0].message;
     seen.beforeAccept = (await call(owner, "catalog.policy.get", {})).result.item.runningCalls;
     const applied = await say("s3", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
     seen.applied = applied.outcomes[0].status;
@@ -512,6 +513,8 @@ test("past revocations are read by the owner through the API and in chat; the po
   assert.match(seen.chat.lines.map((l: any) => l.text).join("\n"), /1\.0\.0 was revoked at .* by owner:.*: leaks tokens/);
   assert.ok(seen.chat.lines.every((l: any) => l.cites.length > 0));
   assert.equal(seen.proposed.status, "proposed", JSON.stringify(seen.proposed));
+  assert.match(String(seen.proposedWhy), /what happens to running tool calls when a version is revoked is shown first/, "the policy is not described as a withdrawal");
+  assert.doesNotMatch(String(seen.proposedWhy), /withdrawing/);
   assert.equal(seen.beforeAccept, null, "nothing changed before the owner accepted");
   assert.equal(seen.applied, "applied");
   assert.deepEqual([seen.afterAccept.runningCalls, seen.afterAccept.revision], ["pause", 1]);

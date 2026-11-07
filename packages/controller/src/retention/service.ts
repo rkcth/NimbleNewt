@@ -50,7 +50,7 @@ export interface CatalogRetentionPort {
 }
 
 export interface RetentionDeps {
-  /** The tool catalogue, for the old-versions rule (card T02c). Absent: that rule does nothing. */
+  /** The tool catalogue, for the old-versions and revoked-text rules (card T02c). Absent: neither does anything. */
   readonly catalog?: CatalogRetentionPort;
   readonly settings: Pick<RetentionSettingsService, "effective">;
   readonly backups?: BackupPort;
@@ -105,7 +105,7 @@ export interface RunReport {
   readonly digest?: string;
   readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null } };
   readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number };
-  /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set): what it would drop (or dropped), and the versions kept because a resumable task used them. */
+  /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set; in the automatic pass also `catalogAutoDrop`): what it would drop (or dropped), and the versions kept because something still needs them (with the reasons). */
   readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
   /** Executable text of revoked versions (off unless `revokedBytesBlank` is on and `revokedBytesDays` is set): what it would blank (or blanked). The record, digest and revocation stay. */
   readonly revokedBytes?: { days: number; candidates: { name: string; version: string; ageDays: number }[]; blanked: number; partial: boolean };
@@ -197,7 +197,7 @@ export class RetentionService {
   // ---- the runner -----------------------------------------------------------------------------------------------------------
 
   /**
-   * The retention runner. Preview (the default) lists what the rule would remove from derived data and backups, and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
+   * The retention runner. Preview (the default) lists what each rule would remove (derived data, model replies, route records, backups, old catalogue versions, revoked executable text), and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
    * Each rule acts only when its own value is set. Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained.
    */
   async run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string } = {}): Promise<RunReport> {
@@ -205,7 +205,7 @@ export class RetentionService {
     return this.#run(by, options, false);
   }
 
-  /** The dispatcher's pass: does the same as an owner's confirmed run, only when `autoRun` is set. */
+  /** The dispatcher's pass: does the same as an owner's confirmed run, only when `autoRun` is set, except that it drops catalogue versions only when `catalogAutoDrop` is also on. */
   async sweep(by: Principal): Promise<RunReport | undefined> {
     if (!isDispatcher(by)) throw new DomainError("forbidden", `${by.id} is not the dispatcher`);
     const values = await this.#deps.settings.effective();

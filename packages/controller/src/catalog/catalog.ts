@@ -54,7 +54,7 @@ export interface VersionBody {
   readonly dropping?: string;
 }
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
-/** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, or cancel them. Absent: nobody was asked (the caller is not chat, or gave no answer), which means `finish`. */
+/** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, cancel them, or stop them and pause their tasks (`pause` was added by card T02c). Absent: nobody was asked (the caller is not chat, or gave no answer), and the policy in force answers (the operator's startup option, else the owner's standing setting, default `finish`). */
 export type RunningCallsChoice = "finish" | "cancel" | "pause";
 export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string }
 export interface UsageBody {
@@ -355,8 +355,8 @@ export class CatalogService {
   }
 
   /**
-   * The past revocations, newest first (owner only): which version, why, who and when. Never any content. `total` counts them all; at most `limit` (default 50, up to 200) are listed. A revocation whose
-   * version record was later dropped by retention still shows (the revocation record is kept as the record of the act).
+   * The past revocations, newest first (owner only): which version, why, who and when. Never any content. `total` counts them all; at most `limit` (default 50, up to 200) are listed. Retention never
+   * drops a revoked version (it may only blank its executable text, `revokedBytesDays`), so its version record and its revocation record both stay.
    */
   async revocations(owner: Principal, query: { name?: string; limit?: number } = {}): Promise<{ items: { name: string; version: string; reason: string; revokedBy: string; at: string }[]; total: number; partial?: true }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner reads past revocations`);
@@ -497,7 +497,7 @@ export class CatalogService {
   }
 
   /**
-   * Revoked versions whose executable text retention may blank (card T02c): revoked at least `olderThanDays` ago, with an executable that is not also the text of a version that is not revoked. The version record,
+   * Revoked versions whose executable text retention may blank (card T02c): revoked at least `olderThanDays` ago, with an executable record that is still exactly as registered and is not also the instructions or executable of a version that is not revoked. The version record,
    * its digest and the revocation stay. Bounded by `limit`; `partial` says more exist or a scan stopped (then nothing is blanked on a guess).
    */
   async revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number; digest: string; revision: number }[]; partial: boolean }> {

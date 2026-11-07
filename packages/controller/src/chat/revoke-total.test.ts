@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { proposalReason } from "./commands.js";
 import { openWorld } from "./testing/harness.js";
 
 after(stopServer);
@@ -28,3 +29,11 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+test("why a tool-catalogue change is shown first says what it is: a revoke, with the calls it would reach, or the standing policy for running calls (card T02c review)", () => {
+  const ctx = { profile: "balanced", said: true, quoted: false };
+  assert.match(String(proposalReason("catalog.revoke", { name: "a_x.slow", version: "1.0.0", reason: "bad" }, false, ctx)), /withdrawing a tool version is shown first, with the calls it would reach/);
+  const policy = String(proposalReason("catalog.policy.change", { runningCalls: "pause" }, false, ctx));
+  assert.equal(policy, "what happens to running tool calls when a version is revoked is shown first");
+  assert.doesNotMatch(policy, /withdrawing/);
+});

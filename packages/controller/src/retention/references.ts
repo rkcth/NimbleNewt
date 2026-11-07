@@ -10,7 +10,7 @@ const TERMINAL = new Set(["done", "cancelled"]);
 /**
  * What a resumable task or a replay still needs (card K06: "material referenced by a resumable task or by replay is never deleted and shows as retained").
  * A task is resumable while it is not done or cancelled. Its material is: its own desk records, history scopes, artifacts, summaries and spill, what its compactions cite, and everything its continuation records list
- * (artifacts, scratch records, summary lineage, source scopes): the continuation is what a resume or a replay reads. The scan is bounded; when it hits the bound `complete` is false and a caller must treat everything as retained.
+ * (artifacts, scratch records, summary lineage, source scopes): the continuation is what a resume or a replay reads; and the tool versions it ran, has a call pinned to or lists as a dependency, plus those in an active or pinned environment's skill library (card T02c). The scan is bounded; when it hits the bound `complete` is false and a caller must treat everything as retained.
  */
 export class RetainedMaterial {
   readonly #reasons = new Map<string, string[]>();
@@ -101,8 +101,7 @@ export class RetainedMaterial {
         if (live(b.taskId) && typeof b.versionId === "string") out.#add("catalog-version", b.versionId, `tool ${String(b.name).slice(0, 80)} ${String(b.version).slice(0, 20)} was run by task ${b.taskId}, which can still resume or be replayed`);
       });
     }
-    // Everything else that names a tool version a resumable task can still need (card T02c). A tool call of a live task that was pinned to a version before it ran (parked for approval, approved and not yet
-    // started, or running) is read from the attempt's operation records; an environment's skill library; and the dependency records a task wrote.
+    // Everything else that names a tool version a resumable task can still need (card T02c). A tool call of a live task that was pinned to a version before it ran (in any state: parked for approval, approved, running or ended) is read from the attempt's operation records; an environment's skill library; and the dependency records a task wrote.
     const attempts = new Map<string, string>();
     await scan(DISPATCH_KIND, (a) => { const b = a.body as { taskId?: unknown; attemptId?: unknown }; if (live(b.taskId) && typeof b.attemptId === "string") attempts.set(b.attemptId, b.taskId); });
     for (const [attemptId, taskId] of attempts) {

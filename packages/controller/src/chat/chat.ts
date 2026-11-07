@@ -579,7 +579,7 @@ export class ChatService {
       return { work, quoted: old.quotedCount > 0 };
     }
     args[asked.field] = choice;
-    // The owner's pick between letting running calls finish and cancelling them is their word: it counts as said, like the project-creation answers.
+    // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word: it counts as said, like the project-creation answers.
     work[asked.intentIndex] = { intent: { ...target.intent, args }, text: asked.field === "runningCalls" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }

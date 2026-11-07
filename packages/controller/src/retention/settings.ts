@@ -37,11 +37,11 @@ export interface RetentionValues {
   /** Resolved incidents are soft-archived after this many days, and removed this many days after being archived. `null`: never. */
   readonly incidentArchiveDays: number | null;
   readonly incidentPurgeDays: number | null;
-  /** Catalogue tool versions: keep only the newest this many published versions of each tool (the latest, revoked versions and any a resumable task used are always kept); older ones are dropped by the runner. `null`: keep every version (card T02c). */
+  /** Catalogue tool versions: keep only the newest this many published versions of each tool (always kept: the versions `protectedVersions` keeps, that is the latest, the highest live and the newest unrevoked; revoked versions; and any a resumable task ran, has a call pinned to or lists as a dependency, or that is in an active or pinned environment's skill library); older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is on). `null`: keep every version (card T02c). */
   readonly catalogVersionsKept: number | null;
-  /** Whether the automatic pass (`autoRun`) may also drop catalogue versions under `catalogVersionsKept` (default off: dropping a version is a larger act than expiring a summary, so a run by hand does it unless this is on). */
+  /** Whether the automatic pass (`autoRun`) may also drop catalogue versions under `catalogVersionsKept` (default off: dropping a version is a larger act than expiring a summary, so while this is off only a run by hand drops them). */
   readonly catalogAutoDrop: boolean;
-  /** A revoked version keeps its record (name, version, digest, manifest, why and when it was revoked) for good; its executable text is blanked this many days after the revocation, unless another live version uses the same text. `null`: keep it. */
+  /** A revoked version keeps its record (name, version, digest, manifest, why and when it was revoked) for good; its executable text is blanked this many days after the revocation, unless a version that is not revoked also uses the same text (as executable or instructions), or a resumable task, checkpoint or dependency record cites it. `null`: keep it. */
   readonly revokedBytesDays: number | null;
   /** The switch for that blanking (default off): `revokedBytesDays` applies only when this is true. Blanking edits a desk record, so it is something the owner turns on. */
   readonly revokedBytesBlank: boolean;
