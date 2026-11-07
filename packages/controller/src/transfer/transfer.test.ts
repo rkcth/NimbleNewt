@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { MaintenanceBarrier } from "../backup/barrier.js";
-import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes } from "../storage/postgres/index.js";
+import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
 import { transferTargetsFromConfig } from "./targets.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
@@ -681,8 +681,7 @@ test("a move to a configured PostgreSQL destination arrives whole; when the copy
     assert.equal((JSON.parse(journalText) as { phase: string }).phase, "failed");
     assert.equal((JSON.parse(journalText) as { failure: { destinationClean: boolean } }).failure.destinationClean, true);
     for (const secret of [PG_PASSWORD, url, "postgres://"]) assert.ok(!journalText.includes(secret), `the journal does not hold ${secret.slice(0, 12)}`);
-    const left = await withClient(url, async (c) => (await c.query("SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = $1", [schema])).rows[0]!.n as number);
-    assert.equal(left, 0, "the schema was dropped by the target's discard");
+    assert.equal(await postgresSchemaExists(url, schema), false, "the schema was dropped by the target's discard");
     armed = false;
     const second = await svc.preview("pg");
     const done = await svc.apply("pg", second.token);

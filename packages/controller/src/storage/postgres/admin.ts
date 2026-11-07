@@ -26,3 +26,8 @@ export async function dropPostgresSchema(connectionString: string, schema: strin
   if (!SCHEMA_NAME.test(schema)) throw new Error("invalid PostgreSQL schema name");
   await withClient(connectionString, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); });
 }
+
+/** Whether the schema exists on the server (for checks that a failed copy was cleaned up). */
+export async function postgresSchemaExists(connectionString: string, schema: string): Promise<boolean> {
+  return withClient(connectionString, async (c) => Number((await c.query("SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = $1", [schema])).rows[0]?.n) > 0);
+}
