@@ -88,7 +88,7 @@ export interface ToolExecutionDeps {
   readonly notice?: (notice: { readonly commandId: string; readonly taskId: string; readonly text: string }) => Promise<unknown>;
   /**
    * What happens to a catalogue tool call already running when its version is revoked (card T02b): `finish` (the provisional default: the run ends on the bytes it started with; new runs are refused either way)
-   * or `cancel` (the run's signal is aborted and the call ends as failed). Read at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
+   * `cancel` (the run's signal is aborted and the call ends as failed) or `pause` (each running call is aborted and its task paused, see `pauseTask`). Read, only when calls are running, at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
    */
   readonly revocationPolicy?: () => "finish" | "cancel" | "pause" | Promise<"finish" | "cancel" | "pause">;
   readonly hosts: Pick<HostService, "status">;
@@ -195,7 +195,7 @@ export class ToolExecutionService {
   dispose(): void { this.#unsubscribe?.(); }
 
   /**
-   * The catalogue calls of a version that are running now (owner decision 2026-10-30: the chat revoke flow lists them and asks whether to let them finish or cancel them).
+   * The catalogue calls of a version that are running now (owner decision 2026-10-30: the chat revoke flow lists them and asks whether to let them finish, cancel them or pause their tasks).
    * Bounded; each is named by attempt, call, task and agent, never by its input.
    */
   runningCalls(name: string, version: string): { readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }[] {

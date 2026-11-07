@@ -386,7 +386,7 @@ export class CatalogService {
   }
 
   /**
-   * Versions that retention may drop (card T02c, K06): for each name, every version that is not among the newest `keep` published versions, is not the entry's latest, and was not revoked (a revoked version stays as the
+   * Versions that retention may drop (card T02c, K06): for each name, every version that is not among the newest `keep` published versions, is not one `protectedVersions` keeps (the latest, the highest live, the newest unrevoked), and was not revoked (a revoked version stays as the
    * record of the revocation). Nothing is dropped here; the retention runner shows these, checks what resumable tasks still use, and calls `dropVersion`. `ageDays` is since registration. Bounded by `limit`; `partial` says
    * more exist or the scan stopped.
    */

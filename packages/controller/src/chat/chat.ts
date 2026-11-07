@@ -923,7 +923,7 @@ export class ChatService {
       delete args["taskId"];
     }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
-    // Revoking a tool version (owner decision 2026-10-30): when calls of it are running, the owner is asked whether they finish or are cancelled; the calls are listed. Nothing is assumed: the answer is the owner's.
+    // Revoking a tool version (owner decision 2026-10-30): when calls of it are running, the owner is asked whether they finish, are cancelled, or their tasks are paused; the calls are listed. Nothing is assumed: the answer is the owner's.
     const notes: string[] = [];
     if (intent.op === "catalog.revoke") {
       if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "say which tool and which version to revoke");
