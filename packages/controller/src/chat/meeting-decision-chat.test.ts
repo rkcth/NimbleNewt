@@ -7,6 +7,8 @@ import { describe, proposalReason } from "./commands.js";
 import { MeetingRecordService, taskUpdateApplier, type ChangeApplier, type DecisionRecordBody } from "../meetings/index.js";
 import { GrantService } from "../security/index.js";
 import { CommandRunner } from "../domain/runner.js";
+import { derivedId } from "../domain/ids.js";
+import { scopedCommandId } from "../security/credentials.js";
 import type { ChatService, Outcome } from "./index.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
@@ -226,6 +228,24 @@ for (const backend of backends) {
     assert.deepEqual(direct.result.shown, ["You declined. The changes not yet started are refused; those already done stay done.", STILL]);
     assert.equal(direct.result.stillApplying, true);
     assert.equal((await ctl.decision(started.id)).changes[0]!.state, "applying");
+  });
+
+  suite("an answer that names the decision both by ID and by words, or gives the owner's own words with an agreement or a decline, is refused and nothing is proposed", async (w, script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const chat = w.chat();
+    const both = `Agree to ${d.id}, the nightly build.`;
+    script[both] = [cmd(OP, { response: "agree", decisionId: d.id, decisionTopic: "nightly build" }, both.slice(0, -1))];
+    const twice = only((await say(w, chat, both)).outcomes);
+    assert.deepEqual([twice.status, twice.code, twice.proposalId], ["refused", "invalid_command", undefined], JSON.stringify(twice));
+    assert.match(String(twice.message), /give either decisionId or decisionTopic, not both/);
+    for (const extra of [{ alternativeStatement: "keep the nightly build at midnight" }, { alternativeTopic: "nightly build" }]) {
+      const text = "No to the nightly build, keep the nightly build at midnight.";
+      script[text] = [cmd(OP, { response: "decline", decisionTopic: "nightly build", ...extra }, "keep the nightly build at midnight")];
+      const tagged = only((await say(w, chat, text)).outcomes);
+      assert.deepEqual([tagged.status, tagged.code, tagged.proposalId], ["refused", "invalid_command", undefined], JSON.stringify(tagged));
+      assert.match(String(tagged.message), /alternativeStatement and alternativeTopic go only with response alternative/);
+    }
+    assert.equal((await ctl.decision(d.id)).ownerResponse, "pending");
   });
 
   test("the preview of a decline or an alternative says how many changes already started will still be finished", () => {
@@ -754,6 +774,17 @@ for (const backend of backends) {
     const repeat = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "decline" }, "ans-decline");
     assert.equal(repeat.result.carriedOut, 1, JSON.stringify(repeat));
     assert.equal(repeat.result.shown[0], "This answer (decline) was already given; this call finished what was left:");
+    // A repeated agreement whose change crashes again: it is not told as "nothing more was done", the change is told as still applying.
+    ctl.policy.value = "allow";
+    const f = await ctl.pending("Retire the old report job on Monday.", "report job", "Report task");
+    ctl.crash.n = 1;
+    const crashed = await call(w, w.ownerToken, OP, { decisionId: f.id, response: "agree" }, "ans-agree-twice");
+    assert.equal(crashed.result.stillApplying, true, JSON.stringify(crashed));
+    ctl.crash.n = 1;
+    const crashedAgain = await call(w, w.ownerToken, OP, { decisionId: f.id, response: "agree" }, "ans-agree-twice");
+    assert.deepEqual([crashedAgain.result.replayed, crashedAgain.result.stillApplying, crashedAgain.result.carriedOut], [true, true, 0], JSON.stringify(crashedAgain));
+    assert.deepEqual(crashedAgain.result.shown, ["This answer (agree) was already given; what was left could not be finished now:", "You agreed. None of its changes was carried out now.", STILL]);
+    assert.equal((await ctl.decision(f.id)).changes[0]!.state, "applying");
   });
 
   suite("an agreement that carries out the first change and stops before the second says the rest still wait, not that nothing started", async (w, script, ctl) => {
@@ -1241,6 +1272,44 @@ for (const backend of backends) {
     const claimed = await call(w, w.ownerToken, OP, { decisionId: g.id, response: "alternative", alternative: legacyAlt }, "old-alt");
     assert.equal(claimed.ok, false);
     assert.match(claimed.error.message, /but nothing shows which meeting decision it was for \(it was recorded before that was kept\), so it is not used for this one; your decision is not linked to it/);
+  });
+
+  suite("an alternative whose command ID is the answer's own, or that is in another project, is refused before anything is written", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const nothingWritten = async (label: string, altId: string) => {
+      const rec = await ctl.decision(d.id);
+      assert.deepEqual([rec.ownerResponse, rec.pendingAlternatives, rec.pendingAlternative, rec.ownerDecisionId], ["pending", undefined, undefined, undefined], label);
+      assert.equal(await w.decisions.get(w.owner, derivedId("dec", scopedCommandId(w.owner.id, altId))), undefined, `${label}: no owner decision was recorded`);
+    };
+    const same = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "ans-same") }, "ans-same");
+    assert.deepEqual([same.ok, same.error?.code], [false, "invalid_command"], JSON.stringify(same));
+    assert.match(same.error.message, /its commandId must differ from the answer's commandId/);
+    await nothingWritten("the same command ID", "ans-same");
+    const other = await w.project("B");
+    const elsewhere = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: { ...altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "alt-elsewhere"), projectId: other } }, "ans-elsewhere");
+    assert.deepEqual([elsewhere.ok, elsewhere.error?.code], [false, "invalid_command"], JSON.stringify(elsewhere));
+    assert.match(elsewhere.error.message, /must be in the meeting's project/);
+    await nothingWritten("another project", "alt-elsewhere");
+    // Both are still accepted once corrected.
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "alt-fixed") }, "ans-same")).ok, true);
+  });
+
+  suite("two new alternatives sent at once on a list one short of the bound: one is kept, the other is refused", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    await ctl.seed(d.id, { pendingAlternatives: Array.from({ length: 7 }, (_, n) => `dec-seeded${String(n).padStart(23, "0")}`) });
+    ctl.recordFail.n = 2;
+    // Both calls read the list of seven before either marks: each waits in the refusal check (just before the marker) until the other has reached it.
+    const realRefusal = w.decisions.refusal.bind(w.decisions);
+    let arrived = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((r) => { release = r; });
+    (w.decisions as { refusal: typeof w.decisions.refusal }).refusal = async (...a) => { if (++arrived === 2) release(); await barrier; return realRefusal(...a); };
+    const both = await Promise.all([0, 1].map((n) => call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: altArgs(ctl, "nightly build", `Keep the nightly build at hour ${n + 2}.`, `alt-race${n}`) }, `race${n}`)));
+    assert.equal(both.every((r) => r.ok === false), true, JSON.stringify(both));
+    assert.equal((await ctl.decision(d.id)).pendingAlternatives!.length, 8, JSON.stringify(both));
+    assert.equal(both.filter((r) => /^alternative: too many earlier alternatives to this meeting decision were begun/.test(String(r.error?.message))).length, 1, JSON.stringify(both));
+    assert.equal(arrived, 2, "both calls reached the marker");
+    ctl.recordFail.n = 0;
   });
 
   suite("an alternative that is not an object is refused cleanly", async (w, _script, ctl) => {

@@ -1241,6 +1241,8 @@ export class MeetingRecordService {
       // The checks the decision service makes on a fresh call are made on a reused one too: no unknown field, and a version that is a whole number.
       onlyKnown(command.alternative as unknown as Record<string, unknown>, ["commandId", "projectId", "taskId", "category", "topic", "statement", "wording", "gate", "source", "basedOn", "session", "stance"]);
       if (!Number.isSafeInteger(command.alternative.basedOn) || command.alternative.basedOn < 0) invalid("alternative", "basedOn must be the version this session saw (0 if nothing was decided yet)");
+      // Both command IDs are scoped to the owner the same way, so one shared by both would record the owner decision and then collide with the answer: refused before anything is written.
+      if (command.alternative.commandId === command.commandId) invalid("alternative", "its commandId must differ from the answer's commandId");
       if (this.#deps.decisions === undefined) throw new DomainError("unavailable", "owner decisions are not available here");
       const found = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
       if (found === undefined) throw new DomainError("not_found", "that decision does not exist");
