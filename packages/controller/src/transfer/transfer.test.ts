@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { MaintenanceBarrier } from "../backup/barrier.js";
-import { PostgresStorage, discardPostgresTransferCopy, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
+import { CONTROLLER_TABLES, PostgresStorage, discardPostgresTransferCopy, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
 import { postgresTargetDeps, transferTargetsFromConfig } from "./targets.js";
 import { commitWhileWaiting, startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
-import { foreignChangeSurvives, makeForeignChange, stateHolder, tableRows } from "../storage/postgres/testing/transfer-copy.js";
+import { commitStateRowWhileWaiting, foreignChangeSurvives, makeForeignChange, schemaTables, stateHolder, tableRows } from "../storage/postgres/testing/transfer-copy.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
@@ -747,6 +747,63 @@ test("the clean-up of a configured PostgreSQL destination drops every controller
       await discardPostgresTransferCopy(url, schema, `transfer-pending:${journal?.id}`); // the schema is already gone: nothing to do
     } finally { await finish(f); }
   }
+});
+
+test("CONTROLLER_TABLES names exactly the tables a fresh PostgreSQL open makes, so the clean-up's list is neither short nor long (card F04l)", async () => {
+  const url = (await server()).url();
+  const schema = `xt_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    await (await PostgresStorage.open({ connectionString: url, schema })).close();
+    assert.deepEqual([...CONTROLLER_TABLES].sort(), (await schemaTables(url, schema)).sort());
+  } finally { await dropPostgresSchema(url, schema); }
+});
+
+test("a second copy that commits its state row while the clean-up waits on it is not dropped: the clean-up locks the row and reads it again (card F04l)", async () => {
+  const url = (await server()).url();
+  const schema = `xk_${process.pid}_${counter++}_${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    await (await PostgresStorage.open({ connectionString: url, schema })).close(); // the open's own state row: holder NULL at epoch 0, which this clean-up would drop
+    const application = `nn-discard-race-${process.pid}`;
+    const named = new URL(url); named.searchParams.set("application_name", application);
+    // The other copy's write is uncommitted while the clean-up runs; it commits only once the clean-up is seen waiting on a lock.
+    const outcome = await commitStateRowWhileWaiting(url, schema, 3, "transfer-pending:xfer-other", application,
+      () => discardPostgresTransferCopy(named.toString(), schema, "transfer-pending:xfer-mine").then(() => "dropped", (error: Error) => error.message));
+    assert.match(outcome, /not this transfer's/);
+    assert.equal(await postgresSchemaExists(url, schema), true, "the other copy's schema is still there");
+    assert.deepEqual((await schemaTables(url, schema)).sort(), [...CONTROLLER_TABLES].sort(), "every table is still there");
+    assert.equal(await stateHolder(url, schema), "transfer-pending:xfer-other");
+  } finally { await dropPostgresSchema(url, schema); }
+});
+
+test("a copy that fails after rows were written to a target without discard tells the owner to empty it by hand, and the journal says it is not clean (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const inner = await sqlTarget(f, "dest.sqlite");
+    const target: TransferTarget = { name: inner.name, kind: inner.kind, fingerprint: inner.fingerprint, open: inner.open, ...(inner.freeBytes === undefined ? {} : { freeBytes: inner.freeBytes }) };
+    const svc = await service(f, [target], { pageSize: 2, inject: (p) => { if (p === "copy:deliveries") throw new Error("copy failed"); } });
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), (e: Error) => {
+      assert.match(e.message, /copy failed/);
+      assert.ok(e.message.endsWith(" The partial copy is still at the destination; empty it by hand before another transfer there."), e.message);
+      return true;
+    });
+    assert.equal((await readJournal(st(f)))?.failure?.destinationClean, false);
+  } finally { await finish(f); }
+});
+
+test("a clean-up that fails with the address in its reason reaches the owner with the address hidden by the target's redact (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const address = "postgres://nnuser:discard-pw@db.example.com:5433/nimble";
+    const inner = await sqlTarget(f, "dest.sqlite");
+    const target: TransferTarget = { ...inner, discard: async () => { throw new Error(`could not empty ${address} (discard-pw)`); }, redact: (text) => text.split(address).join("[address hidden]").split("discard-pw").join("[address hidden]") };
+    const svc = await service(f, [target], { pageSize: 2, inject: (p) => { if (p === "copy:deliveries") throw new Error("copy failed"); } });
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), (e: Error) => {
+      assert.match(e.message, /partial copy was not removed from the destination \(could not empty \[address hidden\]/);
+      assert.ok(!e.message.includes("discard-pw") && !e.message.includes("postgres://"), e.message);
+      return true;
+    });
+    assert.equal((await readJournal(st(f)))?.failure?.destinationClean, false);
+  } finally { await finish(f); }
 });
 
 test("PostgresStorage.open reports whether its own transaction created the schema (card F04l)", async () => {

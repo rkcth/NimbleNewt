@@ -1,4 +1,4 @@
-import { withClient } from "./server.js";
+import { commitWhileWaiting, withClient } from "./server.js";
 
 /**
  * SQL the database transfer tests need around a destination schema (card F04l): things someone else does to it while a copy runs, and reads of what is left.
@@ -39,4 +39,17 @@ export async function stateHolder(url: string, schema: string): Promise<string |
 /** How many rows the table holds. */
 export async function tableRows(url: string, schema: string, table: string): Promise<number> {
   return withClient(url, async (c) => Number((await c.query(`SELECT count(*)::int AS n FROM ${schema}.${table}`)).rows[0]?.n));
+}
+
+/** The names of the tables in the schema, sorted (for checking `CONTROLLER_TABLES` against what an open really makes). */
+export async function schemaTables(url: string, schema: string): Promise<string[]> {
+  return withClient(url, async (c) => (await c.query("SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename COLLATE \"C\"", [schema])).rows.map((r: { tablename: string }) => r.tablename));
+}
+
+/**
+ * A second copy's race with a clean-up: in a transaction left open, the schema's state row is given `epoch` and `holder` (as another copy's final write would);
+ * `start()` runs with that row locked; once a session named `application` waits on a lock (in any statement), the transaction commits. Returns what `start()` settles to.
+ */
+export async function commitStateRowWhileWaiting<T>(url: string, schema: string, epoch: number, holder: string, application: string, start: () => Promise<T>): Promise<T> {
+  return commitWhileWaiting(url, [`UPDATE ${schema}.state SET epoch = ${String(Math.trunc(epoch))}, holder = '${holder.replace(/'/g, "''")}'`], application, "", start);
 }
