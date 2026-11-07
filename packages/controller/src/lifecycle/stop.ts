@@ -516,7 +516,7 @@ export class StopService {
 
   /**
    * Records that a request is waiting on an attempt's pending charge written by ANOTHER request (its own cleanup found that note and could not pay it), in the same open index the sweep reads, so the sweep clears this request's
-   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; after six lost races in a row it throws a retryable error, so the pass does not go on (the request stays live and the sweep carries it on, charging again), never returning with the wait unrecorded.
+   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; after six lost races in a row it throws a retryable error, so the pass does not go on (the request stays live and the sweep carries it on, charging again), never returning with the wait unrecorded. Callers: a request's own pass (`advance`: the error ends the pass, which the sweep carries on), the sweep's charge of a wanted figure (`#retryCharges`: that entry counts as not made and is tried again by the next sweep, the other entries go on), and the lost-races path of `#charge` (same as the first).
    */
   async #waitOn(attemptId: string, intentId: string, want?: { costMicros: number; computeMs: number }): Promise<void> {
     const openRef: AggregateRef = { kind: OPEN, id: attemptId };
@@ -633,7 +633,8 @@ export class StopService {
         if (ok && open.want !== undefined) {
           const have = (await this.#runner.get(CHARGE, rec.id))?.body as unknown as ChargeBody | undefined;
           if (have === undefined || have.costMicros < open.want.costMicros || have.computeMs < open.want.computeMs) {
-            const wanted = await this.#charge(open.want.intentId, by, [{ attemptId: rec.id, costMicros: open.want.costMicros, computeMs: open.want.computeMs }]);
+            // One contended entry (its wait lost six races) holds back only itself: the want stays on the entry, so the next sweep tries again, and the other entries go on.
+            const wanted = await this.#charge(open.want.intentId, by, [{ attemptId: rec.id, costMicros: open.want.costMicros, computeMs: open.want.computeMs }]).catch((e: unknown) => { if (e instanceof DomainError && e.code === "stale_revision") return { costMicros: 0, failed: true }; throw e; });
             ok = !wanted.failed;
           }
         }

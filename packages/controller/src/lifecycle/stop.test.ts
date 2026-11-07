@@ -788,7 +788,16 @@ for (const backend of backends) {
     await c.stops.advance(c.owner, { intentId: y.intentId });
     c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 20, computeMs: 0 }] }, { remaining: [], costs: [{ attemptId: "att-a", costMicros: 30, computeMs: 0 }] }];
     const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
-    await Promise.allSettled([c.stops.advance(c.owner, { intentId: x.intentId }), c.stops.advance(c.owner, { intentId: x.intentId })]);
+    // Both passes are inside the runtime's cleanup before either goes on (without this one pass can finish the request before the other starts, and only one figure is ever reported).
+    let entered = 0;
+    let both!: () => void;
+    const ready = new Promise<void>((r) => { both = r; });
+    const cleanup = c.rt.cleanup.bind(c.rt);
+    c.rt.cleanup = async (s, o) => { if (++entered === 2) both(); await ready; return cleanup(s, o); };
+    const results = await Promise.allSettled([c.stops.advance(c.owner, { intentId: x.intentId }), c.stops.advance(c.owner, { intentId: x.intentId })]);
+    assert.equal(entered, 2, "both passes reached the runtime");
+    // A pass may lose six races in a row under load and fail with the retryable error; nothing else is acceptable.
+    for (const r of results) if (r.status === "rejected") { assert.ok(r.reason instanceof DomainError, String(r.reason)); assert.equal(r.reason.code, "stale_revision"); }
     c.rt.failCharges = 0;
     for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
     assert.equal(sumOf(c, "att-a"), 30, "the highest figure either pass reported");
@@ -1046,6 +1055,38 @@ for (const backend of backends) {
     for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
     assert.equal(sumOf(c, "att-a"), 30);
     assert.equal(((await c.runner.get("stop-intent", x.intentId))!.body as { phase: string }).phase, "done");
+  });
+
+  suite("an entry whose wanted figure cannot be charged because its wait keeps losing races holds back only itself: the sweep still pays and clears the others (card L02d review 8)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.failCharges = 1000;
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 10, computeMs: 0 }] }];
+    const y = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "suspend", reason: "y" });
+    await c.stops.advance(c.owner, { intentId: y.intentId });
+    // The contended entry: a Stop wanted 30 on att-a behind the agent's unpaid note.
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 30, computeMs: 0 }];
+    const r = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" });
+    await c.stops.advance(c.owner, { intentId: r.intentId });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    // The unrelated entry: a Force Stop's own unpaid note on att-b.
+    c.rt.terminateCosts = [{ attemptId: "att-b", costMicros: 40, computeMs: 0 }];
+    const rb = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "rb" });
+    assert.equal(await outcomeMarked(c, r.intentId), true);
+    assert.equal(await outcomeMarked(c, rb.intentId), true);
+    c.rt.failCharges = 0;
+    const lose = tap(c, async (input) => {
+      const lost = input.changes.some((z) => z.ref.kind === "stop-charge" && z.body?.["pending"] !== undefined) || (input.changes.some((z) => z.ref.kind === "stop-charge-open") && !input.changes.some((z) => z.ref.kind === "stop-charge"));
+      if (lost) throw new DomainError("stale_revision", "someone else wrote it");
+    });
+    await c.stops.sweep(c.owner);
+    lose();
+    assert.equal(sumOf(c, "att-b"), 40, "the unrelated entry was paid in the same sweep");
+    assert.equal(await outcomeMarked(c, rb.intentId), false, "and its request cleared");
+    assert.equal(await outcomeMarked(c, r.intentId), true, "the contended one waits");
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-a"), 30);
+    assert.equal(await outcomeMarked(c, r.intentId), false);
+    assert.equal((await openEntries(c)).length, 0);
   });
 
   suite("a wanted figure survives a sweep that stops after the note was paid and before the rest was charged (card L02d review 6, G)", async (c) => {
