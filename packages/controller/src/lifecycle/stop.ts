@@ -65,6 +65,11 @@ export interface StopIntentBody {
   readonly reusedFrom?: string;
   /** Set once the ending of execution (terminate) has run and its cost was billed (a charge that failed leaves the request marked unpaid). */
   readonly ended?: true;
+  /**
+   * Figures this request's own pass reported but could not record anywhere else (the attempt's note and its wait both lost six races): per attempt the highest one. The sweep charges them and takes each off once it is charged;
+   * until then the request counts as unpaid. Bounded by the inventory limit. Records written by older builds have none.
+   */
+  readonly owed?: readonly { readonly attemptId: string; readonly costMicros: number; readonly computeMs: number }[];
   readonly inventory: readonly InventoryItem[];
   /** The attempts the runtime saw for the scope while preparing (so a process of one that ended meanwhile is still asked about after a restart). */
   readonly attempts?: readonly string[];
@@ -360,6 +365,8 @@ export class StopService {
       for (const rec of page) {
         after = rec.id;
         const b = rec.body as unknown as StopIntentBody;
+        // What a pass could not record anywhere else is charged first (see `owed`), for a finished request too.
+        if ((b.owed?.length ?? 0) > 0) await this.#payOwed(by, rec.id).catch(() => undefined);
         if (TERMINAL.includes(b.phase)) continue;
         try { await this.advance(by, { intentId: rec.id }); advanced.push(rec.id); } catch { failed.push(rec.id); }
       }
@@ -402,7 +409,8 @@ export class StopService {
     const found = id === undefined ? undefined : (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
     if (found === undefined || id === undefined) return undefined;
     const attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] = [];
-    let ownPending = false;
+    // A figure the request's own pass could not record elsewhere is its debt too.
+    let ownPending = (found.owed?.length ?? 0) > 0;
     for (const attemptId of (found.attempts ?? []).slice(0, STOP_LIMITS.inventory)) {
       const charge = (await this.#runner.get(CHARGE, attemptId))?.body as unknown as ChargeBody | undefined;
       if (charge === undefined) continue;
@@ -493,7 +501,7 @@ export class StopService {
         if (have.pending !== undefined) {
           const paid = await this.#payPending(c.attemptId);
           billed += paid.billed;
-          if (!paid.ok) { await this.#waitOn(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; done = true; break; }
+          if (!paid.ok) { await this.#wait(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; done = true; break; }
           found = await this.#runner.get(CHARGE, c.attemptId);
           have = (found?.body as unknown as ChargeBody | undefined) ?? { costMicros: 0, computeMs: 0 };
           // Another request noted a new charge right after the one we paid: ours is never written over it (that charge would be made twice); look again and pay it first.
@@ -509,14 +517,57 @@ export class StopService {
         if (!paid.ok) failed = true;
         done = true;
       }
-      if (!done) { await this.#waitOn(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; }
+      if (!done) { await this.#wait(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; }
     }
     return { costMicros: billed, failed };
   }
 
   /**
+   * Records the figure a request could not charge now: in the attempt's open entry (`#waitOn`), or, when that entry keeps changing, on the request's OWN record as `owed` (a record only that request's passes write), so the figure is
+   * never left unrecorded. The error never reaches the caller: `#charge` reports the charge as failed, the request counts as unpaid, and the sweep charges what is owed (`#payOwed`). Only a record that cannot be written either
+   * (six lost races on it too) throws, and then the pass is left unfinished and retried.
+   */
+  async #wait(attemptId: string, intentId: string, want: { costMicros: number; computeMs: number }): Promise<void> {
+    try { await this.#waitOn(attemptId, intentId, want); } catch (error) {
+      if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
+      await this.#update(intentId, (x) => {
+        const have = (x.owed ?? []).find((o) => o.attemptId === attemptId);
+        const merged = { attemptId, costMicros: Math.max(have?.costMicros ?? 0, want.costMicros), computeMs: Math.max(have?.computeMs ?? 0, want.computeMs) };
+        return { ...x, owed: [...(x.owed ?? []).filter((o) => o.attemptId !== attemptId), merged].slice(-STOP_LIMITS.inventory) };
+      });
+    }
+  }
+
+  /**
+   * Charges what a request owes (see `owed`), per attempt, and takes an entry off only once it is charged, and only if no higher figure was added meanwhile. The charge uses the same derived command ID as any other, so charging
+   * again after a crash or by two sweeps at once never pays twice. When nothing is owed any more, a finished request's "not charged" mark is taken off unless an open entry still lists the request (the sweep clears it there).
+   */
+  async #payOwed(by: Principal, id: string): Promise<void> {
+    // Without a way to charge nothing is charged, so nothing owed is taken off.
+    if (this.#ports.charge === undefined) return;
+    const owed = ((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.owed ?? [];
+    for (const o of owed) {
+      const r = await this.#charge(id, by, [o]);
+      if (r.failed) continue;
+      await this.#update(id, (x) => {
+        const rest = (x.owed ?? []).filter((e) => !(e.attemptId === o.attemptId && e.costMicros <= o.costMicros && e.computeMs <= o.computeMs));
+        const { owed: _gone, ...others } = x;
+        return rest.length === 0 ? others as StopIntentBody : { ...others, owed: rest };
+      });
+    }
+    const now = (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
+    if (now === undefined || (now.owed?.length ?? 0) > 0 || !TERMINAL.includes(now.phase) || now.outcome?.unresolved.includes(CLEANUP_UNPAID) !== true) return;
+    for (let after: string | undefined, pages = 0; pages < RETRY_PAGES; pages++) {
+      const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const rec of page) { after = rec.id; if ((rec.body as unknown as OpenBody).intents.includes(id)) return; }
+      if (page.length < 100) break;
+    }
+    await this.#update(id, (x) => (x.outcome === undefined || (x.owed?.length ?? 0) > 0 || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
+  }
+
+  /**
    * Records that a request is waiting on an attempt's pending charge written by ANOTHER request (its own cleanup found that note and could not pay it), in the same open index the sweep reads, so the sweep clears this request's
-   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; after six lost races in a row it throws a retryable error, so the pass does not go on (the request stays live and the sweep carries it on, charging again), never returning with the wait unrecorded. Callers: a request's own pass (`advance`: the error ends the pass, which the sweep carries on), the sweep's charge of a wanted figure (`#retryCharges`: that entry counts as not made and is tried again by the next sweep, the other entries go on), and the lost-races path of `#charge` (same as the first).
+   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; after six lost races in a row it throws a retryable error, so the pass does not go on (the request stays live and the sweep carries it on, charging again), never returning with the wait unrecorded. Called only from `#wait`.
    */
   async #waitOn(attemptId: string, intentId: string, want?: { costMicros: number; computeMs: number }): Promise<void> {
     const openRef: AggregateRef = { kind: OPEN, id: attemptId };
