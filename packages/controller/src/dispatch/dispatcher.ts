@@ -990,7 +990,7 @@ export class DispatcherService {
    * The check's key names the attempt, the checkpoint and the model it is about to run on, so a re-chosen route is a different check (the service refuses a command ID reused with other content). A live check of the task that is not this attempt's
    * is stale and is cancelled; a cancelled check of this attempt is started again under a new key, at most RESUME_RESTARTS times, and then the owner gets a blocker; a blocked check whose blocker is dealt with is retried here.
    */
-  async #resumeCheck(attemptId: string, taskId: string, projectId: string, route: string): Promise<string | { commit: PendingResumeCommit } | undefined> {
+  async #resumeCheck(attemptId: string, taskId: string, title: string, projectId: string, route: string): Promise<string | { commit: PendingResumeCommit } | undefined> {
     const resumes = this.#deps.resumes;
     const b = (await this.#load(attemptId))?.body;
     if (resumes === undefined || b === undefined || b.resumeFrom === undefined) return undefined;
@@ -1036,7 +1036,7 @@ export class DispatcherService {
       if (check.phase === "ready") {
         // A check that holds changes judged to matter is not committed by the dispatcher: the owner decides (`resume.approve`). The commit itself comes last, just before the start (card L04c).
         const relevant = relevantChanges(check);
-        if (relevant.length > 0) return this.#holdForReview(attemptId, taskId, projectId, check, relevant);
+        if (relevant.length > 0) return this.#holdForReview(attemptId, title, projectId, check, relevant);
         return { commit: { checkId: check.id, commandId: `${key}-commit` } };
       }
       if (check.phase === "done") { await this.#settleHold(check.id, projectId); return undefined; }
@@ -1054,12 +1054,13 @@ export class DispatcherService {
   }
 
   /** A ready resume check that holds changes judged to matter waits for the owner. The owner is told once (the command ID is the check's), in words that match the stored check. */
-  async #holdForReview(attemptId: string, taskId: string, projectId: string, check: { id: string }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
+  async #holdForReview(attemptId: string, title: string, projectId: string, check: { id: string }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
     const names = relevant.slice(0, 3).map((i) => `${i.kind} ${i.key} (${i.status})`).join(", ");
     const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
     await this.#deps.notifications?.emitFromController({
       commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: check.id }, projectId,
-      detail: `Task ${taskId} is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve to let it go on, or decline to release it.`.slice(0, 200),
+      // The owner is shown the task by its title (quoted, on one line, cut short so what changed still fits), never by its ID.
+      detail: `"${title.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 60)}" is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve to let it go on, or decline to release it.`.slice(0, 200),
     }).catch((error: unknown) => this.#options.onError?.(error));
     return `the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); attempt ${attemptId} waits until the owner approves the resume (resume.approve) or declines it, which releases the task (resume.decline)`.slice(0, 500);
   }
@@ -1170,7 +1171,7 @@ export class DispatcherService {
     const gap = this.#deps.harnesses.checkAttempt(recovery, chosen.harness);
     if (gap !== undefined) return block("harness", "dispatch_blocked", gap);
     // 5b. A checked resume (card L04c): an attempt that carries earlier work back is checked first, with the model it is about to run on.
-    const resumed = await this.#resumeCheck(attemptId, taskId, task.projectId, chosen.route);
+    const resumed = await this.#resumeCheck(attemptId, taskId, task.title, task.projectId, chosen.route);
     if (typeof resumed === "string") return skip("resume", resumed);
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {

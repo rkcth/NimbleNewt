@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { ResumeCheckService, type ResumePorts } from "../continuation/index.js";
+import { ContinuationService, ResumeCheckService, type ResumePorts } from "../continuation/index.js";
 import { DomainError } from "../domain/errors.js";
 import { NotificationService } from "../notifications/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -8,6 +8,12 @@ import { buildWorld, workGrants, type DispatchWorld } from "./testing/world.js";
 import type { DispatcherDeps, RouteResolver } from "./dispatcher.js";
 
 after(stopServer);
+const CAPTURE = {
+  identity: "conv-1", agent: "agent:ann", boundary: { kind: "turn-complete" as const }, checkpoint: { format: 2, conversationId: 7, at: 41, digest: `v1:sha256:${"a".repeat(64)}`, runtime: { name: "pi-durable", version: "1.3.0" } }, durable: { verified: true },
+  continuation: { artifacts: [], decisions: [], pendingEffects: [], budget: { spent: 1, remaining: 9, unit: "k-tokens" }, nextStep: "run the tests" },
+  manifest: { summaryLineage: [], sourceRanges: [{ source: "history", from: 1, to: 41 }], compression: { state: "none" as const, compactions: 0 }, branches: [], messageCursor: 41, routingRevision: 1, environmentRevision: 1, adapter: { name: "pi-durable", version: "1.3.0" } },
+  nonCheckpointableTools: [], scratchRecords: [], credentialRefs: [],
+};
 
 // Card L04c: the resume commit comes last, just before the start; a check that holds changes judged to matter waits for the owner; the commit is recorded once across a crash and a retry.
 const deferred = <T>(): { promise: Promise<T>; resolve: (v: T) => void } => { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };
@@ -15,15 +21,18 @@ const deferred = <T>(): { promise: Promise<T>; resolve: (v: T) => void } => { le
 class Fakes {
   relevant = false;
   failResumeOnce = false;
+  /** Whether the fake record asks the check's guard first (the real one writes it with the record). Off: the record is written whatever the attempt's state, so a test sees what the commit alone prevents. */
+  guarded = false;
   resumeCalls: string[] = [];
   resumeRecorded = new Set<string>();
   seen = new Map<string, string>();
   told: { commandId: string; detail: string; level?: string }[] = [];
   continuations = {
     latest: async () => ({ id: "cnt-aaaaaaaaaaaaaaaaaaaa" } as never),
-    resume: async (_by: unknown, c: { commandId: string }) => {
+    resume: async (_by: unknown, c: { commandId: string }, o?: { guard?: () => Promise<unknown> }) => {
       this.resumeCalls.push(c.commandId);
       if (this.failResumeOnce) { this.failResumeOnce = false; throw new Error("disk hiccup during the resume"); }
+      if (this.guarded) await o?.guard?.();
       this.resumeRecorded.add(c.commandId);
       return { identity: "conv", continuation: { id: "cnt-aaaaaaaaaaaaaaaaaaaa" } as never, modelChanged: false, replayed: false };
     },
@@ -132,12 +141,13 @@ for (const backend of backends) {
     assert.equal(check.phase, "ready", "the stored check is exactly as the owner is told: ready and uncommitted");
     assert.deepEqual(f.resumeCalls, []);
     // The held list is the owner's: the needs-you answer reads it, nobody else does.
-    assert.deepEqual((await real.held(c.owner, 10)).items.map((h) => [h.checkId, h.changes.map((x) => x.key)]), [[check.id, ["/src/a.ts"]]]);
+    assert.deepEqual((await real.held(c.owner, 10)).items.map((h) => [h.checkId, h.title, h.changes.map((x) => x.key)]), [[check.id, "long job", ["/src/a.ts"]]]);
     assert.deepEqual((await real.held(c.dispatcherPrincipal, 10)).items, []);
     const told = await held();
     assert.equal(told.length, 1, "one notification however many ticks");
     assert.deepEqual([told[0]!.level, told[0]!.ref.id, told[0]!.count], ["needs-you", check.id, 1]);
-    assert.match(told[0]!.detail ?? "", new RegExp(`Task ${a.taskId} is held before it resumes: 1 change\\(s\\) since it stopped matter to it: file /src/a\\.ts \\(changed\\)\\. Approve to let it go on, or decline to release it\\.$`));
+    assert.ok(!(told[0]!.detail ?? "").includes(a.taskId), "the owner is shown the task's title, not its ID");
+    assert.match(told[0]!.detail ?? "", new RegExp(`^"long job" is held before it resumes: 1 change\\(s\\) since it stopped matter to it: file /src/a\\.ts \\(changed\\)\\. Approve to let it go on, or decline to release it\\.$`));
     // The dispatcher (a service) and the agent cannot get past the hold by committing the check themselves.
     // Refused before anything is looked at again, even when the inputs moved meanwhile: a refused commit does not start the check over.
     f.detail = "moved meanwhile";
@@ -560,5 +570,196 @@ for (const backend of backends) {
     await assert.rejects(svc.decline(c.owner, { commandId: "d", taskId: a.taskId }), /is ready and holds no change judged to matter/);
     assert.equal((await real.get(c.owner, check.id))!.phase, "ready");
     assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "assigned");
+  });
+
+  // Card L04c review F1/F2: an approval and a release (the owner's decline, or any other) never both win: no resume is recorded for an attempt that has ended, and the owner is told what happened.
+  const ORPHANED_APPROVE = "not approved: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so there is nothing to let go on";
+  const until = async (what: () => Promise<boolean>) => { for (let i = 0; i < 500 && !(await what()); i++) await new Promise((r) => setTimeout(r, 2)); assert.ok(await what(), "the awaited state was reached"); };
+
+  suite("a decline whose release lands while an approval looks at the inputs again: the approval is refused, the decline stands, no resume is recorded", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const d = go();
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const released = deferred<void>(); const approved = deferred<void>();
+    const svc = declining(c, f, async (by, taskId, attemptId) => { await releaseOf(c)(by, taskId, attemptId); released.resolve(undefined); await approved.promise; });
+    let declining_: Promise<unknown> | undefined;
+    // Inside the approval's own look at the inputs (after it saw the attempt active): the decline runs up to and through its release, and finishes only after the approval.
+    f.during = async () => { declining_ = svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }); await released.promise; };
+    await assert.rejects(svc.approve(c.owner, { commandId: "o1", taskId: a.taskId }), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && e.message === ORPHANED_APPROVE);
+    approved.resolve(undefined);
+    const declined = (await declining_) as Awaited<ReturnType<ResumeCheckService["decline"]>>;
+    assert.deepEqual([declined.id, declined.phase, declined.history.at(-1)!.note], [check.id, "cancelled", "declined by the owner"]);
+    assert.deepEqual(f.resumeCalls, [], "no resume recorded for the released attempt");
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "released");
+    for (let i = 0; i < 2; i++) { const t = await d.tick(); await d.idle(); assert.deepEqual(t.started, []); }
+    assert.deepEqual(f.resumeCalls, []);
+  });
+
+  suite("a decline that completes while an approval looks at the inputs again: the approval says it was declined meanwhile", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const svc = declining(c, f, releaseOf(c));
+    f.during = async () => { assert.equal((await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId })).phase, "cancelled"); };
+    await assert.rejects(svc.approve(c.owner, { commandId: "o1", taskId: a.taskId }), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && e.message === "not approved: the resume was declined meanwhile (the task is released), so nothing is resumed");
+    assert.deepEqual(f.resumeCalls, []);
+    void real;
+  });
+
+  suite("a plain release while an approval looks at the inputs again: the approval is refused and nothing is recorded", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const d = go();
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    f.during = async () => { const asg = (await c.assignments.getAssignment(a.taskId))!; await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision }); };
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && e.message === ORPHANED_APPROVE);
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "not committed");
+    assert.deepEqual(f.resumeCalls, []);
+    for (let i = 0; i < 2; i++) { await d.tick(); await d.idle(); }
+    assert.equal((await real.get(c.owner, check.id))!.phase, "cancelled");
+    assert.deepEqual(f.resumeCalls, []);
+  });
+
+  suite("a release while the dispatcher's own commit looks at the inputs again: nothing is committed or recorded and nothing starts", async (c, f, real, a, go) => {
+    let busy = true;
+    const d = go({ workspaceBusy: async () => busy });
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.equal(check.phase, "ready");
+    busy = false;
+    f.during = async () => { const asg = (await c.assignments.getAssignment(a.taskId))!; await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision }); };
+    const t = await d.tick();
+    await d.idle();
+    assert.deepEqual(t.started, []);
+    assert.match(t.skipped[0]!.reason, /could not be committed: not committed: the attempt this resume check was for is no longer the task's active attempt/);
+    assert.deepEqual(f.resumeCalls, [], "no resume recorded");
+    assert.notEqual((await real.get(c.owner, check.id))!.phase, "done");
+  });
+
+  suite("a release landing after the commit but before the resume is recorded: the record's own write refuses it, the check ends cancelled, the approval is refused", async (c, f, real, a, go) => {
+    f.relevant = true;
+    const continuations = ContinuationService.withEpoch(c.storage, c.epoch, { clock: c.options.clock! });
+    await continuations.capture(c.owner, { commandId: "cap", taskId: a.taskId, ...CAPTURE });
+    f.continuations.latest = ((by: never, taskId: string) => continuations.latest(by, taskId)) as never;
+    const d = go();
+    await d.tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.equal(check.phase, "ready");
+    // The release lands after the guard read the attempt as active and before the record is written: the write's own check of the attempt refuses it.
+    let raced = false;
+    f.continuations.resume = (async (by: never, cmd: never, o: { guard: () => Promise<never> }) => continuations.resume(by, cmd, { guard: async () => {
+      const g = await o.guard();
+      if (!raced) { raced = true; const asg = (await c.assignments.getAssignment(a.taskId))!; await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision }); }
+      return g;
+    } })) as never;
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && e.message === ORPHANED_APPROVE);
+    assert.ok(raced);
+    assert.deepEqual(await c.storage.listAggregates("continuation-resume", { limit: 10 }), [], "no resume recorded for the released attempt");
+    const after = (await real.get(c.owner, check.id))!;
+    assert.deepEqual([after.phase, after.history.at(-1)!.note], ["cancelled", "attempt-ended"]);
+    for (let i = 0; i < 2; i++) { const t = await d.tick(); await d.idle(); assert.deepEqual(t.started, []); }
+    assert.deepEqual(await c.storage.listAggregates("continuation-resume", { limit: 10 }), []);
+  });
+
+  suite("an approval committed just before the decline's release cannot record its resume: the decline carries it on and answers cancelled", async (c, f, real, a, go) => {
+    f.relevant = true;
+    f.guarded = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    // The approval commits (the attempt still active) and stops before recording; the decline's release then ends the attempt.
+    const hold = deferred<void>();
+    const record = f.continuations.resume;
+    let first = true;
+    f.continuations.resume = (async (...args: Parameters<typeof record>) => { if (first) { first = false; await hold.promise; } return record(...args); }) as never;
+    let approving: Promise<unknown> | undefined;
+    const svc = declining(c, f, async (by, taskId, attemptId) => {
+      approving = svc.approve(c.owner, { commandId: "o1", taskId: a.taskId }).catch((e: unknown) => e);
+      await until(async () => (await real.get(c.owner, check.id))!.phase === "executing");
+      await releaseOf(c)(by, taskId, attemptId);
+    });
+    const declined = await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId });
+    assert.deepEqual([declined.id, declined.phase], [check.id, "cancelled"], "the decline answers where the check ends, not executing");
+    hold.resolve(undefined);
+    const approval = await approving;
+    assert.ok(approval instanceof DomainError && approval.code === "invalid_transition" && approval.message === ORPHANED_APPROVE, String(approval));
+    assert.deepEqual([...f.resumeRecorded], [], "no resume recorded");
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "released");
+  });
+
+  suite("a decline of a check left committing when its attempt was released (a crash, then a release) ends it cancelled and finishes the decline", async (c, f, real, a, go) => {
+    f.relevant = true;
+    f.guarded = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    f.failResumeOnce = true;
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), /disk hiccup/);
+    assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
+    const asg = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision });
+    const declined = await declining(c, f, async () => { throw new Error("must not release"); }).decline(c.owner, { commandId: "d1", taskId: a.taskId });
+    assert.deepEqual([declined.id, declined.phase], [check.id, "cancelled"]);
+    assert.deepEqual([...f.resumeRecorded], [], "no resume recorded");
+  });
+
+  suite("a decline command ID used again for another task is refused as a conflict", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const svc = declining(c, f, releaseOf(c));
+    assert.equal((await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId })).phase, "cancelled");
+    const other = await c.task("another job", { aid: "ann" });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: other.taskId }), isCode("command_conflict", /already used to decline another task's resume/));
+    assert.equal((await c.assignments.getAssignment(other.taskId))!.state, "assigned");
+    void real;
+  });
+
+  suite("a resume not held for the owner whose task was released another way cannot be declined", async (c, f, real, a, go) => {
+    await go({ workspaceBusy: async () => true }).tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.deepEqual([check.phase, check.attemptId], ["ready", a.attemptId]);
+    const asg = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision });
+    const svc = declining(c, f, async () => { throw new Error("must not release"); });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_command", /is ready and holds no change judged to matter/));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "not cancelled as declined");
+  });
+
+  suite("a decline cancels a check an approval started over during the release (it is verifying, not ready)", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const gate = deferred<void>();
+    let stall = false;
+    const effects = f.ports.uncertainEffects;
+    f.ports.uncertainEffects = async (taskId, cont) => { if (stall) { stall = false; await gate.promise; } return effects(taskId, cont); };
+    let approving: Promise<unknown> | undefined;
+    const svc = declining(c, f, async (by, taskId, attemptId) => {
+      // The inputs move and the owner approves: the approval starts the check over and stops while it is verifying again.
+      f.detail = "changed again"; stall = true;
+      approving = svc.approve(c.owner, { commandId: "o1", taskId: a.taskId }).catch((e: unknown) => e);
+      await until(async () => (await real.get(c.owner, check.id))!.phase === "verifying" && !stall);
+      await releaseOf(c)(by, taskId, attemptId);
+    });
+    const declined = await svc.decline(c.owner, { commandId: "d1", taskId: a.taskId });
+    assert.deepEqual([declined.phase, declined.history.at(-1)!.note], ["cancelled", "declined by the owner"]);
+    gate.resolve(undefined);
+    const approval = await approving;
+    assert.ok(approval instanceof DomainError && approval.message === "not approved: the resume was declined meanwhile (the task is released), so nothing is resumed", String(approval));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "cancelled");
+    assert.deepEqual(f.resumeCalls, []);
+  });
+
+  suite("a decline after the task was transferred and the new owner released it is refused: the declined attempt was not released", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const bob = await c.agent("bob", workGrants(c.project, []));
+    const asg = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.transferTask({ commandId: "tr", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision, to: { kind: "agent", id: bob.aid } });
+    const moved = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: moved.revision });
+    assert.equal((await real.forTask(c.dispatcherPrincipal, a.taskId))!.id, check.id, "the old check is still the task's current one");
+    const svc = declining(c, f, async () => { throw new Error("must not release"); });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_transition", /^not declined: the attempt this resume check was for is no longer the task's active attempt/));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "not cancelled as declined");
   });
 }

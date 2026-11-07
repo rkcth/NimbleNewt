@@ -1271,9 +1271,9 @@ for (const backend of backends) {
   });
 
   suite("a resume held for the owner is named in the needs-you list with what to do, and a cut list says held resumes may be missing (card L04c)", async (c) => {
-    const one = { checkId: "rck-held", taskId: "task-held", since: "2000-01-01T00:00:00.000Z", changes: [{ kind: "file", key: "/src/a.ts", status: "changed" }] };
+    const one = { checkId: "rck-held", taskId: "task-held", title: "Tidy the garden", since: "2000-01-01T00:00:00.000Z", changes: [{ kind: "file", key: "/src/a.ts", status: "changed" }] };
     const whole = (await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: false }) }).needsYou(c.owner))!;
-    assert.ok(whole.lines.some((l) => l.text === "Task task-held is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a.ts (changed) (approve the resume to let it go on, or decline it, which releases the task); since 2000-01-01T00:00:00.000Z."), JSON.stringify(whole.lines.map((l) => l.text)));
+    assert.ok(whole.lines.some((l) => l.text === "\"Tidy the garden\" is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a.ts (changed) (approve the resume to let it go on, or decline it, which releases the task); since 2000-01-01T00:00:00.000Z."), JSON.stringify(whole.lines.map((l) => l.text)));
     assert.ok(!whole.truncated.includes("held resumes"));
     const cut = (await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: true }) }).needsYou(c.owner))!;
     assert.ok(cut.truncated.includes("held resumes"), "a source that had more than was read is named");

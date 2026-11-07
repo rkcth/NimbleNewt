@@ -132,7 +132,8 @@ for (const store of stores) {
           // The owner can ask what waits for them and finds the held resume with what changed; an agent does not.
           const needs = await call(boot.token, "status.ask", { request: { kind: "needs_you" } });
           const said = (needs.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
-          assert.match(said, new RegExp(`Task ${task} is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a\\.ts \\(changed\\) \\(approve the resume`));
+          assert.ok(said.split("\n").filter((l) => l.includes("held before it resumes")).every((l) => !l.includes(task)), "the owner is shown the task's title, not its ID");
+          assert.match(said, new RegExp(`"weed" is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a\\.ts \\(changed\\) \\(approve the resume`));
           assert.equal((await call(ann, "resume.decline", { taskId: task }, "a4")).error.code, "forbidden", "declining is the owner's too");
           // The dispatcher's notice that the resume is held (same command ID and reference): the controller's approval closes it.
           const notifications = NotificationService.withEpoch(c.storage, c.epoch);
@@ -200,6 +201,53 @@ for (const store of stores) {
       const after = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[];
       assert.ok(after.every((l) => !l.text.includes("held before it resumes")), "no longer said to be held");
       assert.equal((await call(boot.token, "resume.approve", { taskId: task }, "o3")).error.code, "invalid_command", "a declined resume cannot be approved");
+    } finally { await c.close(); await db.close(); }
+  });
+
+  test(`${store.name}: a task transferred inside the decline's release window stays with its new owner: the controller's release only releases the declined attempt`, async () => {
+    const db = await store.open();
+    const c = await startController({
+      storage: db.storage, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+      resume: { observe: async () => ({}), review: async ({ changes }) => Object.fromEntries(changes.map((x) => [x.id, { relevant: true, rationale: "the task edits this file" }])) },
+    });
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const rob = await c.services.principals.authenticate(boot.token);
+      const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+      const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+      const task = (await call(boot.token, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+      await c.services.principals.enroll(rob, { commandId: "e-host", kind: "host", name: "h1", grants: [] });
+      const hostP = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "host:h1")).token);
+      for (const name of ["ann", "bob"]) await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants: [{ action: "task.read", project }, { action: "attempt.work", project }] });
+      await c.services.continuations.capture(hostP, { commandId: "cap1", taskId: task, ...capture(true) });
+      await DependencyService.withEpoch(c.storage, c.epoch).record(rob, { commandId: "d1", taskId: task, dependencies: [{ kind: "file", key: "/src/a.ts", hash: `sha256:${"1".repeat(64)}` }] });
+      await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId: task, expectedRevision: (await c.services.projects.getTask(task))!.revision, to: "ready" });
+      await c.services.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId: task, owner: { kind: "agent", id: "ann" } });
+      const asg = (await c.services.assignments.getAssignment(task))!;
+      await c.services.assignments.admitAttempt({ commandId: "ad1", actor: rob.id, taskId: task, expectedRevision: asg.revision, generation: asg.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" });
+      const attemptId = (await c.services.assignments.getAssignment(task))!.activeAttemptId!;
+      const check = await c.services.resumes.start(rob, { commandId: "k1", taskId: task, attemptId, model: { provider: "local", id: "m1" }, after: "restart" });
+      assert.equal(check.phase, "ready");
+      // The decline has seen the attempt active; the owner transfers the task to bob just as the controller's release reads the assignment.
+      const storage = c.storage as { getAggregate: (ref: { kind: string; id: string }) => Promise<unknown> };
+      const read = storage.getAggregate.bind(storage);
+      let armed = true;
+      storage.getAggregate = async (ref) => {
+        if (armed && ref.kind === "assignment") {
+          armed = false;
+          const now = (await c.services.assignments.getAssignment(task))!;
+          await c.services.assignments.transferTask({ commandId: "tr", actor: rob.id, taskId: task, expectedRevision: now.revision, to: { kind: "agent", id: "bob" } });
+        }
+        return read(ref);
+      };
+      const declined = await call(boot.token, "resume.decline", { taskId: task }, "o1");
+      storage.getAggregate = read;
+      assert.equal(armed, false, "the transfer landed inside the release");
+      assert.equal(declined.error?.code, "invalid_transition", JSON.stringify(declined));
+      assert.match(declined.error.message, /^not declined: the attempt this resume check was for is no longer the task's active attempt/);
+      const now = (await c.services.assignments.getAssignment(task))!;
+      assert.deepEqual([now.state, now.owner?.id], ["assigned", "bob"], "bob's assignment is not released by a decline of ann's attempt");
+      assert.equal((await c.services.resumes.get(rob, check.id))!.phase, "ready", "the check is not cancelled as declined");
     } finally { await c.close(); await db.close(); }
   });
 }

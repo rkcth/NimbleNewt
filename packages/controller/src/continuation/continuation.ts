@@ -7,7 +7,7 @@ import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 export type BoundaryKind = "turn-complete" | "timeout" | "manual" | "shutdown";
 export interface ContinuationInput {
@@ -142,7 +142,12 @@ export class ContinuationService {
   }
 
   /** Continues a task from a complete continuation (the latest by default) in the same conversation identity, after a restart or with a different model. */
-  async resume(by: Principal, command: NoActor & { taskId: string; continuationId?: string; model: { provider: string; id: string }; previousModel?: { provider: string; id: string }; after: "restart" | "model-change" | "continue"; restoredBy?: RestoreMethod }): Promise<{ identity: string; continuation: ContinuationBody & { id: string }; modelChanged: boolean; restoredBy?: RestoreMethod; replayed: boolean }> {
+  /**
+   * `options.guard` (card L04c): extra changes the record is written together with, in the same write (a checked resume passes a revision check of the attempt it is for, so no resume is recorded once
+   * that attempt has ended). It is read again for each try and may refuse by throwing; a lost race on what it guards is answered with what the guard says then. A repeat of a recorded command answers
+   * as recorded without asking it.
+   */
+  async resume(by: Principal, command: NoActor & { taskId: string; continuationId?: string; model: { provider: string; id: string }; previousModel?: { provider: string; id: string }; after: "restart" | "model-change" | "continue"; restoredBy?: RestoreMethod }, options: { guard?: () => Promise<readonly Change[]> } = {}): Promise<{ identity: string; continuation: ContinuationBody & { id: string }; modelChanged: boolean; restoredBy?: RestoreMethod; replayed: boolean }> {
     onlyKnown(command, ["commandId", "taskId", "continuationId", "model", "previousModel", "after", "restoredBy"]);
     const taskId = checkTaskId(command.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
@@ -172,7 +177,13 @@ export class ContinuationService {
         chosen = c;
         const modelChanged = previous !== undefined && (previous.provider !== model.provider || previous.id !== model.id);
         const body: ResumeBody = { taskId, continuationId: c.id, identity: head.identity, model, ...(previous === undefined ? {} : { previousModel: previous }), modelChanged, after: command.after, ...(command.restoredBy === undefined ? {} : { restoredBy: command.restoredBy }), by: by.id, at: this.#runner.now() };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { taskId, continuationId: c.id, modelChanged } };
+        const guard = options.guard;
+        const guarded = guard === undefined ? [] : await guard();
+        return {
+          ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...guarded], detail: { taskId, continuationId: c.id, modelChanged },
+          // What it guards moved meanwhile: the guard's own answer now (its refusal), or a stale revision to try again.
+          ...(guard === undefined ? {} : { contention: async () => { try { await guard(); } catch (error) { if (error instanceof DomainError) return error; throw error; } return new DomainError("stale_revision", "what this resume is recorded against changed meanwhile; try again"); } }),
+        };
       },
     }));
     const done = (await this.#runner.get("continuation-resume", r.id))!.body as unknown as ResumeBody;
