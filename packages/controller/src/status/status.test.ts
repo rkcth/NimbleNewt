@@ -52,7 +52,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -93,7 +93,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1403,6 +1403,29 @@ for (const backend of backends) {
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "catalog_policy" }), undefined, "only the owner is told");
     assert.equal(await c.rebuild().ask(c.owner, { kind: "catalog_policy" }), undefined, "not offered when the policy is not running");
+  });
+
+  suite("why a record or tool version is kept from deletion, and the retention values in force, are told to the owner only, each line citing what it is about (card T02c)", async (c) => {
+    let held = { retained: true, reasons: ["tool toolbox.check 1.0.0 was run by task t1, which can still resume or be replayed", "recorded as a dependency by task t2, which can still resume"] };
+    const retention = {
+      check: async (_by: Principal, ref: { kind: string; id: string }) => (ref.id === "cav-held" ? held : { retained: false, reasons: [] as string[] }),
+      settings: async () => ({ revision: 3, settings: { catalogVersionsKept: 2 }, effective: { catalogVersionsKept: 2, derivedDays: null, backupDaily: 7 } }),
+    };
+    const status = c.rebuild({}, { retention });
+    const kept = (await status.ask(c.owner, { kind: "retention_hold", recordKind: "catalog-version", id: "cav-held" }))!.lines;
+    cited(kept);
+    assert.deepEqual(kept.map((l) => l.text), ["catalog-version cav-held is kept from deletion for 2 reason(s):", ...held.reasons]);
+    assert.match(said((await status.ask(c.owner, { kind: "retention_hold", recordKind: "desk-record", id: "dsk-free" }))!.lines), /dsk-free is not held by anything retention knows of/);
+    const values = (await status.ask(c.owner, { kind: "retention" }))!.lines;
+    cited(values);
+    assert.deepEqual(values.map((l) => l.text), ['Retention values in force (settings revision 3); the ones marked "set" are yours, the others are the installation\'s:', "backupDaily: 7", "catalogVersionsKept: 2 (set)", "derivedDays: none (off or unlimited)"]);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    for (const request of [{ kind: "retention_hold", recordKind: "catalog-version", id: "cav-held" }, { kind: "retention" }] as const) {
+      assert.equal(await status.ask(reader, request), undefined, "only the owner is told");
+      assert.equal(await c.rebuild().ask(c.owner, request), undefined, "not offered when retention is not running");
+    }
+    await assert.rejects(status.ask(c.owner, { kind: "retention_hold", recordKind: "", id: "x" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    held = { retained: false, reasons: [] };
   });
 
   suite("past revocations are told to the owner only: each with which version, who, when and why, a line for the ones not shown, and a closing line when the catalogue was larger than one look covers (card T02c)", async (c) => {

@@ -254,14 +254,14 @@ test("in chat the revoke lists the running calls and asks whether they finish, a
   assert.equal(out.running["state"], "failed");
 });
 
-test("in chat, when the owner already said finish no question is asked and a choice the owner did not say is refused (card T02b)", async () => {
+test("in chat, when the owner already said finish no question is asked and a choice the owner did not say is not taken and the owner is asked instead (card T02b)", async () => {
   const seen: Record<string, any> = {};
   const out = await scenario(async ({ name, say, call, owner }) => {
     const text = `revoke ${name} 1.0.0 because it is bad, let the running calls finish`;
     const said = await say("m1", text, [{ kind: "command", op: "catalog.revoke", args: { name, version: "1.0.0", reason: "it is bad", runningCalls: "finish" }, evidence: text, basis: "owner" }]);
     seen.said = said.outcomes[0].status;
     seen.saidPreview = said.outcomes[0].preview;
-    // A model cannot choose for the owner: a choice that is not in the owner's words is refused.
+    // A model cannot choose for the owner: a choice that is not in the owner's words is dropped and the owner is asked (ASSUMPTION 2026-11-07: ask rather than refuse).
     const text2 = `revoke ${name} 1.0.0 because it is bad`;
     const forged = await say("m2", text2, [{ kind: "command", op: "catalog.revoke", args: { name, version: "1.0.0", reason: "it is bad", runningCalls: "cancel" }, evidence: text2, basis: "owner" }]);
     seen.forged = forged.outcomes[0].status;
@@ -271,7 +271,7 @@ test("in chat, when the owner already said finish no question is asked and a cho
   });
   assert.equal(seen.said, "proposed", JSON.stringify(seen));
   assert.match(seen.saidPreview.join("\n"), /runningCalls=finish/);
-  assert.equal(seen.forged, "refused", "a choice the owner did not say is refused");
+  assert.equal(seen.forged, "asked", "a choice the owner did not say is not taken: the owner is asked");
   assert.equal(seen.applied, "applied", JSON.stringify(seen.appliedAll));
   assert.equal(out.aborted, false);
   assert.equal(out.running["state"], "confirmed");
@@ -552,4 +552,38 @@ test("in chat a revoke with no call running does not assume finish: the preview 
   assert.equal(seen.status, "proposed", JSON.stringify(seen));
   assert.match(seen.preview.join("\n"), /follows the standing policy: cancel/);
   assert.doesNotMatch(seen.preview.join("\n"), /runningCalls=finish/);
+});
+
+test("in chat the owner sets the standing policy in their own words (no fixed word needed), asks what it is, and a real retention run is bound to the preview the chat makes just now; the retention values and the reasons a record is kept can be asked for (card T02c)", async () => {
+  const seen: Record<string, any> = {};
+  await scenario(async ({ say }) => {
+    const finish = "from now on let running calls end on their own when I revoke a tool";
+    seen.finish = (await say("f1", finish, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "finish" }, evidence: finish, basis: "owner" }])).outcomes[0];
+    const cancel = "when I revoke a tool stop running calls right away";
+    seen.cancel = (await say("f2", cancel, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "cancel" }, evidence: cancel, basis: "owner" }])).outcomes[0];
+    // A real run: the chat makes the preview itself and the proposal carries its digest (a digest the model wrote is dropped).
+    const run = "clean up what retention may remove, for real";
+    const proposed = (await say("r1", run, [{ kind: "command", op: "retention.run", args: { dryRun: false, confirm: "f".repeat(64) }, evidence: run, basis: "owner" }])).outcomes[0];
+    seen.runProposed = proposed;
+    const applied = (await say("r2", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.proposalId, evidence: "do that", basis: "owner" }])).outcomes[0];
+    seen.runApplied = applied;
+    const hold = "why is that tool version kept";
+    const q = (text: string, request: Record<string, unknown>, mid: string) => say(mid, text, [{ kind: "status", request, evidence: text, basis: "owner" }]).then((r) => r.outcomes[0]);
+    seen.values = await q("what are my retention values", { kind: "retention" }, "q1");
+    seen.hold = await q(hold, { kind: "retention_hold", recordKind: "catalog-version", id: "cav-nothing" }, "q2");
+  });
+  assert.equal(seen.finish.status, "proposed", JSON.stringify(seen.finish));
+  assert.match(seen.finish.preview.join("\n"), /runningCalls=finish/);
+  assert.equal(seen.cancel.status, "proposed", JSON.stringify(seen.cancel));
+  assert.equal(seen.runProposed.status, "proposed", JSON.stringify(seen.runProposed));
+  const preview = seen.runProposed.preview.join("\n");
+  assert.doesNotMatch(preview, /f{64}/, "the model's digest is not used");
+  assert.match(preview, /confirm=[0-9a-f]{64}/);
+  assert.match(preview, /What retention would do, worked out just now: Retention preview/);
+  assert.equal(seen.runApplied.status, "applied", JSON.stringify(seen.runApplied));
+  assert.match(JSON.stringify(seen.runApplied), /Retention ran:/, "the confirmed run really ran");
+  assert.equal(seen.values.status, "answered", JSON.stringify(seen.values));
+  assert.match(seen.values.lines.map((l: any) => l.text).join("\n"), /Retention values in force[\s\S]*derivedDays: none/);
+  assert.equal(seen.hold.status, "answered", JSON.stringify(seen.hold));
+  assert.match(seen.hold.lines.map((l: any) => l.text).join("\n"), /not held by anything retention knows of/);
 });

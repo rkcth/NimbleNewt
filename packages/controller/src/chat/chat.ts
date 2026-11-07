@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { BUILTIN_COMMANDS, OPERATION_BY_NAME } from "../api/operations.js";
 import { expandShorthand } from "./shorthand.js";
 import { parseInvocation } from "../commands/resolve.js";
@@ -515,7 +515,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
@@ -635,6 +635,20 @@ export class ChatService {
       const plan = found.result["item"] as { token: string; expiresAt?: string; name: string; createdAt: string; kind: string; rows: number; artifactFiles: number; piStores: number; piFiles: number; piStateIncluded: boolean; changesSinceBackup?: number; effectsToMarkUncertain?: number; deliveriesToResend?: number; steps: string[]; warnings: string[] };
       args["confirm"] = plan.token;
       fillNotes.push(`Restore plan, worked out just now from the backup ${plan.name} (made ${plan.createdAt}, ${plan.kind}): ${plan.rows} records, ${plan.artifactFiles} artifact files, ${plan.piStateIncluded ? `${plan.piFiles} conversation files in ${plan.piStores} stores` : "NO conversation state (Pi state not included)"}${plan.changesSinceBackup === undefined ? "" : `; about ${plan.changesSinceBackup} changes made since then will be lost`}${plan.effectsToMarkUncertain === undefined ? "" : `; ${plan.effectsToMarkUncertain} intended actions come back as uncertain`}${plan.deliveriesToResend === undefined ? "" : `; ${plan.deliveriesToResend} undelivered messages are sent again`}. ${plan.expiresAt === undefined ? "" : `Your approval is good until ${plan.expiresAt}. `}Steps: ${plan.steps.join(" ")} Warnings: ${plan.warnings.join(" ")}`);
+    }
+    // A real retention run is proposed with the digest of the preview worked out NOW (never one the interpreter wrote), so the owner's yes is bound to exactly what is shown; a digest the interpreter gave is dropped.
+    if (intent.op === "retention.run") {
+      const real = args["dryRun"] === false || args["confirm"] !== undefined;
+      delete args["confirm"];
+      if (real) {
+        const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "retention.run", commandId: `cp-${randomUUID()}`, args: { dryRun: true, ...(args["limit"] === undefined ? {} : { limit: args["limit"] }) } });
+        if (!found.ok) return refuse(found.error.code, found.error.message);
+        const shown = (found.result["shown"] as string[] | undefined)?.[0];
+        if (typeof found.result["digest"] !== "string") return refuse("invalid_command", "retention could not be previewed just now");
+        args["dryRun"] = false;
+        args["confirm"] = found.result["digest"];
+        fillNotes.push(`What retention would do, worked out just now: ${shown ?? "see the preview"}`);
+      }
     }
     // A database transfer is proposed with the plan the controller computes NOW; the approval token comes from that plan (never from the interpreter's words).
     if (intent.op === "database.transfer.apply") {
@@ -926,6 +940,8 @@ export class ChatService {
     // Revoking a tool version (owner decision 2026-10-30): when calls of it are running, the owner is asked whether they finish, are cancelled, or their tasks are paused; the calls are listed. Nothing is assumed: the answer is the owner's.
     const notes: string[] = [];
     if (intent.op === "catalog.revoke") {
+      // ASSUMPTION (2026-11-07): a choice is taken without asking only when the owner said the word; a choice the model supplied that the owner did not say is dropped, so the question below is asked instead of the move being refused.
+      if (args["runningCalls"] !== undefined && !(typeof args["runningCalls"] === "string" && ["finish", "cancel", "pause"].includes(args["runningCalls"]) && new RegExp(`\\b${args["runningCalls"]}\\b`, "i").test(words))) delete args["runningCalls"];
       if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "say which tool and which version to revoke");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "catalog.running", args: { name: args["name"], version: args["version"] } });
       if (!found.ok) return refuse(found.error.code, found.error.message);

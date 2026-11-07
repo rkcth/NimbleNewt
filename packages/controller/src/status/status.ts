@@ -218,6 +218,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent"], about: "a replay of a task's recorded run" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
+  retention_hold: { keys: ["recordKind", "id"], about: "whether a record or a tool version (recordKind catalog-version, id as the catalogue names it) is kept from deletion, and why (owner only)" },
+  retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
@@ -257,6 +259,8 @@ export type StatusRequest =
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id: string }
+  | { readonly kind: "retention" }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
@@ -266,6 +270,11 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string
 
 export interface StatusDeps {
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
+  /** What retention holds back and why, and its values (card T02c). Absent: the views are not offered. */
+  readonly retention?: {
+    check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
+    settings(by: Principal): Promise<{ readonly revision: number; readonly settings: Readonly<Record<string, unknown>>; readonly effective: Readonly<Record<string, unknown>> }>;
+  };
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
@@ -413,6 +422,8 @@ export class StatusService {
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
+      case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id"]); return this.retentionHoldLines(by, request); }
+      case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -470,6 +481,36 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
     else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity (usually the most recently active tasks).", cite("project", request.projectId)));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** Whether one record or tool version is kept from deletion, and why: one line per reason, each citing what is kept. Owner only. */
+  async retentionHoldLines(by: Principal, query: { recordKind: string; id: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
+    if (typeof query.recordKind !== "string" || query.recordKind === "" || typeof query.id !== "string" || query.id === "") invalid("id", "needs a recordKind and an id");
+    let found;
+    try { found = await this.#deps.retention.check(by, { kind: query.recordKind, id: query.id }); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const c = cite(query.recordKind.slice(0, 80), query.id.slice(0, 200));
+    const what = `${shown(query.recordKind, 80)} ${shown(query.id, 200)}`;
+    return { observedAt: this.#runner.now(), lines: found.retained ? [line(`${what} is kept from deletion for ${found.reasons.length} reason(s):`, c), ...found.reasons.slice(0, 20).map((why) => line(shown(why, 300), c)), ...(found.reasons.length > 20 ? [line(`${found.reasons.length - 20} more reason(s) are not shown.`, c)] : [])] : [line(`${what} is not held by anything retention knows of; a rule may remove it when its time comes.`, c)] };
+  }
+
+  /** The retention values in force and which of them the owner set. Owner only. */
+  async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
+    let got;
+    try { got = await this.#deps.retention.settings(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const c = cite("retention-settings", "main", got.revision === 0 ? undefined : got.revision);
+    const word = (v: unknown): string => (v === null ? "none (off or unlimited)" : String(v));
+    return { observedAt: this.#runner.now(), lines: [
+      line(`Retention values in force (settings revision ${got.revision}); the ones marked "set" are yours, the others are the installation's:`, c),
+      ...Object.keys(got.effective).sort().map((k) => line(`${shown(k, 60)}: ${shown(word(got.effective[k]), 60)}${Object.prototype.hasOwnProperty.call(got.settings, k) ? " (set)" : ""}`, c)),
+    ] };
   }
 
   /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */
