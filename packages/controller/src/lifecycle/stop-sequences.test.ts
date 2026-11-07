@@ -1,18 +1,36 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { AgentService } from "../agents/index.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
+import { backends, stopServer, type Backend } from "../domain/testing/backends.js";
 import { MemoryStorage } from "../storage/memory.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import { StatusService } from "../status/status.js";
 import { PauseService, StopService, type InventoryItem, type StopPorts } from "./index.js";
 
+after(stopServer);
+
 let now = Date.parse("2026-10-28T10:00:00.000Z");
 const options = { clock: () => new Date(now).toISOString(), pause: async () => undefined };
 let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
+
+/** The storage the services use: it can hide one request from listings and run a hook just before the ending of a request is written (a sweep "between the ending's charge and its mark"). */
+class Tap {
+  hide: string | undefined;
+  midEnd: (() => Promise<void>) | undefined;
+  constructor(private readonly inner: any) { return new Proxy(this, { get: (t, p) => (p in t ? (t as any)[p] : typeof inner[p] === "function" ? inner[p].bind(inner) : inner[p]) }); }
+  async listAggregates(kind: string, page: unknown): Promise<Array<{ id: string }>> { return (await this.inner.listAggregates(kind, page)).filter((x: { id: string }) => !(kind === "stop-intent" && this.hide !== undefined && x.id === this.hide)); }
+  async applyOperation(input: { changes: Array<{ ref: { kind: string; id: string }; body?: Record<string, any> }> }): Promise<unknown> {
+    if (this.midEnd !== undefined) {
+      const ch = input.changes.find((c) => c.ref.kind === "stop-intent" && c.body?.["ended"] === true && c.body?.["outcome"] === undefined);
+      if (ch !== undefined) { const h = this.midEnd; this.midEnd = undefined; this.hide = ch.ref.id; try { await h(); } finally { this.hide = undefined; } }
+    }
+    return this.inner.applyOperation(input);
+  }
+}
 
 type Scope = { kind: "task" | "agent"; id: string };
 class Runtime implements StopPorts {
@@ -33,6 +51,8 @@ class Runtime implements StopPorts {
   async release(): Promise<void> { }
   async inventory(): Promise<InventoryItem[]> { return this.blocking ? [{ kind: "process", ref: "pid-7", state: "uncooperative" }] : []; }
   /** The highest total reported for each attempt (every call that returned its costs to the service): all of it must be charged by the fixed point. */
+  /** Command IDs the budget saw twice with a different amount (it would answer the second as a replay of the first: money lost). */
+  reused: string[] = [];
   reportedMax: Record<string, number> = {};
   noteReported(costs: Array<{ attemptId: string; costMicros: number }>): void { for (const c of costs) this.reportedMax[c.attemptId] = Math.max(this.reportedMax[c.attemptId] ?? 0, c.costMicros); }
   async cleanup(scope: Scope) {
@@ -47,7 +67,9 @@ class Runtime implements StopPorts {
   async checkpoint() { return { checkpointId: "cp-1", durable: true, artifactsDurable: true }; }
   async charge(c: { commandId: string; attemptId: string; costMicros: number; computeMs: number }): Promise<void> {
     if (this.failCharges) throw new Error("budget unreachable");
-    if (!this.charges.some((x) => x.commandId === c.commandId)) this.charges.push(c);
+    const same = this.charges.find((x) => x.commandId === c.commandId);
+    if (same !== undefined && (same.costMicros !== c.costMicros || same.attemptId !== c.attemptId)) this.reused.push(c.commandId);
+    if (same === undefined) this.charges.push(c);
   }
   async terminate(scope: Scope) {
     this.terminateCalls++;
@@ -62,7 +84,7 @@ class Runtime implements StopPorts {
   }
 }
 
-const OPS = ["suspend", "stop", "force", "advance", "wait", "restart", "resume", "sweep", "failOn", "failOff", "throwTermOn", "throwTermOff", "blockOn", "blockOff", "agentStop", "agentForce", "agentResume", "hang", "noAttemptsPort"] as const;
+const OPS = ["suspend", "stop", "force", "advance", "wait", "restart", "resume", "sweep", "failOn", "failOff", "throwTermOn", "throwTermOff", "blockOn", "blockOff", "agentStop", "agentForce", "agentResume", "hang", "noAttemptsPort", "raceSweep", "raceAll", "raceForce", "sweepMidEnd", "failMidEnd"] as const;
 const USE = process.env["NOPORT"] === "1" ? OPS.filter((o) => o !== "noAttemptsPort") : OPS;
 type Op = (typeof OPS)[number];
 
@@ -70,8 +92,8 @@ type Op = (typeof OPS)[number];
 // A small seeded walk through many histories (the larger one is run with BRUTE_N=6500 BRUTE_LEN=8). The view is read after every step and each sentence is checked against the stored request and what the runtime did.
 const rng = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 
-const SCRIPTED = ["throwTermOn,stop,advance,throwTermOff,wait", "throwTermOn,suspend,stop,advance,advance,throwTermOff,wait", "suspend,advance,stop", "blockOn,stop,advance,sweep,wait", "failOn,force,agentStop", "failOn,agentStop,failOff,sweep", "failOn,force,stop,force,failOff,sweep", "failOn,agentStop,agentForce,failOff,sweep"];
-const COUNT = Number(process.env["BRUTE_N"] ?? 120);
+const SCRIPTED = ["failOn,agentSuspend,raceAll,failOff,sweep", "failOn,agentSuspend,failMidEnd,stop,advance,sweep", "sweepMidEnd,stop,advance,sweep", "failOn,force,raceSweep,raceSweep,failOff,sweep", "throwTermOn,stop,advance,throwTermOff,wait", "throwTermOn,suspend,stop,advance,advance,throwTermOff,wait", "suspend,advance,stop", "blockOn,stop,advance,sweep,wait", "failOn,force,agentStop", "failOn,agentStop,failOff,sweep", "failOn,force,stop,force,failOff,sweep", "failOn,agentStop,agentForce,failOff,sweep"];
+const COUNT = Number(process.env["BRUTE_N"] ?? 60);
 const MAXLEN = Number(process.env["BRUTE_LEN"] ?? 6);
 const ONLY = process.env["BRUTE_SEQ"];
 
@@ -79,16 +101,18 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
   const violations = new Map<string, string[]>();
   const random = rng(20261107);
   const seqs: Op[][] = [];
+  const backendOf = new Map<Op[], Backend>();
   if (ONLY !== undefined) seqs.push(ONLY.split(",") as Op[]);
   else {
     // Scripted prefixes first (each found a real fault once), then the walk, which leans toward making requests.
-    for (const s of SCRIPTED) seqs.push(s.split(",") as Op[]);
+    for (const s of SCRIPTED) { seqs.push(s.split(",") as Op[]); for (const b of backends) if (b.name !== "reference store") { const again = s.split(",") as Op[]; seqs.push(again); backendOf.set(again, b); } }
     const pool: Op[] = [...USE, "suspend", "stop", "force", "agentStop", "advance", "sweep", "failOn", "failOff"];
     for (let i = 0; i < COUNT; i++) { const len = 1 + Math.floor(random() * MAXLEN); seqs.push(Array.from({ length: len }, () => pool[Math.floor(random() * pool.length)]!)); }
   }
   for (const seq of seqs) {
     now = Date.parse("2026-10-28T10:00:00.000Z");
-    const storage = new MemoryStorage();
+    const world = backendOf.get(seq) === undefined ? undefined : await backendOf.get(seq)!.open();
+    const storage = new Tap(world?.storage ?? new MemoryStorage()) as unknown as MemoryStorage & Tap;
     const projects = await ProjectService.open(storage, { holder: "c1", ...options });
     const epoch = projects.epoch;
     const principals = PrincipalService.withEpoch(storage, epoch, options);
@@ -124,6 +148,7 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
         void beforeBody;
       } catch { /* refused */ }
     };
+    const advanceOf = async (scope: Scope): Promise<void> => { const id = await active(scope); if (id) await stops.advance(owner, { intentId: id }); };
     const doForce = async (scope: Scope) => {
       const before = await active(scope);
       const beforeBody = before === undefined ? undefined : (await runner.get("stop-intent", before))?.body as Record<string, unknown> | undefined;
@@ -164,6 +189,11 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
           case "noAttemptsPort": rt.noAttemptsPort = true; break;
           case "agentStop": { await doRequest(A, "stop"); const id = await active(A); if (id) await stops.advance(owner, { intentId: id }).catch(() => undefined); break; }
           case "agentForce": await doForce(A); break;
+          case "raceSweep": await Promise.allSettled([advanceOf(T), stops.sweep(owner)]); break;
+          case "raceAll": await Promise.allSettled([advanceOf(T), advanceOf(A), stops.sweep(owner)]); break;
+          case "raceForce": await Promise.allSettled([advanceOf(T), doForce(A), stops.sweep(owner)]); break;
+          case "sweepMidEnd": storage.midEnd = async () => { await stops.sweep(owner).catch(() => undefined); }; break;
+          case "failMidEnd": rt.failCharges = true; storage.midEnd = async () => { rt.failCharges = false; await stops.sweep(owner).catch(() => undefined); }; break;
           case "hang": {
             const id = await active(T); if (!id) break;
             const before = rt.terminateCalls; rt.hangTerminate = true;
@@ -251,16 +281,30 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
       }
     }
     // Fixed point: the budget reachable again, the host answering, sweeps run. Every figure the runtime ever reported is charged (the highest one per attempt), nothing is pending, no request keeps the mark, and the index is empty.
-    rt.failCharges = false; rt.throwOnTerminate = false; rt.blocking = false;
+    storage.midEnd = undefined; rt.failCharges = false; rt.throwOnTerminate = false; rt.blocking = false;
     stops = StopService.withEpoch(storage, epoch, PauseService.withEpoch(storage, epoch, {}, options), rt, options);
     for (let i = 0; i < 3; i++) await stops.sweep(owner);
     for (const [a, max] of Object.entries(rt.reportedMax)) {
       const sum = rt.charges.filter((c) => c.attemptId === a).reduce((s, c) => s + c.costMicros, 0);
-      if (sum !== max) record("final-charged-differs-from-reported", `${a} reported ${max} charged ${sum}`);
+      if (sum < max) record("final-charged-differs-from-reported", `${a} reported ${max} charged ${sum}`);
+      if (sum > max) record("final-overcharged", `${a} reported ${max} charged ${sum}`);
     }
+    if (rt.reused.length > 0) record("command-id-reused-with-another-figure", rt.reused.join(","));
     for (const c of await runner.list("stop-charge", { limit: 100 })) if ((c.body as any).pending !== undefined) record("final-pending", c.id);
     for (const r of await runner.list("stop-intent", { limit: 100 })) if (((r.body as any).outcome?.unresolved ?? []).includes("cleanup spend not charged")) record("final-marked", r.id);
-    if ((await runner.list("stop-charge-open", { limit: 100 })).length > 0) record("final-index-not-empty", "");
+    // What is left on the index belongs to requests that have not finished (a blocked one is waiting for the owner's choice).
+    for (const o of await runner.list("stop-charge-open", { limit: 100 })) {
+      const phases: string[] = [];
+      for (const i of (o.body as any).intents as string[]) phases.push(((await runner.get("stop-intent", i))?.body as any)?.phase);
+      // an entry stays while any request it lists is going (the finished ones on it are cleared with it)
+      if (phases.every((p) => ["done", "recovery-required", "cancelled"].includes(p))) record("final-index-keeps-an-entry-of-finished-requests", `${o.id} ${phases.join(",")}`);
+    }
+    // One more sweep changes nothing.
+    const snap = async () => JSON.stringify([await runner.list("stop-charge", { limit: 100 }), await runner.list("stop-charge-open", { limit: 100 }), (await runner.list("stop-intent", { limit: 100 })).map((r) => (r.body as any).outcome), rt.charges.length]);
+    const before = await snap();
+    await stops.sweep(owner);
+    if ((await snap()) !== before) record("sweep-not-idempotent", "");
+    if (world !== undefined) await world.close();
   }
   const out =[...violations.entries()].map(([k, v]) => `${k} (${v.length}+):\n  ${v.join("\n  ")}`).join("\n");
   assert.equal(out, "", `${seqs.length} sequences`);

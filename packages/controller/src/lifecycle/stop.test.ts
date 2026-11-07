@@ -69,7 +69,7 @@ class Runtime implements StopPorts {
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
     owner: Principal; mgr: Principal; ann: Principal; task: string; agentA: string; rt: Runtime; stops: StopService; pauses: PauseService; reopen(): StopService;
-    assignments: AssignmentService; projects: ProjectService; runner: CommandRunner; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
+    assignments: AssignmentService; projects: ProjectService; runner: CommandRunner; storage: unknown; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
   }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-10-28T10:00:00.000Z");
@@ -100,7 +100,7 @@ for (const backend of backends) {
         };
         mayHoldHook = async () => true;
         const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, { ...options, mayHold: (by, t) => mayHoldHook(by, t) });
-        await body({ owner, mgr, ann, task, agentA, rt, stops: make(), pauses, reopen: make, assignments, projects, edit, runner: new CommandRunner(world.storage, epoch, options) });
+        await body({ owner, mgr, ann, task, agentA, rt, stops: make(), pauses, reopen: make, assignments, projects, edit, runner: new CommandRunner(world.storage, epoch, options), storage: world.storage });
       } finally { await world.close(); }
     });
   const scopeOf = (task: string) => ({ kind: "task", id: task }) as const;
@@ -750,7 +750,7 @@ for (const backend of backends) {
     await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
     await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
     c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
-    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    const second = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
     // The first note's charge goes through, then the budget is unreachable again for the rest.
     c.rt.failCharges = 0;
     const real = c.rt.charge.bind(c.rt);
@@ -759,10 +759,280 @@ for (const backend of backends) {
     await c.stops.sweep(c.owner);
     assert.equal(sumOf(c, "att-c"), 20);
     assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, true, "36 are still owed");
+    assert.equal(await outcomeMarked(c, second.intentId), true, "and the request keeps its mark while they are");
     c.rt.charge = real;
     await c.stops.sweep(c.owner);
     assert.equal(sumOf(c, "att-c"), 56);
     assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+  });
+
+  /** Runs `hook` before every storage write (the hook may throw to fail it, or run other work); returns the function that puts the storage back. */
+  const tap = (c: { storage: unknown }, hook: (input: { changes: Array<{ ref: { kind: string; id: string }; body?: Record<string, any> }> }) => Promise<void>): (() => void) => {
+    const s = c.storage as { applyOperation: (input: never) => Promise<unknown> };
+    const had = Object.prototype.hasOwnProperty.call(s, "applyOperation");
+    const orig = s.applyOperation;
+    s.applyOperation = function (this: unknown, input: never) { return hook(input as never).then(() => orig.call(s, input)); };
+    return () => { if (had) s.applyOperation = orig; else delete (s as Partial<typeof s>).applyOperation; };
+  };
+  const MARK = "cleanup spend not charged";
+  const outcomeMarked = async (c: { runner: CommandRunner }, id: string): Promise<boolean> => (((await c.runner.get("stop-intent", id))!.body as { outcome?: { unresolved: string[] } }).outcome?.unresolved ?? []).includes(MARK);
+  const agentScope = (c: { agentA: string }) => ({ kind: "agent", id: c.agentA }) as const;
+  const openEntries = async (c: { runner: CommandRunner }) => c.runner.list("stop-charge-open", { limit: 50 });
+
+  suite("two passes of one request that wait at once with different figures: the higher figure is charged, not dropped as a replay (card L02d review 6, F1)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.failCharges = 1000;
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 10, computeMs: 0 }] }];
+    const y = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "suspend", reason: "y" });
+    await c.stops.advance(c.owner, { intentId: y.intentId });
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 20, computeMs: 0 }] }, { remaining: [], costs: [{ attemptId: "att-a", costMicros: 30, computeMs: 0 }] }];
+    const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    await Promise.all([c.stops.advance(c.owner, { intentId: x.intentId }), c.stops.advance(c.owner, { intentId: x.intentId })]);
+    c.rt.failCharges = 0;
+    for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-a"), 30, "the highest figure either pass reported");
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+    assert.equal((await openEntries(c)).length, 0);
+  });
+
+  suite("a lower figure reported later does not replace a higher one that is waiting to be charged (card L02d review 6, G)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.failCharges = 1000;
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 10, computeMs: 0 }] }];
+    const y = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "suspend", reason: "y" });
+    await c.stops.advance(c.owner, { intentId: y.intentId });
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 30, computeMs: 0 }] }];
+    const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: x.intentId });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 20, computeMs: 0 }] }];
+    const z = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "z" });
+    await c.stops.advance(c.owner, { intentId: z.intentId });
+    c.rt.failCharges = 0;
+    for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-a"), 30);
+  });
+
+  suite("a failed write that clears a request's mark leaves the entry on the index, and a later sweep clears it (card L02d review 6, F2a)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId });
+    assert.equal(await outcomeMarked(c, intentId), true);
+    c.rt.failCharges = 0;
+    let failed = 0;
+    const put = tap(c, async (input) => { if (failed === 0 && input.changes.some((x) => x.ref.kind === "stop-intent")) { failed++; throw new Error("storage went away"); } });
+    await c.stops.sweep(c.owner);
+    put();
+    assert.equal(failed, 1);
+    assert.equal(await outcomeMarked(c, intentId), true, "the clear did not happen");
+    assert.equal((await openEntries(c)).length, 1, "so the entry stays for the next sweep");
+    await c.stops.sweep(c.owner);
+    assert.equal(await outcomeMarked(c, intentId), false);
+    assert.equal((await openEntries(c)).length, 0);
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+  });
+
+  suite("a sweep that runs between the ending's failed charge and the request's settling does not strand the mark (card L02d review 6, F2b)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    let ran = false;
+    const put = tap(c, async (input) => {
+      const ending = input.changes.find((x) => x.ref.kind === "stop-intent" && x.body?.["ended"] === true && x.body?.["outcome"] === undefined);
+      if (ran || ending === undefined) return;
+      ran = true;
+      c.rt.failCharges = 0;
+      // The sweep runs now: the charge is paid and the request is not settled yet.
+      const s = c.storage as { listAggregates: (kind: string, page: never) => Promise<Array<{ id: string }>> };
+      const list = s.listAggregates;
+      s.listAggregates = async (kind, page) => (await list.call(s, kind, page)).filter((x) => !(kind === "stop-intent" && x.id === intentId));
+      try { await c.stops.sweep(c.owner); } finally { s.listAggregates = list; }
+    });
+    await c.stops.advance(c.owner, { intentId });
+    put();
+    assert.equal(ran, true);
+    for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 20);
+    assert.equal(await outcomeMarked(c, intentId), false, "the mark written after the sweep was cleared by a later one");
+    assert.equal((await openEntries(c)).length, 0);
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+  });
+
+  suite("an entry keeps a request that has not finished, the one whose note is pending and the one whose figure is wanted, past the cap (card L02d review 6, F3)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.items = [{ kind: "process", ref: "pid-7", state: "uncooperative" }];
+    c.rt.cleanups = [{ remaining: [{ kind: "process", ref: "pid-7", state: "uncooperative" }], costs: [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }] }];
+    c.rt.failCharges = 1000;
+    const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: x.intentId })).phase, "blocked");
+    // A second request, of the agent, is blocked too and waits on the first one's note: unfinished, unmarked, and not the note's owner.
+    const w = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "stop", reason: "w" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: w.intentId })).phase, "blocked");
+    const entry = (await openEntries(c))[0]!;
+    assert.deepEqual([...(entry.body as { intents: string[] }).intents].sort(), [x.intentId, w.intentId].sort());
+    // Twenty-five other requests (long gone) are on the entry too.
+    const junk = Array.from({ length: 25 }, (_, i) => `stp-junk${i}`);
+    await c.runner.command("test.seed-open", { commandId: cid("seed"), actor: "system" }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "stop-charge-open", id: "att-c" }, creates: false, changes: [{ type: "update" as const, ref: { kind: "stop-charge-open", id: "att-c" }, expectedRevision: entry.revision, body: { intents: [x.intentId, w.intentId, ...junk], settled: false } as never }], detail: {} }) }));
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-c", costMicros: 30, computeMs: 0 }] }];
+    c.rt.items = [];
+    const y = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "installation", id: "installation" }, mode: "suspend", reason: "y" });
+    await c.stops.advance(c.owner, { intentId: y.intentId });
+    const after = (await openEntries(c))[0]!.body as { intents: string[]; want?: { intentId: string } };
+    assert.deepEqual([...after.intents].sort(), [x.intentId, w.intentId, y.intentId].sort(), "the note's owner, the unfinished request and the joining one stay; the gone ones go");
+    assert.equal(after.want?.intentId, y.intentId);
+  });
+
+  suite("an attempt a pass charged is listed even when another pass finished the request first (card L02d review 6, F4)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.cleanups = [{ remaining: [] }, { remaining: [], costs: [{ attemptId: "att-z", costMicros: 40, computeMs: 0 }] }];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    // The first pass is inside its cleanup while a second pass finishes the whole request.
+    c.rt.duringCleanup = async () => { await c.stops.advance(c.owner, { intentId }); };
+    const done = await c.stops.advance(c.owner, { intentId });
+    assert.equal(done.phase, "done");
+    assert.equal(sumOf(c, "att-z"), 40);
+    const seen = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual(seen.attempts.map((a) => [a.attemptId, a.costMicros]), [["att-z", 40]]);
+  });
+
+  suite("a figure that cannot be charged because the note could not be written six times is not lost: the sweep charges it (card L02d review 6, C)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    const lose = tap(c, async (input) => {
+      if (input.changes.some((x) => x.ref.kind === "stop-charge" && x.body?.["pending"] !== undefined)) throw new DomainError("stale_revision", "someone else wrote it");
+    });
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId });
+    lose();
+    assert.equal(sumOf(c, "att-c"), 0);
+    assert.equal(await outcomeMarked(c, intentId), true);
+    for (let i = 0; i < 2; i++) await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 20);
+    assert.equal(await outcomeMarked(c, intentId), false);
+    assert.equal((await openEntries(c)).length, 0);
+  });
+
+  suite("an entry the sweep dropped between a pass's read and its write is a lost race, not a failure of the pass (card L02d review 6)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
+    let dropped = false;
+    const put = tap(c, async (input) => {
+      if (dropped || !input.changes.some((x) => x.ref.kind === "stop-charge-open")) return;
+      dropped = true;
+      const entry = (await openEntries(c))[0]!;
+      await c.runner.command("test.drop-open", { commandId: cid("drop"), actor: "system" }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "stop-charge-open", id: "att-c" }, creates: false, changes: [{ type: "delete" as const, ref: { kind: "stop-charge-open", id: "att-c" }, expectedRevision: entry.revision }], detail: {} }) }));
+    });
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    put();
+    assert.equal(dropped, true);
+    c.rt.failCharges = 0;
+    for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 56);
+    assert.equal((await openEntries(c)).length, 0);
+  });
+
+  suite("an entry dropped between the read and the write of a note is a lost race too (card L02d review 6)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    assert.equal((await openEntries(c)).length, 1, "the settled entry is still on the index");
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
+    let dropped = false;
+    // The sweep drops the settled entry after the second request has read it and before its note is written.
+    const put = tap(c, async (input) => {
+      if (dropped || !input.changes.some((x) => x.ref.kind === "stop-charge" && x.body?.["pending"] !== undefined) || !input.changes.some((x) => x.ref.kind === "stop-charge-open")) return;
+      dropped = true;
+      const entry = (await openEntries(c))[0]!;
+      await c.runner.command("test.drop-open", { commandId: cid("drop"), actor: "system" }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "stop-charge-open", id: "att-c" }, creates: false, changes: [{ type: "delete" as const, ref: { kind: "stop-charge-open", id: "att-c" }, expectedRevision: entry.revision }], detail: {} }) }));
+    });
+    const second = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    put();
+    assert.equal(dropped, true);
+    assert.equal(sumOf(c, "att-c"), 56, "the second request's note was written on the next try and paid");
+    assert.equal(await outcomeMarked(c, second.intentId), false);
+  });
+
+  suite("a note another request writes right after the one a pass paid is paid first, never written over: nothing is charged twice (card L02d review 6)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.failCharges = 0;
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-c", costMicros: 41, computeMs: 0 }] }];
+    const a = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "suspend", reason: "a" });
+    // The pass of the second Force Stop pays the first request's note. Right after that is written, the agent's pass notes and pays a new charge (20 to 41) and is held just before it clears its note.
+    let started = false, holding = false, aPass: Promise<unknown> | undefined;
+    let release!: () => void, reached!: () => void;
+    const gate = new Promise<void>((r) => { release = r; }), atSettle = new Promise<void>((r) => { reached = r; });
+    const settles = (input: { changes: Array<{ ref: { kind: string }; body?: Record<string, any> }> }) => input.changes.some((x) => x.ref.kind === "stop-charge" && x.body?.["pending"] === undefined && x.body?.["costMicros"] > 0);
+    const s = c.storage as { applyOperation: (input: never) => Promise<unknown> };
+    const orig = s.applyOperation;
+    s.applyOperation = async function (this: unknown, input: never) {
+      if (holding && settles(input)) { reached(); await gate; }
+      const result = await orig.call(s, input);
+      if (!started && settles(input)) { started = true; holding = true; aPass = c.stops.advance(c.owner, { intentId: a.intentId }); await atSettle; holding = false; }
+      return result;
+    } as never;
+    try { await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" }); } finally { release(); await aPass; s.applyOperation = orig; }
+    for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
+    assert.equal(started, true);
+    assert.equal(sumOf(c, "att-c"), 56, "the highest figure, once");
+  });
+
+  suite("a wanted figure survives a sweep that stops after the note was paid and before the rest was charged (card L02d review 6, G)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    c.rt.failCharges = 0;
+    let writes = 0;
+    const put = tap(c, async (input) => { if (input.changes.some((x) => x.ref.kind === "stop-charge") && ++writes > 1) throw new Error("storage went away"); });
+    await c.stops.sweep(c.owner);
+    put();
+    assert.equal(sumOf(c, "att-c"), 20, "only the note was paid");
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 56, "the wanted figure was still on the entry");
+  });
+
+  suite("the sweep keeps an entry when a request raised its figure while the note was being paid (card L02d review 6, G)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    c.rt.failCharges = 0;
+    const real = c.rt.charge.bind(c.rt);
+    let armed = true, inside = false;
+    c.rt.charge = async (x) => {
+      if (inside) throw new Error("the budget could not be reached");
+      if (armed) {
+        armed = false; inside = true;
+        // while the note is being paid another request (of the agent) reports a higher figure and cannot charge it
+        c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-c", costMicros: 90, computeMs: 0 }] }];
+        const y = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "suspend", reason: "y" });
+        await c.stops.advance(c.owner, { intentId: y.intentId });
+        inside = false;
+      }
+      await real(x);
+    };
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 20);
+    assert.equal((await openEntries(c)).length, 1, "the entry stays: 70 more are wanted");
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 90);
+    assert.equal((await openEntries(c)).length, 0);
   });
 
   suite("more than twenty requests waiting on one unpaid note are all kept on the index and all cleared by the sweep (card L02d review)", async (c) => {

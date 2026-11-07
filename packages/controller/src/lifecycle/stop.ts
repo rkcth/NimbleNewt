@@ -286,7 +286,7 @@ export class StopService {
         // The attempts the runtime saw are recorded, so a restart still asks about a process of one that has ended since.
         // Attempts that reported a cleanup cost are recorded too (a runtime may report a cost for an attempt it does not list), so the owner's view lists what was charged.
         const seenNow = [...new Set([...(this.#ports.attempts?.(b.scope) ?? []), ...costAttempts(result.costs)])];
-        if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(-STOP_LIMITS.inventory) }), ["preparing"]);
+        if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(-STOP_LIMITS.inventory) }));
         // Something else (a Force Stop, a choice, a resume) may have moved the request while the cleanup ran: then this pass is stale and does nothing more.
         if (((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.phase !== "preparing") continue;
         const spent = b.spent + (result.spent ?? billed.costMicros);
@@ -336,7 +336,7 @@ export class StopService {
         const billed = await this.#charge(id, by, ended.costs);
         // The attempts the ending charged are recorded on the request too (a Force Stop, or a Stop that reused a checkpoint, never saw them while preparing), so the owner's view lists them.
         const charged = costAttempts(ended.costs);
-        await this.#update(id, (x) => ({ ...x, ended: true as const, ...(charged.some((a) => !(x.attempts ?? []).includes(a)) ? { attempts: [...new Set([...(x.attempts ?? []), ...charged])].slice(-STOP_LIMITS.inventory) } : {}) }), ["terminating"]);
+        await this.#update(id, (x) => ({ ...x, ended: true as const, ...(charged.some((a) => !(x.attempts ?? []).includes(a)) ? { attempts: [...new Set([...(x.attempts ?? []), ...charged])].slice(-STOP_LIMITS.inventory) } : {}) }));
         if (billed.failed) ended = { ...ended, unresolved: [...ended.unresolved, CLEANUP_UNPAID] };
         if (ended.ended && ended.unresolved.length === 0) {
           await this.#observe(by, b.scope, id, "stopped", graceful ? "ended after preparation" : "force stopped; incomplete state may need reconciling");
@@ -496,6 +496,8 @@ export class StopService {
           if (!paid.ok) { await this.#waitOn(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; done = true; break; }
           found = await this.#runner.get(CHARGE, c.attemptId);
           have = (found?.body as unknown as ChargeBody | undefined) ?? { costMicros: 0, computeMs: 0 };
+          // Another request noted a new charge right after the one we paid: ours is never written over it (that charge would be made twice); look again and pay it first.
+          if (have.pending !== undefined) continue;
         }
         const newCost = Math.max(Math.min(cost, CLEANUP_CAP), have.costMicros), newCompute = Math.max(Math.min(compute, CLEANUP_CAP), have.computeMs);
         if (newCost === have.costMicros && newCompute === have.computeMs) { done = true; break; }
@@ -523,15 +525,17 @@ export class StopService {
       const had = open?.body as unknown as OpenBody | undefined;
       const raised = this.#raise(had?.want, want, intentId);
       if (had !== undefined && !had.settled && had.intents.includes(intentId) && raised === had.want) return;
-      const next = clean({ intents: await this.#listed(had?.intents ?? [], intentId), settled: false, ...(raised === undefined ? {} : { want: raised }) });
+      const next = clean({ intents: await this.#listed(attemptId, had?.intents ?? [], intentId, [raised?.intentId]), settled: false, ...(raised === undefined ? {} : { want: raised }) });
+      // The figure is part of the identity of the write: two passes that wait at the same revision with different figures are different commands (the second then loses the race and looks again).
+      const digest = createHash("sha256").update(JSON.stringify(next)).digest("hex").slice(0, 16);
       try {
-        await this.#runner.command("stop.charge-wait", { commandId: `stop-wait-${attemptId}-${intentId}-${open?.revision ?? 0}`.slice(0, 200), actor: "system" }, async () => ({
-          payload: { attemptId, intentId },
+        await this.#runner.command("stop.charge-wait", { commandId: `stop-wait-${attemptId}-${intentId}-${open?.revision ?? 0}-${digest}`.slice(0, 200), actor: "system" }, async () => ({
+          payload: { attemptId, intentId, ...(raised === undefined ? {} : { costMicros: raised.costMicros, computeMs: raised.computeMs }) },
           build: async () => ({ ref: openRef, creates: open === undefined, changes: [open === undefined ? { type: "create", ref: openRef, body: next } : { type: "update", ref: openRef, expectedRevision: open.revision, body: next }], detail: { attemptId } }),
         }));
         return;
       } catch (error) {
-        if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) continue;
+        if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict" || error.code === "not_found")) continue;
         throw error;
       }
     }
@@ -544,14 +548,18 @@ export class StopService {
     return { costMicros: Math.max(add.costMicros, had?.costMicros ?? 0), computeMs: Math.max(add.computeMs, had?.computeMs ?? 0), intentId };
   }
 
-  /** The requests an open entry lists once `add` joins. Past `OPEN_INTENTS` the ones that no longer carry the "not charged" mark are dropped (the sweep has nothing to clear on them); one that still carries it is never dropped. */
-  async #listed(have: readonly string[], add: string): Promise<string[]> {
+  /**
+   * The requests an open entry lists once `add` joins. Past `OPEN_INTENTS` only requests the sweep may still have something to do for are kept: one that carries the "not charged" mark, one that has not finished (its mark may yet be
+   * written), the one whose note is pending, the one whose figure is wanted, and `add`. A request is never dropped while any of these holds.
+   */
+  async #listed(attemptId: string, have: readonly string[], add: string, extra: readonly (string | undefined)[] = []): Promise<string[]> {
     const all = [...new Set([...have, add])];
     if (all.length <= OPEN_INTENTS) return all;
+    const pending = ((await this.#runner.get(CHARGE, attemptId))?.body as unknown as ChargeBody | undefined)?.pending?.intentId;
     const keep: string[] = [];
     for (const i of all) {
-      const marked = i === add || ((await this.#runner.get(KIND, i))?.body as unknown as StopIntentBody | undefined)?.outcome?.unresolved.includes(CLEANUP_UNPAID) === true;
-      if (marked) keep.push(i);
+      const b = i === add || i === pending || extra.includes(i) ? undefined : (await this.#runner.get(KIND, i))?.body as unknown as StopIntentBody | undefined;
+      if (i === add || i === pending || extra.includes(i) || (b !== undefined && (!TERMINAL.includes(b.phase) || b.outcome?.unresolved.includes(CLEANUP_UNPAID) === true))) keep.push(i);
     }
     return keep;
   }
@@ -572,7 +580,7 @@ export class StopService {
           // What a request wanted charged stays on the entry until the attempt's total covers it.
           const want = had?.want !== undefined && (had.want.costMicros > body.costMicros || had.want.computeMs > body.computeMs) ? had.want : undefined;
           const idx: JsonObject | undefined = body.pending !== undefined
-            ? clean({ intents: await this.#listed(had?.intents ?? [], body.pending.intentId), settled: false, ...(want === undefined ? {} : { want }) })
+            ? clean({ intents: await this.#listed(attemptId, had?.intents ?? [], body.pending.intentId, [had?.want?.intentId]), settled: false, ...(want === undefined ? {} : { want }) })
             : had === undefined || (had.settled && had.want === want) ? undefined : clean({ intents: had.intents, settled: true, ...(want === undefined ? {} : { want }) });
           const indexChange: Change[] = idx === undefined ? [] : [open === undefined ? { type: "create", ref: openRef, body: idx } : { type: "update", ref: openRef, expectedRevision: open.revision, body: idx }];
           return { ref, creates: revision === undefined, changes: [revision === undefined ? { type: "create", ref, body: next } : { type: "update", ref, expectedRevision: revision, body: next }, ...indexChange], detail: { attemptId } };
@@ -580,7 +588,8 @@ export class StopService {
       }));
       return true;
     } catch (error) {
-      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) return false;
+      // An entry the sweep dropped between the read and the write is a lost race too: the next try creates it again.
+      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict" || error.code === "not_found")) return false;
       throw error;
     }
   }
@@ -635,14 +644,18 @@ export class StopService {
     }
     for (const intentId of cleared) {
       if (stuck.has(intentId)) continue;
-      await this.#update(intentId, (x) => (x.outcome === undefined || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
+      // A request that has not finished has no outcome to clear yet (its mark may still be written): it stays listed. A clear that fails is tried again by the next sweep.
+      const phase = ((await this.#runner.get(KIND, intentId))?.body as unknown as StopIntentBody | undefined)?.phase;
+      if (phase === undefined || !TERMINAL.includes(phase)) { stuck.add(intentId); continue; }
+      const wrote = await this.#update(intentId, (x) => (x.outcome === undefined || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
+      if (!wrote) stuck.add(intentId);
     }
     // A settled entry whose requests are cleared is taken off the index (the per-attempt running total stays: it is what keeps a later stop from charging twice).
     for (const f of finished) {
       const now = await this.#runner.get(OPEN, f.attemptId);
       const charge = (await this.#runner.get(CHARGE, f.attemptId))?.body as unknown as ChargeBody | undefined;
       const wants = (now?.body as unknown as OpenBody | undefined)?.want;
-      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some((i) => stuck.has(i)) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
+      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some((i) => stuck.has(i) || !cleared.has(i)) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
       await this.#runner.command("stop.charge-index-drop", { commandId: `stop-drop-${f.attemptId}-${now.revision}`.slice(0, 200), actor: "system" }, async () => ({
         payload: { attemptId: f.attemptId, revision: now.revision },
         build: async () => ({ ref: { kind: OPEN, id: f.attemptId }, creates: false, changes: [{ type: "delete", ref: { kind: OPEN, id: f.attemptId }, expectedRevision: now.revision }], detail: { attemptId: f.attemptId } }),
