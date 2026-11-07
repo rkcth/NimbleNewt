@@ -5,6 +5,8 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
+import type { ControllerStorage } from "../storage/types.js";
+import { CLAIM_MS } from "./catalog.js";
 import { CatalogService, checkHost, checkManifest, personalNamespace, runAction, type HostFacts } from "./index.js";
 
 after(stopServer);
@@ -22,7 +24,7 @@ const manifest = (extra: Record<string, unknown> = {}) => ({
 const host: HostFacts = { os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: { undici: "7.0.0" }, cpus: 4, memoryMb: 4096 };
 
 for (const backend of backends) {
-  interface Ctx { cat: CatalogService; desks: DeskService; owner: Principal; ann: Principal; ben: Principal; reader: Principal; a: string; b: string; ta: string; grants: GrantService; principals: PrincipalService; note(by: Principal, body: string, extra?: Record<string, unknown>): Promise<string> }
+  interface Ctx { storage: ControllerStorage; epoch: number; cat: CatalogService; desks: DeskService; owner: Principal; ann: Principal; ben: Principal; reader: Principal; a: string; b: string; ta: string; grants: GrantService; principals: PrincipalService; note(by: Principal, body: string, extra?: Record<string, unknown>): Promise<string> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
@@ -41,7 +43,7 @@ for (const backend of backends) {
         const reader = await agent("reader", [{ action: "history.read", project: b }, { action: "catalog.read", project: "*" }]);
         const desks = DeskService.withEpoch(world.storage, projects.epoch, options);
         await body({
-          cat: CatalogService.withEpoch(world.storage, projects.epoch, desks, options), desks, owner, ann, ben, reader, a, b, ta, grants, principals,
+          storage: world.storage, epoch: projects.epoch, cat: CatalogService.withEpoch(world.storage, projects.epoch, desks, options), desks, owner, ann, ben, reader, a, b, ta, grants, principals,
           note: async (by, text, extra = {}) => (await desks.write(by, { commandId: cid("w"), projectId: a, kind: "note", title: "work", body: text, visibility: "shared", status: "accepted", ...extra } as never)).id,
         });
       } finally { await world.close(); }
@@ -229,6 +231,32 @@ for (const backend of backends) {
     assert.equal(await latest(), undefined, "all revoked: none");
     assert.equal((await c.cat.get(c.ann, name, "1.0.5"))!.revoked?.reason, "r");
     await refuses("invalid_command", () => reg("1.9.9"), (e) => assert.match(e.message, /higher/));
+  });
+
+  suite("a drop whose claim has run out, because the check of what still needs the version took longer than the claim lasts or the clock was set back, lifts the claim and drops nothing (card T02c review)", async (c) => {
+    let at = Date.parse("2026-10-22T12:00:00.000Z");
+    const clocked = CatalogService.withEpoch(c.storage, c.epoch, c.desks, { clock: () => new Date(at).toISOString(), pause: async () => undefined });
+    const readme = await c.note(c.ann, "docs");
+    for (const v of ["1.0.0", "1.1.0", "1.2.0"]) await clocked.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "tool", version: v, manifest: manifest(), instructionsRecordId: readme, executableRecordId: await c.note(c.ann, `code ${v}`) });
+    const name = `${personalNamespace(c.ann.id)}.fetch`;
+    const row = async (v: string) => (await clocked.retentionCandidates(c.owner, 1, 10)).items.find((x) => x.version === v)!;
+    const run = (v: string) => clocked.authorizeRun(c.ann, { commandId: cid("u"), name, version: v, taskId: c.ta, projectId: c.a, host });
+    const drop = async (v: string, holds: () => Promise<undefined>) => clocked.dropVersion(c.owner, { name, version: v, revision: (await row(v)).revision, keep: 1 }, holds);
+    // The check is slow: by the time it ends the claim is older than it lasts, so a run could start meanwhile (a recorded use does not change the version's record). Nothing is dropped.
+    let started: unknown;
+    const slow = await drop("1.0.0", async () => { at += CLAIM_MS + 1_000; started = (await run("1.0.0")).ready; return undefined; });
+    assert.equal(started, true, "a claim older than it lasts does not hold a run back");
+    assert.equal(slow.dropped, false);
+    assert.equal((await clocked.get(c.owner, name, "1.0.0"))?.version, "1.0.0", "the version the run started on is still there");
+    // The clock set back below the claim: the claim reads as void as well.
+    const back = await drop("1.0.0", async () => { at -= 3_600_000; return undefined; });
+    assert.equal(back.dropped, false);
+    assert.ok((await clocked.get(c.owner, name, "1.0.0")) !== undefined);
+    // The claim was lifted in both cases: a run starts, and an undisturbed drop goes through.
+    at += 3_600_000;
+    assert.equal((await run("1.0.0")).ready, true);
+    assert.equal((await drop("1.0.0", async () => undefined)).dropped, true);
+    assert.equal(await clocked.get(c.owner, name, "1.0.0"), undefined);
   });
 
   suite("schemas may refer only to themselves", async () => {

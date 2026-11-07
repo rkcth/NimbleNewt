@@ -478,6 +478,9 @@ test("past revocations are read by the owner through the API and in chat; the po
     const text = "which tool versions were revoked";
     const asked = await say("s1", text, [{ kind: "status", request: { kind: "revocations" }, evidence: text, basis: "owner" }]);
     seen.chat = asked.outcomes[0];
+    // The standing policy can be asked for in chat too: owner only, and it tells the policy in force, its source and the owner's setting.
+    const ask = "what happens to running calls when I revoke a tool";
+    seen.policyBefore = (await say("s0", ask, [{ kind: "status", request: { kind: "catalog_policy" }, evidence: ask, basis: "owner" }])).outcomes[0];
     // Policy by chat: shown first with the revision filled in; a change made meanwhile makes the stale proposal fail instead of overwriting it.
     const say2 = "from now on pause the tasks of running calls when I revoke a tool";
     const proposed = await say("s2", say2, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "pause" }, evidence: say2, basis: "owner" }]);
@@ -493,7 +496,15 @@ test("past revocations are read by the owner through the API and in chat; the po
     const a2 = await say("s5", "yes", [{ kind: "apply_proposal", proposalId: p2.outcomes[0].proposalId, evidence: "yes", basis: "owner" }]);
     seen.stale = a2.outcomes[0];
     seen.final = (await call(owner, "catalog.policy.get", {})).result.item.runningCalls;
+    const askAfter = "and what is it now";
+    seen.policyAfter = (await say("s6", askAfter, [{ kind: "status", request: { kind: "catalog_policy" }, evidence: askAfter, basis: "owner" }])).outcomes[0];
+    seen.policyAgent = (await call(agent, "status.ask", { request: { kind: "catalog_policy" } })).error?.code;
   });
+  assert.equal(seen.policyAgent, "not_found", "an agent is not told the owner's policy");
+  assert.equal(seen.policyBefore.status, "answered", JSON.stringify(seen.policyBefore));
+  assert.match(seen.policyBefore.lines.map((l: any) => l.text).join("\n"), /are let finish \(finish\), from the default\.\nYou have set none/);
+  assert.ok(seen.policyBefore.lines.every((l: any) => l.cites.length > 0));
+  assert.match(seen.policyAfter.lines.map((l: any) => l.text).join("\n"), /\(finish\), from your setting\.\nYour setting is finish/);
   assert.deepEqual([seen.empty.total, seen.empty.items], [0, []]);
   assert.deepEqual([seen.list.total, seen.list.items[0].version, seen.list.items[0].reason, seen.list.items[0].revokedBy.startsWith("owner:")], [1, "1.0.0", "leaks tokens", true]);
   assert.deepEqual([seen.byName, seen.other, seen.agent, seen.badLimit], [1, 0, "forbidden", "invalid_command"]);

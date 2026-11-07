@@ -362,7 +362,7 @@ export class RetentionService {
     };
   }
 
-  /** Blanks the executable text of one revoked version's record (title and body gone, a marker left), guarded by the revision read now; the deletion ledger is written first so a restore of an older backup blanks it again. */
+  /** Blanks the executable text of one revoked version's record (title and body gone, a marker left), guarded by the revision read now; the deletion ledger is written after the guarded command has gone through (so a record that was left alone never has an entry), so a restore of an older backup blanks it again. */
   async #blankExecutable(by: Principal, r: { name: string; version: string; versionId: string; recordId: string; digest: string; revision: number }): Promise<boolean> {
     const found = await this.#runner.get("desk-record", r.recordId);
     if (found === undefined) return false;

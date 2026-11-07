@@ -186,7 +186,7 @@ test("revoked versions keep their record and digest; the executable text is blan
   } finally { await c.close(); cleanup(d); }
 });
 
-test("a record that was the source of a registration and has changed since (a new revision) is not blanked when the version is revoked; a cited one is not either (card T02c re-review)", async () => {
+test("a record that was the source of a registration and has changed since (a new revision) is not blanked when the version is revoked (card T02c re-review)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
   const { c, s, boot, rob, ann, call, project, note } = await world(d);
   try {
@@ -210,6 +210,35 @@ test("a record that was the source of a registration and has changed since (a ne
     assert.ok(after.revision > cur.revision);
     assert.equal((after.body as unknown as { deleted?: unknown }).deleted, undefined);
     void project;
+  } finally { await c.close(); cleanup(d); }
+});
+
+test("the executable record of a revoked version that a live task's dependency manifest cites is not blanked, in the preview or at the run, and is blanked once nothing cites it (card T02c review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
+  const { c, s, boot, rob, ann, call, note } = await world(d);
+  try {
+    const code = await note("cited code");
+    await s.catalog.register(ann, { commandId: "reg-c", name: "cited", kind: "tool", version: "1.0.0", manifest, instructionsRecordId: await note("readme"), executableRecordId: code } as never);
+    const name = (await s.catalog.list(rob)).find((x) => x.name.endsWith("cited"))!.name;
+    await s.catalog.revoke(rob, { commandId: "rv", name, version: "1.0.0", reason: "bad" });
+    const apply = (operationId: string, changes: unknown[]) => c.storage.applyOperation({ operationId, epoch: c.epoch, actor: "test", correlationId: "x", at: new Date().toISOString(), changes: changes as never, audit: [{ type: "test.seed", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    const row = (await c.storage.listAggregates("catalog-revocation", { limit: 10 }))[0]!;
+    await apply("age-c", [{ type: "update", ref: { kind: "catalog-revocation", id: row.id }, expectedRevision: row.revision, body: { ...(row.body as object), at: "2020-01-01T00:00:00.000Z" } }]);
+    // A live task depends on the record.
+    await apply("seed-c", [{ type: "create", ref: { kind: "task", id: "task-live-c" }, body: { projectId: "proj-x", state: "in_progress" } }, { type: "create", ref: { kind: "dependency-manifest", id: "dpm-c" }, body: { taskId: "task-live-c", entries: [{ kind: "record", key: code }] } }]);
+    assert.ok((await call(boot, "retention.settings.set", { revokedBytesBlank: true }, "on")).ok);
+    const pre = (await call(boot, "retention.run", { dryRun: true }, "p1")).result;
+    assert.deepEqual(pre.revokedBytes.candidates, [], "a cited record is not offered");
+    const ran = await call(boot, "retention.run", { dryRun: false, confirm: pre.digest }, "r1");
+    assert.ok(ran.ok, JSON.stringify(ran));
+    assert.equal(((await c.storage.getAggregate({ kind: "desk-record", id: code }))!.body as unknown as { body: string }).body, "cited code", "the cited record keeps its text");
+    // The citation goes away (its task is done): the same record is now blanked.
+    const task = (await c.storage.getAggregate({ kind: "task", id: "task-live-c" }))!;
+    await apply("done-c", [{ type: "update", ref: { kind: "task", id: "task-live-c" }, expectedRevision: task.revision, body: { ...(task.body as object), state: "done" } }]);
+    const pre2 = (await call(boot, "retention.run", { dryRun: true }, "p2")).result;
+    assert.equal(pre2.revokedBytes.candidates.length, 1);
+    assert.ok((await call(boot, "retention.run", { dryRun: false, confirm: pre2.digest }, "r2")).ok);
+    assert.equal(((await c.storage.getAggregate({ kind: "desk-record", id: code }))!.body as unknown as { deleted?: unknown }).deleted !== undefined, true, "nothing cites it now, so the text is gone");
   } finally { await c.close(); cleanup(d); }
 });
 

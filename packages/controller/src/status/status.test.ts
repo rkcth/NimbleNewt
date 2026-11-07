@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { AgentService } from "../agents/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
+import { CatalogPolicyService } from "../catalog/index.js";
 import { DeskService } from "../context/index.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { BlockerService, type BlockerBasis, type BlockerType } from "../domain/blockers.js";
@@ -51,7 +52,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -92,7 +93,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1378,6 +1379,21 @@ for (const backend of backends) {
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "handoff", taskId: t.id }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "handoff", taskId: t.id }), undefined);
+  });
+
+  suite("the standing answer for calls running when a tool version is revoked is told to the owner only: the one in force, where it comes from and the owner's own setting (card T02c)", async (c) => {
+    const policy = CatalogPolicyService.withEpoch(c.storage, c.epoch, "finish", options);
+    const status = c.rebuild({}, { catalogPolicy: policy });
+    const texts = async (): Promise<string> => (await status.ask(c.owner, { kind: "catalog_policy" }))!.lines.map((l) => l.text).join("\n");
+    assert.match(await texts(), /are let finish \(finish\), from the default\.\nYou have set none\. The default is finish\./);
+    await policy.change(c.owner, { commandId: cid("cp"), runningCalls: "pause" });
+    assert.match(await texts(), /are cancelled and their tasks paused \(pause\), from your setting\.\nYour setting is pause\./);
+    const operator = c.rebuild({}, { catalogPolicy: CatalogPolicyService.withEpoch(c.storage, c.epoch, "finish", options, () => "cancel") });
+    assert.match((await operator.ask(c.owner, { kind: "catalog_policy" }))!.lines.map((l) => l.text).join("\n"), /\(cancel\), from the operator's startup option, which beats your setting\.\nYour setting is pause \(it does not apply/);
+    assert.ok((await status.ask(c.owner, { kind: "catalog_policy" }))!.lines.every((l) => l.cites.length > 0));
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "catalog_policy" }), undefined, "only the owner is told");
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "catalog_policy" }), undefined, "not offered when the policy is not running");
   });
 
   suite("whether the installation could be stopped now is told to the owner only: ready, or what is still running or unknown (card L06)", async (c) => {

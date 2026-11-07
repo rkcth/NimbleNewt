@@ -422,7 +422,7 @@ export class CatalogService {
   /**
    * Drops one version for retention (card T02c) in two steps, so a run cannot start on a version while it goes. First the version is CLAIMED: its record is updated (`dropping`), which refuses every new run of it and
    * makes any run being recorded at that moment fail its revision check. Then `holds` is asked (the caller reads what resumable tasks, parked calls, environments and dependency records still need, now that nothing new can
-   * start); if anything holds the version the claim is lifted and nothing is dropped. Only then are the version record and its place in the entry removed together, guarded by the revisions seen. The latest, the highest live
+   * start); if anything holds the version the claim is lifted and nothing is dropped. Only then are the version record and its place in the entry removed together, guarded by the revisions seen and by the claim still being in force (a claim older than `CLAIM_MS`, or from the future, is void, so a run may have started: the claim is lifted and nothing is dropped). The latest, the highest live
    * one (what the tool resolves to), the newest unrevoked one and any revoked one are refused, and so is a version that is among the newest `keep` now. Its usage records stay: they are history, not a copy.
    * Returns `{ dropped: false }` when it changed or is gone since it was listed, and `held` with the reasons when something still needs it.
    */
@@ -478,6 +478,10 @@ export class CatalogService {
           const entry = await this.#runner.get(eref.kind, eref.id);
           const found = await this.#runner.get(vref.kind, vref.id);
           if (entry === undefined || found === undefined || found.revision !== claimed) throw new DomainError("stale_revision", "changed since the claim");
+          // authorizeRun treats a claim older than CLAIM_MS, or stamped in the future, as void, and a run it lets start does not change this record's revision. So a slow check (or a clock set back) between the claim
+          // and here may have let a run start; the drop goes ahead only while the claim would still have held that run back.
+          const held = Date.parse(this.#runner.now()) - Date.parse(claimAt);
+          if (!(held >= 0 && held < CLAIM_MS)) throw new DomainError("stale_revision", "the claim ran out before the drop");
           const e = entry.body as unknown as EntryBody;
           if (!eligible(e)) throw new DomainError("stale_revision", "it is no longer a version retention may drop");
           const next: EntryBody = { ...e, versions: e.versions.filter((v) => v !== drop.version), ...(e.deprecated === undefined ? {} : { deprecated: e.deprecated.filter((v) => v !== drop.version) }) };

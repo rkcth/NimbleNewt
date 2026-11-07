@@ -53,3 +53,12 @@ test("the model is told every operation with the argument names the chat accepts
   assert.match(system, /there are no fixed phrases/);
   assert.match(system, /use a clarify intent instead of guessing/);
 });
+
+test("the model is told what the revocation and policy questions are about: revoked tool versions of the catalogue, and the standing answer for running calls (card T02c review)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  assert.ok(system.includes("revocations(name, limit) - the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)"));
+  assert.doesNotMatch(system, /access that was revoked/);
+  assert.match(system, /catalog_policy\(\) - what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting/);
+});

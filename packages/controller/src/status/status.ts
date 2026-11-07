@@ -217,7 +217,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
   replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent"], about: "a replay of a task's recorded run" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
-  revocations: { keys: ["name", "limit"], about: "access that was revoked" },
+  revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
+  catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
   owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
@@ -255,6 +256,7 @@ export type StatusRequest =
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
+  | { readonly kind: "catalog_policy" }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
@@ -264,6 +266,8 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string
 
 export interface StatusDeps {
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
+  /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
+  readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
   readonly assignments: AssignmentService;
   readonly waits: WaitService;
@@ -408,6 +412,7 @@ export class StatusService {
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
+      case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -465,6 +470,27 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
     else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity (usually the most recently active tasks).", cite("project", request.projectId)));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */
+  async catalogPolicyLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.catalogPolicy === undefined || by.kind !== "owner") return undefined;
+    let p;
+    try { p = await this.#deps.catalogPolicy.get(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const where = p.source === "operator" ? "the operator's startup option, which beats your setting"
+      : p.source === "setting" ? "your setting"
+      : p.source === "damaged" ? "a safe fallback, because the stored setting is damaged"
+      : "the default";
+    const mine = p.runningCalls === null ? "You have set none." : `Your setting is ${shown(p.runningCalls, 20)}${p.source === "operator" ? " (it does not apply while the startup option stands)" : ""}.`;
+    const c = cite("catalog-policy", "main", p.revision === 0 ? undefined : p.revision);
+    return { observedAt: this.#runner.now(), lines: [
+      line(`When a tool version is revoked and no choice is named, running calls ${p.effective === "finish" ? "are let finish" : p.effective === "cancel" ? "are cancelled" : "are cancelled and their tasks paused"} (${shown(p.effective, 20)}), from ${where}.`, c),
+      line(`${mine} The default is ${shown(p.default, 20)}.`, c),
+      ...(p.damaged ? [line("The stored setting is damaged and reads as cancel until you set it again.", c)] : []),
+    ] };
   }
 
   /** The tool versions the owner withdrew, newest first: which, why, by whom, when. Owner only; nothing of the tool itself. */
