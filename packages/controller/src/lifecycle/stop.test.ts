@@ -44,6 +44,7 @@ class Runtime implements StopPorts {
   throwOnCheckpoint = false;
   /** Runs inside cleanup, so a test can make something else happen while preparation is in progress. */
   duringCleanup: (() => Promise<void>) | undefined;
+  duringTerminate: (() => Promise<void>) | undefined;
   begins = 0;
   async begin(): Promise<void> { this.begins++; }
   async release(): Promise<void> { this.calls.push("release"); }
@@ -62,7 +63,7 @@ class Runtime implements StopPorts {
     // A repeated command ID is the same charge (as the budget ledger answers it).
     if (!this.charges.some((x) => x.commandId === c.commandId)) this.charges.push(c);
   }
-  async terminate(_s: unknown, o: { force: boolean }) { this.calls.push(o.force ? "terminate-force" : "terminate"); if (this.crashOnTerminate) await new Promise(() => undefined); if (this.throwOnTerminate) throw new Error("cannot reach the host"); return { ended: this.ended, unresolved: this.unresolved, ...(this.terminateCosts === undefined ? {} : { costs: this.terminateCosts }) }; }
+  async terminate(_s: unknown, o: { force: boolean }) { this.calls.push(o.force ? "terminate-force" : "terminate"); const during = this.duringTerminate; this.duringTerminate = undefined; if (during !== undefined) await during(); if (this.crashOnTerminate) await new Promise(() => undefined); if (this.throwOnTerminate) throw new Error("cannot reach the host"); return { ended: this.ended, unresolved: this.unresolved, ...(this.terminateCosts === undefined ? {} : { costs: this.terminateCosts }) }; }
   count(call: string): number { return this.calls.filter((c) => c === call).length; }
 }
 
@@ -787,7 +788,7 @@ for (const backend of backends) {
     await c.stops.advance(c.owner, { intentId: y.intentId });
     c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 20, computeMs: 0 }] }, { remaining: [], costs: [{ attemptId: "att-a", costMicros: 30, computeMs: 0 }] }];
     const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
-    await Promise.all([c.stops.advance(c.owner, { intentId: x.intentId }), c.stops.advance(c.owner, { intentId: x.intentId })]);
+    await Promise.allSettled([c.stops.advance(c.owner, { intentId: x.intentId }), c.stops.advance(c.owner, { intentId: x.intentId })]);
     c.rt.failCharges = 0;
     for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
     assert.equal(sumOf(c, "att-a"), 30, "the highest figure either pass reported");
@@ -987,6 +988,64 @@ for (const backend of backends) {
     for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
     assert.equal(started, true);
     assert.equal(sumOf(c, "att-c"), 56, "the highest figure, once");
+  });
+
+  suite("a request that joins the entry between the sweep's page read and its drop keeps the entry (card L02d review 7, 1)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: x.intentId });
+    const w = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "stop", reason: "w" });
+    c.rt.failCharges = 0;
+    let joined = false;
+    // While the sweep clears the first request's mark, the second one (not finished) is listed on the entry, as if it had just waited on the note.
+    const put = tap(c, async (input) => {
+      if (joined || !input.changes.some((y) => y.ref.kind === "stop-intent" && y.ref.id === x.intentId)) return;
+      joined = true;
+      const entry = (await openEntries(c))[0]!;
+      await c.runner.command("test.join-open", { commandId: cid("join"), actor: "system" }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "stop-charge-open", id: "att-c" }, creates: false, changes: [{ type: "update" as const, ref: { kind: "stop-charge-open", id: "att-c" }, expectedRevision: entry.revision, body: { ...(entry.body as object), intents: [...(entry.body as { intents: string[] }).intents, w.intentId] } as never }], detail: {} }) }));
+    });
+    await c.stops.sweep(c.owner);
+    put();
+    assert.equal(joined, true);
+    assert.equal(await outcomeMarked(c, x.intentId), false);
+    assert.deepEqual(((await openEntries(c))[0]?.body as { intents: string[] } | undefined)?.intents.includes(w.intentId), true, "the entry stays for the request that joined");
+  });
+
+  suite("a request that the scope's resume moved on while the ending ran still records the ending and the attempts it charged (card L02d review 7, 2)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    c.rt.duringTerminate = async () => {
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+      await c.stops.advance(c.owner, { intentId });
+    };
+    await c.stops.advance(c.owner, { intentId });
+    const seen = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.equal(seen.phase, "recovery-required", "the resume moved it while terminate was running");
+    assert.equal(sumOf(c, "att-c"), 20);
+    assert.deepEqual([seen.endingRan, seen.attempts.map((a) => a.attemptId)], [true, ["att-c"]]);
+  });
+
+  suite("a note whose wait loses six races in a row fails the pass, which stays retryable: a later sweep charges the figure (card L02d review 7, 3)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.failCharges = 1000;
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 10, computeMs: 0 }] }];
+    const y = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "suspend", reason: "y" });
+    await c.stops.advance(c.owner, { intentId: y.intentId });
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 30, computeMs: 0 }] }];
+    const x = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    const lose = tap(c, async (input) => {
+      if (input.changes.some((z) => z.ref.kind === "stop-charge-open") && !input.changes.some((z) => z.ref.kind === "stop-charge")) throw new DomainError("stale_revision", "someone else wrote it");
+    });
+    await refuses("stale_revision", () => c.stops.advance(c.owner, { intentId: x.intentId }));
+    lose();
+    assert.equal(((await c.runner.get("stop-intent", x.intentId))!.body as { phase: string }).phase, "preparing", "the request is still live");
+    c.rt.failCharges = 0;
+    for (let i = 0; i < 3; i++) await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-a"), 30);
+    assert.equal(((await c.runner.get("stop-intent", x.intentId))!.body as { phase: string }).phase, "done");
   });
 
   suite("a wanted figure survives a sweep that stops after the note was paid and before the rest was charged (card L02d review 6, G)", async (c) => {

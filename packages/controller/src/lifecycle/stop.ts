@@ -516,7 +516,7 @@ export class StopService {
 
   /**
    * Records that a request is waiting on an attempt's pending charge written by ANOTHER request (its own cleanup found that note and could not pay it), in the same open index the sweep reads, so the sweep clears this request's
-   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; a few tries, then it is left (the next pass of the request does it again).
+   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; after six lost races in a row it throws a retryable error, so the pass does not go on (the request stays live and the sweep carries it on, charging again), never returning with the wait unrecorded.
    */
   async #waitOn(attemptId: string, intentId: string, want?: { costMicros: number; computeMs: number }): Promise<void> {
     const openRef: AggregateRef = { kind: OPEN, id: attemptId };
@@ -539,6 +539,7 @@ export class StopService {
         throw error;
       }
     }
+    throw new DomainError("stale_revision", `the open charge entry of ${attemptId} kept changing; the pass is left unfinished and the next sweep carries it on`);
   }
 
   /** The running maximum of the figures requests wanted charged (the same object when nothing is raised). */
