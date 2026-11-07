@@ -156,7 +156,7 @@ test("revoked versions keep their record and digest; the executable text is blan
     await ageDays(100);
     const preview = (await call(boot, "retention.run", { dryRun: true }, "p1")).result;
     assert.deepEqual(preview.revokedBytes.candidates.map((x: any) => x.version), ["1.0.0"]);
-    // The switch is off by default: nothing is a candidate until the owner turns it on.
+    // With the switch off (its default) nothing is a candidate.
     assert.ok((await call(boot, "retention.settings.set", { revokedBytesBlank: false }, "s-off0")).ok);
     assert.equal((await call(boot, "retention.run", { dryRun: true }, "p1b")).result.revokedBytes, undefined, "nothing is a candidate while the switch is off");
     // Disabled: nothing.

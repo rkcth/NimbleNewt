@@ -2297,7 +2297,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.revoke`
 
-The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed, `pause` aborts each running call, then pauses its task (the pause stops what the agent writes until the owner resumes the task). Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets the standing policy in force (`catalog.policy.get`: the operator's startup option, else the owner's setting, else `finish`). `finish` cannot be changed to `cancel` later: a version is revoked once, and a second revoke is refused. `cancel` and `pause` reach every running call of the version at the moment it is carried out, including calls that started between the preview and the acceptance.
+The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed, `pause` aborts each running call, then pauses its task (the pause stops what the agent writes until the owner resumes the task). Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets the standing policy in force (`catalog.policy.get`: the operator's startup option, else the owner's setting, else `finish`). `finish` cannot be changed to `cancel` or `pause` later: a version is revoked once, and a second revoke is refused. `cancel` and `pause` reach every running call of the version at the moment it is carried out, including calls that started between the preview and the acceptance.
 
 Arguments:
 
@@ -4750,6 +4750,8 @@ Owner only: changes retention values; only the fields given change, `null` clear
 Arguments:
 
 - `derivedDays` (optional): 7 to 3650, or null
+- `generationRunDays` (optional): 1 to 3650, or null
+- `contextRouteDays` (optional): 1 to 3650, or null
 - `autoRun` (optional): true or false
 - `thinkingDays` (optional): 1 to 365
 - `backupDaily` (optional): 1 to 365
@@ -4777,7 +4779,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `retention.run`
 
-Owner only: the retention runner. Without `dryRun: false` it only shows what the rule would remove (derived summaries older than `derivedDays`, backups outside the counts, and, when `catalogVersionsKept` is set (by hand; the automatic pass only when `catalogAutoDrop` is on), old versions of catalogue tools: `catalogVersions` lists them and the ones kept because something still needs them: a resumable task ran or pinned them, an environment or dependency record lists them) and gives a `digest`; run it for real by passing that digest as `confirm`. Material a resumable task or replay needs is skipped and shown as retained (a revoked executable text that something cites is left out of `revokedBytes` and is not listed as retained). Each rule acts only when its own value is set (`derivedDays`, `generationRunDays`, `contextRouteDays`, `catalogVersionsKept`, and `revokedBytesBlank` with `revokedBytesDays`); backups follow their counts. `revokedBytes` lists the revoked executable texts that would be blanked, and a real run reports `blanked`.
+Owner only: the retention runner. Without `dryRun: false` it only shows what the rule would remove (derived summaries older than `derivedDays`, backups outside the counts, and, when `catalogVersionsKept` is set (by hand; the automatic pass only when `catalogAutoDrop` is on), old versions of catalogue tools: `catalogVersions` lists them and the ones kept because something still needs them: a resumable task ran or pinned them, an environment or dependency record lists them) and gives a `digest`; run it for real by passing that digest as `confirm`. Material a resumable task or replay needs is skipped and shown as retained (a revoked executable text that something cites when the run reads it is left out of `revokedBytes`; one that becomes cited during the run stays listed there but is not blanked, so `blanked` is lower; neither is listed as retained). Each rule acts only when its own value is set (`derivedDays`, `generationRunDays`, `contextRouteDays`, `catalogVersionsKept`, and `revokedBytesBlank` with `revokedBytesDays`); backups follow their counts. `revokedBytes` lists the revoked executable texts that would be blanked, and a real run reports `blanked`.
 
 Arguments:
 

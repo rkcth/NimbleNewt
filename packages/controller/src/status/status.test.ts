@@ -52,7 +52,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -93,7 +93,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1403,6 +1403,25 @@ for (const backend of backends) {
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "catalog_policy" }), undefined, "only the owner is told");
     assert.equal(await c.rebuild().ask(c.owner, { kind: "catalog_policy" }), undefined, "not offered when the policy is not running");
+  });
+
+  suite("past revocations are told to the owner only: each with which version, who, when and why, a line for the ones not shown, and a closing line when the catalogue was larger than one look covers (card T02c)", async (c) => {
+    const item = (v: string) => ({ name: "toolbox.check", version: v, reason: "leaks tokens", revokedBy: "owner:rob", at: "2026-10-22T08:00:00.000Z" });
+    let answer: { items: ReturnType<typeof item>[]; total: number; partial?: boolean } = { items: [], total: 0 };
+    const status = c.rebuild({}, { revocations: { list: async () => answer } });
+    assert.deepEqual((await status.ask(c.owner, { kind: "revocations" }))!.lines.map((l) => l.text), ["No tool version has been revoked."]);
+    answer = { items: [item("1.0.0"), item("1.1.0")], total: 5, partial: true };
+    const lines = (await status.ask(c.owner, { kind: "revocations" }))!.lines;
+    cited(lines);
+    assert.deepEqual(lines.map((l) => l.text), [
+      "toolbox.check 1.0.0 was revoked at 2026-10-22T08:00:00.000Z by owner:rob: leaks tokens.",
+      "toolbox.check 1.1.0 was revoked at 2026-10-22T08:00:00.000Z by owner:rob: leaks tokens.",
+      "3 more revocation(s) are not shown.",
+      "The catalogue is larger than was looked through; there may be more revocations than this list shows.",
+    ]);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "revocations" }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "revocations" }), undefined);
   });
 
   suite("whether the installation could be stopped now is told to the owner only: ready, or what is still running or unknown (card L06)", async (c) => {

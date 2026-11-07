@@ -419,7 +419,7 @@ test("under finish only calls that are actually running continue: a call recorde
   assert.equal(out.running["state"], "failed");
 });
 
-test("the standing policy for running calls is a setting: owner only, race-safe, chat-settable; a revoke with no choice follows it and an explicit choice beats it (card T02c)", async () => {
+test("the standing policy for running calls is a setting: owner only, race-safe (chat is in the next test); a revoke with no choice follows it and an explicit choice beats it (card T02c)", async () => {
   const seen: Record<string, any> = {};
   const cancelled = await scenario(async ({ owner, agent, name, call }) => {
     seen.initial = (await call(owner, "catalog.policy.get", {})).result.item;
@@ -431,7 +431,7 @@ test("the standing policy for running calls is a setting: owner only, race-safe,
     seen.replay = (await call(owner, "catalog.policy.change", { runningCalls: "cancel", expectedRevision: 0 }, "p1")).result;
     seen.after = (await call(owner, "catalog.policy.get", {})).result.item;
     assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad" }, "rv-follow")).ok);
-    // The setting moves on; a replay of the first command still answers with what it replaced (null), not with what the record holds now.
+    // The setting moves on; a replay of p3 still answers with what it replaced (cancel), not with what the record holds now (finish).
     seen.p3 = (await call(owner, "catalog.policy.change", { runningCalls: "pause", expectedRevision: 1 }, "p3")).result;
     assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "finish", expectedRevision: 2 }, "p4")).ok);
     seen.replayLater = (await call(owner, "catalog.policy.change", { runningCalls: "pause", expectedRevision: 1 }, "p3")).result;
@@ -522,7 +522,7 @@ test("past revocations are read by the owner through the API and in chat; the st
   assert.equal(seen.final, "finish", "the stale proposal did not overwrite the owner's later change");
 });
 
-test("catalog.policy.get reports the policy in force: an operator's startup answer beats the owner's setting and says so; chat tells it, and with no call running the revoke follows it instead of assuming finish (card T02c fix)", async () => {
+test("catalog.policy.get reports the policy in force: an operator's startup answer beats the owner's setting and says so; chat tells it, and a revoke that names no choice follows it (the running call is cancelled) instead of assuming finish (card T02c fix)", async () => {
   const seen: Record<string, any> = {};
   const out = await scenario(async ({ owner, name, call, say }) => {
     seen.set = (await call(owner, "catalog.policy.change", { runningCalls: "pause" }, "op1")).result;

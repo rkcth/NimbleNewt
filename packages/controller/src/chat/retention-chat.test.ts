@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { RETENTION_FIELDS } from "../retention/index.js";
 import { CHAT_OPS, acceptedArgs } from "./index.js";
 import { cid, openWorld } from "./testing/harness.js";
 
@@ -10,7 +11,8 @@ const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ 
 for (const backend of backends) {
   test(`${backend.name}: the owner changes any retention value by chat: shown first, the revision is read for them, applied once, confirmed back with the old and new value; an agent cannot (card K06)`, async () => {
     for (const op of ["retention.settings.set", "retention.run", "retention.delete", "retention.archive", "retention.restore"]) assert.equal(CHAT_OPS[op]?.mode, "propose", `${op} is shown first`);
-    for (const k of ["derivedDays", "autoRun", "thinkingDays", "backupDaily", "backupWeekly", "incidentArchiveDays", "incidentPurgeDays", "catalogVersionsKept", "quotaProjectBytes", "quotaAgentBytes", "quotaWarnPercent", "reserveBytes", "expectedRevision"]) assert.ok(acceptedArgs("retention.settings.set")!.includes(k), k);
+    // Every retention value, taken from the settings definition so a new one cannot be forgotten, can be named in chat (and is therefore in the arguments the model is told).
+    for (const k of [...Object.keys(RETENTION_FIELDS), "expectedRevision"]) assert.ok(acceptedArgs("retention.settings.set")!.includes(k), k);
     assert.equal(CHAT_OPS["retention.settings.get"], undefined, "reading is a query, not a chat command");
     let revision = 4; let derivedDays: number | null = null;
     const calls: Record<string, unknown>[] = [];

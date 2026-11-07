@@ -15,7 +15,7 @@ test("a tool version that a resumable task has a call pinned to (parked, approve
   await raw.applyOperation(op([
     create("task", "task-live", { projectId: "proj-a", state: "in_progress" }), create("task", "task-done", { projectId: "proj-a", state: "done" }),
     create("dispatch", "att-live", { attemptId: "att-live", taskId: "task-live", state: "parked" }), create("dispatch", "att-done", { attemptId: "att-done", taskId: "task-done", state: "finished" }),
-    // A parked call and an approved-but-not-started call pinned to versions (the tool path name has the underscore of a personal namespace written as a hyphen).
+    // A parked call and an approved call (in progress) pinned to versions (the tool path name has the underscore of a personal namespace written as a hyphen).
     create("tool-op-att-live", "op-1", { tool: { kind: "catalog", name: "toolbox.check", version: "1.0.0" }, state: "awaiting-approval" }),
     create("tool-op-att-live", "op-2", { tool: { kind: "catalog", name: "a-abcd.check", version: "2.0.0" }, state: "in-progress" }),
     create("tool-op-att-live", "op-3", { tool: { kind: "builtin", name: "read-file", version: "1" }, state: "in-progress" }),

@@ -29,7 +29,7 @@ async function world(d: string) {
   return { c, s, boot, rob, ann, call, project, task };
 }
 
-test("catalogue retention (card T02c, K06): off by default; with a count set the runner drops older versions, keeps the latest, revoked ones and any a resumable task ran, shows them as retained, and drops them once the task is over", async () => {
+test("catalogue retention (card T02c, K06): off by default; with a count set the runner drops older versions, keeps the latest, revoked ones and any a resumable task ran, shows them as retained, and offers them for dropping once the task is over", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-catret-"));
   const { c, s, boot, rob, ann, call, project, task } = await world(d);
   try {

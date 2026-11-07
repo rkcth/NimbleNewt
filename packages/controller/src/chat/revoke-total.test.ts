@@ -7,7 +7,7 @@ import { openWorld } from "./testing/harness.js";
 after(stopServer);
 
 for (const backend of backends) {
-  test(`${backend.name}: the revoke question and preview count all running calls, not only the listed ones, and say finish cannot be changed to cancel later (card T02b fix)`, async () => {
+  test(`${backend.name}: the revoke question and preview count all running calls, not only the listed ones, and say finish cannot be changed to cancel or pause later (card T02b fix)`, async () => {
     const script: Record<string, unknown> = {};
     const w = await openWorld(backend, script);
     try {
@@ -24,7 +24,7 @@ for (const backend of backends) {
       const proposed = await chat.submit(w.ownerToken, { messageId: "m2", text: said });
       const preview = (proposed.outcomes[0]!.preview ?? []).join("\n");
       assert.match(preview, /120 running calls/);
-      assert.match(preview, /cannot be changed to cancel later/);
+      assert.match(preview, /cannot be changed to cancel or pause later/);
       assert.match(preview, /including calls that start before you accept/);
     } finally { await w.close(); }
   });
