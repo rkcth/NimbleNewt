@@ -402,6 +402,7 @@ export class ChatService {
     const profile = await this.#profile(owner);
     // Several commands in one message that change the same record: each write moves its revision on by one, so a later command expects the revision the earlier ones will have left.
     const pending = new Map<string, number>();
+    const answeredHere = new Set<string>();
     let coordinatorRevision: number | undefined;
     for (const [n, { intent, text: words, trusted, quoted, from }] of work.entries()) {
       const i = items.length;
@@ -524,6 +525,12 @@ export class ChatService {
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
+      // One message answers a waiting meeting decision once: a second answer to the same decision could only fail when confirmed.
+      const answering = resolved.steps.find((st) => st.op === "meeting.record.owner-respond")?.args["decisionId"];
+      if (typeof answering === "string") {
+        if (answeredHere.has(answering)) { push({ i, kind: "refused", code: "invalid_command", message: "That meeting decision is already answered in this message; a decision is answered once. Say which answer you mean, in a separate message." }); continue; }
+        answeredHere.add(answering);
+      }
       projectId = resolved.projectId ?? projectId;
       // A captured topic is linked to this very turn (set here, after the interpreter's arguments were checked, so it cannot be named by anyone else).
       // An alternative to a meeting decision is the owner's own decision from the turn the words were said in (the same link as a decision stated in chat; after a question that is the turn before the answer), under a command ID of this turn.

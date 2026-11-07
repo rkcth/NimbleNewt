@@ -23,7 +23,7 @@ interface Ctl {
   /** What the approval policy says to a widening change: allow, or ask (the decision then waits for the owner). */
   policy: { value: "allow" | "ask" };
   /** When set, the decision guard cannot be read (a pass that throws before any change starts). */
-  authFail: { on: boolean };
+  authFail: { on: boolean; after: number; calls: number };
   /** When set, the list of waiting decisions the chat reads is cut to this one and says it was cut. */
   cutTo: { id?: string };
   decision(id: string): Promise<DecisionRecordBody & { id: string }>;
@@ -47,9 +47,9 @@ for (const backend of backends) {
       } }) as MeetingRecordService;
       const w = await openWorld(backend, script, undefined, { records: lazy });
       const grants = GrantService.withEpoch(w.world.storage, w.projects.epoch, options);
-      const authFail = { on: false };
+      const authFail = { on: false, after: 0, calls: 0 };
       const realGuard = w.decisions.guard.bind(w.decisions);
-      (w.decisions as { guard: typeof w.decisions.guard }).guard = async (...a) => { if (authFail.on) throw new DomainError("unavailable", "the decision guard could not be read"); return realGuard(...a); };
+      (w.decisions as { guard: typeof w.decisions.guard }).guard = async (...a) => { if (authFail.on && ++authFail.calls > authFail.after) throw new DomainError("unavailable", "the decision guard could not be read"); return realGuard(...a); };
       const authority = async (id: string) => { const p = await w.principals.get(id); return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, options.clock()); };
       const crash = { n: 0, plain: 0 };
       const policy: { value: "allow" | "ask" } = { value: "allow" };
@@ -535,74 +535,298 @@ for (const backend of backends) {
     const narrowed = only((await say(w, chat, "Agree with the nightly one in B.")).outcomes);
     assert.equal(narrowed.status, "proposed", JSON.stringify(narrowed));
     assert.match(String(narrowed.preview), /nightly report weekly/);
+    // A project the owner names where nothing waits is told so, not "nothing waits anywhere".
+    await w.project("C");
+    script["Agree with the nightly one in C."] = [cmd(OP, { response: "agree", decisionTopic: "nightly", projectName: "C" }, "Agree with the nightly one in C")];
+    const none = only((await say(w, chat, "Agree with the nightly one in C.")).outcomes);
+    assert.equal(none.message, "no meeting decision of that project is waiting for your answer");
     assert.ok(boxes.id);
   });
 
-  // A seeded sample of the flow: 1 to 3 waiting decisions, a response, a name that is unique or shared (so the owner is asked and picks in any order), a list cut short, a failing applier.
+  // A seeded sample of the flow: 1 to 3 waiting decisions, a response, a name that is unique or shared (so the owner is asked and picks in any order), a list cut short, a failing applier,
+  // the same message or confirm sent again, a crash after the answer ran but before the proposal was marked applied, a second answer to the same decision in the message, and an agreement that stops part way.
   // For every sample: nothing is applied before the owner confirms, the confirm is never refused as invalid for a proposal the chat made, and what the owner is told matches what the record holds.
   suite("seeded samples of answering held decisions by chat keep their promises", async (w, script, ctl) => {
     w.profile.value = "autonomous";
-    const nouns = ["nightly build", "staging server", "backup job", "billing export", "release notes", "cache warmup", "audit trail", "label printer", "mail relay", "search index", "log rotation", "image resize", "tax report", "door badge", "feed import", "queue limit", "spam filter", "disk quota", "chat export", "map tiles", "video proxy", "form archive", "user import", "help pages"];
+    const nouns = ["nightly build", "staging server", "backup job", "billing export", "release notes", "cache warmup", "audit trail", "label printer", "mail relay", "search index", "log rotation", "image resize", "tax report", "door badge", "feed import", "queue limit", "spam filter", "disk quota", "chat export", "map tiles", "video proxy", "form archive", "user import", "help pages", "map labels", "rate table", "gift cards", "tag cloud", "icon pack", "font cache", "geo lookup", "sync log", "wiki links", "mail digest", "task board", "time sheet"];
     let seed = 20261107;
     const next = (n: number): number => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % n; };
     const chat = w.chat();
-    for (let k = 0; k < 8; k++) {
+    const months = ["March", "April", "May", "June", "July", "August", "September", "October", "November", "December", "January", "February"];
+    for (let k = 0; k < 21; k++) {
       const count = 1 + next(3);
+      let response = (["agree", "decline", "alternative"] as const)[next(3)]!;
+      let shared = count > 1 && next(2) === 0;
+      let cut = next(3) === 0;
+      let partial = response === "agree" && next(3) === 0;
+      let fail = response === "agree" && !partial && next(2) === 0;
+      let twice = next(4) === 0;
+      let crashAfter = next(3) === 0;
+      const resendTurn = next(2) === 0;
+      const resendConfirm = next(2) === 0;
+      // Some combinations are forced so every kind is sampled whatever the sequence gives: two answers in one message (any response), and an agreement that stops part way and is then repeated after a crash.
+      if (k % 7 === 3) { twice = true; shared = false; cut = false; }
+      if (k === 13) { response = "agree"; partial = true; fail = false; crashAfter = true; shared = false; cut = false; twice = false; }
       const made: { id: string; noun: string; taskId: string }[] = [];
       for (let n = 0; n < count; n++) {
-        const noun = nouns[(k * 3 + n) % nouns.length]!;
-        const d = await ctl.pending(`Tune the ${noun} schedule.`, noun, `Task ${k}-${n}`);
+        const noun = `${nouns[(k * 3 + n) % nouns.length]!} ${Math.floor((k * 3 + n) / nouns.length)}`.replace(" 0", "");
+        const d = await ctl.pending(`Tune the ${noun} schedule.`, noun, `Task ${k}-${n}`, { kinds: partial && n === 0 ? ["task.update", "task.update"] : ["task.update"] });
         made.push({ id: d.id, noun, taskId: d.taskId });
       }
-      const target = made[next(count)]!;
-      const response = (["agree", "decline", "alternative"] as const)[next(3)]!;
-      const shared = count > 1 && next(2) === 0;
-      const cut = next(3) === 0;
-      const fail = response === "agree" && next(2) === 0;
+      const picked0 = made[next(count)]!;
+      const target = k === 13 ? made[0]! : picked0;
+      const partialTarget = partial && made[0]!.id === target.id;
       const name = shared ? "schedule" : target.noun;
-      const month = ["March", "April", "May", "June", "July", "August", "September", "October"][k]!;
-      const keep = `keep the ${target.noun} at midnight until ${month}`;
+      const keep = `keep the ${target.noun} at midnight until ${months[k % 12]}`;
+      const label = JSON.stringify({ k, response, shared, cut, partial, fail, twice, crashAfter, resendTurn, resendConfirm, count });
       const text = response === "alternative" ? `Sample ${k}: I would rather ${keep} than that ${name} change.` : `Sample ${k}: ${response === "agree" ? "Agree with" : "No to"} the ${name} change.`;
-      script[text] = [cmd(OP, { response, decisionTopic: name, ...(response === "alternative" ? { alternativeStatement: keep } : {}) }, response === "alternative" ? keep : text.slice(text.indexOf(":") + 2, -1))];
+      const one = cmd(OP, { response, decisionTopic: name, ...(response === "alternative" ? { alternativeStatement: keep } : {}) }, response === "alternative" ? keep : text.slice(text.indexOf(":") + 2, -1));
+      // A second answer to the same decision in the same message (it can only fail when confirmed, so it is refused before).
+      script[text] = twice && !shared && !cut ? [one, cmd(OP, { response: response === "decline" ? "agree" : "decline", decisionTopic: name }, text.slice(text.indexOf(":") + 2, -1))] : [one];
       if (cut) ctl.cutTo.id = target.id;
-      const first = await say(w, chat, text);
+      const messageId = `m-sample-${k}`;
+      const first = await chat.submit(w.ownerToken, { messageId, text });
       delete ctl.cutTo.id;
-      for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${k} ${JSON.stringify({ response, shared, cut, fail, count, m: m.noun })}: nothing is answered before the owner confirms`);
+      for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${label}: nothing is answered before the owner confirms`);
       let outcomes = first.outcomes;
       const mustAsk = shared && !cut;
-      assert.equal(outcomes.some((o) => o.status === "asked"), mustAsk, `sample ${k}: ${JSON.stringify(outcomes)}`);
+      assert.equal(outcomes.some((o) => o.status === "asked"), mustAsk, `sample ${label}: ${JSON.stringify(outcomes)}`);
+      let pickTurn = first.turnId;
       if (mustAsk) {
         script[`Sample ${k} pick.`] = [{ kind: "answer", turnId: first.turnId, choice: target.id, evidence: `Sample ${k} pick`, basis: "owner" }];
-        outcomes = (await say(w, chat, `Sample ${k} pick.`)).outcomes;
+        const picked = await say(w, chat, `Sample ${k} pick.`);
+        outcomes = picked.outcomes;
+        pickTurn = picked.turnId;
+      } else if (resendTurn) {
+        // The message sent again with the same ID is the same turn: the same proposal, nothing new.
+        const again = await chat.submit(w.ownerToken, { messageId, text });
+        assert.equal(again.turnId, first.turnId, `sample ${label}`);
+        assert.deepEqual(again.outcomes.map((o) => o.proposalId), first.outcomes.map((o) => o.proposalId), `sample ${label}: the same proposal`);
       }
+      void pickTurn;
+      if (twice && !shared && !cut) assert.deepEqual(outcomes.map((o) => o.status), ["proposed", "refused"], `sample ${label}: ${JSON.stringify(outcomes)}`);
       const proposal = outcomes.find((o) => o.status === "proposed");
-      assert.ok(proposal, `sample ${k}: a proposal, not a refusal: ${JSON.stringify(outcomes)}`);
-      for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${k}: the proposal changes nothing`);
+      assert.ok(proposal, `sample ${label}: a proposal, not a refusal: ${JSON.stringify(outcomes)}`);
+      for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${label}: the proposal changes nothing`);
       if (fail) ctl.crash.n = 1;
-      const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposal!.proposalId! });
+      if (partialTarget) Object.assign(ctl.authFail, { on: true, after: 1, calls: 0 });
+      let crashed = false;
+      const flaky = { handle: async (token: string, raw: unknown) => { const r = await w.api.handle(token, raw as never); if ((raw as { op?: string }).op === OP && !crashed) { crashed = true; throw new Error("crash"); } return r; } };
+      let applied;
+      if (crashAfter) {
+        await assert.rejects(w.chat({ api: flaky as never }).applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! }), /crash/, `sample ${label}`);
+        ctl.crash.n = 0;
+        ctl.authFail.on = false;
+        applied = await w.chat().applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! });
+      } else {
+        applied = await chat.applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! });
+      }
       ctl.crash.n = 0;
-      assert.equal(applied.applied, true, `sample ${k}: ${JSON.stringify(applied)}`);
+      ctl.authFail.on = false;
+      assert.equal(applied.applied, true, `sample ${label}: ${JSON.stringify(applied)}`);
       const told = (applied.results[0]!.shown ?? []).join("\n");
       const rec = await ctl.decision(target.id);
-      assert.equal(rec.ownerResponse, response === "agree" ? "agreed" : response === "decline" ? "declined" : "alternative", `sample ${k}`);
-      for (const m of made.filter((x) => x.id !== target.id)) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${k}: the others still wait`);
-      const state = rec.changes[0]!.state;
+      assert.equal(rec.ownerResponse, response === "agree" ? "agreed" : response === "decline" ? "declined" : "alternative", `sample ${label}`);
+      for (const m of made.filter((x) => x.id !== target.id)) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${label}: the others still wait`);
+      const states = rec.changes.map((c) => c.state);
       if (response === "agree") {
-        assert.equal(state, fail ? "applying" : "applied", `sample ${k}`);
-        assert.equal(/stays applying/.test(told), fail, `sample ${k}: ${told}`);
-        assert.equal(/1 change carried out now/.test(told), !fail, `sample ${k}: ${told}`);
+        if (crashAfter) {
+          // The first call ran fully before the crash; the repeat says it was given, and finishes only what a failed applier left.
+          assert.match(told, /^This answer \(agree\) was already given/, `sample ${label}: ${told}`);
+          if (fail) { assert.deepEqual(states, ["applied"], `sample ${label}`); assert.match(told, /this call finished what was left:\nYou agreed\. 1 change carried out now\./, `sample ${label}: ${told}`); }
+          else if (partialTarget) { assert.deepEqual(states, ["applied", "applied"], `sample ${label}: the repeat finishes the rest`); assert.match(told, /1 change carried out now/, `sample ${label}: ${told}`); }
+          else { assert.deepEqual(states, ["applied"], `sample ${label}`); assert.equal(told, "This answer (agree) was already given; nothing more was done now.", `sample ${label}`); }
+        } else if (partialTarget) {
+          assert.deepEqual(states, ["applied", "adopted"], `sample ${label}`);
+          assert.match(told, /^You agreed\. 1 change carried out now\.\nCarrying out stopped before the rest started; 1 change still waits\./, `sample ${label}: ${told}`);
+        } else {
+          assert.deepEqual(states, [fail ? "applying" : "applied"], `sample ${label}`);
+          assert.equal(/stays applying/.test(told), fail, `sample ${label}: ${told}`);
+          assert.equal(/1 change carried out now/.test(told), !fail, `sample ${label}: ${told}`);
+        }
       } else {
-        assert.equal(state, "not-applied", `sample ${k}`);
-        assert.match(told, response === "decline" ? /^You declined/ : /^You chose your own decision instead/, `sample ${k}`);
+        assert.deepEqual(states, ["not-applied"], `sample ${label}`);
+        if (crashAfter) assert.equal(told, `This answer (${response === "decline" ? "decline" : "your own decision"}) was already given; nothing more was done now.`, `sample ${label}: ${told}`);
+        else assert.match(told, response === "decline" ? /^You declined/ : /^You chose your own decision instead/, `sample ${label}`);
         if (response === "alternative") {
           const own = await call(w, w.ownerToken, "decision.get", { decisionId: rec.ownerDecisionId });
-          assert.equal(own.result.item.statement, keep, `sample ${k}: the owner's own words are the decision`);
-          assert.equal(own.result.item.source.turnId, first.turnId, `sample ${k}: linked to the message the words were said in`);
+          assert.equal(own.result.item.statement, keep, `sample ${label}: the owner's own words are the decision`);
+          assert.equal(own.result.item.source.turnId, first.turnId, `sample ${label}: linked to the message the words were said in`);
+          assert.equal((await w.decisions.history(w.owner, { projectId: ctl.project, topic: target.noun })).length, 1, `sample ${label}: recorded once`);
         }
+      }
+      // The same confirm sent again changes and tells nothing new that is false: the proposal is done.
+      if (resendConfirm) {
+        const statesBefore = JSON.stringify((await ctl.decision(target.id)).changes.map((c) => c.state));
+        const again: { applied: boolean } | Error = await chat.applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! }).catch((e: Error) => e);
+        assert.equal(JSON.stringify((await ctl.decision(target.id)).changes.map((c) => c.state)), statesBefore, `sample ${label}: a repeated confirm changes nothing`);
+        if (!(again instanceof Error)) assert.equal(again.applied, true, `sample ${label}`);
       }
       // Leave nothing waiting for the next sample.
       for (const m of made.filter((x) => x.id !== target.id)) await call(w, w.ownerToken, OP, { decisionId: m.id, response: "decline" }, `clear-${k}-${m.id}`);
     }
+  });
+
+  const altArgs = (ctl: Ctl, topic: string, statement: string, id: string) => ({ commandId: id, projectId: ctl.project, category: "decision", topic, statement, wording: statement, source: { channel: "direct" }, basedOn: 0 });
+  const firstWaiting = async (w: World): Promise<string> => (await call(w, w.ownerToken, "meeting.decisions.waiting", {})).result.item.items[0].id as string;
+
+  suite("an alternative sent again with the same command is a repeat, not an error; a different command is refused as already answered", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const args = { decisionId: d.id, response: "alternative", alternative: altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "alt-direct") };
+    const first = await call(w, w.ownerToken, OP, args, "ans-alt");
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const again = await call(w, w.ownerToken, OP, args, "ans-alt");
+    assert.equal(again.ok, true, JSON.stringify(again));
+    assert.deepEqual([again.result.replayed, again.result.ownerDecisionId], [true, first.result.ownerDecisionId]);
+    assert.deepEqual(again.result.shown, ["This answer (your own decision) was already given; nothing more was done now."]);
+    const other = await call(w, w.ownerToken, OP, args, "ans-alt-2");
+    assert.equal(other.ok, false);
+    assert.equal(other.error.code, "invalid_command");
+    assert.equal((await w.decisions.history(w.owner, { projectId: ctl.project, topic: "nightly build" })).length, 1, "recorded once");
+  });
+
+  suite("a proposal whose step ran but was not marked applied (a crash) is applied again as a repeat and says so", async (w, script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const text = "I would rather keep the nightly build at midnight until March, not that change.";
+    script[text] = [cmd(OP, { response: "alternative", decisionTopic: "nightly build", alternativeStatement: "keep the nightly build at midnight until March" }, "keep the nightly build at midnight until March")];
+    const proposal = only((await say(w, w.chat(), text)).outcomes);
+    let crashed = false;
+    const flaky = { handle: async (token: string, raw: unknown) => { const r = await w.api.handle(token, raw as never); if ((raw as { op?: string }).op === OP && !crashed) { crashed = true; throw new Error("crash"); } return r; } };
+    await assert.rejects(w.chat({ api: flaky as never }).applyProposal(w.ownerToken, { commandId: "ap-crash", proposalId: proposal.proposalId! }), /crash/);
+    assert.equal((await ctl.decision(d.id)).ownerResponse, "alternative");
+    const again = await w.chat().applyProposal(w.ownerToken, { commandId: "ap-crash", proposalId: proposal.proposalId! });
+    assert.equal(again.applied, true, JSON.stringify(again));
+    assert.deepEqual(again.results[0]!.shown, ["This answer (your own decision) was already given; nothing more was done now."]);
+  });
+
+  suite("a repeated answer that finishes a started change says what it finished", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    ctl.crash.n = 1;
+    const first = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "ans-agree");
+    assert.equal(first.result.stillApplying, true, JSON.stringify(first));
+    const again = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "ans-agree");
+    assert.equal(again.result.replayed, true);
+    assert.equal(again.result.carriedOut, 1);
+    assert.deepEqual(again.result.shown, ["This answer (agree) was already given; this call finished what was left:", "You agreed. 1 change carried out now. 0 changes had been done before.".replace(" 0 changes had been done before.", "")]);
+    assert.equal((await ctl.decision(d.id)).changes[0]!.state, "applied");
+    const third = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "ans-agree");
+    assert.deepEqual(third.result.shown, ["This answer (agree) was already given; nothing more was done now."]);
+    // A decline with a started change, finished by the repeat.
+    const e = await ctl.pending(STAGING, "staging server", "Staging task", { kinds: ["task.update", "task.retitle"], join: false });
+    ctl.policy.value = "ask";
+    ctl.crash.plain = 1;
+    await assert.rejects(() => ctl.records.apply(w.owner, { decisionId: e.id }), (x: unknown) => x instanceof DomainError && x.code === "unavailable");
+    ctl.crash.plain = 1;
+    const declined = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "decline" }, "ans-decline");
+    assert.equal(declined.result.stillApplying, true, JSON.stringify(declined));
+    const repeat = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "decline" }, "ans-decline");
+    assert.equal(repeat.result.carriedOut, 1, JSON.stringify(repeat));
+    assert.equal(repeat.result.shown[0], "This answer (decline) was already given; this call finished what was left:");
+  });
+
+  suite("an agreement that carries out the first change and stops before the second says the rest still wait, not that nothing started", async (w, script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task", { kinds: ["task.update", "task.update"] });
+    const chat = w.chat();
+    script["Agree with the nightly build."] = [cmd(OP, { response: "agree", decisionTopic: "nightly build" }, "Agree with the nightly build")];
+    const proposed = only((await say(w, chat, "Agree with the nightly build.")).outcomes);
+    Object.assign(ctl.authFail, { on: true, after: 1, calls: 0 });
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposed.proposalId! });
+    ctl.authFail.on = false;
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.deepEqual(applied.results[0]!.shown, ["You agreed. 1 change carried out now.", "Carrying out stopped before the rest started; 1 change still waits. Nothing applies it again by itself; the decision must be applied again through the API (meeting.record.apply), which you have no chat command for yet."]);
+    assert.deepEqual((await ctl.decision(d.id)).changes.map((c) => c.state), ["applied", "adopted"]);
+  });
+
+  suite("an alternative recorded in conflict with another instruction on its topic is told as a conflict", async (w, script, ctl) => {
+    const d = await ctl.pending(STAGING, "staging server", "Staging task");
+    const chat = w.chat();
+    const text = "I would rather keep the staging server until May, not that change.";
+    script[text] = [cmd(OP, { response: "alternative", decisionTopic: "staging server", alternativeStatement: "keep the staging server until May" }, "keep the staging server until May")];
+    const proposed = only((await say(w, chat, text)).outcomes);
+    // Another instruction on the topic arrives after the proposal was drawn up (a later turn).
+    await w.decisions.record(w.owner, { commandId: cid("later"), projectId: ctl.project, category: "decision", topic: "staging server", statement: "Retire the staging server in April", wording: "Retire the staging server in April", source: { channel: "direct" }, basedOn: 0 } as never);
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposed.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    const shown = applied.results[0]!.shown!;
+    assert.match(shown[0]!, /^You chose your own decision instead/);
+    assert.equal(shown[shown.length - 1], "Your decision is recorded, but it conflicts with another of your instructions on its topic: nothing on that topic is in force until you choose.");
+    assert.equal((await ctl.decision(d.id)).ownerResponse, "alternative");
+  });
+
+  suite("two answers to the same decision in one message: the first is proposed, the second refused", async (w, script, ctl) => {
+    await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const text = "Agree with the nightly build. No, decline the nightly build.";
+    script[text] = [cmd(OP, { response: "agree", decisionTopic: "nightly build" }, "Agree with the nightly build"), cmd(OP, { response: "decline", decisionTopic: "nightly build" }, "decline the nightly build")];
+    const out = (await say(w, w.chat(), text)).outcomes;
+    assert.deepEqual(out.map((o) => o.status), ["proposed", "refused"], JSON.stringify(out));
+    assert.match(String(out[1]!.message), /already answered in this message/);
+  });
+
+  suite("a held message with two decisions on one topic: resent after a crash it records each once", async (w, script, ctl) => {
+    w.profile.value = "autonomous";
+    await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    await ctl.pending(REPORT, "nightly report", "Report task");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: ctl.project });
+    const said = "For the schedule: use midnight for the nightly build. Then use one for the nightly build instead. Agree with the schedule change.";
+    const dec = (statement: string) => cmd("decision.record", { projectId: ctl.project, category: "decision", topic: "schedule", statement, wording: statement }, statement);
+    script[said] = [dec("use midnight for the nightly build"), dec("use one for the nightly build"), cmd(OP, { response: "agree", decisionTopic: "nightly" }, "Agree with the schedule change")];
+    const first = await say(w, chat, said);
+    assert.ok(first.outcomes.some((o) => o.status === "asked"), JSON.stringify(first.outcomes));
+    script["The first one."] = [{ kind: "answer", turnId: first.turnId, choice: await firstWaiting(w), evidence: "The first one", basis: "owner" }];
+    let calls = 0;
+    const flaky = { handle: async (token: string, raw: unknown) => { if ((raw as { op?: string }).op === "decision.record" && ++calls === 2) throw new Error("crash"); return w.api.handle(token, raw as never); } };
+    await assert.rejects(w.chat({ api: flaky as never }).submit(w.ownerToken, { messageId: "m-held-crash", text: "The first one." }), /crash/);
+    const resumed = await w.chat().submit(w.ownerToken, { messageId: "m-held-crash", text: "The first one." });
+    assert.deepEqual(resumed.outcomes.filter((o) => o.op === "decision.record").map((o) => o.status), ["applied", "applied"], JSON.stringify(resumed.outcomes));
+    // The step recorded before the crash is answered from the record (no revision comes back, as from a send), because it is this message's own record.
+    assert.equal(resumed.outcomes[0]!.revision, undefined, JSON.stringify(resumed.outcomes[0]));
+    assert.deepEqual(resumed.outcomes[0]!.shown, ['Recorded decision version 1 on "schedule": use midnight for the nightly build']);
+    assert.deepEqual((await w.decisions.history(w.owner, { projectId: ctl.project, topic: "schedule" })).map((d) => [d.version, d.state]), [[1, "superseded"], [2, "active"]]);
+  });
+
+  suite("a held message whose decision is recorded by the other copy between the look and the send answers applied", async (w, script, ctl) => {
+    w.profile.value = "autonomous";
+    await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    await ctl.pending(REPORT, "nightly report", "Report task");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: ctl.project });
+    const said = "For the schedule: use midnight for the nightly build. Agree with the schedule change.";
+    script[said] = [cmd("decision.record", { projectId: ctl.project, category: "decision", topic: "schedule", statement: "use midnight for the nightly build", wording: "use midnight for the nightly build" }, "use midnight for the nightly build"), cmd(OP, { response: "agree", decisionTopic: "nightly" }, "Agree with the schedule change")];
+    const first = await say(w, chat, said);
+    script["The first one."] = [{ kind: "answer", turnId: first.turnId, choice: await firstWaiting(w), evidence: "The first one", basis: "owner" }];
+    let raced = false;
+    const racing = { handle: async (token: string, raw: unknown) => { const r = raw as { op?: string; args?: Record<string, unknown> }; if (r.op === "decision.record" && !raced) { raced = true; await w.api.handle(token, { ...r, args: { ...r.args, basedOn: 9 } } as never); } return w.api.handle(token, raw as never); } };
+    const out = (await w.chat({ api: racing as never }).submit(w.ownerToken, { messageId: "m-held-race", text: "The first one." })).outcomes;
+    assert.equal(out.find((o) => o.op === "decision.record")!.status, "applied", JSON.stringify(out));
+    assert.equal((await w.decisions.history(w.owner, { projectId: ctl.project, topic: "schedule" })).length, 1);
+  });
+
+  suite("two questions in a row, then an alternative: the alternative is still linked to the first message", async (w, script, ctl) => {
+    w.profile.value = "autonomous";
+    const a = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const b = await ctl.pending(REPORT, "nightly report", "Report task");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: ctl.project });
+    const said = "I would rather keep the nightly build at midnight until March than the first schedule change. Agree with the second schedule change.";
+    script[said] = [
+      cmd(OP, { response: "alternative", decisionTopic: "nightly", alternativeStatement: "keep the nightly build at midnight until March" }, "keep the nightly build at midnight until March"),
+      cmd(OP, { response: "agree", decisionTopic: "nightly" }, "Agree with the second schedule change"),
+    ];
+    const first = await say(w, chat, said);
+    assert.ok(first.outcomes.some((o) => o.status === "asked"), JSON.stringify(first.outcomes));
+    script["The nightly build one."] = [{ kind: "answer", turnId: first.turnId, choice: a.id, evidence: "The nightly build one", basis: "owner" }];
+    const second = await say(w, chat, "The nightly build one.");
+    assert.ok(second.outcomes.some((o) => o.status === "asked"), JSON.stringify(second.outcomes));
+    script["The report one."] = [{ kind: "answer", turnId: second.turnId, choice: b.id, evidence: "The report one", basis: "owner" }];
+    const third = await say(w, chat, "The report one.");
+    const alt = third.outcomes.find((o) => o.status === "proposed" && JSON.stringify(o).includes("keep the nightly build"));
+    assert.ok(alt, JSON.stringify(third.outcomes));
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: alt!.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    const rec = await ctl.decision(a.id);
+    const own = await call(w, w.ownerToken, "decision.get", { decisionId: rec.ownerDecisionId });
+    assert.equal(own.result.item.source.turnId, first.turnId);
   });
 
   suite("only the owner sees or answers the held decisions: an agent, a host and a task-scoped owner credential are refused, and the chat is the owner's alone", async (w, _script, ctl) => {

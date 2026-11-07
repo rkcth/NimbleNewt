@@ -284,7 +284,7 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  *   private record is marked unverifiable for readers who cannot be shown it.
  */
 /** What an owner's answer to a decision did: `applied` (changes applied in all, after an agreement), `stillApplying` (a started change could not be finished just now), and from the record before and after: changes carried out by this answer, the codes of those it refused, those done before, those still open. */
-export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; carriedOut: number; refused: string[]; alreadyDone: number; stillOpen: number; applying: number }
+export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
   readonly #runner: CommandRunner;
@@ -1217,15 +1217,20 @@ export class MeetingRecordService {
     if (!["agree", "decline", "alternative"].includes(command.response as string)) invalid("response", "must be agree, decline or alternative");
     if ((command.response === "alternative") !== (command.alternative !== undefined)) invalid("alternative", "is needed for an alternative, and only for one");
     let ownerDecisionId: string | undefined;
+    let ownerDecisionDisputed = false;
     if (command.alternative !== undefined) {
       if (this.#deps.decisions === undefined) throw new DomainError("unavailable", "owner decisions are not available here");
       const found = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
       if (found === undefined) throw new DomainError("not_found", "that decision does not exist");
       if (command.alternative.projectId !== found.projectId) invalid("alternative", "must be in the meeting's project");
-      if (found.outcome !== "adopted" || found.scope !== "in-scope" || (found.ownerResponse !== "pending" && found.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", "that decision does not wait for the owner", { field: "decisionId" });
-      const recorded = await this.#deps.decisions.record(by, command.alternative);
-      if (!recorded.recorded) invalid("alternative", recorded.reason);
-      else ownerDecisionId = recorded.id;
+      if (found.ownerResponse === "alternative" && found.ownerDecisionId !== undefined) ownerDecisionId = found.ownerDecisionId;
+      // The same alternative sent again finds its decision already recorded and answered: it is not recorded twice, and the answer command below replays (a different command is refused there as already answered).
+      else if (found.outcome !== "adopted" || found.scope !== "in-scope" || (found.ownerResponse !== "pending" && found.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", "that decision does not wait for the owner", { field: "decisionId" });
+      if (ownerDecisionId === undefined) {
+        const recorded = await this.#deps.decisions.record(by, command.alternative);
+        if (!recorded.recorded) invalid("alternative", recorded.reason);
+        else ownerDecisionId = recorded.id;
+      }
     }
     const answered = await this.#cmd("meeting.decision.owner", by, command.commandId, async () => ({
       payload: clean({ decisionId, response: command.response, ownerDecisionId }),
@@ -1256,18 +1261,20 @@ export class MeetingRecordService {
       if (left?.changes.some((c) => c.state === "applying") === true) { try { await this.#applyDecision(by, decisionId); } catch { stillApplying = true; } }
       else await this.#logChanges(decisionId);
     }
+    // The owner's own decision may conflict with another instruction on its topic (recorded, but not in force until the owner chooses): that is read from the decision itself, so a repeat tells it too.
+    if (ownerDecisionId !== undefined && this.#deps.decisions !== undefined) ownerDecisionDisputed = (await this.#deps.decisions.get(by, ownerDecisionId).catch(() => undefined))?.state === "disputed";
     // What this answer did to the changes, from the record before and after (the changes keep their order).
     const after = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
     const now = after?.changes ?? [];
-    // A repeat of an answer already given has nothing to count: what the first call did is not known now, and changes another pass finished meanwhile are not this answer's.
-    const was = answered.replayed ? now : (before?.changes ?? []);
+    // A repeat of an answer still runs the pass, so it counts what it itself finished or refused, from the record as it stood when it started.
+    const was = before?.changes ?? [];
     const carriedOut = now.filter((c, n) => c.state === "applied" && was[n]?.state !== "applied").length;
     const refused = now.flatMap((c, n) => (c.state === "not-applied" && was[n]?.state !== "not-applied" ? [c.code ?? "failed"] : []));
     // `stillApplying` is true only when a change really was started and stays applying; a pass that threw before starting anything leaves the changes adopted (`passFailed`).
     const applyingNow = now.filter((c) => c.state === "applying").length;
     return {
       ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(applied === undefined ? {} : { applied }), ...(stillApplying && applyingNow > 0 ? { stillApplying: true as const } : {}), ...(stillApplying && applyingNow === 0 ? { passFailed: true as const } : {}),
-      ...(answered.replayed ? { replayed: true as const } : {}),
+      ...(answered.replayed ? { replayed: true as const } : {}), ...(ownerDecisionDisputed ? { ownerDecisionDisputed: true as const } : {}),
       carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length, applying: applyingNow,
     };
   }

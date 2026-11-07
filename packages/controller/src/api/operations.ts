@@ -356,10 +356,13 @@ const NOT_CARRIED_OUT: Readonly<Record<string, string>> = {
 export function ownerAnswerLines(response: string, out: Readonly<Record<string, unknown>>): string[] {
   const num = (k: string): number => (typeof out[k] === "number" ? (out[k] as number) : 0);
   const count = (k: number): string => `${k} change${k === 1 ? "" : "s"}`;
-  if (out["replayed"] === true) return [`This answer (${response === "agree" ? "agree" : response === "decline" ? "decline" : "your own decision"}) was already given; nothing more was done now.`];
+  const given = `This answer (${response === "agree" ? "agree" : response === "decline" ? "decline" : "your own decision"}) was already given`;
+  const replayed = out["replayed"] === true;
+  // A repeat still finishes what an earlier call left started: it says "nothing more was done" only when that is true.
+  if (replayed && num("carriedOut") === 0 && (!Array.isArray(out["refused"]) || out["refused"].length === 0) && out["stillApplying"] !== true && out["passFailed"] !== true) return [`${given}; nothing more was done now.`];
   const carried = num("carriedOut");
   const before = num("alreadyDone");
-  const lines: string[] = [];
+  const lines: string[] = replayed ? [`${given}; this call finished what was left:`] : [];
   const refused = Array.isArray(out["refused"]) ? (out["refused"] as string[]) : [];
   const byCode = new Map<string, number>();
   for (const code of refused) if (!(response !== "agree" && code === "owner")) byCode.set(code, (byCode.get(code) ?? 0) + 1);
@@ -374,9 +377,12 @@ export function ownerAnswerLines(response: string, out: Readonly<Record<string, 
   if (out["stillApplying"] === true) {
     lines.push(`${count(applying)} started but could not be carried out just now and ${applying === 1 ? "stays" : "stay"} applying. Nothing applies ${applying === 1 ? "it" : "them"} again by itself: ${applying === 1 ? "it is" : "they are"} finished when the decision is applied again through the API (meeting.record.apply); you have no chat command for that yet.`);
     if (others > 0) lines.push(`${others} more change${others === 1 ? "" : "s"} still ${others === 1 ? "waits" : "wait"} to be carried out.`);
+  } else if (out["passFailed"] === true && carried > 0) {
+    lines.push(`Carrying out stopped before the rest started; ${count(num("stillOpen"))} still ${num("stillOpen") === 1 ? "waits" : "wait"}. Nothing applies ${num("stillOpen") === 1 ? "it" : "them"} again by itself; the decision must be applied again through the API (meeting.record.apply), which you have no chat command for yet.`);
   } else if (out["passFailed"] === true) {
     lines.push(`Carrying out the changes failed before any of them started; ${count(num("stillOpen"))} still ${num("stillOpen") === 1 ? "waits" : "wait"}. Nothing applies ${num("stillOpen") === 1 ? "it" : "them"} again by itself; the decision must be applied again through the API (meeting.record.apply), which you have no chat command for yet.`);
   } else if (response === "agree" && num("stillOpen") > 0) lines.push(`${count(num("stillOpen"))} still ${num("stillOpen") === 1 ? "waits" : "wait"} to be carried out.`);
+  if (out["ownerDecisionDisputed"] === true) lines.push("Your decision is recorded, but it conflicts with another of your instructions on its topic: nothing on that topic is in force until you choose.");
   return lines;
 }
 
@@ -777,7 +783,7 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("casting-vote", "command", "The chair breaks a tie.", "castingVote", ["motionId", "value", "reason"], "`{ state, decisionId? }`."),
   recordOp("apply", "command", "Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied. A change that was already started when the owner declined is finished by this call too (the owner's answer reports `stillApplying: true` when that could not be done just then).", "apply", ["decisionId"], "`{ applied, notApplied, pending }`.", "viewer"),
   ((): Operation => {
-    const base = recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After an agreement the agreed changes are carried out, and after a decline or an alternative a change that had already started is finished, at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, the change stays applying, and nothing applies it again by itself: it is finished when the decision is applied again with `meeting.record.apply`).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying?, passFailed?, replayed?, carriedOut, refused, alreadyDone, stillOpen, applying, shown }`: `applied` (changes of the decision carried out, in all) after an agreement; `stillApplying` when a change that was started could not be carried out or finished just now and stays applying; `passFailed` when carrying out failed before any change started (they stay adopted); `replayed` for a repeat of an answer already given (the counts are then not this call's); `carriedOut` the changes this answer carried out, `refused` the codes of those it refused, `alreadyDone` those done before, `stillOpen` those still adopted or applying; `shown` plain lines saying what happened (for the chat).");
+    const base = recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them. After an agreement the agreed changes are carried out, and after a decline or an alternative a change that had already started is finished, at once; if that could not be done just now the answer says `stillApplying: true` (the answer itself is saved, the change stays applying, and nothing applies it again by itself: it is finished when the decision is applied again with `meeting.record.apply`).", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied?, stillApplying?, passFailed?, replayed?, carriedOut, refused, alreadyDone, stillOpen, applying, shown }`: `applied` (changes of the decision carried out, in all) after an agreement; `stillApplying` when a change that was started could not be carried out or finished just now and stays applying; `passFailed` when carrying out stopped with changes still adopted (before any started, or after some were carried out; `carriedOut` tells which); `replayed` for the same command sent again: the answer is not given twice (an alternative is not recorded twice), the pass runs again and the counts are what this call itself did (a repeat can finish a change an earlier call left applying); `ownerDecisionDisputed` when the alternative was recorded but conflicts with another instruction on its topic (nothing on the topic is in force until the owner chooses); `carriedOut` the changes this answer carried out, `refused` the codes of those it refused, `alreadyDone` those done before, `stillOpen` those still adopted or applying; `shown` plain lines saying what happened (for the chat).");
     return { ...base, run: async (c, a, id) => {
       const out = await base.run(c, a, id);
       // What happened, in plain lines, for the owner who answered by chat (and any other reader of the answer).
