@@ -2080,6 +2080,23 @@ for (const backend of backends) {
     assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, scopeOf(c.task))), [false, false, false, false]);
   });
 
+  suite("an open index of the entries a scan reads and ONE more: the scan is cut, and the sweep keeps the mark of a request only that entry lists until it is paid (card L02d review 16, 3)", async (c) => {
+    c.rt.seenAttempts = [];
+    const x = await markedStop(c, scopeOf(c.task), true);
+    await fillIndex(c, "b", 2000, () => ({ open: { intents: [], settled: true } }));
+    // The 2001st entry lists the request and has a pending note whose charge fails.
+    await fillIndex(c, "z", 1, () => ({ open: { intents: [x], settled: false }, charge: { costMicros: 0, computeMs: 0, pending: { costMicros: 5, computeMs: 0, commandId: "stopcl-one-more", intentId: x, counted: true } } }));
+    c.rt.failCharges = 1000;
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, scopeOf(c.task))), [true, false, false, true], "one entry follows the full pages: the scan is cut");
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "z00000"), 0);
+    assert.equal(await outcomeMarked(c, x), true, "the entry past the cut still lists it unpaid");
+    c.rt.failCharges = 0;
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "z00000"), 5, "a later sweep pays it");
+    assert.equal(await outcomeMarked(c, x), false);
+  });
+
   suite("a scope that cannot be stopped yet is refused before anything is paused or recorded", async (c) => {
     c.rt.unsupportedWith = "stopping a whole team is not supported yet";
     await refuses("unavailable", () => c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" }));
