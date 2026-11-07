@@ -421,9 +421,10 @@ export class StopService {
       if (charge.pending?.intentId === id) ownPending = true;
     }
     // The request's own pending note may be on an attempt its record does not list: the open index names every request with a note or a wait on an attempt. The scan is cut at `RETRY_PAGES` pages; a scan that did not reach
-    // the end (a short page) says nothing about the rest, so it is reported as cut, never as "nothing of its own left". `listed`: some entry read lists the request (the sweep clears its mark there once that entry is paid).
-    let complete = ownPending, listed = false;
-    for (let after: string | undefined, pages = 0; !ownPending && pages < RETRY_PAGES; pages++) {
+    // the end (a short page, or nothing after a full last page) says nothing about the rest, so it is reported as cut, never as "nothing of its own left". `listed`: some entry read lists the request (the sweep clears its mark
+    // there once that entry is paid).
+    let complete = ownPending, listed = false, after: string | undefined;
+    for (let pages = 0; !ownPending && pages < RETRY_PAGES; pages++) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const rec of page) {
         after = rec.id;
@@ -436,6 +437,8 @@ export class StopService {
       }
       if (ownPending || page.length < 100) { complete = true; break; }
     }
+    // Every page read was full: the scan reached the end only if nothing follows the last entry read.
+    if (!complete && !ownPending) complete = await this.#nothingAfter(after);
     const marked = found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true;
     // Records written before the flags existed (see the notes): a Force Stop that carries a limit, a spent figure, a checkpoint or a preparing/prepared step in its history took over earlier work (a pure Force Stop has none of them),
     // and a request settled as "unresolved work remains" got there through its ending.
@@ -568,13 +571,13 @@ export class StopService {
     const now = (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
     if (now === undefined || (now.owed?.length ?? 0) > 0 || !TERMINAL.includes(now.phase) || now.outcome?.unresolved.includes(CLEANUP_UNPAID) !== true) return;
     // The mark is taken off only after the WHOLE index was read: a scan cut at `RETRY_PAGES` pages may have missed the entry that lists the request, so the mark is kept then (a later sweep looks again).
-    let complete = false;
-    for (let after: string | undefined, pages = 0; pages < RETRY_PAGES; pages++) {
+    let complete = false, after: string | undefined;
+    for (let pages = 0; pages < RETRY_PAGES; pages++) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const rec of page) { after = rec.id; if ((rec.body as unknown as OpenBody).intents.includes(id)) return; }
       if (page.length < 100) { complete = true; break; }
     }
-    if (!complete) return;
+    if (!complete && !(await this.#nothingAfter(after))) return;
     await this.#update(id, (x) => (x.outcome === undefined || (x.owed?.length ?? 0) > 0 || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
   }
 
@@ -678,6 +681,11 @@ export class StopService {
     return { ok: false, billed: 0 };
   }
 
+  /** Whether the open index has no entry after `after` (the last entry of a full page): a scan that read only full pages reached the end only then. */
+  async #nothingAfter(after: string | undefined): Promise<boolean> {
+    return after !== undefined && (await this.#runner.list(OPEN, { afterId: after, limit: 1 })).length === 0;
+  }
+
   /**
    * Makes the charges that failed or were cut short by a crash, for any request (a sweep does this, so a charge that could not be made at the time is retried later). When every charge a finished request was waiting on is made, the
    * request's "cleanup spend not charged" mark is taken off its outcome.
@@ -685,6 +693,8 @@ export class StopService {
   async #retryCharges(by: Principal): Promise<void> {
     const cleared = new Set<string>();
     const stuck = new Set<string>();
+    // Requests an entry past the cut lists: their marks are kept (that entry was not paid by this sweep), but the paid entries in the window that list them are still taken off (see below).
+    const pastCut = new Set<string>();
     const finished: { attemptId: string; revision: number }[] = [];
     // Only the open entries are read (not every charge record ever written); a sweep pays up to RETRY_PAGES x 100 of them and the rest wait for the next sweep.
     let after: string | undefined, complete = false;
@@ -709,14 +719,16 @@ export class StopService {
       }
       if (page.length < 100) { complete = true; break; }
     }
-    // An entry past the cut was not paid by this sweep, so every request it lists is held back too (its mark stays): the rest of the index is read (only read, nothing is paid) to find them.
+    // An entry past the cut was not paid by this sweep, so the mark of every request it lists is kept: the rest of the index is read (only read, nothing is paid) to find them. They go in `pastCut`, not `stuck`: a paid entry
+    // in the window that lists such a request is still taken off, since the entry past the cut keeps listing the request and its mark is cleared once that entry is paid. Holding the window's paid entries back for it would
+    // keep the same entries in the window on every sweep, and the entries past the cut would never be paid.
     while (!complete) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const rec of page) { after = rec.id; for (const intentId of (rec.body as unknown as OpenBody).intents) stuck.add(intentId); }
+      for (const rec of page) { after = rec.id; for (const intentId of (rec.body as unknown as OpenBody).intents) pastCut.add(intentId); }
       if (page.length < 100) complete = true;
     }
     for (const intentId of cleared) {
-      if (stuck.has(intentId)) continue;
+      if (stuck.has(intentId) || pastCut.has(intentId)) continue;
       // A request that has not finished has no outcome to clear yet (its mark may still be written): it stays listed. Nor is a request cleared while it still owes a figure of its own (`owed`): its mark stays until
       // `#payOwed` has charged that too, and it stays listed here. A clear that fails is tried again by the next sweep.
       const x0 = (await this.#runner.get(KIND, intentId))?.body as unknown as StopIntentBody | undefined;

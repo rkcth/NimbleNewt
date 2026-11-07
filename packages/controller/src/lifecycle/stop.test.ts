@@ -1975,6 +1975,111 @@ for (const backend of backends) {
     assert.deepEqual(c.rt.charges.map((x) => x.costMicros), [700], "charged once");
   });
 
+  /** Writes `count` open entries named `prefix` + a five-digit number; `body(i)` gives each entry's index body and, optionally, its charge record. */
+  const fillIndex = async (c: { runner: CommandRunner }, prefix: string, count: number, body: (i: number) => { open: Record<string, unknown>; charge?: Record<string, unknown> }): Promise<void> => {
+    for (let start = 0; start < count; start += 50) {
+      const changes: Array<{ type: "create"; ref: { kind: string; id: string }; body: Record<string, unknown> }> = [];
+      for (let i = start; i < Math.min(start + 50, count); i++) {
+        const a = prefix + String(i).padStart(5, "0");
+        const b = body(i);
+        if (b.charge !== undefined) changes.push({ type: "create", ref: { kind: "stop-charge", id: a }, body: b.charge });
+        changes.push({ type: "create", ref: { kind: "stop-charge-open", id: a }, body: b.open });
+      }
+      await c.runner.command("test.fill", { commandId: cid("fill"), actor: "system" }, async () => ({ payload: { start }, build: async () => ({ ref: changes[0]!.ref, creates: true, changes: changes as never, detail: {} }) }));
+    }
+  };
+  const openCount = async (c: { runner: CommandRunner }): Promise<number> => {
+    let total = 0;
+    for (let after: string | undefined; ;) {
+      const page = await c.runner.list("stop-charge-open", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      total += page.length;
+      if (page.length < 100) return total;
+      after = page[page.length - 1]!.id;
+    }
+  };
+  /** A finished Stop on the scope whose outcome carries the mark: `ended` as this build writes it, or absent as an older build wrote it. */
+  const markedStop = async (c: Parameters<Parameters<typeof suite>[1]>[0], scope: { kind: "task" | "agent"; id: string }, ended: boolean): Promise<string> => {
+    const x = await c.stops.request(c.owner, { commandId: cid("s"), scope, mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: x.intentId });
+    await c.edit(x.intentId, (b) => { const { ended: _e, ...rest } = b; const outcome = b["outcome"] as { unresolved: string[] }; return { ...rest, ...(ended ? { ended: true } : {}), phase: "recovery-required", outcome: { ...outcome, state: "recovery-required", unresolved: [MARK] } }; });
+    return x.intentId;
+  };
+  const flags = (v: { unpaid: boolean; markOnly: boolean; markKept: boolean; scanCut: boolean } | undefined) => [v?.unpaid, v?.markOnly, v?.markKept, v?.scanCut];
+
+  suite("one request listed on more paid entries than a sweep reads: the paid ones in the window are taken off so the rest are paid by the next sweep, and the mark is cleared only then (card L02d review 16, 1)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "aaa", costMicros: 5, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const r = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "r" });
+    c.rt.failCharges = 0;
+    assert.equal(await outcomeMarked(c, r.intentId), true);
+    // 2100 entries, each with the request's own pending note of 1: one sweep reads "aaa" and the first 1999 of them.
+    await fillIndex(c, "e", 2100, (i) => ({ open: { intents: [r.intentId], settled: false }, charge: { costMicros: 0, computeMs: 0, pending: { costMicros: 1, computeMs: 0, commandId: `stopcl-w${i}`, intentId: r.intentId, counted: true } } }));
+    const paid = (): number => { let s = 0; for (let i = 0; i < 2100; i++) s += sumOf(c, "e" + String(i).padStart(5, "0")); return s; };
+    await c.stops.sweep(c.owner);
+    assert.deepEqual([sumOf(c, "aaa"), paid()], [5, 1999]);
+    assert.equal(await outcomeMarked(c, r.intentId), true, "the mark stays: 101 entries past the cut still wait");
+    assert.equal(await openCount(c), 101, "the paid entries in the window are taken off");
+    await c.stops.sweep(c.owner);
+    assert.equal(paid(), 2100, "the next sweep pays the rest");
+    assert.equal(c.rt.charges.length, 2101, "each charge once");
+    assert.equal(await outcomeMarked(c, r.intentId), false);
+    assert.equal(await openCount(c), 0);
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, scopeOf(c.task))), [false, false, false, false]);
+  });
+
+  suite("a request listed only on an entry more than a page past the cut keeps its mark, and an older record's mark on a cut scan is reported as cut, not kept (card L02d review 16)", async (c) => {
+    c.rt.seenAttempts = [];
+    const old = await markedStop(c, agentScope(c), false);
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: agentScope(c), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "aaa", costMicros: 5, computeMs: 0 }, { attemptId: "zzz", costMicros: 7, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const r = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "r" });
+    c.rt.failCharges = 0;
+    // The window holds "aaa" and b00000..b01998; 121 entries and then "zzz" follow, so "zzz" is on the second page past the cut.
+    await fillIndex(c, "b", 2120, () => ({ open: { intents: [], settled: true } }));
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, agentScope(c))), [true, false, false, true], "the older record's mark is not called kept: the scan was cut");
+    await c.stops.sweep(c.owner);
+    assert.deepEqual([sumOf(c, "aaa"), sumOf(c, "zzz")], [5, 0]);
+    assert.equal(await outcomeMarked(c, r.intentId), true, "the entry past the cut still waits");
+    await c.stops.sweep(c.owner);
+    assert.deepEqual([sumOf(c, "aaa"), sumOf(c, "zzz")], [5, 7]);
+    assert.equal(await outcomeMarked(c, r.intentId), false);
+    assert.equal(await outcomeMarked(c, old), true, "no sweep clears the older record's mark");
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, agentScope(c))), [true, false, true, false]);
+  });
+
+  suite("an open index of more than one page is read to its end: by the view (a request's own note on page 2 is its own, a marked request on no entry is mark only) and by the sweep's clear (card L02d review 16)", async (c) => {
+    c.rt.seenAttempts = [];
+    // Own: its pending note is on an attempt its record does not list, behind 150 other entries.
+    c.rt.terminateCosts = [{ attemptId: "zzown", costMicros: 9, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const own = await c.stops.force(c.owner, { commandId: cid("f"), scope: agentScope(c), reason: "own" });
+    c.rt.failCharges = 0;
+    await c.edit(own.intentId, (b) => ({ ...b, attempts: [] }));
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: agentScope(c), reason: "again" });
+    c.rt.terminateCosts = undefined;
+    const x = await markedStop(c, scopeOf(c.task), true);
+    await fillIndex(c, "b", 150, () => ({ open: { intents: [], settled: true } }));
+    const vo = (await c.stops.cleanupSpend(c.owner, agentScope(c)))!;
+    assert.equal(vo.intentId, own.intentId);
+    assert.deepEqual(flags(vo), [true, false, false, false], "its own note is found on page 2: the charge is retried, the scan is not cut");
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, scopeOf(c.task))), [true, true, false, false], "an ended request on no entry: mark only");
+    await c.stops.sweep(c.owner);
+    assert.equal(await outcomeMarked(c, x), false, "one sweep reads the whole index and clears it");
+    assert.equal(sumOf(c, "zzown"), 9);
+  });
+
+  suite("an open index of exactly the entries a scan reads is read to its end: the view does not say cut, and the sweep clears a mark (card L02d review 16, 2)", async (c) => {
+    c.rt.seenAttempts = [];
+    const x = await markedStop(c, scopeOf(c.task), true);
+    await fillIndex(c, "b", 2000, () => ({ open: { intents: [], settled: true } }));
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, scopeOf(c.task))), [true, true, false, false]);
+    await c.stops.sweep(c.owner);
+    assert.equal(await outcomeMarked(c, x), false);
+    assert.deepEqual(flags(await c.stops.cleanupSpend(c.owner, scopeOf(c.task))), [false, false, false, false]);
+  });
+
   suite("a scope that cannot be stopped yet is refused before anything is paused or recorded", async (c) => {
     c.rt.unsupportedWith = "stopping a whole team is not supported yet";
     await refuses("unavailable", () => c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" }));
