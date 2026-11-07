@@ -112,8 +112,17 @@ export class DecisionService implements DecisionGuard {
 
   // ---- recording -------------------------------------------------------------------------------------------------------------
 
-  /** Records an owner decision, correction or gate. Returns `recorded: false` (and writes nothing) for words that are not a decision, or the same decision said again. */
-  async record(by: Principal, command: RecordDecision): Promise<RecordResult> {
+  /**
+   * Why `record` would refuse this command (an unusable stance, words that are not a decision, a source that is not the owner's own words), or undefined. A command that is malformed throws, as `record` does. Writes nothing; the meeting record asks it before it writes
+   * anything of its own (card M02h).
+   */
+  async refusal(by: Principal, command: RecordDecision): Promise<string | undefined> {
+    const prepared = await this.#prepare(by, command);
+    return "refusal" in prepared ? prepared.refusal : undefined;
+  }
+
+  /** The checks `record` makes before it writes: the shape of the command, the words, the source, the project and the task. Shared with `refusal`. */
+  async #prepare(by: Principal, command: RecordDecision): Promise<{ refusal: string } | { projectId: string; taskId: string | undefined; category: DecisionCategory; gate: GateKind | undefined; topic: string; statement: string; wording: string; session: string | undefined; source: DecisionSource }> {
     onlyKnown(command, ["commandId", "projectId", "taskId", "category", "topic", "statement", "wording", "gate", "source", "basedOn", "session", "stance"]);
     if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the owner; only the owner's own words make a decision`);
     const projectId = checkProjectId(command.projectId);
@@ -129,21 +138,29 @@ export class DecisionService implements DecisionGuard {
     if (!Number.isSafeInteger(command.basedOn) || command.basedOn < 0) invalid("basedOn", "must be the version this session saw (0 if nothing was decided yet)");
     const session = command.session === undefined ? undefined : typeof command.session === "string" && SESSION.test(command.session) ? command.session : invalid("session", "must be a short label");
     const stance = command.stance === undefined ? "decided" : (STANCES as readonly string[]).includes(command.stance) ? command.stance : invalid("stance", `must be one of ${STANCES.join(", ")}`);
-    if (stance !== "decided") return { recorded: false, reason: `a ${stance} is not a decision; nothing was recorded` };
+    if (stance !== "decided") return { refusal: `a ${stance} is not a decision; nothing was recorded` };
     const words = notADecision(wording);
-    if (words !== undefined) return { recorded: false, reason: `${words}; nothing was recorded` };
+    if (words !== undefined) return { refusal: `${words}; nothing was recorded` };
     const sourced = await this.#source(by, command.source, wording);
-    if ("refusal" in sourced) return { recorded: false, reason: `${sourced.refusal}; nothing was recorded` };
+    if ("refusal" in sourced) return { refusal: `${sourced.refusal}; nothing was recorded` };
     const source = sourced;
     if ((await this.#runner.get("project", projectId)) === undefined) throw new DomainError("not_found", `project ${projectId} does not exist`);
     if (taskId !== undefined && body<TaskBody>(await this.#runner.get("task", taskId))?.projectId !== projectId) invalid("taskId", "is not a task of that project");
+    return { projectId, taskId, category: category as DecisionCategory, gate: gate as GateKind | undefined, topic, statement, wording, session, source };
+  }
+
+  /** Records an owner decision, correction or gate. Returns `recorded: false` (and writes nothing) for words that are not a decision, or the same decision said again. */
+  async record(by: Principal, command: RecordDecision, link?: { readonly meetingDecisionId: string }): Promise<RecordResult> {
+    const prepared = await this.#prepare(by, command);
+    if ("refusal" in prepared) return { recorded: false, reason: prepared.refusal };
+    const { projectId, taskId, category, gate, topic, statement, wording, session, source } = prepared;
     const scoped = scopedCommandId(by.id, command.commandId);
     const id = derivedId("dec", scoped);
-    const origin: DecisionOrigin = { principalId: by.id, ...(by.credentialId === undefined ? {} : { credentialId: by.credentialId }), ...(session === undefined ? {} : { session }) };
+    const origin: DecisionOrigin = { principalId: by.id, ...(by.credentialId === undefined ? {} : { credentialId: by.credentialId }), ...(session === undefined ? {} : { session }), ...(link === undefined ? {} : { meetingDecisionId: link.meetingDecisionId }) };
     let outcome: { version: number; superseded: string[]; disputeId?: string; propId?: string } = { version: 0, superseded: [] };
     try {
       const result = await this.#retrying(() => this.#runner.command("decision.record", { commandId: scoped, actor: by.id }, async () => ({
-        payload: json({ projectId, ...(taskId === undefined ? {} : { taskId }), category, topic, statement, wording, ...(gate === undefined ? {} : { gate }), source: source as unknown as JsonObject, basedOn: command.basedOn, ...(session === undefined ? {} : { session }) }),
+        payload: json({ projectId, ...(taskId === undefined ? {} : { taskId }), category, topic, statement, wording, ...(gate === undefined ? {} : { gate }), source: source as unknown as JsonObject, basedOn: command.basedOn, ...(session === undefined ? {} : { session }), ...(link === undefined ? {} : { meetingDecisionId: link.meetingDecisionId }) }),
         build: async () => this.#buildRecord({ id, by, projectId, taskId, category, topic, statement, wording, gate, source, basedOn: command.basedOn, origin }, (o) => { outcome = o; }),
       })));
       if (result.replayed) {

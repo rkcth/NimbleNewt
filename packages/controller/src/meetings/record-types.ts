@@ -187,7 +187,9 @@ export interface DecisionRecordBody {
   /** Set when the decision was put back to waiting for the owner part way through (the widening limit, or the policy asking at apply time): changes that widen nothing still go ahead, only widening ones wait. Absent: a pending decision holds all its changes. */
   readonly held?: true;
   readonly ownerDecisionId?: string;
-  /** The owner decision an alternative answer was about to record (card M02h): written before it is recorded, so a crash between the record and the answer is found again. It stays after the answer; it differs from `ownerDecisionId` only for a decision recorded and never linked. */
+  /** The owner decisions alternative answers to this decision were about to record (card M02h), oldest first, without repeats, at most `RECORD_LIMITS.pendingAlternatives`: each is written before its decision is recorded, so a crash between the record and the answer is found again. The list stays after the answer; a decision in it is the owner's answer's own only if it is `ownerDecisionId`. Whether one was recorded for this decision is read from the owner decision's `origin.meetingDecisionId`. */
+  readonly pendingAlternatives?: readonly string[];
+  /** Written by the first version of the marker (one value); read as a list of one. */
   readonly pendingAlternative?: string;
   readonly ownerRespondedAt?: string;
   readonly agendaItemId?: string;

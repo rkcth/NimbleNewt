@@ -208,7 +208,7 @@ export interface RecordOptions extends RunnerOptions {
 
 export const RECORD_LIMITS = {
   text: 4000, reason: 500, entries: 1000, systemEntries: 50, motions: 30, trail: 60, tagged: 100, corrections: 100, changes: 10, versions: 20, sources: 5, openRecords: 100, patchBytes: 4000,
-  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10,
+  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8,
 } as const;
 
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -283,6 +283,8 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  * - **Summary.** Built from the records alone: attendance, key updates, decisions with reasons and a link to the discussion, dissent, unresolved questions, actions, and the plan; adopted is kept apart from applied. A conclusion that rests on a
  *   private record is marked unverifiable for readers who cannot be shown it.
  */
+/** The owner decisions marked on a meeting decision, oldest first (the first version's single value is a list of one). */
+const marked = (d: DecisionRecordBody): readonly string[] => [...new Set([...(d.pendingAlternative === undefined ? [] : [d.pendingAlternative]), ...(d.pendingAlternatives ?? [])])];
 /** How the owner is told what became of an owner decision of theirs that is not linked to the meeting decision: in force, in dispute (and how to settle it) or replaced. */
 const standing = (state: string): string => (state === "active" ? "is in force" : state === "disputed" ? "conflicts with another of your instructions, so nothing on that topic is in force until you choose" : "has since been replaced");
 const repairHint = (topic: string, state: string): string => (state === "active" ? `if it should not stand, say what you decide on topic "${topic}" now (a later decision of yours replaces it)` : state === "disputed" ? "settle that conflict to choose" : "");
@@ -290,9 +292,9 @@ const repairHint = (topic: string, state: string): string => (state === "active"
  * The refusal when the owner's own decision was recorded under this command ID but is not the answer to this meeting decision: the meeting decision no longer waits for an answer (answered meanwhile, or it never waited: `neverWaited`), or the ID belongs to another meeting decision
  * (`elsewhere`). The owner is told the decision's id, topic and state, that it is not linked, and how to repair it.
  */
-const orphanError = (id: string, topic: string, state: string, response: string, how: "waited" | "neverWaited" | "elsewhere" = "waited"): DomainError => {
+const orphanError = (id: string, topic: string, state: string, response: string, how: "waited" | "neverWaited" | "elsewhere" | "unknown" | "full" = "waited"): DomainError => {
   const hint = repairHint(topic, state);
-  const why = how === "elsewhere" ? "but for another meeting decision (or an earlier attempt), not for this one" : how === "neverWaited" ? `but this meeting decision does not wait for your answer (${response})` : `but this meeting decision no longer waits for an answer (${response})`;
+  const why = how === "elsewhere" ? "but for another meeting decision, not for this one" : how === "unknown" ? "but nothing shows which meeting decision it was for (it was recorded before that was kept), so it is not used for this one" : how === "neverWaited" ? `but this meeting decision does not wait for your answer (${response})` : `but this meeting decision no longer waits for an answer (${response})`;
   return new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded under this command ID and ${standing(state)}, ${why}; your decision is not linked to it${hint === "" ? "" : `; ${hint}`}`, { field: "alternative" });
 };
 /**
@@ -300,7 +302,7 @@ const orphanError = (id: string, topic: string, state: string, response: string,
  * `applied` the changes carried out in all after an agreement; `stillApplying` a started change could not be finished just now; `passFailed` carrying out stopped with changes still adopted; `replayed` the same command sent again.
  * From the record before and after the call, each change in exactly one count: `carriedOut` carried out by this call, `refused` the codes of those it refused, `alreadyDone` done before, `refusedBefore` refused before, `stillOpen` still adopted or applying (`applying` of them started).
  */
-export interface OwnerAnswer { ownerDecisionId?: string; orphanedDecision?: { id: string; topic: string; state: string }; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; refusedBefore: number; stillOpen: number; applying: number }
+export interface OwnerAnswer { ownerDecisionId?: string; orphanedDecisions?: { id: string; topic: string; state: string }[]; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; refusedBefore: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
   readonly #runner: CommandRunner;
@@ -1259,7 +1261,9 @@ export class MeetingRecordService {
           && (recordedAlt.origin as { session?: string } | undefined)?.session === alt.session;
         if (!same) throw new DomainError("command_conflict", `command ID ${alt.commandId.slice(0, 60)} was already used for a different decision`, { field: "alternative" });
         // The owner decision stands for this meeting decision only if it was recorded for it: it is linked here (a repeat), or marked here before it was recorded (a crash before the answer was saved). Another meeting decision's is refused.
-        if (found.ownerDecisionId !== altId && found.pendingAlternative !== altId && found.outcome === "adopted" && found.scope === "in-scope" && (found.ownerResponse === "pending" || found.ownerResponse === "not-asked")) throw orphanError(altId, recordedAlt.topic, recordedAlt.state, found.ownerResponse, "elsewhere");
+        // It was recorded for this meeting decision (the owner decision says so) and is linked to it or was marked on it first. One recorded before the owner decision kept that is never claimed for a meeting decision through the marker alone.
+        const forId = recordedAlt.origin.meetingDecisionId;
+        if (found.ownerDecisionId !== altId && !(forId === decisionId && marked(found).includes(altId)) && found.outcome === "adopted" && found.scope === "in-scope" && (found.ownerResponse === "pending" || found.ownerResponse === "not-asked")) throw orphanError(altId, recordedAlt.topic, recordedAlt.state, found.ownerResponse, forId === undefined ? "unknown" : "elsewhere");
         ownerDecisionId = altId;
       }
       // An answer already given by an alternative stands only for the same alternative (a repeat); another one is refused (the answer command below would refuse it as already answered too).
@@ -1268,8 +1272,13 @@ export class MeetingRecordService {
       if (found.ownerResponse === "alternative") { if (ownerDecisionId === undefined || found.ownerDecisionId !== ownerDecisionId) throw orphaned("the owner already answered (alternative)"); }
       else if (found.outcome !== "adopted" || found.scope !== "in-scope" || (found.ownerResponse !== "pending" && found.ownerResponse !== "not-asked")) throw orphaned("that decision does not wait for the owner");
       if (ownerDecisionId === undefined) {
-        // Marked first: if this call stops after the owner decision is recorded, the marker is how it is found again, and how an answer given differently is told about it.
-        if (found.pendingAlternative !== altId) {
+        // What the decision service would refuse is refused before anything is written (a refused alternative leaves the meeting decision as it was).
+        const refusal = await this.#deps.decisions.refusal(by, command.alternative);
+        if (refusal !== undefined) invalid("alternative", refusal);
+        // Marked first: if this call stops after the owner decision is recorded, the marker is how it is found again, and how an answer given differently is told about it. The list is bounded; at the bound a new alternative is refused until the decision is answered.
+        const listed = marked(found);
+        if (!listed.includes(altId)) {
+          if (listed.length >= RECORD_LIMITS.pendingAlternatives) invalid("alternative", `${listed.length} earlier alternatives of yours were recorded for this meeting decision and never saved as its answer; answer it with agree or decline, or send one of them again`);
           await this.#cmd("meeting.decision.owner-pending", by, derivedId("dec", `pending:${decisionId}:${altId}`), async () => ({
             payload: { decisionId, pendingAlternative: altId },
             build: async () => {
@@ -1277,11 +1286,14 @@ export class MeetingRecordService {
               const d = known<DecisionRecordBody>(head);
               if (head === undefined || d === undefined) throw new DomainError("not_found", "that decision does not exist");
               if (d.outcome !== "adopted" || d.scope !== "in-scope" || (d.ownerResponse !== "pending" && d.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", `the owner already answered (${d.ownerResponse})`, { field: "decisionId" });
-              return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: head.revision, body: json({ ...d, pendingAlternative: altId }) }], detail: { projectId: d.projectId } };
+              const list = marked(d);
+                            if (!list.includes(altId) && list.length >= RECORD_LIMITS.pendingAlternatives) invalid("alternative", "too many earlier alternatives were recorded for this meeting decision and never saved as its answer");
+              const { pendingAlternative: _old, ...rest } = d; void _old;
+              return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: head.revision, body: json({ ...rest, pendingAlternatives: list.includes(altId) ? list : [...list, altId] }) }], detail: { projectId: d.projectId } };
             },
           }));
         }
-        const recorded = await this.#deps.decisions.record(by, command.alternative);
+        const recorded = await this.#deps.decisions.record(by, command.alternative, { meetingDecisionId: decisionId });
         if (!recorded.recorded) invalid("alternative", recorded.reason);
         else ownerDecisionId = recorded.id;
       }
@@ -1337,15 +1349,18 @@ export class MeetingRecordService {
     const refused = now.flatMap((c, n) => (c.state === "not-applied" && was[n]?.state !== "not-applied" ? [c.code ?? "failed"] : []));
     // `stillApplying` is true only when a change really was started and stays applying; a pass that threw before starting anything leaves the changes adopted (`passFailed`).
     const applyingNow = now.filter((c) => c.state === "applying").length;
-    // An owner decision recorded for this meeting decision and never linked to it (this answer is another one, or the call that recorded it stopped before the answer was saved) is told, from the marker as it stood before this call.
-    let orphanedDecision: { id: string; topic: string; state: string } | undefined;
-    const marked = before?.pendingAlternative;
-    if (marked !== undefined && marked !== ownerDecisionId && this.#deps.decisions !== undefined) {
-      const lost = await this.#deps.decisions.get(by, marked).catch(() => undefined);
-      if (lost !== undefined) orphanedDecision = { id: marked, topic: lost.topic, state: lost.state };
+    // Every owner decision recorded for this meeting decision and never linked to its answer (this answer is another one, or the call that recorded it stopped before the answer was saved) is told, from the marker as it stood before this call. Only a decision whose own origin says it
+    // was recorded for this meeting decision counts: one recorded for another meeting decision, before that was kept, or never recorded is not told as this one's.
+    const orphanedDecisions: { id: string; topic: string; state: string }[] = [];
+    if (this.#deps.decisions !== undefined && before !== undefined) {
+      for (const id of marked(before)) {
+        if (id === ownerDecisionId) continue;
+        const lost = await this.#deps.decisions.get(by, id).catch(() => undefined);
+        if (lost !== undefined && lost.origin.meetingDecisionId === decisionId) orphanedDecisions.push({ id, topic: lost.topic, state: lost.state });
+      }
     }
     return {
-      ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(orphanedDecision === undefined ? {} : { orphanedDecision }), ...(applied === undefined ? {} : { applied }), ...(stillApplying && applyingNow > 0 ? { stillApplying: true as const } : {}), ...(stillApplying && applyingNow === 0 ? { passFailed: true as const } : {}),
+      ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }), ...(orphanedDecisions.length === 0 ? {} : { orphanedDecisions }), ...(applied === undefined ? {} : { applied }), ...(stillApplying && applyingNow > 0 ? { stillApplying: true as const } : {}), ...(stillApplying && applyingNow === 0 ? { passFailed: true as const } : {}),
       ...(answered.replayed ? { replayed: true as const } : {}), ...(ownerDecisionDisputed ? { ownerDecisionDisputed: true as const } : {}),
       carriedOut, refused, alreadyDone: was.filter((c) => c.state === "applied").length, refusedBefore: was.filter((c) => c.state === "not-applied").length, stillOpen: now.filter((c) => c.state === "adopted" || c.state === "applying").length, applying: applyingNow,
     };

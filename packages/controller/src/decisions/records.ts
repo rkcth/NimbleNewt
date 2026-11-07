@@ -28,7 +28,7 @@ export interface DecisionSource {
   readonly messageId?: string;
 }
 /** Who said it, from authentication (never from the caller). `session` is a label the owner's client gives its session or device; it is shown, never trusted as an identity. */
-export interface DecisionOrigin { readonly principalId: string; readonly credentialId?: string; readonly session?: string }
+export interface DecisionOrigin { readonly principalId: string; readonly credentialId?: string; readonly session?: string; /** The meeting decision this was recorded for as the owner's alternative answer to it (card M02h); set only by the meeting record, never by the caller. */ readonly meetingDecisionId?: string }
 
 export interface OwnerDecisionBody {
   readonly projectId: string;
