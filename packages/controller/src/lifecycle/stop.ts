@@ -92,6 +92,8 @@ interface ChargeBody { readonly costMicros: number; readonly computeMs: number; 
 /** The refs of host-side "unknown" placeholders: a remote placement (`remote:<attempt>`), or an attempt a local worker forgot (`attempt:<attempt>`). */
 const PLACEHOLDER = /^(remote|attempt):/;
 const RETRY_PAGES = 20;
+/** The attempt IDs a runtime reported a cleanup cost for, those a charge would accept. */
+const costAttempts = (costs: readonly CleanupCost[] | undefined): string[] => (costs ?? []).map((c) => c?.attemptId).filter((a): a is string => typeof a === "string" && /^[A-Za-z0-9:_-]{1,120}$/.test(a));
 const TERMINAL: readonly StopPhase[] = ["done", "recovery-required", "cancelled"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
@@ -279,7 +281,8 @@ export class StopService {
         // Cleanup is billed even when this pass turns out stale: what was spent was spent.
         const billed = await this.#charge(id, by, result.costs);
         // The attempts the runtime saw are recorded, so a restart still asks about a process of one that has ended since.
-        const seenNow = this.#ports.attempts?.(b.scope) ?? [];
+        // Attempts that reported a cleanup cost are recorded too (a runtime may report a cost for an attempt it does not list), so the owner's view lists what was charged.
+        const seenNow = [...new Set([...(this.#ports.attempts?.(b.scope) ?? []), ...costAttempts(result.costs)])];
         if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(-STOP_LIMITS.inventory) }), ["preparing"]);
         // Something else (a Force Stop, a choice, a resume) may have moved the request while the cleanup ran: then this pass is stale and does nothing more.
         if (((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.phase !== "preparing") continue;
@@ -329,7 +332,7 @@ export class StopService {
         // What the ending cost is billed too; a charge that cannot be made is named, never dropped.
         const billed = await this.#charge(id, by, ended.costs);
         // The attempts the ending charged are recorded on the request too (a Force Stop, or a Stop that reused a checkpoint, never saw them while preparing), so the owner's view lists them.
-        const charged = (ended.costs ?? []).map((c) => c?.attemptId).filter((a): a is string => typeof a === "string" && /^[A-Za-z0-9:_-]{1,120}$/.test(a));
+        const charged = costAttempts(ended.costs);
         await this.#update(id, (x) => ({ ...x, ended: true as const, ...(charged.some((a) => !(x.attempts ?? []).includes(a)) ? { attempts: [...new Set([...(x.attempts ?? []), ...charged])].slice(-STOP_LIMITS.inventory) } : {}) }), ["terminating"]);
         if (billed.failed) ended = { ...ended, unresolved: [...ended.unresolved, CLEANUP_UNPAID] };
         if (ended.ended && ended.unresolved.length === 0) {
@@ -387,9 +390,9 @@ export class StopService {
 
   /**
    * What the latest suspension or stop of a scope has spent on cleanup, for the owner to read (card L02d): the figure the request counted, what the runtime reported and the budgets were charged for each attempt the
-   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` starts a new one, and a pass that went stale is not in it), not the full cost.
+   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass that went stale is not in it), not the full cost.
    */
-  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: every attempt shown is charged (another request paid it) and the next sweep clears the mark. */ markOnly: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no pending note of its own left (another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid. */ markOnly: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
     // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
     await this.#pauses.authorizeControl(viewer, scope);
     const id = await this.#activeId(scope);
@@ -474,7 +477,7 @@ export class StopService {
         if (have.pending !== undefined) {
           const paid = await this.#payPending(c.attemptId);
           billed += paid.billed;
-          if (!paid.ok) { failed = true; done = true; break; }
+          if (!paid.ok) { await this.#waitOn(c.attemptId, id); failed = true; done = true; break; }
           found = await this.#runner.get(CHARGE, c.attemptId);
           have = (found?.body as unknown as ChargeBody | undefined) ?? { costMicros: 0, computeMs: 0 };
         }
@@ -491,6 +494,30 @@ export class StopService {
       if (!done) failed = true;
     }
     return { costMicros: billed, failed };
+  }
+
+  /**
+   * Records that a request is waiting on an attempt's pending charge written by ANOTHER request (its own cleanup found that note and could not pay it), in the same open index the sweep reads, so the sweep clears this request's
+   * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; a few tries, then it is left (the next pass of the request does it again).
+   */
+  async #waitOn(attemptId: string, intentId: string): Promise<void> {
+    const openRef: AggregateRef = { kind: OPEN, id: attemptId };
+    for (let race = 0; race < 6; race++) {
+      const open = await this.#runner.get(OPEN, attemptId);
+      const had = open?.body as unknown as OpenBody | undefined;
+      if (had !== undefined && !had.settled && had.intents.includes(intentId)) return;
+      const next = clean({ intents: [...new Set([...(had?.intents ?? []), intentId])].slice(-20), settled: false });
+      try {
+        await this.#runner.command("stop.charge-wait", { commandId: `stop-wait-${attemptId}-${intentId}-${open?.revision ?? 0}`.slice(0, 200), actor: "system" }, async () => ({
+          payload: { attemptId, intentId },
+          build: async () => ({ ref: openRef, creates: open === undefined, changes: [open === undefined ? { type: "create", ref: openRef, body: next } : { type: "update", ref: openRef, expectedRevision: open.revision, body: next }], detail: { attemptId } }),
+        }));
+        return;
+      } catch (error) {
+        if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) continue;
+        throw error;
+      }
+    }
   }
 
   /** Writes the per-attempt charge record if it is still at the revision it was read at (false when someone else got there first and the caller should try again later). */

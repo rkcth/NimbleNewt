@@ -1484,7 +1484,7 @@ for (const backend of backends) {
     const got = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!;
     cited(got.lines);
     assert.deepEqual(got.lines.map((l) => l.text), [
-      `The stop of task ${t.id} is done. Its cleanup budget window (an extended wait starts it again) has used 2.5 (budget currency), against a limit of 5.0; the cost of ending the work is charged on top.`,
+      `The stop of task ${t.id} is done. Its cleanup budget window (a wait on a blocked preparation starts it again) has used 2.5 (budget currency), against a limit of 5.0; the cost of ending the work is charged on top.`,
       "Attempt att-1: 2.5 and 900 ms of compute charged to its task's budget in all (every stop of it counted once).",
     ]);
     assert.deepEqual(asked[0], { kind: "task", id: t.id });
@@ -1575,7 +1575,7 @@ for (const backend of backends) {
     }
     // A Force Stop over a preparation keeps its figure and limit; one over a reused checkpoint points to the attempt totals; a reused-checkpoint Stop does not claim a window.
     answer = { ...base, mode: "force-stop", phase: "done", forcedAfterPreparation: true };
-    assert.equal(await head(task), "The force stop of task task-aaaaaaaaaaaaaaaaaaaa is done. Its last cleanup budget window before the Force Stop (an extended wait starts it again) used 0.005 (budget currency), against a limit of 0.0001; what ending the work cost is charged to the attempts below.");
+    assert.equal(await head(task), "The force stop of task task-aaaaaaaaaaaaaaaaaaaa is done. Its last cleanup budget window before the Force Stop (a wait on a blocked preparation starts it again) used 0.005 (budget currency), against a limit of 0.0001; what ending the work cost is charged to the attempts below.");
     answer = { ...base, mode: "force-stop", phase: "done", spent: 0, spendBudget: undefined, forcedAfterPreparation: true, reusedCheckpoint: true };
     assert.match(await head(task), /Its preparation was the checkpoint of an earlier Suspend \(that cost is in the attempt totals below\); what ending the work cost/);
     answer = { ...base, mode: "stop", phase: "done", endingRan: true, spent: 0, spendBudget: undefined, reusedCheckpoint: true };

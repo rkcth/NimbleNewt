@@ -105,7 +105,7 @@ test("a Stop asks the worker host what is still held, ends a background job, bil
     const seen = await call(c, boot.token, "status.ask", { request: { kind: "stop_cleanup", taskId: one.id } });
     assert.ok(seen.ok, JSON.stringify(seen));
     const said = (seen.result.item.lines as { text: string }[]).map((l) => l.text);
-    assert.match(said[0]!, /The stop of task .* is recovery-required\. Its cleanup budget window \(an extended wait starts it again\) has used 0\.007 \(budget currency\), with no limit set; the cost of ending the work is charged on top\./, said.join("\n"));
+    assert.match(said[0]!, /The stop of task .* is recovery-required\. Its cleanup budget window \(a wait on a blocked preparation starts it again\) has used 0\.007 \(budget currency\), with no limit set; the cost of ending the work is charged on top\./, said.join("\n"));
     assert.ok(said.some((t) => t.includes(`Attempt ${one.attempt}: 0.007 and 700 ms of compute charged`)), said.join("\n"));
     // Someone who may not control the task, and a task that does not exist, are told nothing (not "it was never stopped").
     await c.services.principals.enroll(owner, { commandId: "e-eve", kind: "agent", name: "eve", grants: [] });

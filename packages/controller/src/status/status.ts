@@ -621,9 +621,9 @@ export class StatusService {
     if (r.mode === "force-stop") {
       head = r.reusedCheckpoint ? `The force stop of ${name} is ${r.phase}. Its preparation was the checkpoint of an earlier Suspend (that cost is in the attempt totals below); ${forceTail}.`
         : !r.forcedAfterPreparation ? `The force stop of ${name} is ${r.phase}. A Force Stop has no preparation; ${forceTail}.`
-          : `The force stop of ${name} is ${r.phase}. Its last cleanup budget window before the Force Stop (an extended wait starts it again) used ${used}; ${forceTail}.`;
+          : `The force stop of ${name} is ${r.phase}. Its last cleanup budget window before the Force Stop (a wait on a blocked preparation starts it again) used ${used}; ${forceTail}.`;
     } else if (r.reusedCheckpoint) head = `The ${r.mode} of ${name} is ${r.phase}. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below${reuseTail}.`;
-    else head = `The ${r.mode} of ${name} is ${r.phase}. Its cleanup budget window (an extended wait starts it again) has used ${used}${onTop}.`;
+    else head = `The ${r.mode} of ${name} is ${r.phase}. Its cleanup budget window (a wait on a blocked preparation starts it again) has used ${used}${onTop}.`;
     const lines: Line[] = [line(head, cite("stop", r.intentId), where)];
     for (const a of r.attempts.slice(0, 20)) lines.push(line(`Attempt ${shown(a.attemptId, 80)}: ${money(a.costMicros)} and ${a.computeMs} ms of compute charged to its task's budget in all (every stop of it counted once)${a.pending ? "; a further charge is still being made" : ""}.`, cite("stop", r.intentId)));
     if (r.attempts.length > 20) lines.push(line(`${r.attempts.length - 20} more attempt(s) are not listed.`, cite("stop", r.intentId)));

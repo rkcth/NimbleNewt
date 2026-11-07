@@ -670,6 +670,55 @@ for (const backend of backends) {
     assert.equal(theirs.unpaid, true);
   });
 
+  suite("a Force Stop that came after a preparation is still told so when a long history has pushed every preparing step out; only the flag says it (card L02d review)", async (c) => {
+    c.rt.items = [{ kind: "foreground", ref: "att-a/c1", state: "running" }];
+    c.rt.cleanups = [{ remaining: [{ kind: "foreground", ref: "att-a/c1", state: "running" }] }];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "preparing");
+    c.rt.throwOnTerminate = true;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" });
+    for (let i = 0; i < 35; i++) {
+      await c.stops.choose(c.owner, { commandId: cid("c"), intentId, choice: "wait" });
+      assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "blocked");
+    }
+    const got = (await c.stops.get(c.owner, intentId))!;
+    assert.equal(got.history.length, 60);
+    assert.ok(!got.history.some((h) => h.phase === "preparing" || h.phase === "prepared"), "no preparing or prepared step is left in the history");
+    const seen = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+    assert.deepEqual([seen?.spent, seen?.spendBudget, seen?.forcedAfterPreparation], [0, undefined, true]);
+  });
+
+  suite("a request whose charge failed on another request's unpaid note is indexed too, so a sweep clears its mark once the note is paid (card L02d review)", async (c) => {
+    c.rt.seenAttempts = ["att-a"];
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 500, computeMs: 0 }, { attemptId: "att-b", costMicros: 300, computeMs: 0 }];
+    c.rt.failCharges = 100;
+    const f1 = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, true);
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 600, computeMs: 0 }] }];
+    const s = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    assert.notEqual(s.intentId, f1.intentId);
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    const before = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([before.intentId, before.unpaid, before.markOnly], [s.intentId, true, true], "its own charge never got a note: only the mark is left");
+    c.rt.failCharges = 0;
+    await c.stops.sweep(c.owner);
+    const after = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([after.unpaid, after.markOnly], [false, false], "the sweep paid the other request's note and cleared this request's mark too");
+  });
+
+  suite("an attempt that reported a cleanup cost is listed even when the runtime does not list it among its attempts (card L02d review)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.items = [{ kind: "process", ref: "pid-7", state: "uncooperative" }];
+    c.rt.cleanups = [{ remaining: [{ kind: "process", ref: "pid-7", state: "uncooperative" }], costs: [{ attemptId: "att-z", costMicros: 800, computeMs: 0 }] }];
+    c.rt.failCharges = 5;
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "blocked");
+    const seen = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual(seen.attempts.map((a) => [a.attemptId, a.pending]), [["att-z", true]]);
+    assert.equal(seen.unpaid, true, "its own pending note is open");
+  });
+
   suite("a Force Stop after a wait keeps the limit and a spent figure of 0 (the window restarted) while the attempt shows what was charged; the view's wording carries that caveat (card L02d review)", async (c) => {
     c.rt.seenAttempts = ["att-a"];
     c.rt.items = [{ kind: "process", ref: "pid-7", state: "uncooperative" }];
