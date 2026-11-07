@@ -26,6 +26,8 @@ interface Ctl {
   authFail: { on: boolean; after: number; calls: number };
   /** When set, the next owner decision recorded is saved and then the call fails (a crash between recording the alternative and saving the answer). */
   recordCrash: { n: number };
+  /** Run once right after the next owner decision is recorded (another answer winning the race). */
+  afterRecord: { run?: () => Promise<void> };
   /** When set, the list of waiting decisions the chat reads is cut to this one and says it was cut. */
   cutTo: { id?: string };
   decision(id: string): Promise<DecisionRecordBody & { id: string }>;
@@ -51,8 +53,9 @@ for (const backend of backends) {
       const grants = GrantService.withEpoch(w.world.storage, w.projects.epoch, options);
       const authFail = { on: false, after: 0, calls: 0 };
       const recordCrash = { n: 0 };
+      const afterRecord: { run?: () => Promise<void> } = {};
       const realRecord = w.decisions.record.bind(w.decisions);
-      (w.decisions as { record: typeof w.decisions.record }).record = async (...a) => { const r = await realRecord(...a); if (recordCrash.n > 0) { recordCrash.n--; throw new DomainError("unavailable", "storage went away after the decision was saved"); } return r; };
+      (w.decisions as { record: typeof w.decisions.record }).record = async (...a) => { const r = await realRecord(...a); if (afterRecord.run !== undefined) { const f = afterRecord.run; delete afterRecord.run; await f(); } if (recordCrash.n > 0) { recordCrash.n--; throw new DomainError("unavailable", "storage went away after the decision was saved"); } return r; };
       const realGuard = w.decisions.guard.bind(w.decisions);
       (w.decisions as { guard: typeof w.decisions.guard }).guard = async (...a) => { if (authFail.on && ++authFail.calls > authFail.after) throw new DomainError("unavailable", "the decision guard could not be read"); return realGuard(...a); };
       const authority = async (id: string) => { const p = await w.principals.get(id); return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, options.clock()); };
@@ -69,7 +72,7 @@ for (const backend of backends) {
       const hostToken = (await w.principals.issueCredential(w.owner, "host:h1")).token;
       const crew = [await w.agent("ann", [{ action: "task.read", project: "*" }, { action: "meeting.attend", project: "*" }, { action: "task.update", project: "*" }]), await w.agent("bob", [{ action: "task.read", project: "*" }, { action: "meeting.attend", project: "*" }]), await w.agent("cy", [{ action: "task.read", project: "*" }, { action: "meeting.attend", project: "*" }])];
       const ctl: Ctl = {
-        project, mgrToken: mgr.token, hostToken, crewTokens: crew.map((c) => c.token), records, crash, policy, cutTo, authFail, recordCrash,
+        project, mgrToken: mgr.token, hostToken, crewTokens: crew.map((c) => c.token), records, crash, policy, cutTo, authFail, recordCrash, afterRecord,
         decision: async (id) => (await records.decision(w.owner, id)) as unknown as DecisionRecordBody & { id: string },
         pending: async (wording, topic, title, o = {}) => {
           const kinds = o.kinds ?? ["task.update"];
@@ -574,6 +577,7 @@ for (const backend of backends) {
       // Some combinations are forced so every kind is sampled whatever the sequence gives: two answers in one message (any response), and an agreement that stops part way and is then repeated after a crash.
       if (crashAfter) recordCrash = false;
       if (k % 7 === 3) { twice = true; shared = false; cut = false; }
+      if (k === 20) { response = "agree"; partial = true; fail = false; crashAfter = true; shared = false; cut = false; twice = false; }
       if (k === 13) { response = "agree"; partial = true; fail = false; crashAfter = true; shared = false; cut = false; twice = false; }
       const made: { id: string; noun: string; taskId: string }[] = [];
       for (let n = 0; n < count; n++) {
@@ -582,7 +586,7 @@ for (const backend of backends) {
         made.push({ id: d.id, noun, taskId: d.taskId });
       }
       const picked0 = made[next(count)]!;
-      const target = k === 13 ? made[0]! : picked0;
+      const target = k === 13 || k === 20 ? made[0]! : picked0;
       const partialTarget = partial && made[0]!.id === target.id;
       const name = shared ? "schedule" : target.noun;
       const keep = `keep the ${target.noun} at midnight until ${months[k % 12]}`;
@@ -617,7 +621,9 @@ for (const backend of backends) {
       assert.ok(proposal, `sample ${label}: a proposal, not a refusal: ${JSON.stringify(outcomes)}`);
       for (const m of made) assert.equal((await ctl.decision(m.id)).ownerResponse, "pending", `sample ${label}: the proposal changes nothing`);
       if (fail) ctl.crash.n = 1;
-      if (partialTarget) Object.assign(ctl.authFail, { on: true, after: 1, calls: 0 });
+      // k = 20: the first call fails before anything starts, the repeat carries one change out and fails on the next.
+      const laterFail = k === 20;
+      if (partialTarget) Object.assign(ctl.authFail, { on: true, after: laterFail ? 0 : 1, calls: 0 });
       let crashed = false;
       const flaky = { handle: async (token: string, raw: unknown) => { const r = await w.api.handle(token, raw as never); if ((raw as { op?: string }).op === OP && !crashed) { crashed = true; throw new Error("crash"); } return r; } };
       let applied;
@@ -631,7 +637,7 @@ for (const backend of backends) {
       } else if (crashAfter) {
         await assert.rejects(w.chat({ api: flaky as never }).applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! }), /crash/, `sample ${label}`);
         ctl.crash.n = 0;
-        ctl.authFail.on = false;
+        if (laterFail) Object.assign(ctl.authFail, { on: true, after: 1, calls: 0 }); else ctl.authFail.on = false;
         applied = await w.chat().applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! });
       } else {
         applied = await chat.applyProposal(w.ownerToken, { commandId: `ap-${k}`, proposalId: proposal!.proposalId! });
@@ -649,6 +655,10 @@ for (const backend of backends) {
           // The first call ran fully before the crash; the repeat says it was given, and finishes only what a failed applier left.
           assert.match(told, /^This answer \(agree\) was already given/, `sample ${label}: ${told}`);
           if (fail) { assert.deepEqual(states, ["applied"], `sample ${label}`); assert.match(told, /this call finished what was left:\nYou agreed\. 1 change carried out now\./, `sample ${label}: ${told}`); }
+          else if (partialTarget && laterFail) {
+            assert.deepEqual(states, ["applied", "adopted"], `sample ${label}`);
+            assert.match(told, /^This answer \(agree\) was already given; this call did this much of what was left:\nYou agreed\. 1 change carried out now\.\nCarrying out stopped before the rest started; 1 change still waits\./, `sample ${label}: ${told}`);
+          }
           else if (partialTarget) { assert.deepEqual(states, ["applied", "applied"], `sample ${label}: the repeat finishes the rest`); assert.match(told, /1 change carried out now/, `sample ${label}: ${told}`); }
           else { assert.deepEqual(states, ["applied"], `sample ${label}`); assert.equal(told, "This answer (agree) was already given; nothing more was done now.", `sample ${label}`); }
         } else if (partialTarget) {
@@ -924,6 +934,74 @@ for (const backend of backends) {
     assert.equal(lines[0], "You agreed. None of its changes was carried out now. 1 change had been done before. 1 change had been refused before.");
     assert.match(lines[1]!, /^Carrying out the changes failed before any of the remaining changes started; 1 change still waits\./);
     assert.deepEqual(ownerAnswerLines("decline", { carriedOut: 0, refused: ["owner"], alreadyDone: 0, refusedBefore: 2, stillOpen: 0, applying: 0 }).slice(1), ["2 changes had been refused before."]);
+  });
+
+  suite("a repeat that moves things on and then fails does not say it finished what was left", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task", { kinds: ["task.update", "task.update"] });
+    Object.assign(ctl.authFail, { on: true, after: 0, calls: 0 });
+    const first = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "ans-later");
+    assert.equal(first.result.passFailed, true, JSON.stringify(first.result));
+    Object.assign(ctl.authFail, { on: true, after: 1, calls: 0 });
+    const again = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "ans-later");
+    ctl.authFail.on = false;
+    assert.deepEqual((await ctl.decision(d.id)).changes.map((c) => c.state), ["applied", "adopted"]);
+    assert.deepEqual(again.result.shown.slice(0, 2), ["This answer (agree) was already given; this call did this much of what was left:", "You agreed. 1 change carried out now."]);
+    assert.match(again.result.shown[2], /^Carrying out stopped before the rest started; 1 change still waits\./);
+    const done = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "agree" }, "ans-later");
+    assert.equal(done.result.shown[0], "This answer (agree) was already given; this call finished what was left:");
+  });
+
+  test("a change refused in this call and a failure after it say 'the remaining changes'", () => {
+    const lines = ownerAnswerLines("agree", { carriedOut: 0, refused: ["conflict"], alreadyDone: 0, refusedBefore: 0, stillOpen: 1, applying: 0, passFailed: true });
+    assert.match(lines[lines.length - 1]!, /^Carrying out the changes failed before any of the remaining changes started; 1 change still waits\./);
+    assert.equal(ownerAnswerLines("agree", { carriedOut: 1, refused: [], alreadyDone: 0, refusedBefore: 0, stillOpen: 1, applying: 0, passFailed: true, replayed: true })[0], "This answer (agree) was already given; this call did this much of what was left:");
+  });
+
+  suite("the same alternative command ID is the same decision only with the same content: task, category, gate, wording and exact words count; a gate alternative can be retried", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const base = altArgs(ctl, "nightly build", "Use the Red runner", "alt-same");
+    ctl.recordCrash.n = 1;
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: base }, "ans-same")).ok, false);
+    for (const [what, change] of [["wording", { wording: "Use the Red runner, please" }], ["task", { taskId: d.taskId }], ["case of the words", { statement: "use the red RUNNER" }]] as const) {
+      const r = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: { ...base, ...change } }, "ans-same");
+      assert.equal(r.ok, false, what);
+      assert.equal(r.error.code, "command_conflict", what);
+    }
+    assert.equal((await ctl.decision(d.id)).ownerResponse, "pending");
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: base }, "ans-same")).ok, true);
+    // A gate alternative: its stored topic is the gate topic, and a retry without a topic is the same command.
+    const e = await ctl.pending(STAGING, "staging server", "Staging task");
+    const gate = { commandId: "alt-gate", projectId: ctl.project, category: "gate", gate: "planning-only", statement: "plan only until June", wording: "plan only until June", source: { channel: "direct" }, basedOn: 0 };
+    ctl.recordCrash.n = 1;
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: gate }, "ans-gate")).ok, false);
+    const retried = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: gate }, "ans-gate");
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+  });
+
+  suite("an owner decision recorded for an answer that lost the race is told to stand, in the retry and in the call that lost", async (w, script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    // A crash after recording, then a decline wins; the retry is told the decision stands.
+    ctl.recordCrash.n = 1;
+    const alt = altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "alt-orph");
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, "ans-orph")).ok, false);
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "decline" }, "ans-decline")).ok, true);
+    const retry = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, "ans-orph");
+    assert.equal(retry.ok, false);
+    assert.match(retry.error.message, /^your decision dec-\S+ on topic "nightly build" was recorded and is in force, but the meeting decision was answered meanwhile \(declined\); it is not linked to the meeting decision$/);
+    // A decline wins right after the record, in the same call.
+    const e = await ctl.pending(STAGING, "staging server", "Staging task");
+    ctl.afterRecord.run = async () => { await ctl.records.ownerRespond(w.owner, { commandId: "race-decline", decisionId: e.id, response: "decline" }); };
+    const lost = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: altArgs(ctl, "staging server", "Keep the staging server until May.", "alt-race") }, "ans-race");
+    assert.equal(lost.ok, false);
+    assert.match(lost.error.message, /^your decision dec-\S+ on topic "staging server" was recorded and is in force, but the meeting decision was answered meanwhile \(declined\)/);
+    // Through chat the owner reads the same words.
+    const f = await ctl.pending(REPORT, "nightly report", "Report task");
+    const text = "I would rather keep the nightly report weekly until March, not that change.";
+    script[text] = [cmd(OP, { response: "alternative", decisionTopic: "report", alternativeStatement: "keep the nightly report weekly until March" }, "keep the nightly report weekly until March")];
+    const proposal = only((await say(w, w.chat(), text)).outcomes);
+    ctl.afterRecord.run = async () => { await ctl.records.ownerRespond(w.owner, { commandId: "race-decline-2", decisionId: f.id, response: "decline" }); };
+    const failed = await w.chat().applyProposal(w.ownerToken, { commandId: "ap-race", proposalId: proposal.proposalId! }).catch((x: unknown) => x);
+    assert.match(JSON.stringify(failed), /was recorded and is in force, but the meeting decision was answered meanwhile \(declined\)/);
   });
 
   suite("only the owner sees or answers the held decisions: an agent, a host and a task-scoped owner credential are refused, and the chat is the owner's alone", async (w, _script, ctl) => {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { DecisionService, RecordDecision } from "../decisions/decisions.js";
-import { normalTopic, TOPIC } from "../decisions/records.js";
+import { GATE_TOPIC, normalTopic, TOPIC } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, type TaskBody, type View } from "../domain/model.js";
@@ -288,6 +288,8 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  * `applied` the changes carried out in all after an agreement; `stillApplying` a started change could not be finished just now; `passFailed` carrying out stopped with changes still adopted; `replayed` the same command sent again.
  * From the record before and after the call, each change in exactly one count: `carriedOut` carried out by this call, `refused` the codes of those it refused, `alreadyDone` done before, `refusedBefore` refused before, `stillOpen` still adopted or applying (`applying` of them started).
  */
+/** The refusal when the owner's own decision was recorded but the meeting decision was answered before it could be linked: the decision stands, and the owner is told so. */
+const orphanError = (id: string, topic: string, state: string, response: string): DomainError => new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded and ${state === "active" ? "is in force" : state === "disputed" ? "conflicts with another of your instructions, so nothing on that topic is in force until you choose" : "has since been replaced"}, but the meeting decision was answered meanwhile (${response}); it is not linked to the meeting decision`, { field: "alternative" });
 export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; refusedBefore: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
@@ -1231,21 +1233,28 @@ export class MeetingRecordService {
       // It is reused, never recorded twice; but only if it says what this call says: the same command ID with other words is a different command.
       const altId = derivedId("dec", scopedCommandId(by.id, command.alternative.commandId));
       const recordedAlt = await this.#deps.decisions.get(by, altId);
-      const plain = (x: unknown): string => String(x ?? "").trim().replace(/\s+/g, " ").toLowerCase();
       if (recordedAlt !== undefined) {
-        if (recordedAlt.projectId !== command.alternative.projectId || plain(recordedAlt.statement) !== plain(command.alternative.statement) || plain(recordedAlt.topic) !== plain(command.alternative.topic)) throw new DomainError("command_conflict", `command ID ${command.alternative.commandId.slice(0, 60)} was already used for a different decision`, { field: "alternative" });
+        // Everything the decision service puts in its command's payload except `basedOn` (the chat reads that again when the owner confirms), normalised as the service normalises it.
+        const alt = command.alternative;
+        const src = (x: unknown): string => JSON.stringify([(x as { channel?: unknown } | undefined)?.channel, (x as { turnId?: unknown } | undefined)?.turnId]);
+        const same = recordedAlt.projectId === alt.projectId && recordedAlt.taskId === alt.taskId && recordedAlt.category === alt.category && recordedAlt.gate === alt.gate
+          && recordedAlt.topic === (alt.category === "gate" ? GATE_TOPIC : normalTopic(typeof alt.topic === "string" ? alt.topic : ""))
+          && recordedAlt.statement === String(alt.statement).trim() && recordedAlt.wording === String(alt.wording).trim() && src(recordedAlt.source) === src(alt.source);
+        if (!same) throw new DomainError("command_conflict", `command ID ${alt.commandId.slice(0, 60)} was already used for a different decision`, { field: "alternative" });
         ownerDecisionId = altId;
       }
       // An answer already given by an alternative stands only for the same alternative (a repeat); another one is refused (the answer command below would refuse it as already answered too).
-      if (found.ownerResponse === "alternative") { if (ownerDecisionId === undefined || found.ownerDecisionId !== ownerDecisionId) throw new DomainError("invalid_command", "the owner already answered (alternative)", { field: "decisionId" }); }
-      else if (found.outcome !== "adopted" || found.scope !== "in-scope" || (found.ownerResponse !== "pending" && found.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", "that decision does not wait for the owner", { field: "decisionId" });
+      // If this very command's own decision was recorded and the meeting decision cannot take it any more, the owner is told the decision stands (it is not withdrawn: nothing here can do that safely).
+      const orphaned = (what: string): DomainError => recordedAlt === undefined ? new DomainError("invalid_command", what, { field: "decisionId" }) : orphanError(altId, recordedAlt.topic, recordedAlt.state, found.ownerResponse);
+      if (found.ownerResponse === "alternative") { if (ownerDecisionId === undefined || found.ownerDecisionId !== ownerDecisionId) throw orphaned("the owner already answered (alternative)"); }
+      else if (found.outcome !== "adopted" || found.scope !== "in-scope" || (found.ownerResponse !== "pending" && found.ownerResponse !== "not-asked")) throw orphaned("that decision does not wait for the owner");
       if (ownerDecisionId === undefined) {
         const recorded = await this.#deps.decisions.record(by, command.alternative);
         if (!recorded.recorded) invalid("alternative", recorded.reason);
         else ownerDecisionId = recorded.id;
       }
     }
-    const answered = await this.#cmd("meeting.decision.owner", by, command.commandId, async () => ({
+    const answerCommand = () => this.#cmd("meeting.decision.owner", by, command.commandId, async () => ({
       payload: clean({ decisionId, response: command.response, ownerDecisionId }),
       build: async () => {
         const found = await this.#runner.get("meeting-decision", decisionId);
@@ -1263,6 +1272,17 @@ export class MeetingRecordService {
         return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: found.revision, body: json(next) }], detail: { projectId: d.projectId, response } };
       },
     }));
+    const recordedHere = command.alternative !== undefined && ownerDecisionId !== undefined;
+    let answered: Awaited<ReturnType<typeof answerCommand>>;
+    try { answered = await answerCommand(); } catch (error) {
+      // Another answer won the race after this call recorded the owner's decision: say that it stands.
+      if (recordedHere && error instanceof DomainError && error.code === "invalid_command") {
+        const now = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+        const mine = await this.#deps.decisions!.get(by, ownerDecisionId!);
+        if (now !== undefined && mine !== undefined && now.ownerResponse !== "pending" && now.ownerResponse !== "not-asked" && !(now.ownerResponse === "alternative" && now.ownerDecisionId === ownerDecisionId)) throw orphanError(ownerDecisionId!, mine.topic, mine.state, now.ownerResponse);
+      }
+      throw error;
+    }
     // The answer is saved. What follows (carrying out the agreed changes, or finishing a change that had already started when the owner declined; nothing else would finish it, a sweep does not apply decisions) must not undo or hide it:
     // a failure of the applier leaves the change applying and is reported as `stillApplying` (card M02h).
     let stillApplying = false;
