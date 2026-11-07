@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { MaintenanceBarrier } from "../backup/barrier.js";
 import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
-import { transferTargetsFromConfig } from "./targets.js";
+import { postgresTargetDeps, transferTargetsFromConfig } from "./targets.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
@@ -627,7 +627,7 @@ async function configuredPg(f: Fixture, entry: Record<string, unknown> = {}): Pr
   f.cleanup.push(async () => { await dropPostgresSchema(url, schema); });
   const [target] = await transferTargetsFromConfig([{ name: "pg", kind: "postgres", url: { secret: "transfer.pg-url" }, schema, ...entry }], {
     openStorage: (path) => SqliteStorage.open({ path }), statfs: async () => { throw new Error("not used"); },
-    postgres: { resolveSecret: async (name) => (name === "transfer.pg-url" ? url : undefined), openStorage: (u, sch) => PostgresStorage.open({ connectionString: u, schema: sch }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema },
+    postgres: postgresTargetDeps(async (name) => (name === "transfer.pg-url" ? url : undefined)),
   });
   return { target: target!, url, schema };
 }
@@ -689,5 +689,34 @@ test("a move to a configured PostgreSQL destination arrives whole; when the copy
     const authority = readFileSync(join(st(f), "storage-authority.json"), "utf8");
     for (const secret of [PG_PASSWORD, url]) assert.ok(!authority.includes(secret), "the authority file does not hold the address or its password");
     assert.equal((await readAuthority(st(f)))?.active.fingerprint, target.fingerprint);
+  } finally { await finish(f); }
+});
+
+test("a configured PostgreSQL destination whose schema existed before is not dropped when the copy fails: what else it holds survives and the journal says the destination is not clean (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const { target, url, schema } = await configuredPg(f);
+    // The owner prepared the schema (with something of their own in it) before naming it as a destination.
+    await withClient(url, async (c) => { await c.query(`CREATE SCHEMA ${schema}`); await c.query(`CREATE SEQUENCE ${schema}.owners_own`); });
+    const svc = await service(f, [target], { pageSize: 2, inject: (p) => { if (p === "copy:deliveries") throw new Error("copy failed"); } });
+    const plan = await svc.preview("pg");
+    assert.equal(plan.ok, true, JSON.stringify(plan.findings));
+    await assert.rejects(svc.apply("pg", plan.token), /copy failed/);
+    const journal = JSON.parse(readFileSync(join(st(f), "database-transfer-journal.json"), "utf8")) as { phase: string; failure: { destinationClean: boolean } };
+    assert.equal(journal.phase, "failed");
+    assert.equal(journal.failure.destinationClean, false, "the partial copy is still there, and the journal says so");
+    assert.equal(await postgresSchemaExists(url, schema), true, "a schema the transfer did not create is not dropped");
+    const kept = await withClient(url, async (c) => (await c.query("SELECT to_regclass($1)::text AS t", [`${schema}.owners_own`])).rows[0]?.t as string | null);
+    assert.equal(kept, `${schema}.owners_own`, "the owner's own object in that schema survives");
+  } finally { await finish(f); }
+});
+
+test("what a destination's store says when the preview probes it reaches the owner with the target's address hidden (card F04l)", async () => {
+  const f = await fixture();
+  try {
+    const address = "postgres://nnuser:probe-pw@db.example.com:5433/nimble";
+    const broken = { snapshot: async () => { throw new Error(`relation missing on ${address} (probe-pw)`); }, close: async () => undefined } as unknown as ControllerStorage;
+    const target: TransferTarget = { name: "pg", kind: "postgres", fingerprint: "postgres:db.example.com:5433/nimble#x", open: async () => broken, redact: (text) => text.split(address).join("[address hidden]").split("probe-pw").join("[address hidden]") };
+    await assert.rejects((await service(f, [target])).preview("pg"), (e: Error) => { assert.match(e.message, /relation missing on \[address hidden\]/); assert.ok(!e.message.includes("probe-pw") && !e.message.includes("postgres://"), e.message); return true; });
   } finally { await finish(f); }
 });

@@ -164,6 +164,7 @@ const pgDeps = (over: Partial<NonNullable<SqliteTargetDeps["postgres"]>> = {}): 
     openStorage: async () => { throw new Error(`could not connect to ${ADDRESS}: password hunter2/x was refused for nnuser`); },
     databaseBytes: async () => 1_000,
     dropSchema: async () => undefined,
+    schemaExists: async () => false,
     ...over,
   },
 });
@@ -241,4 +242,25 @@ test("freeBytes of a PostgreSQL entry is the cap less the server's size, never b
   const [c] = await sqliteTargetsFromConfig([pgEntry()], pgDeps({ databaseBytes: async () => { asked++; return 1; } }));
   assert.equal(await c!.freeBytes!(), undefined);
   assert.equal(asked, 0, "without a cap the server is not asked");
+});
+
+test("a failed copy drops a PostgreSQL schema only when this target's open created it; a schema that was there before is never dropped (card F04l)", async () => {
+  const dropped: string[] = [];
+  const asked: string[] = [];
+  const build = async (exists: boolean) => (await sqliteTargetsFromConfig([pgEntry({ schema: "nn_x" })], pgDeps({
+    openStorage: async () => ({}) as never, dropSchema: async (_u, schema) => { dropped.push(schema); }, schemaExists: async (_u, schema) => { asked.push(schema); return exists; },
+  })))[0]!;
+  const before = await build(true);
+  await assert.rejects(before.discard!(), /nn_x existed before this controller opened it, so it is not dropped/);
+  await before.open();
+  await before.open();
+  await assert.rejects(before.discard!(), (e: Error) => /not dropped/.test(e.message) && !e.message.includes("hunter2") && !e.message.includes("db.example.com"));
+  assert.deepEqual(dropped, [], "an existing schema (public, one prepared by the owner, another installation's) is left alone");
+  assert.deepEqual(asked, ["nn_x", "nn_x"], "every open asks until one finds the schema absent");
+  const fresh = await build(false);
+  await assert.rejects(fresh.discard!(), /not dropped/, "nothing was opened yet, so nothing was created");
+  await fresh.open();
+  await fresh.discard!();
+  await fresh.discard!();
+  assert.deepEqual(dropped, ["nn_x", "nn_x"], "the schema its own open created is dropped (and again after a later failed copy)");
 });

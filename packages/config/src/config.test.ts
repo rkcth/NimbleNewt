@@ -444,3 +444,29 @@ test("the start gets the transfer destinations as written and a secret lookup th
   assert.deepEqual(none.targetEntries, []);
   assert.equal(await none.secrets("transfer.pg-url"), undefined);
 });
+
+test("transfer destinations in the configuration: a PostgreSQL address only as a secret reference (a plain address is refused unechoed), names unique and plain, at most 16, listed as a secret use, kept out of public profiles and exports (card F04l)", async () => {
+  const address = "postgres://nnuser:s3cret-pw@db.internal:5432/nimble";
+  const withTargets = (targets: unknown[], profile = "private") => { const doc = parsed(profile); doc.controller.databaseTransfer = { targets }; return doc; };
+  const plain = JSON.stringify(loadConfig(withTargets([{ name: "pg", kind: "postgres", url: address }])));
+  assert.match(plain, /controller\.databaseTransfer\.targets\[0\]\.url/);
+  assert.match(plain, /secrets must never be written into configuration/);
+  for (const part of ["s3cret-pw", "db.internal", "postgres://"]) assert.equal(plain.includes(part), false, `the refusal repeated ${part}`);
+  const twice = messages(loadConfig(withTargets([{ name: "a", kind: "sqlite", path: "/srv/a.sqlite" }, { name: "a", kind: "postgres", url: { secret: "t.pg" } }]))).join("\n");
+  assert.match(twice, /controller\.databaseTransfer\.targets\[1\]\.name: "a" is used by another transfer target/);
+  for (const bad of [{ name: "A", kind: "sqlite", path: "/x" }, { name: "a", kind: "mysql", path: "/x" }, { name: "a", kind: "postgres", url: { secret: "t.pg" }, schema: "Bad" }, { name: "a", kind: "postgres", url: { secret: "t.pg" }, maxBytes: 0 }, { name: "a", kind: "sqlite", path: "/x", url: { secret: "t.pg" } }]) {
+    assert.equal(loadConfig(withTargets([bad])).ok, false, JSON.stringify(bad));
+  }
+  assert.equal(loadConfig(withTargets(Array.from({ length: 17 }, (_, i) => ({ name: `t${i}`, kind: "sqlite", path: `/srv/t${i}.sqlite` })))).ok, false, "17 destinations are refused");
+  const config = loadOk(withTargets([{ name: "file", kind: "sqlite", path: "/srv/b.sqlite" }, { name: "pg", kind: "postgres", url: { secret: "transfer.pg-url" }, schema: "nn_b", maxBytes: 1000 }]));
+  assert.deepEqual(secretReferences(config).map((r) => [r.name, r.usedBy]).filter(([n]) => n === "transfer.pg-url"), [["transfer.pg-url", "controller.databaseTransfer.targets[1].url"]]);
+  const missing = await resolveSecrets(config, memorySecrets({ "controller.database-url": "postgres://x", "example-cloud.api-key": "k" }));
+  assert.ok(!missing.ok && missing.missing.map((m) => m.name).join() === "transfer.pg-url", "a start without the destination's secret is told its name");
+  const { document, preview } = exportProfile(config);
+  assert.equal(JSON.stringify(document).includes("databaseTransfer"), false, "a shared export leaves the destinations out");
+  assert.ok(preview.omitted.some((o) => o.path === "controller.databaseTransfer"));
+  assert.ok(loadConfig(document).ok);
+  const pub = parsed("public");
+  pub.controller.databaseTransfer = { targets: [] };
+  assert.match(messages(loadConfig(pub)).join("\n"), /controller\.databaseTransfer: a public profile must not name database transfer destinations/);
+});

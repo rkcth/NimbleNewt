@@ -2,6 +2,7 @@ import { dirname, isAbsolute } from "node:path";
 import { canon } from "../backup/canon.js";
 import type { StatsFs } from "node:fs";
 import type { ControllerStorage } from "../storage/types.js";
+import { PostgresStorage, dropPostgresSchema, postgresDatabaseBytes, postgresSchemaExists } from "../storage/postgres/index.js";
 import { postgresFingerprint, sqliteFingerprint, type TransferTarget } from "./transfer.js";
 
 /**
@@ -39,6 +40,13 @@ export interface PostgresTargetDeps {
   databaseBytes(url: string): Promise<number>;
   /** Drops the schema and everything in it. */
   dropSchema(url: string, schema: string): Promise<void>;
+  /** Whether the schema exists on the server. Asked before the first open, so a failed copy drops only a schema that this controller created. */
+  schemaExists(url: string, schema: string): Promise<boolean>;
+}
+
+/** The real PostgreSQL side of configured targets: the storage's own open (no unsupported-server override) and the server reads and clean-up of the storage folder. The start and the tests use this one wiring. */
+export function postgresTargetDeps(resolveSecret: (name: string) => Promise<string | undefined>): PostgresTargetDeps {
+  return { resolveSecret, openStorage: (url, schema) => PostgresStorage.open({ connectionString: url, schema }), databaseBytes: postgresDatabaseBytes, dropSchema: dropPostgresSchema, schemaExists: postgresSchemaExists };
 }
 
 /** What building targets needs from outside: opening a store at a path, reading a file system's room, and (for PostgreSQL entries) the secret store and the server. */
@@ -122,12 +130,19 @@ export async function transferTargetsFromConfig(entries: readonly unknown[], dep
       const earlier = places.get(fingerprint);
       if (earlier !== undefined) refuse(i, `url: is the same place as entry ${earlier}`);
       names.add(name); places.set(fingerprint, i);
+      // Set when an open of this target found the schema absent, so the open created it. Only such a schema is dropped after a failed copy: a schema that was
+      // there before (the database's `public`, one the owner prepared with grants, or one holding other objects) is never dropped; the owner is told the
+      // destination is not clean instead.
+      let created = false;
       out.push({
         name, kind: "postgres", fingerprint,
-        open: () => hiding(url, () => pg.openStorage(url, schema)),
+        open: () => hiding(url, async () => { if (!created && !(await pg.schemaExists(url, schema))) created = true; return pg.openStorage(url, schema); }),
         // The server's own figure for the database, against the cap the configuration gives: PostgreSQL cannot tell a client how much disk is left, so without a cap nothing is claimed.
         freeBytes: maxBytes === undefined ? async () => undefined : () => hiding(url, async () => Math.max(0, maxBytes - (await pg.databaseBytes(url)))),
-        discard: () => hiding(url, () => pg.dropSchema(url, schema)),
+        discard: () => hiding(url, async () => {
+          if (!created) throw new Error(`the schema ${schema} existed before this controller opened it, so it is not dropped; empty it by hand`);
+          await pg.dropSchema(url, schema);
+        }),
         redact: (text) => hideAddress(text, url),
       });
       continue;

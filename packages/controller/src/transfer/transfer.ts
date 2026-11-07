@@ -356,6 +356,10 @@ export class DatabaseTransferService {
         if (state === undefined || Number(state["epoch"]) !== 0) findings.push({ severity: "error", text: (typeof state?.["holder"] === "string" && state["holder"].startsWith("transfer-pending:") ? `the destination holds a copy left by an unfinished transfer (${state["holder"]}); it is not a database in use. Empty it before another transfer` : "the destination is not empty: a controller has already owned it. A transfer goes into a new, empty database.") });
         else for (const table of SNAPSHOT_TABLES) if (table !== "state" && (await probe.read(table, { limit: 1 })).length > 0) { findings.push({ severity: "error", text: `the destination already holds ${table} records (a partial copy?); empty it first` }); break; }
       } finally { await probe.close(); }
+    } catch (error) {
+      // What the destination's store says about itself goes to the owner: the target hides its address from it (a PostgreSQL target's open already does).
+      if (target.redact !== undefined && error instanceof Error && target.redact(error.message) !== error.message) throw new Error(target.redact(error.message));
+      throw error;
     } finally { await destination.close(); }
     let freeBytes: number | undefined;
     try { freeBytes = await target.freeBytes?.(); } catch { freeBytes = undefined; }
