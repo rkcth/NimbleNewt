@@ -1407,6 +1407,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12q — Finish the quiesce: the landing path and the production workspace port
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `db325f81`, `52fdf8ad`, `0f20d438`, `77a9b475`, `bb71685f`, `f964d5b6`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A landing runs only with the task's attempts quiet and no attempt can start during one: a frozen attempt is not started and holds no place, allowance or pin while it waits, the quiesce waits (bounded) for a worker still coming up, a failed later look releases what it froze, a Stop or Suspend treats a worker still coming up as running work (a Stop's checkpoint waits for it no longer than the deadline), and a place or hold an advance takes after a stop ended the attempt is marked on the record and given back, retried every tick and after a restart (a crash between taking it and recording it can still leave it). Tested on all four storage backends and with the real worker process. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12d.
 - **Deliverable:** Split from H12d (2026-10-30); narrowed 2026-10-31 (the product worker host composition is H12s, the lease and queue of landing are P10): landing is an operation of workspace.request run behind the quiesce, and the worker package supplies the production workspace port.
 - **Acceptance and verification:** A landing waits for running attempts to quiesce and an attempt cannot start during one.
