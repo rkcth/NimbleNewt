@@ -107,7 +107,7 @@ export interface RunReport {
   readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number };
   /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set): what it would drop (or dropped), and the versions kept because a resumable task used them. */
   readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
-  /** Executable text of revoked versions (off when `revokedBytesDays` is null): what it would blank (or blanked). The record, digest and revocation stay. */
+  /** Executable text of revoked versions (off unless `revokedBytesBlank` is on and `revokedBytesDays` is set): what it would blank (or blanked). The record, digest and revocation stay. */
   readonly revokedBytes?: { days: number; candidates: { name: string; version: string; ageDays: number }[]; blanked: number; partial: boolean };
   readonly runId?: string;
 }
@@ -124,7 +124,7 @@ export interface DeletionReport {
 }
 
 /**
- * Retention, quotas, archive, export and deletion (card K06). Nothing here deletes unless the owner asked or set a rule: the runner does nothing while `derivedDays` is unset, a user-requested deletion is an owner command, and what a resumable task
+ * Retention, quotas, archive, export and deletion (card K06). Nothing here deletes unless the owner asked or set a rule: each rule acts only when its own value is set, a user-requested deletion is an owner command, and what a resumable task
  * or a replay needs is refused as retained. Every removal is a guarded delete with an audit record (and a storage tombstone), so it is recorded and a stale holder cannot write over it.
  */
 export class RetentionService {
@@ -198,7 +198,7 @@ export class RetentionService {
 
   /**
    * The retention runner. Preview (the default) lists what the rule would remove from derived data and backups, and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
-   * Nothing is removed while `derivedDays` is unset. Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained.
+   * Each rule acts only when its own value is set. Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained.
    */
   async run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string } = {}): Promise<RunReport> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not run retention by hand`);
