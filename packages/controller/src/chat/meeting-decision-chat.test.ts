@@ -1199,11 +1199,23 @@ for (const backend of backends) {
     assert.match(ninth.error.message, /^alternative: 8 earlier alternatives of yours to this meeting decision were begun and never saved as its answer \(0 of them recorded\); answer it with agree or decline \(to decide otherwise, decline and say what you decide on the topic\), or send one of them again through the API$/);
     assert.equal((await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: altArgs(ctl, "staging server", "Keep the staging server number 3.", "alt-b3") }, "b3")).ok, true, "a listed one still works");
     // A mixed list: two of eight recorded (crash after the record), six that stopped before it; the count of recorded ones is true.
+    // One that stopped before the record (alt-mx2) is then sent on another meeting decision and recorded there: still listed here, but not counted as recorded for this one.
+    // It is on that decision's topic, because the two recorded ones leave "mixed job" disputed and a third decision on it would be refused.
     const m = await ctl.pending("Retire the old mixed job on Thursday.", "mixed job", "Mixed task");
+    const mxElsewhere = await ctl.pending("Retire the old side job on Friday.", "side job", "Side task");
     for (let n = 0; n < 8; n++) {
       if (n < 2) ctl.recordCrash.n = 1; else ctl.recordFail.n = 1;
-      await call(w, w.ownerToken, OP, { decisionId: m.id, response: "alternative", alternative: altArgs(ctl, "mixed job", `Keep the mixed job number ${n}.`, `alt-mx${n}`) }, `mx${n}`);
+      const alt = n === 2 ? altArgs(ctl, "side job", "Keep the side job.", "alt-mx2") : altArgs(ctl, "mixed job", `Keep the mixed job number ${n}.`, `alt-mx${n}`);
+      assert.equal((await call(w, w.ownerToken, OP, { decisionId: m.id, response: "alternative", alternative: alt }, `mx${n}`)).ok, false);
+      if (n === 2) {
+        const there = await call(w, w.ownerToken, OP, { decisionId: mxElsewhere.id, response: "alternative", alternative: alt }, "mx2-elsewhere");
+        assert.equal(there.ok, true, JSON.stringify(there));
+        const recordedThere = (await w.decisions.get(w.owner, (await ctl.decision(mxElsewhere.id)).ownerDecisionId!))!;
+        assert.equal(recordedThere.origin.meetingDecisionId, mxElsewhere.id, "recorded for the other meeting decision");
+        assert.equal((await ctl.decision(m.id)).pendingAlternatives!.includes(recordedThere.id), true, "and still listed on this one");
+      }
     }
+    assert.equal((await ctl.decision(m.id)).pendingAlternatives!.length, 8);
     const mixed = await call(w, w.ownerToken, OP, { decisionId: m.id, response: "alternative", alternative: altArgs(ctl, "mixed job", "Keep the mixed job number 9.", "alt-mx9") }, "mx9");
     assert.match(mixed.error.message, /^alternative: 8 earlier alternatives of yours to this meeting decision were begun and never saved as its answer \(2 of them recorded\); /);
     // A record as the first version left it: recorded, marked with the single field, without its meeting decision on the owner decision: not claimed.
