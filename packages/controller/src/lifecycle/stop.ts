@@ -84,7 +84,10 @@ const FORCE_REF = "stop-force-ref";
 const CHARGE = "stop-charge";
 /** The index of attempts whose charge note was ever pending, with the stop requests waiting on it: a sweep reads this (small) set instead of every charge record, and takes a settled entry off after it has cleared the requests' marks. */
 const OPEN = "stop-charge-open";
-interface OpenBody { readonly intents: readonly string[]; readonly settled: boolean }
+/** `want` is the highest figure a request reported for the attempt while another request's pending note stood in its way (a running maximum, with the request that raised it); the sweep charges it once that note is paid. */
+interface OpenBody { readonly intents: readonly string[]; readonly settled: boolean; readonly want?: { readonly costMicros: number; readonly computeMs: number; readonly intentId: string } }
+/** How many requests an open entry lists before the ones that no longer carry the "not charged" mark are dropped. A request that still carries it is never dropped. */
+const OPEN_INTENTS = 20;
 /** The most the host's figure for one attempt's cleanup is trusted to be: 10^12 micros (a million units of the currency) and 10^12 ms of compute. A larger figure is cut to this. */
 export const CLEANUP_CAP = 1_000_000_000_000;
 const CLEANUP_UNPAID = "cleanup spend not charged";
@@ -362,7 +365,7 @@ export class StopService {
       }
       if (page.length < 100) break;
     }
-    await this.#retryCharges().catch(() => undefined);
+    await this.#retryCharges(by).catch(() => undefined);
     return { advanced, failed };
   }
 
@@ -392,7 +395,7 @@ export class StopService {
    * What the latest suspension or stop of a scope has spent on cleanup, for the owner to read (card L02d): the figure the request counted, what the runtime reported and the budgets were charged for each attempt the
    * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass that went stale is not in it), not the full cost.
    */
-  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no pending note of its own left (another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid. */ markOnly: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid. */ markOnly: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
     // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
     await this.#pauses.authorizeControl(viewer, scope);
     const id = await this.#activeId(scope);
@@ -406,6 +409,19 @@ export class StopService {
       attempts.push({ attemptId, costMicros: charge.costMicros, computeMs: charge.computeMs, pending: charge.pending !== undefined });
       // A pending note belongs to the request that wrote it; another request's further charge on the same attempt is not this request's debt.
       if (charge.pending?.intentId === id) ownPending = true;
+    }
+    // The request's own pending note may be on an attempt its record does not list: the open index names every request with a note or a wait on an attempt.
+    for (let after: string | undefined, pages = 0; !ownPending && pages < RETRY_PAGES; pages++) {
+      const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const rec of page) {
+        after = rec.id;
+        if (!(rec.body as unknown as OpenBody).intents.includes(id)) continue;
+        const charge = (await this.#runner.get(CHARGE, rec.id))?.body as unknown as ChargeBody | undefined;
+        const want = (rec.body as unknown as OpenBody).want;
+        // Its own note, or a figure it (or a request after it) reported that is still above what was charged: the request has charging left to do, not just a mark.
+        if (charge?.pending?.intentId === id || (want !== undefined && (charge === undefined || charge.costMicros < want.costMicros || charge.computeMs < want.computeMs))) { ownPending = true; break; }
+      }
+      if (page.length < 100) break;
     }
     const marked = found.outcome?.unresolved.includes(CLEANUP_UNPAID) === true;
     // Records written before the flags existed (see the notes): a Force Stop that carries a limit, a spent figure, a checkpoint or a preparing/prepared step in its history took over earlier work (a pure Force Stop has none of them),
@@ -477,7 +493,7 @@ export class StopService {
         if (have.pending !== undefined) {
           const paid = await this.#payPending(c.attemptId);
           billed += paid.billed;
-          if (!paid.ok) { await this.#waitOn(c.attemptId, id); failed = true; done = true; break; }
+          if (!paid.ok) { await this.#waitOn(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; done = true; break; }
           found = await this.#runner.get(CHARGE, c.attemptId);
           have = (found?.body as unknown as ChargeBody | undefined) ?? { costMicros: 0, computeMs: 0 };
         }
@@ -491,7 +507,7 @@ export class StopService {
         if (!paid.ok) failed = true;
         done = true;
       }
-      if (!done) failed = true;
+      if (!done) { await this.#waitOn(c.attemptId, id, { costMicros: Math.min(cost, CLEANUP_CAP), computeMs: Math.min(compute, CLEANUP_CAP) }); failed = true; }
     }
     return { costMicros: billed, failed };
   }
@@ -500,13 +516,14 @@ export class StopService {
    * Records that a request is waiting on an attempt's pending charge written by ANOTHER request (its own cleanup found that note and could not pay it), in the same open index the sweep reads, so the sweep clears this request's
    * "not charged" mark once the note is paid. Without it the request would carry the mark for good. A lost race is read again; a few tries, then it is left (the next pass of the request does it again).
    */
-  async #waitOn(attemptId: string, intentId: string): Promise<void> {
+  async #waitOn(attemptId: string, intentId: string, want?: { costMicros: number; computeMs: number }): Promise<void> {
     const openRef: AggregateRef = { kind: OPEN, id: attemptId };
     for (let race = 0; race < 6; race++) {
       const open = await this.#runner.get(OPEN, attemptId);
       const had = open?.body as unknown as OpenBody | undefined;
-      if (had !== undefined && !had.settled && had.intents.includes(intentId)) return;
-      const next = clean({ intents: [...new Set([...(had?.intents ?? []), intentId])].slice(-20), settled: false });
+      const raised = this.#raise(had?.want, want, intentId);
+      if (had !== undefined && !had.settled && had.intents.includes(intentId) && raised === had.want) return;
+      const next = clean({ intents: await this.#listed(had?.intents ?? [], intentId), settled: false, ...(raised === undefined ? {} : { want: raised }) });
       try {
         await this.#runner.command("stop.charge-wait", { commandId: `stop-wait-${attemptId}-${intentId}-${open?.revision ?? 0}`.slice(0, 200), actor: "system" }, async () => ({
           payload: { attemptId, intentId },
@@ -518,6 +535,25 @@ export class StopService {
         throw error;
       }
     }
+  }
+
+  /** The running maximum of the figures requests wanted charged (the same object when nothing is raised). */
+  #raise(had: OpenBody["want"], add: { costMicros: number; computeMs: number } | undefined, intentId: string): OpenBody["want"] {
+    if (add === undefined) return had;
+    if (had !== undefined && add.costMicros <= had.costMicros && add.computeMs <= had.computeMs) return had;
+    return { costMicros: Math.max(add.costMicros, had?.costMicros ?? 0), computeMs: Math.max(add.computeMs, had?.computeMs ?? 0), intentId };
+  }
+
+  /** The requests an open entry lists once `add` joins. Past `OPEN_INTENTS` the ones that no longer carry the "not charged" mark are dropped (the sweep has nothing to clear on them); one that still carries it is never dropped. */
+  async #listed(have: readonly string[], add: string): Promise<string[]> {
+    const all = [...new Set([...have, add])];
+    if (all.length <= OPEN_INTENTS) return all;
+    const keep: string[] = [];
+    for (const i of all) {
+      const marked = i === add || ((await this.#runner.get(KIND, i))?.body as unknown as StopIntentBody | undefined)?.outcome?.unresolved.includes(CLEANUP_UNPAID) === true;
+      if (marked) keep.push(i);
+    }
+    return keep;
   }
 
   /** Writes the per-attempt charge record if it is still at the revision it was read at (false when someone else got there first and the caller should try again later). */
@@ -533,9 +569,11 @@ export class StopService {
           // The index of open charges is kept in the same operation as the note.
           const open = await this.#runner.get(OPEN, attemptId);
           const had = open?.body as unknown as OpenBody | undefined;
+          // What a request wanted charged stays on the entry until the attempt's total covers it.
+          const want = had?.want !== undefined && (had.want.costMicros > body.costMicros || had.want.computeMs > body.computeMs) ? had.want : undefined;
           const idx: JsonObject | undefined = body.pending !== undefined
-            ? clean({ intents: [...new Set([...(had?.intents ?? []), body.pending.intentId])].slice(-20), settled: false })
-            : had === undefined || had.settled ? undefined : clean({ intents: had.intents, settled: true });
+            ? clean({ intents: await this.#listed(had?.intents ?? [], body.pending.intentId), settled: false, ...(want === undefined ? {} : { want }) })
+            : had === undefined || (had.settled && had.want === want) ? undefined : clean({ intents: had.intents, settled: true, ...(want === undefined ? {} : { want }) });
           const indexChange: Change[] = idx === undefined ? [] : [open === undefined ? { type: "create", ref: openRef, body: idx } : { type: "update", ref: openRef, expectedRevision: open.revision, body: idx }];
           return { ref, creates: revision === undefined, changes: [revision === undefined ? { type: "create", ref, body: next } : { type: "update", ref, expectedRevision: revision, body: next }, ...indexChange], detail: { attemptId } };
         },
@@ -570,7 +608,7 @@ export class StopService {
    * Makes the charges that failed or were cut short by a crash, for any request (a sweep does this, so a charge that could not be made at the time is retried later). When every charge a finished request was waiting on is made, the
    * request's "cleanup spend not charged" mark is taken off its outcome.
    */
-  async #retryCharges(): Promise<void> {
+  async #retryCharges(by: Principal): Promise<void> {
     const cleared = new Set<string>();
     const stuck = new Set<string>();
     const finished: { attemptId: string; revision: number }[] = [];
@@ -580,7 +618,15 @@ export class StopService {
       for (const rec of page) {
         after = rec.id;
         const open = rec.body as unknown as OpenBody;
-        const ok = (await this.#payPending(rec.id)).ok;
+        let ok = (await this.#payPending(rec.id)).ok;
+        // A figure a request reported while another request's note stood in the way is charged now that the note is paid; its requests are cleared only when that is charged too.
+        if (ok && open.want !== undefined) {
+          const have = (await this.#runner.get(CHARGE, rec.id))?.body as unknown as ChargeBody | undefined;
+          if (have === undefined || have.costMicros < open.want.costMicros || have.computeMs < open.want.computeMs) {
+            const wanted = await this.#charge(open.want.intentId, by, [{ attemptId: rec.id, costMicros: open.want.costMicros, computeMs: open.want.computeMs }]);
+            ok = !wanted.failed;
+          }
+        }
         // A request is cleared when every charge it waited on is made, also one that another request (a concurrent stop of the same attempt) made.
         for (const intentId of open.intents) { if (ok) cleared.add(intentId); else stuck.add(intentId); }
         if (ok) finished.push({ attemptId: rec.id, revision: rec.revision });
@@ -595,7 +641,8 @@ export class StopService {
     for (const f of finished) {
       const now = await this.#runner.get(OPEN, f.attemptId);
       const charge = (await this.#runner.get(CHARGE, f.attemptId))?.body as unknown as ChargeBody | undefined;
-      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some((i) => stuck.has(i))) continue;
+      const wants = (now?.body as unknown as OpenBody | undefined)?.want;
+      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some((i) => stuck.has(i)) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
       await this.#runner.command("stop.charge-index-drop", { commandId: `stop-drop-${f.attemptId}-${now.revision}`.slice(0, 200), actor: "system" }, async () => ({
         payload: { attemptId: f.attemptId, revision: now.revision },
         build: async () => ({ ref: { kind: OPEN, id: f.attemptId }, creates: false, changes: [{ type: "delete", ref: { kind: OPEN, id: f.attemptId }, expectedRevision: now.revision }], detail: { attemptId: f.attemptId } }),

@@ -69,7 +69,7 @@ class Runtime implements StopPorts {
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
     owner: Principal; mgr: Principal; ann: Principal; task: string; agentA: string; rt: Runtime; stops: StopService; pauses: PauseService; reopen(): StopService;
-    assignments: AssignmentService; projects: ProjectService; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
+    assignments: AssignmentService; projects: ProjectService; runner: CommandRunner; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
   }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-10-28T10:00:00.000Z");
@@ -100,7 +100,7 @@ for (const backend of backends) {
         };
         mayHoldHook = async () => true;
         const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, { ...options, mayHold: (by, t) => mayHoldHook(by, t) });
-        await body({ owner, mgr, ann, task, agentA, rt, stops: make(), pauses, reopen: make, assignments, projects, edit });
+        await body({ owner, mgr, ann, task, agentA, rt, stops: make(), pauses, reopen: make, assignments, projects, edit, runner: new CommandRunner(world.storage, epoch, options) });
       } finally { await world.close(); }
     });
   const scopeOf = (task: string) => ({ kind: "task", id: task }) as const;
@@ -700,11 +700,102 @@ for (const backend of backends) {
     assert.notEqual(s.intentId, f1.intentId);
     await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
     const before = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
-    assert.deepEqual([before.intentId, before.unpaid, before.markOnly], [s.intentId, true, true], "its own charge never got a note: only the mark is left");
+    assert.deepEqual([before.intentId, before.unpaid, before.markOnly], [s.intentId, true, false], "its own figure (600) is above what was charged: it is owed, not mark only");
     c.rt.failCharges = 0;
     await c.stops.sweep(c.owner);
     const after = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
     assert.deepEqual([after.unpaid, after.markOnly], [false, false], "the sweep paid the other request's note and cleared this request's mark too");
+  });
+
+  const sumOf = (c: { rt: { charges: Array<{ attemptId: string; costMicros: number }> } }, a: string): number => c.rt.charges.filter((x) => x.attemptId === a).reduce((s, x) => s + x.costMicros, 0);
+
+  suite("a higher figure the ending reports while the request's own earlier note cannot be paid is charged by the sweep, and the view does not say paid before (card L02d review)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-b", costMicros: 20, computeMs: 0 }] }];
+    c.rt.terminateCosts = [{ attemptId: "att-b", costMicros: 111, computeMs: 0 }];
+    c.rt.failCharges = 100;
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId });
+    assert.equal(sumOf(c, "att-b"), 0);
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, true);
+    c.rt.failCharges = 0;
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-b"), 111, "the whole reported figure is charged");
+    const seen = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([seen.unpaid, seen.attempts.map((a) => [a.attemptId, a.costMicros, a.pending])], [false, [["att-b", 111, false]]]);
+    assert.equal((await c.runner.list("stop-charge-open", { limit: 10 })).length, 0, "the entry is taken off the index once everything is charged");
+  });
+
+  suite("a Force Stop's higher figure behind an earlier request's unpaid note is charged by the sweep (card L02d review)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 100;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
+    const second = await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    assert.equal(sumOf(c, "att-c"), 0);
+    const mid = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([mid.intentId, mid.unpaid, mid.markOnly], [second.intentId, true, false], "its own figure above the note is owed: not mark only");
+    c.rt.failCharges = 0;
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 56, "20 of the first request and the 36 more the second one reported");
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+  });
+
+  suite("the sweep does not clear a request while its higher figure still cannot be charged (card L02d review)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 100;
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "first" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 56, computeMs: 0 }];
+    await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "second" });
+    // The first note's charge goes through, then the budget is unreachable again for the rest.
+    c.rt.failCharges = 0;
+    const real = c.rt.charge.bind(c.rt);
+    let calls = 0;
+    c.rt.charge = async (x) => { if (++calls > 1) throw new Error("the budget could not be reached"); await real(x); };
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 20);
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, true, "36 are still owed");
+    c.rt.charge = real;
+    await c.stops.sweep(c.owner);
+    assert.equal(sumOf(c, "att-c"), 56);
+    assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.unpaid, false);
+  });
+
+  suite("more than twenty requests waiting on one unpaid note are all kept on the index and all cleared by the sweep (card L02d review)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.terminateCosts = [{ attemptId: "att-c", costMicros: 20, computeMs: 0 }];
+    c.rt.failCharges = 1000;
+    const ids: string[] = [];
+    for (let i = 0; i < 23; i++) {
+      ids.push((await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: `r${i}` })).intentId);
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    }
+    const open = await c.runner.list("stop-charge-open", { limit: 10 });
+    assert.equal(open.length, 1);
+    assert.deepEqual([...(open[0]!.body as { intents: string[] }).intents].sort(), [...ids].sort(), "none of the 23 waiting requests was dropped");
+    c.rt.failCharges = 0;
+    await c.stops.sweep(c.owner);
+    for (const id of ids) {
+      const marked = ((await c.runner.get("stop-intent", id))!.body as { outcome?: { unresolved: string[] } }).outcome?.unresolved.includes("cleanup spend not charged");
+      assert.equal(marked, false, `request ${id} was cleared`);
+    }
+    assert.equal(sumOf(c, "att-c"), 20);
+  });
+
+  suite("a request's own pending note on an attempt its record does not list still reads as unpaid (card L02d review)", async (c) => {
+    c.rt.seenAttempts = [];
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-b", costMicros: 20, computeMs: 0 }] }];
+    c.rt.terminateCosts = [];
+    c.rt.failCharges = 100;
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId });
+    await c.edit(intentId, (b) => { delete b["attempts"]; return b; });
+    const seen = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+    assert.deepEqual([seen.attempts.length, seen.unpaid, seen.markOnly], [0, true, false]);
   });
 
   suite("an attempt that reported a cleanup cost is listed even when the runtime does not list it among its attempts (card L02d review)", async (c) => {

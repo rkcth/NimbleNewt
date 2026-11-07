@@ -32,11 +32,17 @@ class Runtime implements StopPorts {
   async begin(): Promise<void> { }
   async release(): Promise<void> { }
   async inventory(): Promise<InventoryItem[]> { return this.blocking ? [{ kind: "process", ref: "pid-7", state: "uncooperative" }] : []; }
+  /** The highest total reported for each attempt (every call that returned its costs to the service): all of it must be charged by the fixed point. */
+  reportedMax: Record<string, number> = {};
+  noteReported(costs: Array<{ attemptId: string; costMicros: number }>): void { for (const c of costs) this.reportedMax[c.attemptId] = Math.max(this.reportedMax[c.attemptId] ?? 0, c.costMicros); }
   async cleanup(scope: Scope) {
-    this.totals["att-a"]! += 100;
+    // att-b is never listed by attempts(): only the costs the runtime reports tell the service about it.
+    this.totals["att-a"]! += 100; this.totals["att-b"]! += 20;
     const id = await this.activeOf(scope);
-    if (id !== undefined) { const s = this.costsReported.get(id) ?? new Set(); s.add("att-a"); this.costsReported.set(id, s); }
-    return { remaining: this.blocking ? [{ kind: "process", ref: "pid-7", state: "uncooperative" } as InventoryItem] : [], costs: [{ attemptId: "att-a", costMicros: this.totals["att-a"]!, computeMs: 0 }] };
+    if (id !== undefined) { const s = this.costsReported.get(id) ?? new Set(); s.add("att-a"); s.add("att-b"); this.costsReported.set(id, s); }
+    const costs = [{ attemptId: "att-a", costMicros: this.totals["att-a"]!, computeMs: 0 }, { attemptId: "att-b", costMicros: this.totals["att-b"]!, computeMs: 0 }];
+    this.noteReported(costs);
+    return { remaining: this.blocking ? [{ kind: "process", ref: "pid-7", state: "uncooperative" } as InventoryItem] : [], costs };
   }
   async checkpoint() { return { checkpointId: "cp-1", durable: true, artifactsDurable: true }; }
   async charge(c: { commandId: string; attemptId: string; costMicros: number; computeMs: number }): Promise<void> {
@@ -50,7 +56,9 @@ class Runtime implements StopPorts {
     this.totals["att-a"]! += 50; this.totals["att-b"]! += 30;
     const id = await this.activeOf(scope);
     if (id !== undefined) { this.terminated.add(id); const s = this.costsReported.get(id) ?? new Set(); s.add("att-a"); s.add("att-b"); this.costsReported.set(id, s); }
-    return { ended: true, unresolved: [], costs: [{ attemptId: "att-a", costMicros: this.totals["att-a"]!, computeMs: 0 }, { attemptId: "att-b", costMicros: this.totals["att-b"]!, computeMs: 0 }] };
+    const costs = [{ attemptId: "att-a", costMicros: this.totals["att-a"]!, computeMs: 0 }, { attemptId: "att-b", costMicros: this.totals["att-b"]!, computeMs: 0 }];
+    this.noteReported(costs);
+    return { ended: true, unresolved: [], costs };
   }
 }
 
@@ -62,6 +70,7 @@ type Op = (typeof OPS)[number];
 // A small seeded walk through many histories (the larger one is run with BRUTE_N=6500 BRUTE_LEN=8). The view is read after every step and each sentence is checked against the stored request and what the runtime did.
 const rng = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 
+const SCRIPTED = ["throwTermOn,stop,advance,throwTermOff,wait", "throwTermOn,suspend,stop,advance,advance,throwTermOff,wait", "suspend,advance,stop", "blockOn,stop,advance,sweep,wait", "failOn,force,agentStop", "failOn,agentStop,failOff,sweep", "failOn,force,stop,force,failOff,sweep", "failOn,agentStop,agentForce,failOff,sweep"];
 const COUNT = Number(process.env["BRUTE_N"] ?? 120);
 const MAXLEN = Number(process.env["BRUTE_LEN"] ?? 6);
 const ONLY = process.env["BRUTE_SEQ"];
@@ -71,7 +80,12 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
   const random = rng(20261107);
   const seqs: Op[][] = [];
   if (ONLY !== undefined) seqs.push(ONLY.split(",") as Op[]);
-  else for (let i = 0; i < COUNT; i++) { const len = 1 + Math.floor(random() * MAXLEN); seqs.push(Array.from({ length: len }, () => USE[Math.floor(random() * USE.length)]!)); }
+  else {
+    // Scripted prefixes first (each found a real fault once), then the walk, which leans toward making requests.
+    for (const s of SCRIPTED) seqs.push(s.split(",") as Op[]);
+    const pool: Op[] = [...USE, "suspend", "stop", "force", "agentStop", "advance", "sweep", "failOn", "failOff"];
+    for (let i = 0; i < COUNT; i++) { const len = 1 + Math.floor(random() * MAXLEN); seqs.push(Array.from({ length: len }, () => pool[Math.floor(random() * pool.length)]!)); }
+  }
   for (const seq of seqs) {
     now = Date.parse("2026-10-28T10:00:00.000Z");
     const storage = new MemoryStorage();
@@ -124,7 +138,19 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
           case "stop": await doRequest(T, "stop"); break;
           case "force": await doForce(T); break;
           case "advance": { const id = await active(T); if (id) await stops.advance(owner, { intentId: id }).catch(() => undefined); break; }
-          case "wait": { const id = await active(T); if (id) await stops.choose(owner, { commandId: cid("c"), intentId: id, choice: "wait", extendMs: 1 }).catch(() => undefined); break; }
+          case "wait": {
+            const id = await active(T);
+            if (!id) break;
+            const was = (await runner.get("stop-intent", id))!.body as Record<string, any>;
+            await stops.choose(owner, { commandId: cid("c"), intentId: id, choice: "wait", extendMs: 1 }).catch(() => undefined);
+            const is = (await runner.get("stop-intent", id))!.body as Record<string, any>;
+            // A wait on a blocked preparation starts a new budget window; a wait after a failed ending keeps the figure of the preparation.
+            if (was["phase"] === "blocked" && is["phase"] !== "blocked") {
+              const expected = (was["blocked"]?.resume ?? "preparing") === "preparing" ? 0 : was["spent"];
+              if (is["spent"] !== expected) record("wait-spent", `resume ${was["blocked"]?.resume} spent ${was["spent"]} -> ${is["spent"]}`);
+            }
+            break;
+          }
           case "restart": { const id = await active(T); if (id) await stops.choose(owner, { commandId: cid("c"), intentId: id, choice: "restart-earlier-boundary" }).catch(() => undefined); break; }
           case "resume": await pauses.resume(owner, { commandId: cid("rs"), scope: T, reason: "again" }).catch(() => undefined); break;
           case "agentResume": await pauses.resume(owner, { commandId: cid("rs"), scope: A, reason: "again" }).catch(() => undefined); break;
@@ -182,14 +208,29 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
         }
         // unpaid
         const charges = await runner.list("stop-charge", { limit: 100 });
-        const ownPendingAny = charges.some((c) => (c.body as any).pending?.intentId === v.intentId);
+        // owed: its own pending note, or a figure above what was charged that the sweep still has to charge (kept on the open entry of an attempt that lists the request)
+        const openEntries = await runner.list("stop-charge-open", { limit: 100 });
+        const owedWant = openEntries.some((o) => {
+          const b = o.body as any;
+          const rec = charges.find((c) => c.id === o.id)?.body as any;
+          return b.intents.includes(v.intentId) && b.want !== undefined && (rec === undefined || rec.costMicros < b.want.costMicros || rec.computeMs < b.want.computeMs);
+        });
+        const ownPendingAny = owedWant || charges.some((c) => (c.body as any).pending?.intentId === v.intentId);
         const marked = (stored["outcome"]?.unresolved ?? []).includes("cleanup spend not charged");
         const saysUnpaid = lines.some((l) => /not charged yet|A charge failed when the request ended/.test(l));
         if (saysUnpaid !== (marked || ownPendingAny)) record("unpaid-mismatch", `${where} marked=${marked} ownPending=${ownPendingAny} says=${saysUnpaid}`);
         // attempts totals equal the charges made
+        // an own pending note reads as "retried until it is" whatever the mark says
+        if (ownPendingAny && !lines.some((l) => /retried until it is/.test(l))) record("own-pending-not-told", where);
         for (const a of v.attempts) {
           const sum = rt.charges.filter((c) => c.attemptId === a.attemptId).reduce((s, c) => s + c.costMicros, 0);
-          if (sum !== a.costMicros) record("attempt-total", `${where} ${a.attemptId} view ${a.costMicros} charged ${sum}`);
+          const rec = charges.find((c) => c.id === a.attemptId)?.body as { costMicros: number; pending?: { costMicros: number } } | undefined;
+          // charged so far = the ledger, or the ledger plus the part of a pending note that was made before the note was cleared
+          if (sum !== a.costMicros && !(rec?.pending !== undefined && sum === rec.pending.costMicros)) record("attempt-total", `${where} ${a.attemptId} view ${a.costMicros} charged ${sum}`);
+          // the amount the owner reads is the amount in the view
+          const shown = lines.find((l) => l.startsWith(`Attempt ${a.attemptId}:`));
+          const m = shown === undefined ? null : /^Attempt \S+: ([0-9.]+) and/.exec(shown);
+          if (m === null || Math.round(Number(m[1]) * 1_000_000) !== a.costMicros) record("attempt-line-amount", `${where} ${shown ?? "(no line)"} view ${a.costMicros}`);
         }
         // every attempt with a charge record that this request reported costs for is listed
         const reported = new Set(rt.costsReported.get(v.intentId) ?? []);
@@ -209,7 +250,18 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
         }
       }
     }
+    // Fixed point: the budget reachable again, the host answering, sweeps run. Every figure the runtime ever reported is charged (the highest one per attempt), nothing is pending, no request keeps the mark, and the index is empty.
+    rt.failCharges = false; rt.throwOnTerminate = false; rt.blocking = false;
+    stops = StopService.withEpoch(storage, epoch, PauseService.withEpoch(storage, epoch, {}, options), rt, options);
+    for (let i = 0; i < 3; i++) await stops.sweep(owner);
+    for (const [a, max] of Object.entries(rt.reportedMax)) {
+      const sum = rt.charges.filter((c) => c.attemptId === a).reduce((s, c) => s + c.costMicros, 0);
+      if (sum !== max) record("final-charged-differs-from-reported", `${a} reported ${max} charged ${sum}`);
+    }
+    for (const c of await runner.list("stop-charge", { limit: 100 })) if ((c.body as any).pending !== undefined) record("final-pending", c.id);
+    for (const r of await runner.list("stop-intent", { limit: 100 })) if (((r.body as any).outcome?.unresolved ?? []).includes("cleanup spend not charged")) record("final-marked", r.id);
+    if ((await runner.list("stop-charge-open", { limit: 100 })).length > 0) record("final-index-not-empty", "");
   }
-  const out = [...violations.entries()].map(([k, v]) => `${k} (${v.length}+):\n  ${v.join("\n  ")}`).join("\n");
+  const out =[...violations.entries()].map(([k, v]) => `${k} (${v.length}+):\n  ${v.join("\n  ")}`).join("\n");
   assert.equal(out, "", `${seqs.length} sequences`);
 });
