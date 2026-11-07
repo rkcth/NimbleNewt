@@ -289,7 +289,7 @@ interface Loaded { readonly agg: Aggregate; readonly body: RecordBody }
  * From the record before and after the call, each change in exactly one count: `carriedOut` carried out by this call, `refused` the codes of those it refused, `alreadyDone` done before, `refusedBefore` refused before, `stillOpen` still adopted or applying (`applying` of them started).
  */
 /** The refusal when the owner's own decision was recorded but the meeting decision was answered before it could be linked: the decision stands, and the owner is told so. */
-const orphanError = (id: string, topic: string, state: string, response: string): DomainError => new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded and ${state === "active" ? "is in force" : state === "disputed" ? "conflicts with another of your instructions, so nothing on that topic is in force until you choose" : "has since been replaced"}, but the meeting decision was answered meanwhile (${response}); it is not linked to the meeting decision`, { field: "alternative" });
+const orphanError = (id: string, topic: string, state: string, response: string): DomainError => new DomainError("invalid_command", `your decision ${id} on topic "${topic}" was recorded under this command ID and ${state === "active" ? "is in force" : state === "disputed" ? "conflicts with another of your instructions, so nothing on that topic is in force until you choose" : "has since been replaced"}, but this meeting decision no longer waits for an answer (${response}); your decision is not linked to it${state === "active" ? `; if it should not stand, say what you decide on topic "${topic}" now (a later decision of yours replaces it)` : state === "disputed" ? "; settle that conflict to choose" : ""}`, { field: "alternative" });
 export interface OwnerAnswer { ownerDecisionId?: string; applied?: number; stillApplying?: true; passFailed?: true; replayed?: true; ownerDecisionDisputed?: true; carriedOut: number; refused: string[]; alreadyDone: number; refusedBefore: number; stillOpen: number; applying: number }
 
 export class MeetingRecordService {
@@ -1234,12 +1234,15 @@ export class MeetingRecordService {
       const altId = derivedId("dec", scopedCommandId(by.id, command.alternative.commandId));
       const recordedAlt = await this.#deps.decisions.get(by, altId);
       if (recordedAlt !== undefined) {
-        // Everything the decision service puts in its command's payload except `basedOn` (the chat reads that again when the owner confirms), normalised as the service normalises it.
+        // What the decision service keeps of its command, compared as it stores it (the words exactly as given, the topic normalised, the gate topic for a gate): project, task, category, gate, topic, statement, wording, source channel and turn, and the session.
+        // Left out: `basedOn` (the chat reads it again when the owner confirms). A stance other than decided is refused here as the service refuses it.
         const alt = command.alternative;
+        if (alt.stance !== undefined && alt.stance !== "decided") invalid("alternative", `a ${alt.stance} is not a decision; nothing was recorded`);
         const src = (x: unknown): string => JSON.stringify([(x as { channel?: unknown } | undefined)?.channel, (x as { turnId?: unknown } | undefined)?.turnId]);
         const same = recordedAlt.projectId === alt.projectId && recordedAlt.taskId === alt.taskId && recordedAlt.category === alt.category && recordedAlt.gate === alt.gate
           && recordedAlt.topic === (alt.category === "gate" ? GATE_TOPIC : normalTopic(typeof alt.topic === "string" ? alt.topic : ""))
-          && recordedAlt.statement === String(alt.statement).trim() && recordedAlt.wording === String(alt.wording).trim() && src(recordedAlt.source) === src(alt.source);
+          && recordedAlt.statement === alt.statement && recordedAlt.wording === alt.wording && src(recordedAlt.source) === src(alt.source)
+          && (recordedAlt.origin as { session?: string } | undefined)?.session === alt.session;
         if (!same) throw new DomainError("command_conflict", `command ID ${alt.commandId.slice(0, 60)} was already used for a different decision`, { field: "alternative" });
         ownerDecisionId = altId;
       }

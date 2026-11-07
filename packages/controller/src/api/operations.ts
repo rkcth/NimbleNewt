@@ -352,6 +352,7 @@ const NOT_CARRIED_OUT: Readonly<Record<string, string>> = {
   failed: "it could not be carried out", recommendation: "it was only a recommendation", owner: "you refused it",
 };
 
+const DISPUTED_LINE = "Your decision is recorded, but it conflicts with another of your instructions on its topic: nothing on that topic is in force until you choose.";
 /** What an owner's answer did, in plain lines, from the counts `ownerRespond` returns (card M02h): what was carried out now, what was not and why, what was done before, what is still open. */
 export function ownerAnswerLines(response: string, out: Readonly<Record<string, unknown>>): string[] {
   const num = (k: string): number => (typeof out[k] === "number" ? (out[k] as number) : 0);
@@ -359,11 +360,10 @@ export function ownerAnswerLines(response: string, out: Readonly<Record<string, 
   const given = `This answer (${response === "agree" ? "agree" : response === "decline" ? "decline" : "your own decision"}) was already given`;
   const replayed = out["replayed"] === true;
   // A repeat still finishes what an earlier call left started: it says "nothing more was done" only when that is true.
-  if (replayed && num("carriedOut") === 0 && (!Array.isArray(out["refused"]) || out["refused"].length === 0) && out["stillApplying"] !== true && out["passFailed"] !== true) return [`${given}; nothing more was done now.`];
+  if (replayed && num("carriedOut") === 0 && (!Array.isArray(out["refused"]) || out["refused"].length === 0) && out["stillApplying"] !== true && out["passFailed"] !== true) return [`${given}; nothing more was done now.`, ...(out["ownerDecisionDisputed"] === true ? [DISPUTED_LINE] : [])];
   const carried = num("carriedOut");
   const before = num("alreadyDone");
   const refused = Array.isArray(out["refused"]) ? (out["refused"] as string[]) : [];
-  // The header says "finished" only if this call carried out or refused something; a repeat that could not finish what was left says so.
   // "Finished what was left" only when nothing is left; a repeat that moved things on but stopped says how far it got.
   const lines: string[] = replayed ? [`${given}; ${carried > 0 || refused.length > 0 ? (num("stillOpen") === 0 ? "this call finished what was left" : "this call did this much of what was left") : "what was left could not be finished now"}:`] : [];
   const refusedBefore = num("refusedBefore");
@@ -386,7 +386,7 @@ export function ownerAnswerLines(response: string, out: Readonly<Record<string, 
   } else if (out["passFailed"] === true) {
     lines.push(`Carrying out the changes failed before ${before > 0 || refusedBefore > 0 || refused.length > 0 ? "any of the remaining changes" : "any of them"} started; ${count(num("stillOpen"))} still ${num("stillOpen") === 1 ? "waits" : "wait"}. Nothing applies ${num("stillOpen") === 1 ? "it" : "them"} again by itself; the decision must be applied again through the API (meeting.record.apply), which you have no chat command for yet.`);
   } else if (response === "agree" && num("stillOpen") > 0) lines.push(`${count(num("stillOpen"))} still ${num("stillOpen") === 1 ? "waits" : "wait"} to be carried out.`);
-  if (out["ownerDecisionDisputed"] === true) lines.push("Your decision is recorded, but it conflicts with another of your instructions on its topic: nothing on that topic is in force until you choose.");
+  if (out["ownerDecisionDisputed"] === true) lines.push(DISPUTED_LINE);
   return lines;
 }
 

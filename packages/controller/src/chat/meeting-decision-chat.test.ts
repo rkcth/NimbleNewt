@@ -974,6 +974,9 @@ for (const backend of backends) {
     const gate = { commandId: "alt-gate", projectId: ctl.project, category: "gate", gate: "planning-only", statement: "plan only until June", wording: "plan only until June", source: { channel: "direct" }, basedOn: 0 };
     ctl.recordCrash.n = 1;
     assert.equal((await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: gate }, "ans-gate")).ok, false);
+    // Another kind of gate under the same command ID is another decision.
+    const other = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: { ...gate, gate: "implementation-hold" } }, "ans-gate");
+    assert.equal(other.error.code, "command_conflict");
     const retried = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: gate }, "ans-gate");
     assert.equal(retried.ok, true, JSON.stringify(retried));
   });
@@ -987,13 +990,13 @@ for (const backend of backends) {
     assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "decline" }, "ans-decline")).ok, true);
     const retry = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, "ans-orph");
     assert.equal(retry.ok, false);
-    assert.match(retry.error.message, /^your decision dec-\S+ on topic "nightly build" was recorded and is in force, but the meeting decision was answered meanwhile \(declined\); it is not linked to the meeting decision$/);
+    assert.match(retry.error.message, /^your decision dec-\S+ on topic "nightly build" was recorded under this command ID and is in force, but this meeting decision no longer waits for an answer \(declined\); your decision is not linked to it; if it should not stand, say what you decide on topic "nightly build" now \(a later decision of yours replaces it\)$/);
     // A decline wins right after the record, in the same call.
     const e = await ctl.pending(STAGING, "staging server", "Staging task");
     ctl.afterRecord.run = async () => { await ctl.records.ownerRespond(w.owner, { commandId: "race-decline", decisionId: e.id, response: "decline" }); };
     const lost = await call(w, w.ownerToken, OP, { decisionId: e.id, response: "alternative", alternative: altArgs(ctl, "staging server", "Keep the staging server until May.", "alt-race") }, "ans-race");
     assert.equal(lost.ok, false);
-    assert.match(lost.error.message, /^your decision dec-\S+ on topic "staging server" was recorded and is in force, but the meeting decision was answered meanwhile \(declined\)/);
+    assert.match(lost.error.message, /^your decision dec-\S+ on topic "staging server" was recorded under this command ID and is in force, but this meeting decision no longer waits for an answer \(declined\)/);
     // Through chat the owner reads the same words.
     const f = await ctl.pending(REPORT, "nightly report", "Report task");
     const text = "I would rather keep the nightly report weekly until March, not that change.";
@@ -1001,7 +1004,86 @@ for (const backend of backends) {
     const proposal = only((await say(w, w.chat(), text)).outcomes);
     ctl.afterRecord.run = async () => { await ctl.records.ownerRespond(w.owner, { commandId: "race-decline-2", decisionId: f.id, response: "decline" }); };
     const failed = await w.chat().applyProposal(w.ownerToken, { commandId: "ap-race", proposalId: proposal.proposalId! }).catch((x: unknown) => x);
-    assert.match(JSON.stringify(failed), /was recorded and is in force, but the meeting decision was answered meanwhile \(declined\)/);
+    assert.match(JSON.stringify(failed), /was recorded under this command ID and is in force, but this meeting decision no longer waits for an answer \(declined\)/);
+  });
+
+  suite("the same alternative command ID: padded words, topic, source, category, gate, session and stance are all pinned; a retry with the identical padded words works", async (w, _script, ctl) => {
+    const d = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    const base = altArgs(ctl, "nightly build", "  use the teal runner  ", "alt-pin");
+    ctl.recordCrash.n = 1;
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: base }, "ans-pin")).ok, false);
+    const variants: [string, Record<string, unknown>, string][] = [
+      ["another topic", { topic: "other topic" }, "command_conflict"],
+      ["a chat source", { source: { channel: "chat", turnId: "turn-x" } }, "command_conflict"],
+      ["a gate category", { category: "gate", gate: "planning-only" }, "command_conflict"],
+      ["a session", { session: "phone" }, "command_conflict"],
+      ["a brainstorm", { stance: "brainstorm" }, "invalid_command"],
+    ];
+    for (const [what, change, code] of variants) {
+      const r = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: { ...base, ...change } }, "ans-pin");
+      assert.equal(r.ok, false, what);
+      assert.equal(r.error.code, code, `${what}: ${JSON.stringify(r.error)}`);
+    }
+    assert.equal((await ctl.decision(d.id)).ownerResponse, "pending");
+    const ok = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: base }, "ans-pin");
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+  });
+
+  suite("the alternative's command ID used for another meeting decision that no longer waits: the owner is told the decision is recorded and not linked to it", async (w, _script, ctl) => {
+    const x = await ctl.pending(STAGING, "staging server", "Staging task");
+    const y = await ctl.pending(NIGHTLY, "nightly build", "Nightly task");
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: x.id, response: "agree" }, "ans-x")).ok, true);
+    const alt = altArgs(ctl, "nightly build", "Keep the nightly build at midnight.", "alt-y");
+    assert.equal((await call(w, w.ownerToken, OP, { decisionId: y.id, response: "alternative", alternative: alt }, "ans-y")).ok, true);
+    const r = await call(w, w.ownerToken, OP, { decisionId: x.id, response: "alternative", alternative: alt }, "ans-x2");
+    assert.equal(r.ok, false);
+    assert.match(r.error.message, /^your decision dec-\S+ on topic "nightly build" was recorded under this command ID and is in force, but this meeting decision no longer waits for an answer \(agreed\); your decision is not linked to it; if it should not stand/);
+  });
+
+  test("a nothing-done repeat still tells that the owner's decision conflicts", () => {
+    const lines = ownerAnswerLines("alternative", { carriedOut: 0, refused: [], alreadyDone: 0, refusedBefore: 0, stillOpen: 0, applying: 0, replayed: true, ownerDecisionDisputed: true });
+    assert.deepEqual(lines, ["This answer (your own decision) was already given; nothing more was done now.", "Your decision is recorded, but it conflicts with another of your instructions on its topic: nothing on that topic is in force until you choose."]);
+  });
+
+  // The alternative through the API with random padding, crash, disputes and reuse: whatever happens the decision is recorded once, a retry works, and what is told is true of the record.
+  suite("seeded alternatives through the API: padded words, a crash after recording, a conflict, a reuse on another decision", async (w, _script, ctl) => {
+    let seed = 7;
+    const next = (n: number): number => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % n; };
+    const months = ["March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    for (let k = 0; k < 10; k++) {
+      const noun = `thing${k} board`;
+      const d = await ctl.pending(`Tune the ${noun} schedule.`, noun, `Task ${k}`);
+      const pad = k === 4 ? "  " : ["", " ", "  "][next(3)]!;
+      let crash = next(2) === 0;
+      let dispute = next(3) === 0;
+      let reuse = next(3) === 0;
+      // Forced so each kind is sampled whatever the sequence gives.
+      if (k === 1) { crash = true; dispute = true; }
+      if (k === 4) { crash = true; reuse = true; dispute = false; }
+      if (k === 6) { dispute = true; crash = false; }
+      const statement = `${pad}Keep the ${noun} until ${months[k]}${pad}`;
+      const alt = altArgs(ctl, noun, statement, `alt-p${k}`);
+      if (dispute) await w.decisions.record(w.owner, { commandId: cid("later"), projectId: ctl.project, category: "decision", topic: noun, statement: `Retire the ${noun} in April`, wording: `Retire the ${noun} in April`, source: { channel: "direct" }, basedOn: 0 } as never);
+      const label = JSON.stringify({ k, pad, crash, dispute, reuse });
+      if (crash) { ctl.recordCrash.n = 1; assert.equal((await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, `ans-p${k}`)).ok, false, label); }
+      const first = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, `ans-p${k}`);
+      assert.equal(first.ok, true, `${label}: ${JSON.stringify(first)}`);
+      assert.equal((await ctl.decision(d.id)).ownerResponse, "alternative", label);
+      assert.equal(first.result.ownerDecisionDisputed === true, dispute, label);
+      assert.equal(first.result.shown.includes("Your decision is recorded, but it conflicts with another of your instructions on its topic: nothing on that topic is in force until you choose."), dispute, `${label}: ${first.result.shown}`);
+      const again = await call(w, w.ownerToken, OP, { decisionId: d.id, response: "alternative", alternative: alt }, `ans-p${k}`);
+      assert.equal(again.result.replayed, true, label);
+      assert.deepEqual(again.result.shown.slice(0, 1), ["This answer (your own decision) was already given; nothing more was done now."], label);
+      assert.equal(again.result.shown.length, dispute ? 2 : 1, `${label}: the repeat tells the conflict too`);
+      assert.equal((await w.decisions.history(w.owner, { projectId: ctl.project, topic: noun })).filter((h) => h.statement === statement).length, 1, `${label}: recorded once`);
+      if (reuse) {
+        const other = await ctl.pending(`Tune the ${noun} again.`, `${noun} again`, `Task ${k} again`);
+        assert.equal((await call(w, w.ownerToken, OP, { decisionId: other.id, response: "decline" }, `dec-p${k}`)).ok, true, label);
+        const r = await call(w, w.ownerToken, OP, { decisionId: other.id, response: "alternative", alternative: alt }, `ans-p${k}-x`);
+        assert.equal(r.ok, false, label);
+        assert.match(r.error.message, /was recorded under this command ID and (is in force|conflicts with another of your instructions[^;]*), but this meeting decision no longer waits for an answer \(declined\); your decision is not linked to it/, label);
+      }
+    }
   });
 
   suite("only the owner sees or answers the held decisions: an agent, a host and a task-scoped owner credential are refused, and the chat is the owner's alone", async (w, _script, ctl) => {
