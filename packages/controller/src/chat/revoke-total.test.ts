@@ -30,6 +30,15 @@ for (const backend of backends) {
   });
 }
 
+test("why a retention command is shown first says what it does: a preview deletes nothing, a real run deletes, settings decide what may be deleted (card T02c review)", () => {
+  const ctx = { profile: "balanced", said: true, quoted: false };
+  assert.match(String(proposalReason("retention.run", {}, false, ctx)), /only previews .* deletes nothing/);
+  assert.match(String(proposalReason("retention.run", { dryRun: false }, false, ctx)), /real retention run deletes what the rules expire/);
+  assert.match(String(proposalReason("retention.settings.set", { derivedDays: 30 }, false, ctx)), /decide what may be deleted/);
+  assert.match(String(proposalReason("retention.delete", { recordId: "x" }, false, ctx)), /deleting, archiving or restoring/);
+  for (const op of ["retention.run", "retention.settings.set", "retention.delete"]) assert.doesNotMatch(String(proposalReason(op, {}, false, ctx)), /role's capabilities/);
+});
+
 test("why a tool-catalogue change is shown first says what it is: a revoke, with the calls it would reach, or the standing policy for running calls (card T02c review)", () => {
   const ctx = { profile: "balanced", said: true, quoted: false };
   assert.match(String(proposalReason("catalog.revoke", { name: "a_x.slow", version: "1.0.0", reason: "bad" }, false, ctx)), /withdrawing a tool version is shown first, with the calls it would reach/);

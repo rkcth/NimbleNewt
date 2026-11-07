@@ -186,6 +186,21 @@ test("the runner: off until derivedDays is set, preview then confirm by digest, 
     const r9 = (await call(boot.token, "retention.run", { dryRun: false, confirm: p3.digest }, "r9")).result;
     assert.deepEqual([r9.incidents.archived, r9.incidents.purged], [0, 0]);
 
+    // What the owner confirms includes the incidents: the preview counts those to archive and to remove, the digest covers them, and the run reports them.
+    const incident = (n: string, extra: object) => put("responsibility-incident", `inc-${n}`, { responsibilityId: "rsp-x", projectId: project, signature: `sig-${n}`, state: "resolved", resolvedAt: "2020-01-01T00:00:00.000Z", ...extra });
+    await incident("a", {}); await incident("b", {}); await incident("c", { archivedAt: "2020-02-01T00:00:00.000Z" });
+    const p4 = (await call(boot.token, "retention.run", {}, "r10")).result;
+    assert.deepEqual([p4.incidents.wouldArchive, p4.incidents.wouldPurge], [2, 1]);
+    assert.match(p4.shown[0], /, 2 resolved incident\(s\) would be archived, 1 archived incident\(s\) would be removed/);
+    assert.notEqual(p4.digest, p3.digest, "the incidents are part of the digest");
+    await incident("d", {});
+    assert.equal((await call(boot.token, "retention.run", { dryRun: false, confirm: p4.digest }, "r11")).error?.code, "invalid_command", "a changed set of incidents refuses the old confirmation");
+    const p5 = (await call(boot.token, "retention.run", {}, "r12")).result;
+    assert.equal(p5.incidents.wouldArchive, 3);
+    const r13 = (await call(boot.token, "retention.run", { dryRun: false, confirm: p5.digest }, "r13")).result;
+    assert.deepEqual([r13.incidents.archived, r13.incidents.purged], [3, 1]);
+    assert.match(r13.shown[0], /, 3 resolved incident\(s\) archived, 1 archived incident\(s\) removed/);
+
     // The dispatcher does nothing by itself until autoRun is on.
     await put("summary-record", "sum-old-1", { projectId: project, title: "t", text: "t", sources: [], createdBy: "x" });
     for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();

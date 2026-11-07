@@ -8061,6 +8061,23 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "K06d",
+      "parent": "N17",
+      "existing_issue": "AII-267",
+      "title": "Chat view of the retention status",
+      "depends_on": [
+        "K06"
+      ],
+      "deliverable": "Chat view of the retention status: disk and reserve, quota warnings, backups, recent deletions (split from T02c 2026-11-07: retention.status has no chat view, and the quota notice points to it with 'See retention.status.', which the owner cannot reach in chat). The owner asks in their own words and a status kind answers from the same service as retention.status, owner only, every line citing its records; the interpreter prompt lists the kind.",
+      "acceptance_and_verification": "The owner can ask in chat how much room is left, which quotas are near their limit, which backups are kept and what retention deleted lately, and a non-owner gets nothing",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "K06b",
       "parent": "N17",
       "existing_issue": "AII-267",
@@ -9036,6 +9053,7 @@
         "U11c",
         "U11d",
         "K06c",
+        "K06d",
         "P03b",
         "K01i",
         "F04l",

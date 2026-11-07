@@ -51,6 +51,11 @@ export interface ResponsibilityObservedState {
  * Incidents for responsibilities (card P04): repeated alerts group into one open incident, an incident not resolved by the responsibility's escalation time is escalated once, and the
  * observed state is kept apart from the desired one. Nothing here acts on a resource or starts a model; escalation is a record the caller turns into a notice.
  */
+/** Resolved long enough ago, not archived, and not escalated without having been told (the rule `archive` and `due` share). */
+const archivable = (b: IncidentBody, cutoff: number): boolean => b.state === "resolved" && b.archivedAt === undefined && b.resolvedAt !== undefined && Date.parse(b.resolvedAt) < cutoff && !(b.escalatedAt !== undefined && b.notifiedAt === undefined);
+/** Archived long enough ago and not escalated without having been told (the rule `purge` and `due` share). */
+const purgeable = (b: IncidentBody, cutoff: number): boolean => b.state === "resolved" && b.archivedAt !== undefined && Date.parse(b.archivedAt) < cutoff && !(b.escalatedAt !== undefined && b.notifiedAt === undefined);
+
 export class IncidentService {
   readonly #runner: CommandRunner;
   readonly #duties: Pick<ResponsibilityService, "get" | "list" | "status">;
@@ -185,6 +190,23 @@ export class IncidentService {
   }
 
   /**
+   * Which incidents a retention run would archive and which it would remove now (card K06, T02c: the preview and its digest cover them), with the same rules as `archive` and `purge`: at most `limit` (default 200) of each, optionally
+   * for one project, the IDs in record-ID order. A window left out lists none of that kind. Owner or service only.
+   */
+  async due(by: Principal, options: { archiveDays?: number; purgeDays?: number; limit?: number; projectId?: string } = {}): Promise<{ archive: string[]; purge: string[] }> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "look at which incidents are due");
+    const limit = options.limit ?? 200;
+    const now = Date.parse(this.#runner.now());
+    const pick = async (days: number | undefined, test: (b: IncidentBody, cutoff: number) => boolean): Promise<string[]> => {
+      if (days === undefined) return [];
+      const cutoff = now - days * 86_400_000;
+      const found = await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && test(b, cutoff); });
+      return found.map((a) => a.id).sort().slice(0, limit);
+    };
+    return { archive: await pick(options.archiveDays, archivable), purge: await pick(options.purgeDays, purgeable) };
+  }
+
+  /**
    * Soft archive (card K06): marks resolved incidents resolved more than `olderThanDays` ago (default 90, 7..3650) as archived, at most `limit` (default 200, 1..1000) per call, optionally
    * for one project. An incident escalated but not yet told is kept. A lost race is skipped. Returns how many were archived. Owner or service only.
    */
@@ -195,7 +217,7 @@ export class IncidentService {
     if (!Number.isInteger(days) || days < 7 || days > 3650) throw invalid("olderThanDays", "must be a whole number from 7 to 3650");
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw invalid("limit", "must be a whole number from 1 to 1000");
     const cutoff = Date.parse(this.#runner.now()) - days * 86_400_000;
-    const old = (b: IncidentBody): boolean => b.state === "resolved" && b.archivedAt === undefined && b.resolvedAt !== undefined && Date.parse(b.resolvedAt) < cutoff && !(b.escalatedAt !== undefined && b.notifiedAt === undefined);
+    const old = (b: IncidentBody): boolean => archivable(b, cutoff);
     let done = 0;
     for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && old(b); })) {
       if (done >= limit) break;
@@ -228,7 +250,7 @@ export class IncidentService {
     if (!Number.isInteger(days) || days < 30 || days > 3650) throw invalid("olderThanDays", "must be a whole number from 30 to 3650");
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw invalid("limit", "must be a whole number from 1 to 1000");
     const cutoff = Date.parse(this.#runner.now()) - days * 86_400_000;
-    const expired = (b: IncidentBody): boolean => b.state === "resolved" && b.archivedAt !== undefined && Date.parse(b.archivedAt) < cutoff && !(b.escalatedAt !== undefined && b.notifiedAt === undefined);
+    const expired = (b: IncidentBody): boolean => purgeable(b, cutoff);
     let done = 0;
     for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && expired(b); })) {
       if (done >= limit) break;

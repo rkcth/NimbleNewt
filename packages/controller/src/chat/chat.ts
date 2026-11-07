@@ -206,6 +206,8 @@ type Resolved =
  *   command ID. The stored turn links each outcome to the command IDs (and so to the audit entries) it produced.
  */
 /** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
+/** The owner saying a running-call choice in their own words, with its usual endings ("cancel", "cancelled", "cancels"; "finish", "finished"; "pause", "paused"). */
+const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { finish: /\bfinish(?:ed|es|ing)?\b/i, cancel: /\bcancel(?:l?ed|s|l?ing)?\b/i, pause: /\bpause(?:d|s)?\b|\bpausing\b/i };
 const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
@@ -512,7 +514,7 @@ export class ChatService {
         push({ i, kind: "coordinator", action: intent.action, ...(expectedRevision === undefined ? {} : { expectedRevision }), ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
         continue;
       }
-      // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
+      // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
@@ -638,7 +640,7 @@ export class ChatService {
     }
     // A real retention run is proposed with the digest of the preview worked out NOW (never one the interpreter wrote), so the owner's yes is bound to exactly what is shown; a digest the interpreter gave is dropped.
     if (intent.op === "retention.run") {
-      const real = args["dryRun"] === false || args["confirm"] !== undefined;
+      const real = args["dryRun"] === false;
       delete args["confirm"];
       if (real) {
         const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "retention.run", commandId: `cp-${randomUUID()}`, args: { dryRun: true, ...(args["limit"] === undefined ? {} : { limit: args["limit"] }) } });
@@ -936,12 +938,11 @@ export class ChatService {
       }
       delete args["taskId"];
     }
-    // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     // Revoking a tool version (owner decision 2026-10-30): when calls of it are running, the owner is asked whether they finish, are cancelled, or their tasks are paused; the calls are listed. Nothing is assumed: the answer is the owner's.
     const notes: string[] = [];
     if (intent.op === "catalog.revoke") {
       // ASSUMPTION (2026-11-07): a choice is taken without asking only when the owner said the word; a choice the model supplied that the owner did not say is dropped, so the question below is asked instead of the move being refused.
-      if (args["runningCalls"] !== undefined && !(typeof args["runningCalls"] === "string" && ["finish", "cancel", "pause"].includes(args["runningCalls"]) && new RegExp(`\\b${args["runningCalls"]}\\b`, "i").test(words))) delete args["runningCalls"];
+      if (args["runningCalls"] !== undefined && !(typeof args["runningCalls"] === "string" && ["finish", "cancel", "pause"].includes(args["runningCalls"]) && SAID_CHOICE[args["runningCalls"] as "finish" | "cancel" | "pause"].test(words))) delete args["runningCalls"];
       if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "say which tool and which version to revoke");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "catalog.running", args: { name: args["name"], version: args["version"] } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
@@ -963,6 +964,7 @@ export class ChatService {
       const standing = await this.#get(token, "catalog.policy.get", {});
       if (standing?.["source"] === "operator") notes.push(`The operator set this at startup (${String(standing["effective"])}); your setting is saved but does not apply until that startup option is removed.`);
     }
+    // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
       delete args["toAgentName"];

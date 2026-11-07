@@ -44,7 +44,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P03b, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
-| N17 / AII-267 | K01, K01e, K01f, K01g, K01h, K01i, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06c, K06b, K07 |
+| N17 / AII-267 | K01, K01e, K01f, K01g, K01h, K01i, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06c, K06d, K06b, K07 |
 | N18 / AII-268 | G06, X11, X09, X09b, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
@@ -2888,6 +2888,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Stored thinking is deleted at the cleanup deadline, a deletion is recorded, and a task cannot resume after its thinking is deleted without the provider-invalid handling of C06b; chat keeps the words said and drops thinking when the live conversation no longer needs it.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### K06d — Chat view of the retention status
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K06.
+- **Deliverable:** Chat view of the retention status: disk and reserve, quota warnings, backups, recent deletions (split from T02c 2026-11-07: retention.status has no chat view, and the quota notice points to it with 'See retention.status.', which the owner cannot reach in chat). The owner asks in their own words and a status kind answers from the same service as retention.status, owner only, every line citing its records; the interpreter prompt lists the kind..
+- **Acceptance and verification:** The owner can ask in chat how much room is left, which quotas are near their limit, which backups are kept and what retention deleted lately, and a non-owner gets nothing.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### K06b — Implement tiered retention (optional, after the first release)
 
 - **Parent:** N17 / AII-267.
@@ -3181,7 +3189,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i, F04l, F04m, F04n.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

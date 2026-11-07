@@ -12,6 +12,7 @@ import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PrincipalService, TaskCredentialService, type Grant, type Principal } from "../security/index.js";
+import { STATUS_KINDS } from "../status/index.js";
 import { API_VERSION, OPERATIONS, PAGE, StateApi, renderApiDocs, type ApiResponse } from "./index.js";
 
 after(stopServer);
@@ -262,4 +263,9 @@ test("the documentation is generated from the operation table and is up to date"
   assert.equal(readFileSync(file, "utf8"), renderApiDocs(), "run `npm run build && npm run api:docs:write` and commit the result");
   for (const op of OPERATIONS) assert.ok(renderApiDocs().includes(`#### \`${op.name}\``), `${op.name} is documented`);
   assert.equal(new Set(OPERATIONS.map((o) => o.name)).size, OPERATIONS.length, "operation names are unique");
+});
+
+test("the status.ask description names every kind of status question the chat model is told, so the two lists cannot drift apart (card T02c review)", () => {
+  const summary = OPERATIONS.find((o) => o.name === "status.ask")!.summary;
+  for (const kind of Object.keys(STATUS_KINDS)) assert.ok(summary.includes(`\`${kind}\``), `${kind} is described in status.ask`);
 });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { AgentService } from "../agents/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
-import { CatalogPolicyService } from "../catalog/index.js";
+import { CatalogPolicyService, versionIdOf } from "../catalog/index.js";
 import { DeskService } from "../context/index.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { BlockerService, type BlockerBasis, type BlockerType } from "../domain/blockers.js";
@@ -1408,24 +1408,31 @@ for (const backend of backends) {
   suite("why a record or tool version is kept from deletion, and the retention values in force, are told to the owner only, each line citing what it is about (card T02c)", async (c) => {
     let held = { retained: true, reasons: ["tool toolbox.check 1.0.0 was run by task t1, which can still resume or be replayed", "recorded as a dependency by task t2, which can still resume"] };
     const retention = {
-      check: async (_by: Principal, ref: { kind: string; id: string }) => (ref.id === "cav-held" ? held : { retained: false, reasons: [] as string[] }),
+      check: async (_by: Principal, ref: { kind: string; id: string }) => (ref.id === versionIdOf("toolbox.check", "1.0.0") ? held : { retained: false, reasons: [] as string[] }),
       settings: async () => ({ revision: 3, settings: { catalogVersionsKept: 2 }, effective: { catalogVersionsKept: 2, derivedDays: null, backupDaily: 7 } }),
     };
     const status = c.rebuild({}, { retention });
-    const kept = (await status.ask(c.owner, { kind: "retention_hold", recordKind: "catalog-version", id: "cav-held" }))!.lines;
+    const kept = (await status.ask(c.owner, { kind: "retention_hold", recordKind: "catalog-version", name: "toolbox.check", version: "1.0.0" }))!.lines;
     cited(kept);
-    assert.deepEqual(kept.map((l) => l.text), ["catalog-version cav-held is kept from deletion for 2 reason(s):", ...held.reasons]);
+    assert.deepEqual(kept.map((l) => l.text), ["toolbox.check 1.0.0 is kept from deletion for 2 reason(s):", ...held.reasons]);
+    assert.deepEqual(kept.map((l) => l.cites[0]!.id), kept.map(() => versionIdOf("toolbox.check", "1.0.0")), "the lines cite the version record");
+    assert.match(said((await status.ask(c.owner, { kind: "retention_hold", recordKind: "catalog-version", name: "toolbox.other", version: "2.0.0" }))!.lines), /toolbox\.other 2\.0\.0 is not held/);
+    await assert.rejects(status.ask(c.owner, { kind: "retention_hold", recordKind: "catalog-version", name: "toolbox.check" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     assert.match(said((await status.ask(c.owner, { kind: "retention_hold", recordKind: "desk-record", id: "dsk-free" }))!.lines), /dsk-free is not held by anything retention knows of/);
     const values = (await status.ask(c.owner, { kind: "retention" }))!.lines;
     cited(values);
     assert.deepEqual(values.map((l) => l.text), ['Retention values in force (settings revision 3); the ones marked "set" are yours, the others are the installation\'s:', "backupDaily: 7", "catalogVersionsKept: 2 (set)", "derivedDays: none (off or unlimited)"]);
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
-    for (const request of [{ kind: "retention_hold", recordKind: "catalog-version", id: "cav-held" }, { kind: "retention" }] as const) {
+    for (const request of [{ kind: "retention_hold", recordKind: "catalog-version", name: "toolbox.check", version: "1.0.0" }, { kind: "retention" }] as const) {
       assert.equal(await status.ask(reader, request), undefined, "only the owner is told");
       assert.equal(await c.rebuild().ask(c.owner, request), undefined, "not offered when retention is not running");
     }
     await assert.rejects(status.ask(c.owner, { kind: "retention_hold", recordKind: "", id: "x" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     held = { retained: false, reasons: [] };
+    const damaged = c.rebuild({}, { retention: { check: retention.check, settings: async () => { throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)"); } } });
+    const told = (await damaged.ask(c.owner, { kind: "retention" }))!.lines;
+    cited(told);
+    assert.deepEqual(told.map((l) => l.text), ["The stored retention setting is damaged; set it again (retention.settings.set)."]);
   });
 
   suite("past revocations are told to the owner only: each with which version, who, when and why, a line for the ones not shown, and a closing line when the catalogue was larger than one look covers (card T02c)", async (c) => {
