@@ -10,11 +10,10 @@ import { SandboxLauncher, appFromRepository, localWorkerParts } from "@nimblenew
 
 // Card H12e through the composed controller: startController builds the cache policies (`dispatch.cache`), the operator's local build hands the attempt's policy to the relay and its `takeUsage` to the host, the real worker
 // process runs Pi in the real sandbox, and its model calls reach the simulated llama-server of C06 through the relay. What the server reports as cache hits is what budget accounting records, per task and per project.
-// Skipped without bubblewrap unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI).
+// Linux only (bubblewrap); on Linux it is skipped without bubblewrap unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI), where an unusable sandbox fails. The macOS and Windows proof of the worker process is the remainder card of H12b.
 const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const skipOrFail = (t: { skip(why: string): void }, why: string): void => { if (required) assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the check cannot run: ${why}`); t.skip(why); };
 const ANN = "agt-aaaaaaaaaaaaaaaaaaaa", BOB = "agt-bbbbbbbbbbbbbbbbbbbb";
 const LLAMA = "http://llama.test:8080";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -31,7 +30,7 @@ interface Answer { readonly slot: unknown; readonly cachePrompt: unknown; readon
 
 test("the composed controller with the real worker process: a project reuses its slot, another project does not, and the server's hit figures are what budget accounting records (card H12e)", async (t) => {
   const real = await launcher();
-  if (real === undefined) return skipOrFail(t, "bubblewrap or a node install it can mount is unusable (this rig runs on Linux)");
+  if (real === undefined) { t.skip("this rig runs on Linux with bubblewrap and a node install it can mount"); return; }
   const sim = new LlamaSim(2);
   const answers: Answer[] = [];
   const recording = { send: async (r: Parameters<LlamaSim["send"]>[0]) => {
