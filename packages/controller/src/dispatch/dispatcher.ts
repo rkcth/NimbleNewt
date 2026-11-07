@@ -43,6 +43,9 @@ import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
+/** The held-resume notice (card L04c): the longest detail a notification takes (NOTIFICATION_LIMITS.detail), and how much of the task's title it quotes. */
+const NOTICE_DETAIL = 200;
+const HELD_TITLE = 40;
 /** The host that last took an attempt of a task (card H12m): where the task's checkout is when it has no live attempt. One record per task. */
 const PLACED_KIND = "task-placement";
 /** Where the scan of assignments stopped (card H12c): the next tick, of this process or of one after a restart, goes on from there instead of from the beginning. */
@@ -1042,10 +1045,10 @@ export class DispatcherService {
       if (check.phase === "done") { await this.#settleHold(check.id, projectId); return undefined; }
       if (check.phase === "blocked" && resumes.exhausted(check)) {
         // No blocker will ever resolve and no retry is left: the owner is told once (the command ID is stable).
-        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume-blocked:${check.id}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Attempt ${attemptId} cannot start: its resume check is blocked (${check.blocked?.type ?? "unknown"}: ${check.blocked?.reason ?? "no reason recorded"}) after ${check.blocks} tries and nothing will retry it. Look at why, then assign the task again.`.slice(0, 900), resolver: "owner" }).catch(() => undefined);
+        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume-blocked:${check.id}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: clipText(`Attempt ${attemptId} cannot start: its resume check is blocked (${check.blocked?.type ?? "unknown"}: ${check.blocked?.reason ?? "no reason recorded"}) after ${check.blocks} tries and nothing will retry it. Look at why, then assign the task again.`, 900), resolver: "owner" }).catch(() => undefined);
         return `the resume check ${check.id} is blocked and retries are used up; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
       }
-      if (check.phase === "blocked") return `the resume check ${check.id} is blocked: ${check.blocked?.reason ?? "see its blocker"}`.slice(0, 500);
+      if (check.phase === "blocked") return clipText(`the resume check ${check.id} is blocked: ${check.blocked?.reason ?? "see its blocker"}`, 500);
       if (check.phase === "cancelled") return `the resume check ${check.id} was cancelled; it is started again on the next tick`;
       return `the resume check ${check.id} is ${check.phase}`;
     } catch (error) {
@@ -1057,12 +1060,17 @@ export class DispatcherService {
   async #holdForReview(attemptId: string, title: string, projectId: string, check: { id: string }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
     const names = relevant.slice(0, 3).map((i) => `${i.kind} ${i.key} (${i.status})`).join(", ");
     const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
+    // The owner is shown the task by its title (quoted, on one line, cut short), never by its ID; what changed is cut to the room left, so what to do always fits in the notice's 200 characters.
+    // Every cut keeps a character whole (never half of a surrogate pair): ill-formed text is refused by the notification, and the owner would never be told.
+    const head = `"${clipText(title.replace(/[\u0000-\u001f\u007f]/g, " "), HELD_TITLE)}" is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: `;
+    const tail = " Approve to let it go on, or decline to release it.";
+    const what = `${names}${more}.`;
+    const room = NOTICE_DETAIL - head.length - tail.length;
     await this.#deps.notifications?.emitFromController({
       commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: check.id }, projectId,
-      // The owner is shown the task by its title (quoted, on one line, cut short so what changed still fits), never by its ID.
-      detail: `"${title.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 60)}" is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: ${names}${more}. Approve to let it go on, or decline to release it.`.slice(0, 200),
+      detail: clipText(`${head}${what.length <= room ? what : `${clipText(what, room - 3)}...`}${tail}`, NOTICE_DETAIL),
     }).catch((error: unknown) => this.#options.onError?.(error));
-    return `the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); attempt ${attemptId} waits until the owner approves the resume (resume.approve) or declines it, which releases the task (resume.decline)`.slice(0, 500);
+    return clipText(`the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); attempt ${attemptId} waits until the owner approves the resume (resume.approve) or declines it, which releases the task (resume.decline)`, 500);
   }
 
   /** The owner's notice that a resume is held is closed once the check is done (approved) or cancelled, so the inbox never says a task waits that does not. Best effort; nothing open is a no-op. */

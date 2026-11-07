@@ -70,10 +70,13 @@ export function plainDuration(ms: number): string {
   return hours % 24 === 0 ? `${days} d` : `${days} d ${hours % 24} h`;
 }
 
-/** Record text shown in an answer: credential-shaped runs cut out, whitespace made plain, and bounded. */
+/** Record text shown in an answer: credential-shaped runs cut out, whitespace made plain, and bounded (never splitting a character). */
 export function shown(value: string | undefined, max = 200): string {
   const clean = redactText(value ?? "").replace(/\s+/g, " ").trim();
-  return clean.length > max ? `${clean.slice(0, max - 3)}...` : clean;
+  if (clean.length <= max) return clean;
+  // Cut without splitting a surrogate pair: half of one is ill-formed text, which a stored or sent answer refuses.
+  const cut = clean.slice(0, max - 3);
+  return `${/[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut}...`;
 }
 
 /**

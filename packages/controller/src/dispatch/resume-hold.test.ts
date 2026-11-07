@@ -38,9 +38,10 @@ class Fakes {
     },
   };
   detail = "now changed";
+  key = "/src/a.ts";
   /** Runs once, inside the next dependency check (to move the inputs while something else is in progress). */
   during: (() => Promise<void>) | undefined;
-  dependencies = { check: async () => { const run = this.during; this.during = undefined; await run?.(); return [{ id: "dep-1", kind: "file" as const, key: "/src/a.ts", status: "changed" as never, detail: this.detail }] as never; } };
+  dependencies = { check: async () => { const run = this.during; this.during = undefined; await run?.(); return [{ id: "dep-1", kind: "file" as const, key: this.key, status: "changed" as never, detail: this.detail }] as never; } };
   blockers = { getBlocker: async (id: string) => ({ id, state: "open" }) as never, openBlocker: async (c: { commandId: string }) => { const id = this.seen.get(c.commandId) ?? `blk-${this.seen.size + 1}`; this.seen.set(c.commandId, id); return { id } as never; } };
   ports: ResumePorts = {
     observe: async () => ({}), missingContext: async () => [], uncertainEffects: async () => [],
@@ -50,7 +51,7 @@ class Fakes {
 }
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: DispatchWorld, f: Fakes, real: ResumeCheckService, a: { taskId: string; attemptId: string }, go: (extra?: Partial<DispatcherDeps>) => ReturnType<DispatchWorld["restart"]>) => Promise<void>) =>
+  const suite = (name: string, body: (c: DispatchWorld, f: Fakes, real: ResumeCheckService, a: { taskId: string; attemptId: string }, go: (extra?: Partial<DispatcherDeps>) => ReturnType<DispatchWorld["restart"]>) => Promise<void>, title = "long job") =>
     test(`${backend.name}: ${name}`, async () => {
       const store = await backend.open();
       try {
@@ -58,7 +59,7 @@ for (const backend of backends) {
         const f = new Fakes();
         const real = ResumeCheckService.withEpoch(store.storage, c.epoch, { continuations: f.continuations as never, dependencies: f.dependencies as never, blockers: f.blockers as never, ports: f.ports }, { clock: c.options.clock! });
         const ann = await c.agent("ann", workGrants(c.project, []));
-        const { taskId, attemptId } = await c.task("long job", ann);
+        const { taskId, attemptId } = await c.task(title, ann);
         const gate = deferred<void>();
         c.worker.script = async () => { await gate.promise; return { status: "completed", text: "late" }; };
         const first = c.restart();
@@ -761,5 +762,136 @@ for (const backend of backends) {
     const svc = declining(c, f, async () => { throw new Error("must not release"); });
     await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_transition", /^not declined: the attempt this resume check was for is no longer the task's active attempt/));
     assert.equal((await real.get(c.owner, check.id))!.phase, "ready", "not cancelled as declined");
+  });
+
+  // Card L04c review (fourth part) F1: an approval that finds the check already committing answers by the same rules as one that commits: never success unless the resume was recorded.
+  suite("an approval of a check left committing whose attempt was then released is refused as no longer active, and nothing is recorded", async (c, f, real, a, go) => {
+    f.relevant = true;
+    f.guarded = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    f.failResumeOnce = true;
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), /disk hiccup/);
+    assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
+    const asg = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision });
+    await assert.rejects(real.approve(c.owner, { commandId: "o2", taskId: a.taskId }), isCode("invalid_transition", new RegExp(`^${ORPHANED_APPROVE.replace(/[()]/g, "\\$&")}$`)));
+    assert.deepEqual([...f.resumeRecorded], [], "no resume recorded for the released attempt");
+    const after = (await real.get(c.owner, check.id))!;
+    assert.deepEqual([after.phase, after.history.at(-1)!.note], ["cancelled", "attempt-ended"]);
+    await assert.rejects(real.approve(c.owner, { commandId: "o3", taskId: a.taskId }), /is cancelled; only a ready one can be approved/);
+  });
+
+  suite("two overlapping approvals with a release before the resume is recorded: the second is refused as no longer active, not answered as approved", async (c, f, real, a, go) => {
+    f.relevant = true;
+    f.guarded = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    const hold = deferred<void>();
+    const record = f.continuations.resume;
+    let first = true;
+    f.continuations.resume = (async (...args: Parameters<typeof record>) => { if (first) { first = false; await hold.promise; } return record(...args); }) as never;
+    const one = real.approve(c.owner, { commandId: "o1", taskId: a.taskId }).catch((e: unknown) => e);
+    await until(async () => (await real.get(c.owner, check.id))!.phase === "executing");
+    const asg = (await c.assignments.getAssignment(a.taskId))!;
+    await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision });
+    const two = await real.approve(c.owner, { commandId: "o2", taskId: a.taskId }).catch((e: unknown) => e);
+    assert.ok(two instanceof DomainError && two.code === "invalid_transition" && two.message === ORPHANED_APPROVE, String(two));
+    hold.resolve(undefined);
+    const got = await one;
+    assert.ok(got instanceof DomainError && got.code === "invalid_transition" && got.message === ORPHANED_APPROVE, String(got));
+    assert.deepEqual([...f.resumeRecorded], []);
+  });
+
+  suite("an approval that finds the check still being committed by someone else is refused as not approved yet; approving again later finishes it", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    f.failResumeOnce = true;
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), /disk hiccup/);
+    // Every try to record the resume loses a race to another writer: the check stays executing.
+    const record = f.continuations.resume;
+    f.continuations.resume = (async () => { throw new DomainError("stale_revision", "lost a race"); }) as never;
+    await assert.rejects(real.approve(c.owner, { commandId: "o2", taskId: a.taskId }), isCode("invalid_transition", /^not approved yet: the task's resume is still being committed; try again in a moment$/));
+    assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
+    f.continuations.resume = record;
+    assert.equal((await real.approve(c.owner, { commandId: "o3", taskId: a.taskId })).phase, "done");
+    assert.equal(f.resumeRecorded.size, 1);
+  });
+
+  suite("inputs that move while the attempt ends during an approval: the approval says the attempt is no longer active, not that the inputs changed", async (c, f, real, a, go) => {
+    f.relevant = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    f.during = async () => { f.detail = "changed again"; const asg = (await c.assignments.getAssignment(a.taskId))!; await c.assignments.releaseTask({ commandId: "rel", actor: c.owner.id, taskId: a.taskId, expectedRevision: asg.revision }); };
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && e.message === ORPHANED_APPROVE);
+    assert.notEqual((await real.get(c.owner, check.id))!.phase, "done");
+    assert.deepEqual(f.resumeCalls, [], "nothing was committed");
+  });
+
+  // M25: a decline does not finish (or undo) an approval that committed and crashed while its attempt is still active.
+  suite("a decline of a check an approval left committing while its attempt is active is refused: nothing is recorded or released, and approving again finishes it", async (c, f, real, a, go) => {
+    f.relevant = true;
+    f.guarded = true;
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    f.failResumeOnce = true;
+    await assert.rejects(real.approve(c.owner, { commandId: "o1", taskId: a.taskId }), /disk hiccup/);
+    assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
+    const svc = declining(c, f, async () => { throw new Error("must not release"); });
+    await assert.rejects(svc.decline(c.owner, { commandId: "d1", taskId: a.taskId }), isCode("invalid_command", /already approved and is being committed; there is nothing to decline/));
+    assert.deepEqual([...f.resumeRecorded], [], "the decline did not finish recording the approved resume");
+    assert.equal((await real.get(c.owner, check.id))!.phase, "executing");
+    assert.equal((await c.assignments.getAssignment(a.taskId))!.state, "assigned");
+    assert.equal((await real.approve(c.owner, { commandId: "o2", taskId: a.taskId })).phase, "done");
+    assert.equal(f.resumeRecorded.size, 1);
+  });
+
+  // F2 / M22: the held notice cuts the title and the whole text without splitting a character, and keeps what to do in view.
+  const noticeOf = async (c: DispatchWorld, real: ResumeCheckService) => {
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+    const errors: unknown[] = [];
+    const d = c.restart({ resumes: real, notifications }, { onError: (e: unknown) => errors.push(e) } as never);
+    await d.tick();
+    const told = (await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check");
+    assert.deepEqual(errors.map(String), [], "the notice was not refused");
+    assert.equal(told.length, 1, "the owner is told");
+    return told[0]!.detail ?? "";
+  };
+  const wellFormed = (s: string) => !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);
+
+  const TAIL = " Approve to let it go on, or decline to release it.";
+  suite("a title with a character outside the basic plane at the title's cut: the owner is still told, the character dropped whole", async (c, f, real) => {
+    f.relevant = true;
+    const detail = await noticeOf(c, real);
+    assert.ok(wellFormed(detail));
+    assert.equal(detail, `"${"x".repeat(39)}" is held before it resumes: 1 change(s) since it stopped matter to it: file /src/a.ts (changed).${TAIL}`);
+  }, `${"x".repeat(39)}\u{1F680} rocket`);
+
+  suite("a change name with a character outside the basic plane where what changed is cut: the owner is still told, with what to do", async (c, f, real) => {
+    f.relevant = true;
+    const head = `"long job" is held before it resumes: 1 change(s) since it stopped matter to it: `;
+    const room = 200 - head.length - TAIL.length;
+    // What changed reads "file <key> (changed)."; it is cut to room - 3 characters and marked: the pair straddles that cut.
+    const ks = room - 3 - "file /".length - 1;
+    f.key = `/${"k".repeat(ks)}\u{1F680}/tail`;
+    const detail = await noticeOf(c, real);
+    assert.ok(wellFormed(detail));
+    assert.equal(detail, `${head}file /${"k".repeat(ks)}...${TAIL}`);
+    assert.ok(detail.length <= 200);
+  });
+
+  suite("a 200-character title does not push what to do out of the held notice", async (c, f, real) => {
+    f.relevant = true;
+    const detail = await noticeOf(c, real);
+    assert.equal(detail, `"${"t".repeat(40)}" is held before it resumes: 1 change(s) since it stopped matter to it: file /src/a.ts (changed).${TAIL}`);
+  }, "t".repeat(200));
+
+  suite("a reviewer's reason with a character outside the basic plane at the note's cut is kept whole-charactered", async (c, f, real, a, go) => {
+    f.relevant = true;
+    f.ports.review = async ({ changes }) => Object.fromEntries(changes.map((x) => [x.id, { relevant: true, rationale: `${"r".repeat(299)}\u{1F680} and more` }]));
+    await go().tick();
+    const check = (await real.forTask(c.dispatcherPrincipal, a.taskId))!;
+    assert.equal(check.verdicts["dep-1"]!.rationale, "r".repeat(299));
   });
 }

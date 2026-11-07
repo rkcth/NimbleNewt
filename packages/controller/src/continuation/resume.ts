@@ -88,7 +88,8 @@ const ACTIVE = "resume-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
 const clean = (body: object): JsonObject => JSON.parse(JSON.stringify(body)) as JsonObject;
-const short = (value: string): string => redactText(value).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, RESUME_LIMITS.note);
+/** Cut without splitting a surrogate pair: half of one is ill-formed text, refused wherever the note is shown or sent on (a blocker's summary, a notice). */
+const short = (value: string): string => { const cut = redactText(value).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, RESUME_LIMITS.note); return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
 const checkModel = (v: unknown, field: string): { provider: string; id: string } => {
   if (v === null || typeof v !== "object") return invalid(field, "must be { provider, id }");
@@ -224,17 +225,21 @@ export class ResumeCheckService {
     const check = await this.forTask(by, command.taskId);
     if (check === undefined) throw new DomainError("not_found", "that task has no resume check");
     if (check.phase === "done") { await this.#settle?.(check.id, check.projectId).catch(() => undefined); return check; }
-    // Committed already but not finished (a crash while recording it): carried on, as a commit would.
-    if (check.phase === "executing") return this.advance(by, { checkId: check.id });
-    if (check.phase !== "ready") throw new DomainError("invalid_command", `the task's resume check is ${check.phase}; only a ready one can be approved`, { field: "taskId" });
-    if (!(await this.#forCurrentAttempt(check))) throw new DomainError("invalid_transition", NOT_APPROVED_ORPHANED);
+    if (check.phase !== "ready" && check.phase !== "executing") throw new DomainError("invalid_command", `the task's resume check is ${check.phase}; only a ready one can be approved`, { field: "taskId" });
+    if (check.phase === "ready" && !(await this.#forCurrentAttempt(check))) throw new DomainError("invalid_transition", NOT_APPROVED_ORPHANED);
     let after: View<ResumeCheckBody>;
-    try { after = await this.commit(by, { commandId: `rck-approve-${check.id.slice(4)}`, checkId: check.id }); } catch (error) {
+    try {
+      // Committed already but not finished (a crash while recording it, or another approval still recording it): carried on, as a commit would, and answered by the same rules below (its attempt may
+      // have ended since, and then nothing is recorded and the check ends cancelled).
+      after = check.phase === "executing" ? await this.advance(by, { checkId: check.id }) : await this.commit(by, { commandId: `rck-approve-${check.id.slice(4)}`, checkId: check.id });
+    } catch (error) {
       // The attempt ended while approving (released, transferred, replaced, or declined): nothing was committed or recorded.
       if (error instanceof DomainError && error.message === ORPHANED) throw new DomainError("invalid_transition", NOT_APPROVED_ORPHANED);
       throw error;
     }
     if (after.phase === "done") { await this.#settle?.(check.id, check.projectId).catch(() => undefined); return after; }
+    // Still being recorded by someone else (another approval, the dispatcher or the start-up sweep): not done yet, so the owner is not told it is approved.
+    if (after.phase === "executing") throw new DomainError("invalid_transition", "not approved yet: the task's resume is still being committed; try again in a moment");
     // Cancelled meanwhile (declined by the owner, or its attempt ended): nothing was recorded, and the owner is told what happened, not that the inputs moved.
     if (after.phase === "cancelled") {
       const note = after.history.at(-1)?.note;
@@ -274,7 +279,10 @@ export class ResumeCheckService {
     if (this.#release === undefined) throw new DomainError("unavailable", "declining a held resume needs the task release, which this controller does not run");
     const declined = check.history.some((h) => h.note === DECLINED);
     const notHeld = (): never => {
-      if (check.phase === "done" || check.phase === "executing") throw new DomainError("invalid_command", "the task's resume check was already approved and committed; there is nothing to decline", { field: "taskId" });
+      if (check.phase === "done") throw new DomainError("invalid_command", "the task's resume check was already approved and committed; there is nothing to decline", { field: "taskId" });
+      // An approval that committed and stopped before recording its resume (a crash) while its attempt is still active: the owner's approval stands and is not undone here, nor is it finished here
+      // (approving again, a tick or the start-up sweep finishes it). Nothing is released or recorded; to stop the task now, release it.
+      if (check.phase === "executing") throw new DomainError("invalid_command", "the task's resume check was already approved and is being committed; there is nothing to decline (approve again to finish it, or release the task to stop it)", { field: "taskId" });
       throw new DomainError("invalid_command", `the task's resume check is ${check.phase}${check.phase === "ready" ? " and holds no change judged to matter" : ""}; only a resume held for changes judged to matter can be declined`, { field: "taskId" });
     };
     const moved = (): never => { throw new DomainError("invalid_transition", "not declined: the attempt this resume check was for is no longer the task's active attempt (the task was transferred or given another attempt), so there is nothing to release; the task is left as it is"); };

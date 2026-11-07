@@ -1281,6 +1281,17 @@ for (const backend of backends) {
     const over = (await c.rebuild({}, { heldResumes: async () => ({ items: many, truncated: false }) }).needsYou(c.owner, 50))!;
     assert.ok(over.truncated.includes("held resumes"), "more than fifty found is named as cut too");
     assert.equal(over.lines.filter((l) => /held before it resumes/.test(l.text)).length, 50);
+    // The title is record text: a credential-shaped run in it is cut out, and a long one is cut short (keeping every character whole) so what to do still reads.
+    const secret = { ...one, checkId: "rck-secret", taskId: "task-secret", title: "Rotate sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 today" };
+    const long = { ...one, checkId: "rck-long", taskId: "task-long", title: `${"y".repeat(56)}\u{1F680}${"z".repeat(142)}` };
+    const lines = (await c.rebuild({}, { heldResumes: async () => ({ items: [secret, long], truncated: false }) }).needsYou(c.owner))!.lines.map((l) => l.text).filter((t) => /held before it resumes/.test(t));
+    assert.equal(lines.length, 2, JSON.stringify(lines));
+    assert.ok(lines.every((t) => !t.includes("sk-ant-api03")), JSON.stringify(lines));
+    assert.ok(lines.some((t) => t.startsWith('"Rotate ') && t.includes(' today" is held before it resumes')), JSON.stringify(lines));
+    const longLine = lines.find((t) => t.startsWith('"yyy'))!;
+    assert.ok(longLine.startsWith(`"${"y".repeat(56)}..." is held`), longLine);
+    assert.ok(longLine.includes('..." is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a.ts (changed) (approve the resume to let it go on, or decline it, which releases the task)'), longLine);
+    assert.doesNotMatch(longLine, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no half of a surrogate pair is left at the cut");
   });
 
   suite("a task's activity is told step by step in plain lines, the last few on request, and what the caller may not read reads as missing (card C09h)", async (c) => {
