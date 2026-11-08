@@ -22,7 +22,7 @@ const ports: StopPorts = { inventory: async () => [], cleanup: async () => ({ re
 const latch = (): { wait: Promise<void>; open: () => void } => { let open!: () => void; const wait = new Promise<void>((r) => { open = r; }); return { wait, open }; };
 
 for (const backend of backends) {
-  type Hooks = { beforeDelegate?: () => Promise<void>; beforeAdvance?: () => Promise<void>; beforeTransition?: () => Promise<void>; stuck?: () => boolean };
+  type Hooks = { beforeDelegate?: () => Promise<void>; afterDelegate?: () => Promise<void>; beforeAdvance?: () => Promise<void>; beforeTransition?: () => Promise<void>; stuck?: () => boolean };
   const world = async (hooks: Hooks = {}) => {
     const w = await backend.open();
     const projects = await ProjectService.open(w.storage, { holder: "c1", ...options });
@@ -37,7 +37,7 @@ for (const backend of backends) {
     const pauses = PauseService.withEpoch(w.storage, projects.epoch, {}, options);
     const stops = StopService.withEpoch(w.storage, projects.epoch, pauses, ports, options);
     // Wrappers that can hold a spawn just before its allowance is handed over, hold a cancel while it stops a child, or make a child's stop not finish.
-    const held = new Proxy(budgets, { get: (t, k) => (k === "delegate" ? async (...a: Parameters<BudgetService["delegate"]>) => { await hooks.beforeDelegate?.(); return t.delegate(...a); } : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+    const held = new Proxy(budgets, { get: (t, k) => (k === "delegate" ? async (...a: Parameters<BudgetService["delegate"]>) => { await hooks.beforeDelegate?.(); const r = await t.delegate(...a); await hooks.afterDelegate?.(); return r; } : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
     const slowStops = new Proxy(stops, { get: (t, k) => (k === "advance" ? async (...a: Parameters<StopService["advance"]>) => { await hooks.beforeAdvance?.(); if (hooks.stuck?.() === true) return { outcome: undefined } as never; return t.advance(...a); } : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
     const settings = SwarmLimitsService.withEpoch(w.storage, projects.epoch, options);
     const contracts = ContractService.withEpoch(w.storage, projects.epoch, options);
@@ -221,6 +221,114 @@ for (const backend of backends) {
       assert.deepEqual([second.settled, second.pending], [[grandchild.taskId, a.taskId], []], "deepest first");
       const again = await x.spawn();
       assert.ok(again.taskId);
+    } finally { await x.w.close(); }
+  });
+
+  // Review of card H10: the money paths around a cancel.
+  const delegated = async (x: Awaited<ReturnType<typeof world>>) => (await x.budgets.report(x.rob, x.root))!.delegatedToChildren;
+
+  suite("a spawn that crashes just after its hand-over, to a child a cancel already cancelled, leaves nothing with that child: a cancelled task is given no allowance", async () => {
+    const hold = latch();
+    const reached = latch();
+    let holding = true;
+    const x = await world({ beforeDelegate: async () => { if (holding) { holding = false; reached.open(); await hold.wait; } }, afterDelegate: async () => { throw new Error("the process died after the hand-over"); } });
+    try {
+      const late = x.spawn();
+      await reached.wait; // claimed, no allowance yet
+      const result = await x.swarm.cancel(x.rob, { commandId: "c1", parentTaskId: x.root, reason: "plans changed" });
+      assert.deepEqual(result.pending, []);
+      const [child] = result.settled;
+      hold.open();
+      await assert.rejects(late);
+      assert.equal(await x.w.storage.getAggregate({ kind: "budget-link", id: child! }), undefined, "the cancelled child was given no allowance");
+      assert.deepEqual(await delegated(x), { costMicros: 0, computeMs: 0 }, "nothing stays handed down");
+    } finally { await x.w.close(); }
+  });
+
+  suite("a delegation whose child is cancelled between the delegation's read of it and its commit is refused, not committed to the cancelled task", async () => {
+    const x = await world();
+    try {
+      const child = (await x.projects.createTask({ commandId: "t-c", actor: x.rob.id, projectId: x.project, title: "Child" })).id;
+      let cancelOnRead = true;
+      // The delegation's read of the child task is answered, and only then is the task cancelled: its commit meets a newer task.
+      const storage = new Proxy(x.w.storage, { get: (t, k) => (k === "getAggregate" ? async (ref: { kind: string; id: string }) => { const v = await t.getAggregate(ref); if (cancelOnRead && ref.kind === "task" && ref.id === child) { cancelOnRead = false; await x.finish(child); } return v; } : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+      const racing = BudgetService.withEpoch(storage, x.projects.epoch, options);
+      await refuses("invalid_command", () => racing.delegate(x.rob, { commandId: "d-race", parentTaskId: x.root, childTaskId: child, costMicros: 1000, computeMs: 100 }), /cancelled task is given no allowance/);
+      assert.equal(cancelOnRead, false, "the race was staged");
+      assert.equal(await x.w.storage.getAggregate({ kind: "budget-link", id: child }), undefined);
+      assert.deepEqual(await delegated(x), { costMicros: 0, computeMs: 0 });
+    } finally { await x.w.close(); }
+  });
+
+  suite("a parent cancelled by another path while its child is being made hands that child nothing; the child is cancelled", async () => {
+    let cancelParent: (() => Promise<void>) | undefined;
+    const x = await world({ beforeDelegate: async () => { const run = cancelParent; cancelParent = undefined; await run?.(); } });
+    try {
+      const parent = await x.spawn();
+      cancelParent = () => x.finish(parent.taskId); // after the spawn's finished-parent check and its claim, before the hand-over
+      await refuses("invalid_command", () => x.spawn(parent.taskId, { costMicros: 400, computeMs: 40 }), /cancelled task hands on no allowance/);
+      assert.equal(cancelParent, undefined, "the race was staged");
+      const report = (await x.budgets.report(x.rob, parent.taskId))!;
+      assert.deepEqual(report.delegatedToChildren, { costMicros: 0, computeMs: 0 });
+      assert.deepEqual((await x.tasks()).filter((t) => t.id !== x.root && t.state !== "cancelled"), [], "nothing is left live");
+    } finally { await x.w.close(); }
+  });
+
+  suite("a cancel cancels a child before it takes back the allowance, so a cancel that fails half-way never leaves a live child with its limit taken down (a limit of 0 reads as none)", async () => {
+    let failing = false;
+    const x = await world({ beforeTransition: async () => { if (failing) { failing = false; throw new DomainError("unavailable", "the store went away"); } } });
+    try {
+      const child = await x.spawn();
+      failing = true;
+      await refuses("unavailable", () => x.swarm.cancel(x.rob, { commandId: "c1", parentTaskId: x.root, reason: "plans changed" }));
+      assert.notEqual((await x.projects.getTask(child.taskId))!.state, "cancelled");
+      const limit = (await x.budgets.report(x.rob, child.taskId))!.limit;
+      assert.deepEqual([limit.costMicros, limit.computeMs], [1000, 100], "the live child keeps the limit it was given");
+      const again = await x.swarm.cancel(x.rob, { commandId: "c2", parentTaskId: x.root, reason: "plans changed" });
+      assert.deepEqual([again.settled, again.pending], [[child.taskId], []]);
+      assert.deepEqual(await delegated(x), { costMicros: 0, computeMs: 0 });
+    } finally { await x.w.close(); }
+  });
+
+  suite("what a cancelled child held and has since let go of, and what a finished child did not use, go back on the next cancel", async () => {
+    const x = await world();
+    try {
+      const child = await x.spawn();
+      const hold = await x.budgets.reserve(x.rob, { commandId: "hold", taskId: child.taskId, costMicros: 600, computeMs: 60, purpose: "a call in flight" });
+      await x.swarm.cancel(x.rob, { commandId: "c1", parentTaskId: x.root, reason: "plans changed" });
+      assert.deepEqual(await delegated(x), { costMicros: 600, computeMs: 60 }, "the hold stays with the child");
+      await x.budgets.release(x.rob, { commandId: "let-go", reservationId: hold.id });
+      // A child that finished its work keeps what it did not use until the swarm is settled.
+      const done = await x.spawn();
+      for (const to of ["ready", "in_progress", "done"]) { const t = (await x.projects.getTask(done.taskId))!; await x.projects.transitionTask({ commandId: `to-${to}`, actor: x.rob.id, taskId: done.taskId, expectedRevision: t.revision, to } as never); }
+      assert.deepEqual(await delegated(x), { costMicros: 1600, computeMs: 160 }, "the cancelled child's 600 and the finished child's 1000");
+      const again = await x.swarm.cancel(x.rob, { commandId: "c2", parentTaskId: x.root, reason: "plans changed" });
+      assert.deepEqual([again.settled.sort(), again.pending], [[child.taskId, done.taskId].sort(), []]);
+      assert.deepEqual(await delegated(x), { costMicros: 0, computeMs: 0 }, "what was let go of and what was left came back");
+    } finally { await x.w.close(); }
+  });
+
+  suite("a nested cancel that ends while an outer cancel still runs does not reopen its task to new children", async () => {
+    const hold = latch();
+    const reached = latch();
+    let holding = false;
+    const x = await world({ beforeAdvance: async () => { if (holding) { holding = false; reached.open(); await hold.wait; } } });
+    try {
+      const inner = await x.spawn();
+      const grandchild = await x.spawn(inner.taskId, { costMicros: 400, computeMs: 40 });
+      holding = true;
+      const outer = x.swarm.cancel(x.rob, { commandId: "outer", parentTaskId: x.root, reason: "plans changed" });
+      await reached.wait; // the outer cancel has sealed the swarm and is stopping the grandchild
+      const nested = await x.swarm.cancel(x.rob, { commandId: "inner", parentTaskId: inner.taskId, reason: "that part is not needed" });
+      assert.deepEqual([nested.settled, nested.pending], [[grandchild.taskId], []]);
+      await refuses("invalid_command", () => x.spawn(inner.taskId, { costMicros: 400, computeMs: 40 }), /being cancelled/);
+      hold.open();
+      const result = await outer;
+      assert.deepEqual(result.pending, [], JSON.stringify(result));
+      const live = (await x.tasks()).filter((t) => t.id !== x.root && t.state !== "cancelled");
+      assert.deepEqual(live, [], "no child of the cancelled swarm is live");
+      assert.deepEqual(await delegated(x), { costMicros: 0, computeMs: 0 });
+      await x.spawn();
     } finally { await x.w.close(); }
   });
 }

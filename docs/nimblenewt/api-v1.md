@@ -5530,7 +5530,7 @@ Result: `{ taskId, replayed }`.
 
 #### `swarm.cancel`
 
-Cancels a task's whole swarm: every child and grandchild is stopped (deepest first), what each did not use goes back to its parent, and the tasks are cancelled. Repeat it to carry on if some are still being stopped.
+Cancels a task's whole swarm: no new child is made under it meanwhile, every child and grandchild is stopped (deepest first) and cancelled, and what each did not use goes back to its parent (also from children that had already finished or been cancelled). Repeat it to carry on if some are still being stopped; the parent may spawn again once nothing is pending.
 
 Arguments:
 

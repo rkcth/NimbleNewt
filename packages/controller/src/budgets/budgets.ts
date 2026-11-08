@@ -276,7 +276,17 @@ export class BudgetService {
         if (parent === undefined || !this.#manages(by, parent)) throw refused();
         this.#mustBeOpen(tree);
         // Looked up only after the caller is known to hold the parent, so a caller without rights cannot tell a missing task from an existing one.
-        if ((await this.#projectOf(childId)) !== tree.projectId) invalid("childTaskId", "must be a task of the same project");
+        const childTask = await this.#runner.get("task", childId);
+        const childBody = childTask?.body as unknown as TaskBody | undefined;
+        if (childTask === undefined || childBody === undefined) throw new DomainError("not_found", "no such task");
+        if (childBody.projectId !== tree.projectId) invalid("childTaskId", "must be a task of the same project");
+        // A finished task is given nothing (card H10 review): an allowance handed to a task already cancelled would stay there with no one to spend or take it back. The task's revision is
+        // checked in the same step, so a cancel that lands meanwhile makes this delegation look again and be refused, and an allowance is never handed to a cancelled task.
+        if (childBody.state === "done" || childBody.state === "cancelled") invalid("childTaskId", `a ${childBody.state} task is given no allowance`);
+        // Nor does a finished task hand any on: what a cancelled parent was given is not spent by a child made after it ended (checked on its revision in the same step too).
+        const parentTask = await this.#runner.get("task", parentId);
+        const parentState = (parentTask?.body as unknown as TaskBody | undefined)?.state;
+        if (parentState === "done" || parentState === "cancelled") invalid("parentTaskId", `a ${parentState} task hands on no allowance`);
         if ((await this.#runner.get(LINK, childId)) !== undefined) invalid("childTaskId", "already has a budget");
         if (Object.keys(tree.nodes).length >= BUDGET_LIMITS.nodes) invalid("childTaskId", `a budget tree has at most ${BUDGET_LIMITS.nodes} tasks`);
         if (this.#depth(tree, parentId) + 1 > BUDGET_LIMITS.depth) invalid("childTaskId", `a budget tree is at most ${BUDGET_LIMITS.depth} levels deep`);
@@ -288,7 +298,7 @@ export class BudgetService {
         parent.children.push(childId);
         tree.nodes[childId] = { taskId: childId, projectId: tree.projectId, parentId, ...(holder === undefined ? {} : { holder }), limit: { ...give }, delegated: zero(), reserved: zero(), uncertain: zero(), spent: zero(), overrun: zero(), children: [], openRequests: [] };
         const link: AggregateRef = { kind: LINK, id: childId };
-        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref: link, body: { treeId } }], detail: { parentId, childId, ...give }, contention: async () => new DomainError("stale_revision", "the budget changed meanwhile") };
+        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref: link, body: { treeId } }, { type: "check", ref: { kind: "task", id: childId }, expectedRevision: childTask.revision }, ...(parentTask === undefined ? [] : [{ type: "check" as const, ref: { kind: "task", id: parentId }, expectedRevision: parentTask.revision }])], detail: { parentId, childId, ...give }, contention: async () => new DomainError("stale_revision", "the budget or the child task changed meanwhile") };
       },
     })));
     return { id: result.id, replayed: result.replayed };

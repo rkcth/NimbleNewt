@@ -36,10 +36,12 @@ const GATE = "swarm-gate";
 /** The budget's own link (kind `budget-link`, ID = the task): a task that has one has an allowance node. */
 const BUDGET_LINK = "budget-link";
 const FINAL = new Set(["done", "cancelled"]);
-interface GateBody { readonly children: readonly string[]; readonly sealed?: { readonly by: string; readonly at: string } }
+/** `sealed.roots`: the tasks whose swarm cancels hold the seal (a gate stays sealed while any does, so an inner cancel that ends does not reopen a task an outer cancel still holds). */
+interface Seal { readonly by: string; readonly at: string; readonly roots?: readonly string[] }
+interface GateBody { readonly children: readonly string[]; readonly sealed?: Seal }
 const gateBody = (body: unknown): GateBody => {
   const b = (body ?? {}) as { children?: unknown; sealed?: unknown };
-  return { children: Array.isArray(b.children) ? (b.children as string[]) : [], ...(b.sealed === undefined || b.sealed === null ? {} : { sealed: b.sealed as { by: string; at: string } }) };
+  return { children: Array.isArray(b.children) ? (b.children as string[]) : [], ...(b.sealed === undefined || b.sealed === null ? {} : { sealed: b.sealed as Seal }) };
 };
 
 /**
@@ -50,8 +52,8 @@ const gateBody = (body: unknown): GateBody => {
  *   limit, one with its live children at the limit or one that has had its fan-in total of children is refused, and nothing is left live behind (a child created before a refusal is cancelled).
  *   The child spends only that allowance (R05); the link records who spawned it. The limits are the owner's (`SwarmLimitsService`), read at every spawn.
  * - **Cancelling a parent settles its swarm.** `cancel` first seals every task of the swarm (a spawn under a sealed task is refused, and a spawn that claimed its place earlier is found
- *   through its claim), then stops every descendant, deepest first, takes back what each did not use, and cancels it; it can be repeated, reports what could not be settled yet, and lets the
- *   parent spawn again only once nothing is pending.
+ *   through its claim), then stops every descendant, deepest first, cancels it and takes back what it did not use (also from children already finished or cancelled); it can be repeated,
+ *   reports what could not be settled yet, and lets the parent spawn again only once nothing is pending and no enclosing swarm's cancel still holds it. A cancelled task is given no allowance.
  * - Who may spawn: the owner, or the holder of the parent's budget with `budget.manage` (the delegation says so); an agent's own authority is not widened.
  */
 export class SwarmService {
@@ -90,6 +92,10 @@ export class SwarmService {
         .catch((error: unknown) => { if (!(error instanceof DomainError && error.code === "stale_revision")) throw error; });
       await this.#deps.budgets.delegate(by, { commandId: `${command.commandId}:budget`, parentTaskId: parentId, childTaskId: childId, ...(command.costMicros === undefined ? {} : { costMicros: command.costMicros }), ...(command.computeMs === undefined ? {} : { computeMs: command.computeMs }) });
     } catch (error) {
+      // A cancel of the swarm that met this child before its allowance was handed over has cancelled it, and a cancelled task is given no allowance: the spawn says so plainly.
+      if ((await this.#deps.projects.getTask(childId))?.state === "cancelled" && error instanceof DomainError && error.code === "invalid_command" && /is given no allowance/.test(error.message)) {
+        throw new DomainError("invalid_command", "the parent's swarm was cancelled while this child was being made; the child is cancelled and was given no allowance", { field: "parentTaskId" });
+      }
       await this.#abandon(by, childId, parentId);
       throw error;
     }
@@ -132,7 +138,7 @@ export class SwarmService {
       tree = await this.#descendants(parentId, parent.projectId);
       const fresh = [parentId, ...tree.keys()].filter((id) => !sealed.has(id));
       if (fresh.length === 0) break;
-      for (const id of fresh) { await this.#mark(id, true, by.id); sealed.add(id); }
+      for (const id of fresh) { await this.#mark(id, true, by.id, parentId); sealed.add(id); }
     }
     const order: string[] = [];
     const visit = (id: string): void => { for (const [child, info] of tree) if (info.parent === id) { visit(child); order.push(child); } };
@@ -141,7 +147,10 @@ export class SwarmService {
     const pending: string[] = [];
     for (const childId of order) {
       const task = await this.#deps.projects.getTask(childId);
-      if (task === undefined || task.state === "cancelled" || task.state === "done") { settled.push(childId); continue; }
+      if (task === undefined) { settled.push(childId); continue; }
+      // A child that finished or was cancelled earlier (by an earlier pass, its spawn's refusal or another path) may still hold allowance it did not use: a hold settled since, or what a
+      // finished child left. It goes back now; taking back is repeat-safe (a second time returns only what has come free since).
+      if (FINAL.has(task.state)) { await this.#takeBack(by, `swr-${command.commandId}-${childId}`, childId); settled.push(childId); continue; }
       // Authority over the child's allowance is checked before anything is stopped, so a child is never left stopped but uncancelled.
       const parentOfChild = tree.get(childId)!.parent;
       if (!(await this.#deps.budgets.canManage(by, parentOfChild))) { pending.push(childId); continue; }
@@ -150,22 +159,24 @@ export class SwarmService {
       const intentId = under?.mode === "stop" ? under.intentId : (await this.#deps.stops.request(by, { commandId: `swc-${command.commandId}-${childId}`, scope: { kind: "task", id: childId }, mode: "stop", reason })).intentId;
       const advanced = await this.#deps.stops.advance(by, { intentId });
       if (advanced.outcome === undefined || advanced.outcome.state === "recovery-required") { pending.push(childId); continue; }
-      // What a child did not use goes back before it is cancelled; a caller who cannot take it back leaves the child as it is, so a later call by someone who can still finds it.
-      // A child still being made (claimed, not given its allowance yet) has nothing to take back: it is cancelled, and its spawn gives back what it hands over after that.
-      const hasAllowance = (await this.#runner.get(BUDGET_LINK, childId)) !== undefined;
-      const reclaimed = !hasAllowance || await this.#deps.budgets.reclaim(by, { commandId: `swr-${command.commandId}-${childId}`, taskId: childId }).then(() => true, (error: unknown) => { if (error instanceof DomainError && ["forbidden", "not_found"].includes(error.code)) return false; throw error; });
-      if (!reclaimed) { pending.push(childId); continue; }
+      // The child is cancelled first and what it did not use is taken back after (card H10 review). Taking back lowers its limit to what it used, and a limit of 0 reads as none, so a child
+      // that stayed live after a take-back (a cancel that then failed) could spend without limit. And a delegation is refused to a cancelled task, checked on the task's revision in
+      // the same step, so once the child is cancelled every allowance it will ever have is already there: a child still being made (claimed, its spawn not yet past the hand-over) is
+      // either given its allowance before the cancel, and it is taken back here, or refused it after.
       const fresh = (await this.#deps.projects.getTask(childId))!;
       if (!FINAL.has(fresh.state)) await this.#deps.projects.transitionTask({ commandId: `swt-${command.commandId}-${childId}`, actor: by.id, taskId: childId, expectedRevision: fresh.revision, to: "cancelled" } as never);
-      // A spawn may hand the allowance over after it was looked at above and see the child still live before it is cancelled here; then neither side would take it back. Looking again after
-      // the cancel closes that gap: a hand-over before the cancel is seen here, one after it is seen by the spawn (taking back twice returns nothing the second time).
-      if (!hasAllowance && (await this.#runner.get(BUDGET_LINK, childId)) !== undefined) {
-        await this.#deps.budgets.reclaim(by, { commandId: `swr2-${command.commandId}-${childId}`, taskId: childId }).catch((error: unknown) => { if (!(error instanceof DomainError && ["forbidden", "not_found"].includes(error.code))) throw error; });
-      }
+      await this.#takeBack(by, `swr-${command.commandId}-${childId}`, childId);
       settled.push(childId);
     }
-    if (pending.length === 0) await this.#mark(parentId, false, by.id);
+    // Only this cancel's own seal is let go of: a cancel of an enclosing swarm still under way keeps the parent closed.
+    if (pending.length === 0) await this.#mark(parentId, false, by.id, parentId);
     return { settled, pending };
+  }
+
+  /** Takes back what a child holds and did not use, when it has an allowance at all; one the caller may not take back is left for someone who may. */
+  async #takeBack(by: Principal, commandId: string, childId: string): Promise<void> {
+    if ((await this.#runner.get(BUDGET_LINK, childId)) === undefined) return;
+    await this.#deps.budgets.reclaim(by, { commandId, taskId: childId }).catch((error: unknown) => { if (!(error instanceof DomainError && ["forbidden", "not_found"].includes(error.code))) throw error; });
   }
 
   async #limits(): Promise<SwarmLimits> {
@@ -254,17 +265,22 @@ export class SwarmService {
     }
   }
 
-  /** Seals (no new child) or opens a task's gate. The command ID names the revision it was decided on, so a repeat is a no-op and a later change is a new command. */
-  async #mark(taskId: string, seal: boolean, actor: string): Promise<void> {
+  /**
+   * Seals (no new child) or lets go of the seal a cancel of `root`'s swarm put on a task's gate. The gate opens when no cancel holds it any more: a nested cancel (of a swarm inside one
+   * being cancelled) that ends lets go of its own seal only, so the outer cancel's stays. The command ID names the root and the revision it was decided on, so a repeat is a no-op.
+   */
+  async #mark(taskId: string, seal: boolean, actor: string, root: string): Promise<void> {
     const ref: AggregateRef = { kind: GATE, id: taskId };
     for (let attempt = 0; ; attempt++) {
       const gate = await this.#runner.get(GATE, taskId);
       const current = gateBody(gate?.body);
-      if ((current.sealed !== undefined) === seal) return;
+      const roots = current.sealed?.roots ?? [];
+      if (seal ? current.sealed !== undefined && roots.includes(root) : current.sealed === undefined || (roots.length > 0 && !roots.includes(root))) return;
       const { sealed: _s, ...rest } = current; void _s;
-      const body = (seal ? { ...rest, sealed: { by: actor, at: this.#runner.now() } } : rest) as unknown as JsonObject;
+      const left = seal ? [...roots, root].slice(-50) : roots.filter((r) => r !== root);
+      const body = (left.length === 0 ? rest : { ...rest, sealed: { by: current.sealed?.by ?? actor, at: current.sealed?.at ?? this.#runner.now(), roots: left } }) as unknown as JsonObject;
       try {
-        await this.#runner.command(seal ? "swarm.seal" : "swarm.open", { commandId: `sw${seal ? "s" : "o"}-${taskId}-r${gate?.revision ?? 0}`, actor }, async () => ({
+        await this.#runner.command(seal ? "swarm.seal" : "swarm.open", { commandId: `sw${seal ? "s" : "o"}-${taskId}-${root}-r${gate?.revision ?? 0}`, actor }, async () => ({
           payload: { taskId },
           build: async (): Promise<Built> => ({
             ref, creates: gate === undefined,
