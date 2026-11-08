@@ -2126,7 +2126,9 @@
           "210f3b7",
           "6e1db74"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The 50-hand-off test of the hand-off package runs on every storage backend; it showed a silent tail cut (C07j) and a package that grows with every hand-off (C07k); first-call size, stored conversation and resume note are C07l. Green exhaustive run pending (to be added to ci_runs)."
@@ -2456,7 +2458,9 @@
         "commits": [
           "b0950daf"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "A task's activity and its explanation index are read in chat; a local worker publishes artifacts through its tool bridge, and every artifact published for a task, every agent message and every bridge write is a step of the run, shown with a real sandboxed worker through startController. Green exhaustive run pending (to be added to ci_runs)."
@@ -3662,7 +3666,9 @@
           "87adfd9e",
           "d52b16e3"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The worker process gets the lease as a duration in its start, renews it over the channel (each renewal is the attempt's heartbeat; the answer counts from the send), and stops on a fenced renewal; a fenced bridge answer holds further calls until a renewal answers. The remote client renews with the controller's leaseMs and every attempt request (control poll, checkpoint, publish, artifacts) stops the attempt on a fenced answer. A process that does not wind down is ended inside the grace (store close within a share of it, exit 75; the host ends it too). On Linux a corrected wall clock is not a wake (boot clock); macOS and Windows keep the wall-clock check. Supervisor pulses stay unwired (channel close and --die-with-parent cover supervisor death on Linux). Green exhaustive run pending (to be added to ci_runs)."
@@ -3852,7 +3858,9 @@
           "a2200470",
           "f4fa7f32"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The real bubblewrap launcher, the worker process running Pi with no network, the model relay that adds the provider key, the limits and narrow/widen recipe changes are built and proven on Linux; the macOS (Seatbelt) and Windows runs are H12r. Green exhaustive run pending (to be added to ci_runs)."
@@ -3942,7 +3950,9 @@
           "bb71685f",
           "f964d5b6"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "A landing runs only with the task's attempts quiet and no attempt can start during one: a frozen attempt is not started and holds no place, allowance or pin while it waits, the quiesce waits (bounded) for a worker still coming up, a failed later look releases what it froze, a Stop or Suspend treats a worker still coming up as running work (a Stop's checkpoint waits for it no longer than the deadline), and a place or hold an advance takes after a stop ended the attempt is marked on the record and given back, retried every tick and after a restart (a crash between taking it and recording it can still leave it). Tested on all four storage backends and with the real worker process. Green exhaustive run pending (to be added to ci_runs)."
@@ -4063,7 +4073,9 @@
           "32eb27a7",
           "ed91a4fd"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The local worker host (the production LocalWorkspaces port) and a remote host over the authenticated transport answer refresh, integration and quarantine of a task's real checkout with the same typed outcomes, and release as a typed refusal; the host is found by the running or pinned attempt or the task's last placement, never by fall-through; an attempt does not start during an operation; the agent is told, a quarantine stops it; the request names the assignee; a failed freeze lift opens a blocker. The commit itself through release moved to H12o; the product composition of the port is H12t. Green exhaustive run pending (to be added to ci_runs)."
@@ -4092,7 +4104,9 @@
           "8c3d9b45",
           "65f043ae"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "Pi's model calls go through the C06 cache adapter in the composed controller: an end-to-end test with the real worker process and the simulated llama-server shows real reuse inside a project, none across projects, no degraded mode while the adapter is there, and budget accounting equal to the server's hit figures per task and project (also on all four storage backends through the dispatcher, a resent report charged once). Fixed: a turn whose process died lost its figures; the composer degraded slotted servers when no endpoint state was given. Slot assignment is never released (C06 limit); nothing creates a project's pin markers yet. Green exhaustive run pending (to be added to ci_runs)."
@@ -4127,7 +4141,9 @@
           "f0cbb882",
           "a2200470"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The runtime admits the first call (compacting once, else refusing with the blocker), declines to resume a stored conversation over the resume share, reports pausing and paused honestly and delivers interrupts and advice only at the right boundaries. Green exhaustive run pending (to be added to ci_runs)."
@@ -4235,7 +4251,9 @@
           "1346e48f",
           "f4fa7f32"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The worker-process gaps are closed on Linux; running the same process tests on macOS and Windows moved to H12r on 2026-11-08. Green exhaustive run pending (to be added to ci_runs)."
@@ -4272,7 +4290,9 @@
           "65ac33b8",
           "fa449d1f"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "startController composes the local worker host from the operator's build with the relay, message, pause and context guards, the owner's limits and the remote MCP connector and client; the MCP transport speaks streamable HTTP only to the checked address with TLS checked against the name. A ready-made builder is U14 and the product workspace composition H12t; agent-side remote MCP tools are follow-up work. Green exhaustive run pending (to be added to ci_runs)."
@@ -4472,7 +4492,9 @@
         "commits": [
           "49d2073c"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The owner defines timer, file or folder, git repository and service-health sources in settings (API and chat), polled from the next tick without a restart; a built-in source reports model outages from the router's health record to every active project; a chat view lists what is watched. Through startController, events from each real source wake the watched task's owner and its active attempt, and nobody else. Green exhaustive run pending (to be added to ci_runs)."
@@ -4651,7 +4673,9 @@
           "66716b81",
           "2ba9f837"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "Each run of an attempt on a route is a call of the fallback service: the owner's controls and route health choose the open route at claim and start, a drain report counts running runs, a cutover cancels the generation and worker and the replacement goes to the next open route; the routes tick turns an expired drain into a cutover; drain and cutover by chat and the model_routes status view. The relay does not yet report provider failures to the gate. Green exhaustive run pending (to be added to ci_runs)."
@@ -6260,7 +6284,9 @@
           "e7f524f0",
           "cb20b18d"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "An unanswered stall concern climbs the recovery action ladder one rung at a time, each recorded: by its holder or the owner (recovery.step, also in chat), or, when the owner switches autoStep on (off by default, 240 minutes per rung by default), by the controller in the holder's name and with the holder's own rights, never choosing a reassignment target and stopping when the concern is answered, clears or reaches the owner. The owner lists, answers and steps concerns in free-form chat. No per-project ladder. Green exhaustive run pending (to be added to ci_runs)."
@@ -7197,7 +7223,9 @@
           "b98c829",
           "982976f"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "Old catalogue versions are kept or dropped by the retention rule (catalogVersionsKept, off by default; automatic drops only with catalogAutoDrop; the live, latest and newest unrevoked versions, revoked versions and anything a resumable task or environment holds stay; revoked executable text is blanked only with revokedBytesBlank). A revocation can pause the tasks of running calls, the standing policy is set by chat, and the owner reads past revocations, the policy, retention values and holds in chat; a chat retention run is bound to a fresh preview whose digest covers incidents. Remote and other-process reach and the launcher are T02d; the chat view of retention.status is K06d. Green exhaustive run pending (to be added to ci_runs)."
@@ -7383,7 +7411,9 @@
           "61bb8a94",
           "0d43d039"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "42473276627"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The composed controller hands the local host its tool execution service as the bridge and the agent's namespace, and the dispatcher the replay-safe answer from the approved manifest; the real worker process runs Pi with the bridge over the channel, a tampered program inside it reaches no controller module, file, network or unlisted operation, a tool registered in a turn is declared at the next request, scripts run through the launcher with their limits, a repeated provider call ID does not replay a write, and remote attempts are refused catalogue calls (no remote bridge endpoint). Green exhaustive run pending (to be added to ci_runs)."

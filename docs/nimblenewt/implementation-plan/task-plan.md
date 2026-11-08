@@ -787,7 +787,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C07h — Prove handoff input stays bounded without losing what the next agent needs to fix the task
 
 - **Parent:** N07 / AII-257.
-- **Status:** implemented; commits `6eaedbc`, `cd259e6`, `210f3b7`, `6e1db74`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `6eaedbc`, `cd259e6`, `210f3b7`, `6e1db74`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The 50-hand-off test of the hand-off package runs on every storage backend; it showed a silent tail cut (C07j) and a package that grows with every hand-off (C07k); first-call size, stored conversation and resume note are C07l. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** C07f, L03.
 - **Deliverable:** Narrowed 2026-11-06 to the hand-off package (first slice, built): the 50-hand-off test drives the real hand-off service and the real controller package source on every storage backend (two in the typical tier, four in the exhaustive tier), checking the fixed sections and the section limit, and the owner's words, goal, permissions, open question, acceptance criteria and next action at every hop, and the seeded early decision and failure after the last hop. Findings it showed, each with its own card: a section is cut at its tail with a plain slice (lifecycle/handoff.ts line 492), no marker and no archive, so the newest decisions and the latest diagnosis are lost once decisions pile up (C07j); the package grows with every hand-off until it reaches the section limit and nothing summarises the decisions (lifecycle/handoff-sources.ts lines 48-49) (C07k). The first-call size sent to a worker, the stored conversation size, the resume note, and the lease-timeout, compaction and smaller-window-fallback hops are C07l. Mutation checks recorded 2026-11-06: removing the section slice in handoff.ts makes the section-limit test fail (completedWork 4094 over 4000 at hop 29); dropping the brief in handoff-sources.ts leaves the package incomplete (missing brief) and completing the hand-off is refused without acceptGaps, and cutting the brief to a title (the owner's words and goal removed) makes the retention tests fail at hop 1. Original text: Added 2026-11-03 after an independent code audit of the Paperclip failure in which a task passed between agents accumulates ever-larger notes and every handoff gets slower. A repeated-handoff test, with a retention check as important as the size check: a task is handed A to B to A about 50 times with retries, lease timeouts, resumes, a fallback to a smaller-window route and compactions, and at each hop the test records what the next agent is actually given (the first-call size sent, the handoff package size, the stored conversation size and the resume note) and what survives in it. Size: every hop stays under the first-call limit, the average of the last 10 hops is no more than 5 percent above the first 10, and the package stays within its fixed sections. Retention, so that bounding never starves the agent that has to fix the problem: at every hop the owner's words, permissions, the current goal and acceptance criteria, open blockers and questions, the most recent failure with its diagnosis, the next action and every recorded decision are still present whole or retrievable by the reference the prompt carries, and a seeded early decision and a seeded early failure detail are found again after 50 hops. Anything cut leaves a visible marker and an archived original that can be read back, so a cut is never silent. The test is the deliverable; where it shows a path unbounded or a cut that loses essentials (the audit's candidates: a route with an unknown window admits everything, the remote worker host has no first-call check, a handoff section is cut with a plain slice and no marker, the brief is cut at its tail, the compaction lineage cap of 200 makes later captures fail, and the controller's own summariser and handoff note are never used), each is recorded as a finding and split into its own follow-up card rather than fixed inside this one.
@@ -909,7 +909,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C09h — Record activity: local worker artifacts, chat access, explanation index
 
 - **Parent:** N07 / AII-257.
-- **Status:** implemented; commits `b0950daf`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `b0950daf`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** A task's activity and its explanation index are read in chat; a local worker publishes artifacts through its tool bridge, and every artifact published for a task, every agent message and every bridge write is a step of the run, shown with a real sandboxed worker through startController. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** C09g, H12k.
 - **Deliverable:** Split from C09g (2026-10-29): artifact steps for local workers, chat access, the per-task explanation index.
@@ -1319,7 +1319,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H08b — Run the lease watchdog in the real worker process
 
 - **Parent:** N05 / AII-255.
-- **Status:** implemented; commits `87adfd9e`, `d52b16e3`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `87adfd9e`, `d52b16e3`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The worker process gets the lease as a duration in its start, renews it over the channel (each renewal is the attempt's heartbeat; the answer counts from the send), and stops on a fenced renewal; a fenced bridge answer holds further calls until a renewal answers. The remote client renews with the controller's leaseMs and every attempt request (control poll, checkpoint, publish, artifacts) stops the attempt on a fenced answer. A process that does not wind down is ended inside the grace (store close within a share of it, exit 75; the host ends it too). On Linux a corrected wall clock is not a wake (boot clock); macOS and Windows keep the wall-clock check. Supervisor pulses stay unwired (channel close and --die-with-parent cover supervisor death on Linux). Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H08, H12b.
 - **Deliverable:** Split from H08 (2026-10-28): the worker entry point creates and runs the watchdog, the controller sends the lease as a duration (not a deadline against the worker clock), and every call that touches the controller reacts to a fenced answer and checks that work is still allowed.
@@ -1383,7 +1383,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12b — Bind the real sandbox launcher and worker process to the local runtime
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `f7f7de6b`, `a5eaabc6`, `f7c2593c`, `87374921`, `cf595b06`, `f0cbb882`, `a2200470`, `f4fa7f32`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `f7f7de6b`, `a5eaabc6`, `f7c2593c`, `87374921`, `cf595b06`, `f0cbb882`, `a2200470`, `f4fa7f32`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The real bubblewrap launcher, the worker process running Pi with no network, the model relay that adds the provider key, the limits and narrow/widen recipe changes are built and proven on Linux; the macOS (Seatbelt) and Windows runs are H12r. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12, A03, A08.
 - **Deliverable:** Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox, which has no network and talks to the controller over one channel; a narrow relay, its own replaceable component, makes the worker's model calls for it: it reaches only the model endpoints the routing table allows and adds the provider credentials itself (owner decision 2026-10-25).
@@ -1413,7 +1413,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12q — Finish the quiesce: the landing path and the production workspace port
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `db325f81`, `52fdf8ad`, `0f20d438`, `77a9b475`, `bb71685f`, `f964d5b6`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `db325f81`, `52fdf8ad`, `0f20d438`, `77a9b475`, `bb71685f`, `f964d5b6`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** A landing runs only with the task's attempts quiet and no attempt can start during one: a frozen attempt is not started and holds no place, allowance or pin while it waits, the quiesce waits (bounded) for a worker still coming up, a failed later look releases what it froze, a Stop or Suspend treats a worker still coming up as running work (a Stop's checkpoint waits for it no longer than the deadline), and a place or hold an advance takes after a stop ended the attempt is marked on the record and given back, retried every tick and after a restart (a crash between taking it and recording it can still leave it). Tested on all four storage backends and with the real worker process. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12d.
 - **Deliverable:** Split from H12d (2026-10-30); narrowed 2026-10-31 (the product worker host composition is H12s, the lease and queue of landing are P10): landing is an operation of workspace.request run behind the quiesce, and the worker package supplies the production workspace port.
@@ -1457,7 +1457,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12m — Bind the workspace operations to the local host and to remote hosts
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `ff0979f0`, `b15c6a2e`, `a198d854`, `75a204a2`, `32eb27a7`, `ed91a4fd`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `ff0979f0`, `b15c6a2e`, `a198d854`, `75a204a2`, `32eb27a7`, `ed91a4fd`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The local worker host (the production LocalWorkspaces port) and a remote host over the authenticated transport answer refresh, integration and quarantine of a task's real checkout with the same typed outcomes, and release as a typed refusal; the host is found by the running or pinned attempt or the task's last placement, never by fall-through; an attempt does not start during an operation; the agent is told, a quarantine stops it; the request names the assignee; a failed freeze lift opens a blocker. The commit itself through release moved to H12o; the product composition of the port is H12t. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12l, A04, H12b, H02.
 - **Deliverable:** Split from H12l (2026-10-27): the controller asks a host through the WorkspacePort and the simulated hosts answer; the local host's port (GitBridge refresh and integrate with the controller's write bridge, the A03 quarantine) and a remote host's message for it are not yet built.
@@ -1467,7 +1467,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12e — Route Pi model calls through the cache adapter
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `5a4846bb`, `8c3d9b45`, `65f043ae`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `5a4846bb`, `8c3d9b45`, `65f043ae`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** Pi's model calls go through the C06 cache adapter in the composed controller: an end-to-end test with the real worker process and the simulated llama-server shows real reuse inside a project, none across projects, no degraded mode while the adapter is there, and budget accounting equal to the server's hit figures per task and project (also on all four storage backends through the dispatcher, a resent report charged once). Fixed: a turn whose process died lost its figures; the composer degraded slotted servers when no endpoint state was given. Slot assignment is never released (C06 limit); nothing creates a project's pin markers yet. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12, C06b.
 - **Deliverable:** Pi's own HTTP calls go through the C06 CacheAdapter and its per-endpoint state so slot partitioning, markers and pins apply.
@@ -1477,7 +1477,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12f — Wire context enforcement, pause observation and message boundaries into the runtime
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `775fcbbf`, `e1279ae7`, `0dc661b9`, `c9ff061d`, `cf595b06`, `f0cbb882`, `a2200470`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `775fcbbf`, `e1279ae7`, `0dc661b9`, `c9ff061d`, `cf595b06`, `f0cbb882`, `a2200470`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The runtime admits the first call (compacting once, else refusing with the blocker), declines to resume a stored conversation over the resume share, reports pausing and paused honestly and delivers interrupts and advice only at the right boundaries. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12, C07b, L01, U12.
 - **Deliverable:** The runtime calls C07b admit at start and resumeDecision at resume, reports L01 PauseService.observe so a paused attempt shows as paused, and delivers U12 boundary reads (interrupt, advice) to the running attempt.
@@ -1515,7 +1515,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12j — Close the H12b worker-process gaps
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `f91be3a0`, `2c4ef1eb`, `1346e48f`, `f4fa7f32`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `f91be3a0`, `2c4ef1eb`, `1346e48f`, `f4fa7f32`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The worker-process gaps are closed on Linux; running the same process tests on macOS and Windows moved to H12r on 2026-11-08. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12b.
 - **Deliverable:** The worker process is reaped when its attempt is paused, stopped or lost; a missed pin marker is recorded as lost; no provider key can appear in the worker's files, environment or output; the launcher is exercised on the Linux CI cells (macOS and Windows moved to H12r on 2026-11-08).
@@ -1525,7 +1525,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12k — Compose the local worker host in the controller
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `58fbebff`, `160c6ca7`, `cd659a2a`, `916f624e`, `720b241e`, `4c84d827`, `65ac33b8`, `fa449d1f`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `58fbebff`, `160c6ca7`, `cd659a2a`, `916f624e`, `720b241e`, `4c84d827`, `65ac33b8`, `fa449d1f`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** startController composes the local worker host from the operator's build with the relay, message, pause and context guards, the owner's limits and the remote MCP connector and client; the MCP transport speaks streamable HTTP only to the checked address with TLS checked against the name. A ready-made builder is U14 and the product workspace composition H12t; agent-side remote MCP tools are follow-up work. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12b, H12c, H12d, H12f, H12g.
 - **Deliverable:** Controller start-up builds the local worker host with the model relay, the message and pause guards, the context checks, the quiesce coordinator and the remote MCP connector, and an MCP transport that connects to the checked address.
@@ -1595,7 +1595,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H13f — Finish event watching: other real sources, choosing sources in settings, chat
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `49d2073c`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `49d2073c`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The owner defines timer, file or folder, git repository and service-health sources in settings (API and chat), polled from the next tick without a restart; a built-in source reports model outages from the router's health record to every active project; a chat view lists what is watched. Through startController, events from each real source wake the watched task's owner and its active attempt, and nobody else. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H13e, H12k.
 - **Deliverable:** Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command; a real model-availability source.
@@ -1655,7 +1655,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R04c — Bind model calls, probes and cancellation to drain and cutover
 
 - **Parent:** N08 / AII-258.
-- **Status:** implemented; commits `66716b81`, `2ba9f837`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `66716b81`, `2ba9f837`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** Each run of an attempt on a route is a call of the fallback service: the owner's controls and route health choose the open route at claim and start, a drain report counts running runs, a cutover cancels the generation and worker and the replacement goes to the next open route; the routes tick turns an expired drain into a cutover; drain and cutover by chat and the model_routes status view. The relay does not yet report provider failures to the gate. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** R04, R04b, H12k.
 - **Deliverable:** Split from R04b (2026-10-28): the dispatcher's model calls go through the fallback service so the gate is consulted, a cutover cancels the running generation and runtime, health probes run on a timer, chat commands for the controls, and the configuration lists check runs in the running controller.
@@ -2197,7 +2197,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### V02c — Finish supervisor recovery: the action ladder
 
 - **Parent:** N11 / AII-261.
-- **Status:** implemented; commits `e7f524f0`, `cb20b18d`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `e7f524f0`, `cb20b18d`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** An unanswered stall concern climbs the recovery action ladder one rung at a time, each recorded: by its holder or the owner (recovery.step, also in chat), or, when the owner switches autoStep on (off by default, 240 minutes per rung by default), by the controller in the holder's name and with the holder's own rights, never choosing a reassignment target and stopping when the concern is answered, clears or reaches the owner. The owner lists, answers and steps concerns in free-form chat. No per-project ladder. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** V02b.
 - **Deliverable:** Split from V02b (2026-10-30): the ordered ladder of supervisor actions after an escalation goes unanswered.
@@ -2513,7 +2513,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T02c — Finish catalog promotion: retention of old versions, pause policy, chat view of past revocations
 
 - **Parent:** N13 / AII-263.
-- **Status:** implemented; commits `e57d415`, `1bd42fc`, `c1cf4ff`, `1a12619`, `339da9e`, `4734b6e`, `1cc73f0`, `74a90e9`, `e92fe61`, `acf56fc`, `fe2f5bf`, `10c9202`, `c1a1fd5`, `fde1750`, `deda9e4`, `9459afd`, `34fd4f4`, `c394df5`, `99c1a21`, `fa99814`, `aec01b5`, `b98c829`, `982976f`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `e57d415`, `1bd42fc`, `c1cf4ff`, `1a12619`, `339da9e`, `4734b6e`, `1cc73f0`, `74a90e9`, `e92fe61`, `acf56fc`, `fe2f5bf`, `10c9202`, `c1a1fd5`, `fde1750`, `deda9e4`, `9459afd`, `34fd4f4`, `c394df5`, `99c1a21`, `fa99814`, `aec01b5`, `b98c829`, `982976f`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** Old catalogue versions are kept or dropped by the retention rule (catalogVersionsKept, off by default; automatic drops only with catalogAutoDrop; the live, latest and newest unrevoked versions, revoked versions and anything a resumable task or environment holds stay; revoked executable text is blanked only with revokedBytesBlank). A revocation can pause the tasks of running calls, the standing policy is set by chat, and the owner reads past revocations, the policy, retention values and holds in chat; a chat retention run is bound to a fresh preview whose digest covers incidents. Remote and other-process reach and the launcher are T02d; the chat view of retention.status is K06d. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** T02b.
 - **Deliverable:** Split from T02b (2026-10-30), built 2026-10-31: retention of old and stale referenced tool versions as a K06 setting (catalogVersionsKept, off by default, automatic drops only with catalogAutoDrop; the latest, the highest live and the newest unrevoked versions, revoked versions, and any a resumable task ran, pinned or lists, or an environment holds, stay; revoked executable text blanked only with revokedBytesBlank), pause as a third in-flight policy plus a chat-settable standing policy for revokes that name no choice, and a chat view of past revocations.
@@ -2579,7 +2579,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T06b — Wire the protected bridge into the composed worker across a process boundary
 
 - **Parent:** N13 / AII-263.
-- **Status:** implemented; commits `fb912d52`, `12e57e15`, `61bb8a94`, `0d43d039`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `fb912d52`, `12e57e15`, `61bb8a94`, `0d43d039`; CI runs 42473276627; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The composed controller hands the local host its tool execution service as the bridge and the agent's namespace, and the dispatcher the replay-safe answer from the approved manifest; the real worker process runs Pi with the bridge over the channel, a tampered program inside it reaches no controller module, file, network or unlisted operation, a tool registered in a turn is declared at the next request, scripts run through the launcher with their limits, a repeated provider call ID does not replay a write, and remote attempts are refused catalogue calls (no remote bridge endpoint). Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** T06, H12b, H12c.
 - **Deliverable:** The worker runtime factory starts every worker with the bridge extension over a bound transport to the tool execution service across a process boundary, backs the script runner with the sandbox launcher and its limits, and opens request-boundary declarations.
