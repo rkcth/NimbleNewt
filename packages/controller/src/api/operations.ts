@@ -298,6 +298,12 @@ const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? 
 const continuationsOf = (c: Context): ContinuationOps => c.continuations ?? unavailable("continuation capture");
 /** A host reads or writes a task's continuation, dependencies and resume check only while it runs the task's live attempt or is the host it is pinned to (card L04c); with nothing to ask, it is outside. */
 const hostOutside = async (c: Context, taskId: string): Promise<boolean> => c.principal.kind === "host" && !(c.continuations !== undefined && await c.continuations.hostHolds(c.principal.id, taskId));
+/** The same for a resume check named by its ID (card L04c review): a host that does not hold the check's task is told there is no such check, like anyone who may not resume it. */
+const hostOutsideCheck = async (c: Context, checkId: unknown): Promise<void> => {
+  if (c.principal.kind !== "host") return;
+  const item = await resumesOf(c).get(c.principal, String(checkId));
+  if (item === undefined || await hostOutside(c, item.taskId)) throw new DomainError("not_found", "no such resume check");
+};
 
 /** What the continuation operations use (card L04c). */
 export interface ContinuationOps {
@@ -758,10 +764,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps hand-offs"); return asJson(await handoffsOf(c).sweep(c.principal)); } },
   { name: "resume.start", kind: "command", summary: "Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.", args: { taskId: "the task", model: "{ provider, id } the resume will run on", "previousModel?": "{ provider, id } it ran on before", after: "restart, model-change or continue", commandId: "required" },
     result: "`{ item: { id, phase, delta, verdicts, blocked? } }`.",
-    run: async (c, a, id) => { only(a, ["taskId", "model", "previousModel", "after"]); return asJson({ item: await resumesOf(c).start(c.principal, { commandId: need(id), ...a } as never) }); } },
+    run: async (c, a, id) => { only(a, ["taskId", "model", "previousModel", "after"]); if (await hostOutside(c, String(a["taskId"]))) throw new DomainError("forbidden", "a host resumes only a task whose attempt it runs"); return asJson({ item: await resumesOf(c).start(c.principal, { commandId: need(id), ...a } as never) }); } },
   { name: "resume.commit", kind: "command", summary: "Commits a ready resume: the inputs are checked once more, and if anything changed since the review the check starts over (and stops as a blocker after three rounds). Otherwise the resume is recorded with how the context came back and what that cannot promise.", args: { checkId: "the check", "restoredBy?": "native-restore, reconstruction or restart", "limits?": "what the restoration cannot promise, as short statements", commandId: "required" },
     result: "`{ item }`.",
-    run: async (c, a, id) => { only(a, ["checkId", "restoredBy", "limits"]); return asJson({ item: await resumesOf(c).commit(c.principal, { commandId: need(id), ...a } as never) }); } },
+    run: async (c, a, id) => { only(a, ["checkId", "restoredBy", "limits"]); await hostOutsideCheck(c, a["checkId"]); return asJson({ item: await resumesOf(c).commit(c.principal, { commandId: need(id), ...a } as never) }); } },
   { name: "resume.approve", kind: "command", summary: "The owner lets a task go on after a resume check that holds changes judged to matter to its work (owner only): the task's current check, when it is ready, is committed. A check already done answers as it is (one left half-recorded by a crash is finished); one that is not ready is refused with where it stands, and an approval during which the task's inputs changed again is refused (`invalid_transition`) and the check stays held for a new look.", args: { taskId: "the task", commandId: "required" },
     result: "`{ item }`: the check, `phase` done when it was approved.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["taskId"]); return asJson({ item: await resumesOf(c).approve(c.principal, { commandId: need(id), taskId: a["taskId"] as string }) }); } },
@@ -769,13 +775,13 @@ export const OPERATIONS: readonly Operation[] = [
     result: "`{ item }`: the check, `phase` cancelled (or, when an approval committed it just before the release, as it stands; the task is released either way).", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["taskId"]); return asJson({ item: await resumesOf(c).decline(c.principal, { commandId: need(id), taskId: a["taskId"] as string }) }); } },
   { name: "resume.retry", kind: "command", summary: "Starts a blocked resume check over once the reason has been dealt with.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
-    run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).retry(c.principal, { checkId: a["checkId"] as string }) }); } },
+    run: async (c, a) => { only(a, ["checkId"]); await hostOutsideCheck(c, a["checkId"]); return asJson({ item: await resumesOf(c).retry(c.principal, { checkId: a["checkId"] as string }) }); } },
   { name: "resume.cancel", kind: "command", summary: "Cancels a resume check that has not been committed.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
-    run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).cancel(c.principal, { checkId: a["checkId"] as string }) }); } },
+    run: async (c, a) => { only(a, ["checkId"]); await hostOutsideCheck(c, a["checkId"]); return asJson({ item: await resumesOf(c).cancel(c.principal, { checkId: a["checkId"] as string }) }); } },
   { name: "resume.advance", kind: "command", summary: "Takes a resume check as far as it can go now (safe to repeat).", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
-    run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).advance(c.principal, { checkId: a["checkId"] as string }) }); } },
+    run: async (c, a) => { only(a, ["checkId"]); await hostOutsideCheck(c, a["checkId"]); return asJson({ item: await resumesOf(c).advance(c.principal, { checkId: a["checkId"] as string }) }); } },
   { name: "resume.get", kind: "query", summary: "A resume check, with what changed, the verdicts and the history.", args: { checkId: "the check" }, result: "`{ item }`.",
-    run: async (c, a) => { only(a, ["checkId"]); const item = await resumesOf(c).get(c.principal, a["checkId"] as string); if (item === undefined) throw new DomainError("not_found", "no such resume check"); return asJson({ item }); } },
+    run: async (c, a) => { only(a, ["checkId"]); await hostOutsideCheck(c, a["checkId"]); const item = await resumesOf(c).get(c.principal, a["checkId"] as string); if (item === undefined) throw new DomainError("not_found", "no such resume check"); return asJson({ item }); } },
   { name: "resume.for-task", kind: "query", summary: "The task's current resume check (the one the dispatcher or a person started last, in any phase), or `not_found` when it has none or you may not resume the task (a host only for an attempt it runs or is pinned to).", args: { taskId: "the task" }, result: "`{ item }`.",
     run: async (c, a) => {
       only(a, ["taskId"]); const r = resumesOf(c); if (r.forTask === undefined) unavailable("resume checks by task");

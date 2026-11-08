@@ -94,6 +94,11 @@ test("through the state API a host captures a continuation for the attempt it ru
     assert.equal((await call(from.token, "resume.for-task", { taskId: t.taskId })).error.code, "not_found", "the host that gave the attempt up reads its check no more");
     assert.equal((await call(from.token, "continuation.latest", { taskId: t.taskId })).result.item, undefined);
     assert.equal((await call(to.token, "continuation.latest", { taskId: t.taskId })).result.item.id !== undefined, true);
+    // Nor does it reach the check by its ID, or start, cancel, retry, advance or commit one for the task (card L04c review); the host that holds it does.
+    assert.equal((await call(from.token, "resume.get", { checkId: check.id })).error.code, "not_found");
+    for (const op of ["resume.cancel", "resume.retry", "resume.advance", "resume.commit"]) assert.equal((await call(from.token, op, { checkId: check.id }, `x-${op}`)).error.code, "not_found", op);
+    assert.equal((await call(from.token, "resume.start", { taskId: t.taskId, model: { provider: "p", id: "m" }, after: "continue" }, "x-start")).error.code, "forbidden");
+    assert.equal((await call(to.token, "resume.get", { checkId: check.id })).result.item.id, check.id);
     assert.equal((await w.c.storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "one resume recorded");
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
