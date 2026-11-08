@@ -622,9 +622,10 @@ export class StatusService {
 
   /**
    * The owner's release view (card X09b part 2): one candidate, or the newest `limit` of them, each with the gate per platform (pass, flaky pass, fail, interrupted, timed out, running or not run)
-   * and its attempts with state, host and time, and what is staged and current when this controller stages releases. Every text a host or a candidate carries (a result summary, a host name, a
-   * platform name) is quoted on one line, never followed. Owner only: to anyone else this reads exactly like a view that does not exist. The answer stays bounded; when it had to be cut, the last
-   * line says how to ask for the rest.
+   * and its attempts with state, host and time (newest first, because what is open or just ended is what the owner is asking about), and what is staged and current when this controller stages
+   * releases. Every text a host or a candidate carries (a result summary, a host name, a platform name) is quoted on one line, never followed. Owner only: to anyone else this reads exactly like a view
+   * that does not exist. The answer stays inside 30 lines and the candidates stop being read once that is used up: the gate summary of everything shown, the staging line and (when anything was cut)
+   * the line saying how many lines are not shown and how to get the rest are always inside them.
    */
   async releaseLines(by: Principal, request: { candidateId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const release = this.#deps.release;
@@ -638,7 +639,7 @@ export class StatusService {
       return `${state} (${cell.attempts} attempt${cell.attempts === 1 ? "" : "s"})`;
     };
     const attemptWords = (a: ReleaseAttemptBody & { id: string }): string => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quotedLine(shown(a.hostId, 80))}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quotedLine(shown(a.result.summary, 160))}`}${a.reason === undefined ? "" : `; reason: ${quotedLine(shown(a.reason, 160))}`}`;
-    const lines: Line[] = [];
+    const body: Line[] = [];
     let candidates: readonly CandidateRow[];
     let moreCandidates = false;
     let scanLimited = false;
@@ -653,9 +654,16 @@ export class StatusService {
       candidates = got.candidates;
       moreCandidates = got.more;
       scanLimited = got.scanLimited;
-      if (candidates.length === 0) lines.push(line("No release candidate has been submitted yet: release.submit is the start.", cite("release-candidates", "list")));
+      if (candidates.length === 0) body.push(line("No release candidate has been submitted yet: release.submit is the start.", cite("release-candidates", "list")));
     }
+    // What the owner always gets besides the candidates: the staging line and, when anything is cut, the line saying so (and the line saying candidates are left out). Reading stops once the rest is used up.
+    const max = 30;
+    const budget = max - 2 - (moreCandidates ? 1 : 0);
+    let lineDropped = 0;
+    let candidatesSkipped = 0;
     for (const candidate of candidates) {
+      // The budget is gone: the rest of the candidates are not read at all (so a wide list costs one page of reads, not a hundred).
+      if (body.length >= budget) { candidatesSkipped++; continue; }
       const c = cite("release-candidate", candidate.candidateId);
       let gate: Gate;
       try { gate = await release.gate(by, candidate.candidateId); }
@@ -673,10 +681,13 @@ export class StatusService {
         if (error instanceof DomainError && error.code === "forbidden") return undefined;
         throw error;
       }
-      lines.push(line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: approving needs acknowledgeFlaky)" : ""}.`, c));
-      for (const cell of gate.cells) lines.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
-      for (const a of attempts) lines.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: approving needs acknowledgeFlaky)" : ""}.`, c)];
+      for (const cell of gate.cells) block.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
+      // Newest first: what is running now, or the attempt that just ended, is what the owner is asking about.
+      for (const a of [...attempts].reverse()) block.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      for (const l of block) { if (body.length < budget) body.push(l); else lineDropped++; }
     }
+    const lines: Line[] = [...body];
     if (moreCandidates) lines.push(line(scanLimited ? "More candidates were submitted than are listed, and the list had to stop at its read bound, so some older ones were never read: name one (kind release with its candidateId) to read it directly." : "More candidates were submitted than are listed (the newest are first); ask again naming one (kind release with its candidateId) or with a larger limit (1 to 10).", cite("release-candidates", "list")));
     const staging = cite("release-activation", "main");
     if (release.status === undefined) lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
@@ -689,11 +700,13 @@ export class StatusService {
         lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
       }
     }
-    const max = 30;
-    if (lines.length > max) {
-      const kept = lines.slice(0, max - 1);
-      kept.push(line(`${lines.length - (max - 1)} more line(s) are not shown: ask again for one candidate (kind release with its candidateId) or, for one candidate's full evidence, release.attempts.`, cite("release-candidates", "list")));
-      return { observedAt: this.#runner.now(), lines: kept };
+    // The cut is said last, and says what the owner can actually do: someone who named a candidate is not told to name one.
+    const dropped = lineDropped + candidatesSkipped;
+    if (dropped > 0) {
+      const rest = request.candidateId === undefined
+        ? "ask again naming one candidate (kind release with its candidateId), or read release.attempts for one candidate's attempts (the newest are shown first)"
+        : "read release.attempts for every attempt of this candidate (the newest are shown here first)";
+      lines.push(line(`${dropped}${candidatesSkipped === 0 ? "" : " or more"} more line(s) are not shown: ${rest}.`, cite(request.candidateId === undefined ? "release-candidates" : "release-candidate", request.candidateId ?? "list")));
     }
     return { observedAt: this.#runner.now(), lines };
   }
