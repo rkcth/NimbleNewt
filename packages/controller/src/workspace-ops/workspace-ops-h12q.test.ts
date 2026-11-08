@@ -389,6 +389,42 @@ for (const backend of backends) {
     } finally { r.turn.end!(); await r.d.idle(); await r.store.close(); }
   });
 
+  test(`${backend.name}: a hold another controller's advance records while this controller's stop is ending the waiting attempt (after the end read the record), on which the attempt never runs, is marked by the end and given back (card H12q check)`, async () => {
+    let busy = true;
+    const r = await rig({ budget: true, busy: async () => busy });
+    // The second controller over the same records: its advance is not this controller's, so the end's mark of what an advance of its own may yet take does not name the hold.
+    const d2 = r.w.restart({ workers: [r.local], workspaceBusy: async () => false });
+    let stopping: Promise<unknown> | undefined;
+    try {
+      assert.ok((await r.d.tick()).waiting.includes(r.attemptId), "the first controller claims the attempt and leaves it waiting");
+      busy = false;
+      let inEnd!: () => void; const reached = new Promise<void>((ok) => { inEnd = ok; });
+      let go!: () => void; const gate = new Promise<void>((ok) => { go = ok; });
+      const asg = r.w.assignments as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const realGet = asg["getAssignment"]!.bind(asg);
+      let armed = true;
+      // The first controller's end has read the record (no place, no hold) and waits here, before it finishes the assignment.
+      asg["getAssignment"] = async (...a: unknown[]) => { if (armed && (new Error().stack ?? "").includes("endInner")) { armed = false; inEnd(); await gate; } return realGet(...a); };
+      // The second controller's advance has recorded its place and hold and is pinning the checkout: the end now writes the attempt finished.
+      const res = r.w.resources as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const realPin = res["dispatchCheckout"]!.bind(res);
+      res["dispatchCheckout"] = async (...a: unknown[]) => { if ((a[0] as { pin?: boolean }).pin === true && stopping !== undefined) { const s = stopping; stopping = undefined; go(); await s; } return realPin(...a); };
+      stopping = r.d.stop(r.w.owner, r.attemptId, { reason: "owner says stop", emergency: true });
+      const ending = stopping;
+      await reached;
+      const late = lateReleases(r);
+      const tick = await d2.tick();
+      await ending;
+      assert.deepEqual(tick.failures, []);
+      assert.deepEqual(tick.started, [], "the attempt never ran");
+      assert.deepEqual((await d2.tick()).failures, []);
+      assert.deepEqual((await r.d.tick()).failures, []);
+      assert.ok(late.includes("hold"), "the hold was given back as taken late");
+      assert.equal((await holds(r)).open, 0, "no hold is left open");
+      assert.equal(await places(r), 0, "no place is left");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.lateHeld, undefined);
+      assert.deepEqual(r.log, [], "no worker was opened");
+    } finally { await r.d.idle(); await d2.idle(); await r.store.close(); }
+  });
+
   for (const at of ["pin", "reserve"] as const) {
     test(`${backend.name}: a stop that ends a waiting attempt ${at === "pin" ? "while its checkout is being pinned" : "just after its allowance was held"} ends it cleanly: no tick failure, "the attempt has ended", no place or hold left (card H12q review)`, async () => {
       const r = await rig({ budget: true, busy: async () => false });
