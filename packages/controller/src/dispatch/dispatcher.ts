@@ -902,6 +902,23 @@ export class DispatcherService {
     return { processes, costs: [...costs].map(([attemptId, v]) => ({ attemptId, ...v })) };
   }
 
+  /**
+   * Force Stop's last step (card L02d): every worker host is told to kill what it still holds for these attempts (`WorkerHost.endLocalWork`). Only staff may ask. Every host is told even when one fails; the failures are thrown
+   * together afterwards (the stop looks again and names what is left, so a failure here is never taken as "ended").
+   */
+  async endLocalWorkOf(by: Principal, attemptIds: readonly string[]): Promise<void> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not end what workers hold`);
+    const ids = attemptIds.filter((id) => typeof id === "string" && ATTEMPT.test(id)).slice(0, 500);
+    if (ids.length === 0) return;
+    const failures: string[] = [];
+    for (const host of this.#deps.workers) {
+      if (host.endLocalWork === undefined) continue;
+      try { await host.endLocalWork(ids); } catch (error) { failures.push(`${host.hostId}: ${String((error as Error)?.message ?? error).slice(0, 200)}`); }
+    }
+    if (failures.length > 0) throw new Error(failures.join("; ").slice(0, 500));
+  }
+
   /** Every attempt the dispatcher holds live (not finished) with the dispatcher's state for it, each read once, for the staff passes that look at where work runs (the quiet-host pass). Only staff may ask. */
   async liveAttempts(by: Principal): Promise<{ attemptId: string; state: string }[]> {
     const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;

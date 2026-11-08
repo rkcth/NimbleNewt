@@ -145,6 +145,8 @@ export interface WorkerHost {
    * throws when it cannot look (the stop then shows one unknown item instead of a clean stop).
    */
   localWork?(attemptIds: readonly string[]): Promise<HostLocalWork>;
+  /** Force Stop (card L02d): kill whatever this host still holds for these attempts, without asking first. A host that cannot leaves it out; one that fails throws (the stop looks again afterwards and names what is left). */
+  endLocalWork?(attemptIds: readonly string[]): Promise<void>;
   /** The host's side of integration, landing, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }

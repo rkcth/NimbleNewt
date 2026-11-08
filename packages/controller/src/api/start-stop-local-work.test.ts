@@ -25,8 +25,11 @@ function fakeHost(held: { work: () => HostLocalWork; asked: string[][] }): Scrip
     return { status: "completed", text: "stopped" };
   });
   (host as unknown as WorkerHost).localWork = async (ids: readonly string[]) => { held.asked.push([...ids]); return held.work(); };
+  // Force Stop's kill (card L02d): what the test makes of it.
+  (host as unknown as WorkerHost).endLocalWork = async (ids: readonly string[]) => { END.on?.(ids); };
   return host;
 }
+const END: { on: ((ids: readonly string[]) => void) | undefined } = { on: undefined };
 const open = (file: string, host: WorkerHost) => startController({
   storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
   dispatch: {
@@ -125,6 +128,39 @@ test("a Stop asks the worker host what is still held, ends a background job, bil
     assert.ok(again.ok);
     assert.equal((await call(c, boot.token, "budget.usage", { taskId: one.id })).result.item.byActivity["stop-cleanup"].costMicros, 7000, "a sweep or a repeat does not charge again");
   } finally { await c.close(); cleanup(d); }
+});
+
+test("a worker process that ignores the Stop is named and the stop is not clean; the owner's Force Stop makes the host kill it, and the stop then ends (card L02d)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l02d-"));
+  const ends: string[][] = [];
+  const held = { asked: [] as string[][], processes: [] as HostLocalWork["processes"][number][] };
+  const w = await world(d, { asked: held.asked, work: () => ({ processes: held.processes }) });
+  const { c, boot } = w;
+  try {
+    const one = await w.task(1);
+    await c.dispatch!.dispatcher.tick();
+    // While the attempt runs nothing of the host's is listed (the worker process is the attempt); once it was told to end and did not, the host lists it.
+    held.processes = [];
+    const ready = await call(c, boot.token, "lifecycle.readiness", { scope: { kind: "task", id: one.id } });
+    assert.equal(ready.result.unsettled.some((i: { kind: string }) => i.kind === "process"), false, JSON.stringify(ready.result));
+    held.processes = [{ attemptId: one.attempt, ref: "worker process pid 42 (node)", kind: "process", state: "uncooperative" }];
+    const stop = await call(c, boot.token, "lifecycle.stop", { scope: { kind: "task", id: one.id }, mode: "stop", reason: "night" }, "st1");
+    assert.ok(stop.ok, JSON.stringify(stop));
+    // The preparation waits for nothing that will not settle: the request is blocked at once, naming the process, with Force Stop among the choices.
+    assert.equal(stop.result.phase, "blocked", JSON.stringify(stop.result));
+    assert.match(stop.result.blocked.reason, /uncooperative/, JSON.stringify(stop.result.blocked));
+    assert.ok(stop.result.blocked.choices.includes("force-stop"), JSON.stringify(stop.result.blocked));
+    const listed = await call(c, boot.token, "lifecycle.readiness", { scope: { kind: "task", id: one.id } });
+    assert.ok(listed.result.unsettled.some((i: { ref: string; state: string }) => i.ref === "worker process pid 42 (node)" && i.state === "uncooperative"), JSON.stringify(listed.result));
+    assert.equal(ends.length, 0, "a graceful Stop asks; it does not kill");
+    // The owner's Force Stop: the host is told to kill what it holds for the attempt, and the stop ends.
+    END.on = (ids) => { ends.push([...ids]); held.processes = []; };
+    const forced = await call(c, boot.token, "lifecycle.force", { scope: { kind: "task", id: one.id }, reason: "it will not stop" }, "f1");
+    assert.ok(forced.ok, JSON.stringify(forced));
+    assert.deepEqual(ends, [[one.attempt]], JSON.stringify(forced.result));
+    assert.equal(forced.result.outcome?.state, "stopped", JSON.stringify(forced.result));
+    assert.equal(forced.result.outcome.graceful, false);
+  } finally { END.on = undefined; await c.close(); cleanup(d); }
 });
 
 test("a host that cannot say what it holds makes the stop's look unknown, never clean; and a Force Stop still ends the attempt (card L02d)", async () => {

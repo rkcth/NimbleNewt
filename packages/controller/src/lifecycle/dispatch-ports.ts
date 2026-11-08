@@ -8,7 +8,7 @@ import type { Principal } from "../security/principals.js";
 import type { PauseScope } from "./pause.js";
 import type { InventoryItem, StopPorts } from "./stop.js";
 
-type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "get" | "quiesce" | "stop" | "operations" | "release" | "localWorkOf">;
+type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "get" | "quiesce" | "stop" | "operations" | "release" | "localWorkOf"> & Partial<Pick<DispatcherService, "endLocalWorkOf">>;
 
 /**
  * The agent IDs a scope covers (card L02b): an agent is itself; a team is every agent whose team chain passes through it (the same walk the pause gate reads); the installation is every agent. Cycles and over-long chains stop the walk.
@@ -74,6 +74,7 @@ export function hostLocalWork(dispatch: () => { dispatcher: Dispatcher; principa
   return {
     processes: async (attempts) => (await ask(attempts)).processes.map((p) => ({ ref: p.ref, kind: p.kind, state: p.state })),
     costs: async (attempts) => [...((await ask(attempts)).costs ?? [])],
+    end: async (attempts) => { const h = dispatch(); await h?.dispatcher.endLocalWorkOf?.(h.principal, attempts); },
   };
 }
 
@@ -83,6 +84,8 @@ export interface LocalWork {
   spent?(attempts: readonly string[]): Promise<number | undefined>;
   /** What the cleanup has cost per attempt, as running totals (the stop charges only what is new). Asked for the attempts seen for the scope, also ones that have ended. */
   costs?(attempts: readonly string[]): Promise<readonly { readonly attemptId: string; readonly costMicros?: number; readonly computeMs?: number }[]>;
+  /** Force Stop: kill whatever the runtime still holds for these attempts, without asking first (card L02d). Asked for every attempt seen for the scope, after their attempts were ended. Absent: a Force Stop ends the attempts and nothing more. */
+  end?(attempts: readonly string[]): Promise<void>;
 }
 
 type JobRow = { readonly ownerUnknown?: boolean; readonly id: string; readonly state: string; readonly kind?: string; readonly background?: boolean; readonly resumability?: string; readonly attemptId?: string };
@@ -327,6 +330,13 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         for (const op of (await h!.dispatcher.operations(h!.principal, id)) ?? []) if (op.state === "uncertain") unresolved.push(`${id}/${op.callId}`.slice(0, 120));
       }
       unresolved.push(...await askJobs(scope, attempts, l, options.by, options.force));
+      // A Force Stop kills what the hosts still hold for every attempt seen for the scope (also one that ended earlier and left a process behind), without asking first (card L02d). A swarm child's attempt only for someone
+      // who may control the child. A failure is not reported as such: the look below names whatever is still there.
+      if (options.force && local?.end !== undefined) {
+        const every = [...new Set([...(seen.get(`${scope.kind}:${scope.id}`) ?? []), ...attempts])];
+        const mine = every.length === 0 ? [] : (await controllable(options.by, every, scope)).allowed;
+        if (mine.length > 0) await local.end(mine).catch(() => undefined);
+      }
       // A job whose outcome is not known, or that was asked to stop and has not, is named as unresolved too.
       // Looking again can fail; that is not a clean stop. A process or child still running after the stop did not end either.
       const after = await inFlight(attempts, scope, look()).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
