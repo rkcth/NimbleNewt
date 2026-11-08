@@ -400,10 +400,20 @@ const CAPACITY_WORDS: Readonly<Record<string, string>> = {
   depth: "levels of child tasks below a task that was not spawned", liveChildren: "children of one parent that are not finished at once", totalChildren: "children of one parent in all (the fan-in)",
 };
 const capacityWord = (name: string): string => CAPACITY_WORDS[name] ?? name;
-/** Why one group of the capacity view cannot be shown, in one clause; anything but a damaged, refused or missing record is a real failure and is thrown. */
-function capacityProblem(error: unknown, repair: string): string {
+/**
+ * What a damaged record of each kind does to the controller, in the owner's words - said per group because each one gates something different, and borrowing one group's words for another would be a guess:
+ * `AdmissionService.request` reads the caps record before it admits anything, so a damaged caps record refuses every new request (inquiries and reviews included) while what already runs keeps running and is
+ * still released; the quotas live in the admission record itself, the record admission works from; and `SwarmService` takes its limits from `SwarmLimitsService.effective()`, which throws on a damaged record,
+ * so a damaged swarm record spawns nothing at all.
+ */
+const CAPS_DAMAGED = "the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity.limits.change; what is already running is not stopped";
+const SWARM_DAMAGED = "the stored swarm limits are damaged - no child task can be spawned until they are repaired with swarm.limits.change";
+/** Why the host and global quotas are not shown, in one clause. `AdmissionService.quotas()` hands back the admission record without checking it, so a figure that is not a figure reaches the view as it is. */
+const quotasDamaged = (what: string): string => `the record you stored is damaged (${what}): nothing in this group is shown, and what admission admits from that same record is not what these figures would allow (repair it with capacity.quotas.change)`;
+/** Why one group of the capacity view cannot be shown, in one clause; anything but a damaged, refused or missing record is a real failure and is thrown. `damaged` is what that group's record being unreadable does, because the groups gate different things. */
+function capacityProblem(error: unknown, damaged: string): string {
   if (!(error instanceof DomainError)) throw error;
-  if (error.code === "integrity") return `the record you stored is damaged and applies to nothing: set it again (${repair}) to repair it`;
+  if (error.code === "integrity") return damaged;
   if (error.code === "forbidden" || error.code === "unavailable") return "it cannot be read here";
   throw error;
 }
@@ -661,7 +671,7 @@ export class StatusService {
     if (settings.limits === undefined) lines.push(line("Capacity caps: this controller does not offer them.", capsAbsent));
     else {
       let caps: Awaited<ReturnType<NonNullable<typeof settings.limits>["get"]>> | undefined;
-      try { caps = await settings.limits.get(by); } catch (error) { lines.push(line(`Capacity caps: ${capacityProblem(error, "capacity.limits.change")}.`, capsAbsent)); }
+      try { caps = await settings.limits.get(by); } catch (error) { lines.push(line(`Capacity caps: ${capacityProblem(error, CAPS_DAMAGED)}.`, capsAbsent)); }
       if (caps !== undefined) {
         const c = cite("capacity-limits-settings", "main", caps.revision === 0 ? undefined : caps.revision);
         lines.push(line(`Capacity caps (your setting is at revision ${caps.revision}); all are off unless you turned one on:`, c));
@@ -679,7 +689,7 @@ export class StatusService {
     if (settings.quotas === undefined) lines.push(line("Host and global quotas: this controller does not offer them.", quotaAbsent));
     else {
       let q: Awaited<ReturnType<NonNullable<typeof settings.quotas>["quotas"]>> | undefined;
-      try { q = await settings.quotas.quotas(by); } catch (error) { lines.push(line(`Host and global quotas: ${capacityProblem(error, "capacity.quotas.change")}.`, quotaAbsent)); }
+      try { q = await settings.quotas.quotas(by); } catch (error) { lines.push(line(`Host and global quotas: ${capacityProblem(error, quotasDamaged("the record cannot be read at all"))}.`, quotaAbsent)); }
       if (q !== undefined) {
         const c = cite("admission-state", "admission", q.revision === 0 ? undefined : q.revision);
         const live: Readonly<Record<string, string>> = { productive: `; ${q.running.productive} running now`, perHost: "", control: `; ${q.running.control} of them in use now`, queue: `; ${q.waiting} waiting now` };
@@ -700,7 +710,7 @@ export class StatusService {
     if (settings.swarm === undefined) lines.push(line("Limits on spawning child tasks: this controller does not offer them.", swarmAbsent));
     else {
       let s: Awaited<ReturnType<NonNullable<typeof settings.swarm>["get"]>> | undefined;
-      try { s = await settings.swarm.get(by); } catch (error) { lines.push(line(`Limits on spawning child tasks: ${capacityProblem(error, "swarm.limits.change")}.`, swarmAbsent)); }
+      try { s = await settings.swarm.get(by); } catch (error) { lines.push(line(`Limits on spawning child tasks: ${capacityProblem(error, SWARM_DAMAGED)}.`, swarmAbsent)); }
       if (s !== undefined) {
         const c = cite("swarm-limits-settings", "main", s.revision === 0 ? undefined : s.revision);
         lines.push(line(`Limits on spawning child tasks (your setting is at revision ${s.revision}):`, c));

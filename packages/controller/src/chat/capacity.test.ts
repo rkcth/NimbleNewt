@@ -124,6 +124,24 @@ for (const backend of backends) {
     assert.ok(shown.some((l) => l.text.includes("revision 3") && l.cites.some((c) => c.kind === "capacity-limits-settings" && c.revision === 3)), "the caps lines cite the revision read");
   });
 
+  suite("a damaged caps record is told as the thing it is: nothing new is admitted until it is repaired, inquiries and reviews included", async (w, s) => {
+    await damage(s.storage, s.epoch, CAPS_REF, { perProject: { enabled: true, value: "many" } }, "caps-admit");
+    const shown = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
+    const body = text(shown);
+    assert.match(body, /^Capacity caps: the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity\.limits\.change; what is already running is not stopped\.$/m);
+    assert.match(body, /^Host and global quotas/m, "the other two groups are still shown");
+    assert.match(body, /^Limits on spawning child tasks/m);
+    assert.ok(!body.includes("applies to nothing"), "the line does not leave it looking like a record that simply does nothing");
+    // The wording is only honest while admission behaves that way: read through the same service the state API reads, every new request is refused for the caps record being unreadable.
+    for (const cls of ["inquiry", "review"] as const) {
+      await assert.rejects(
+        () => s.quotas.request({ commandId: cid(`admit-${cls}`), actor: "host:pc", class: cls, cpus: 1, memoryMb: 512 }),
+        (error: unknown) => error instanceof DomainError && error.code === "integrity",
+        `a ${cls} is refused while the caps record is damaged`,
+      );
+    }
+  });
+
   suite("a caller who is not the owner reads exactly what it would read if the view did not exist", async (w, s) => {
     const ann = await w.agent("ann", [{ action: "task.read", project: "*" }]);
     assert.equal(await s.status.ask(ann.principal, { kind: "capacity" }), undefined, "nothing at all, not an empty answer");
@@ -159,7 +177,7 @@ for (const backend of backends) {
     // The damaged caps record throws `integrity`, and the damaged swarm record says which names it cannot read: both are one line each.
     const broken = (await s.status.ask(s.owner, { kind: "capacity" }))!;
     const body = text(broken.lines);
-    assert.match(body, /^Capacity caps: the record you stored is damaged and applies to nothing: set it again \(capacity\.limits\.change\) to repair it\.$/m);
+    assert.match(body, /^Capacity caps: the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity\.limits\.change; what is already running is not stopped\.$/m, "a damaged caps record stops admission, and the line says that rather than sounding harmless");
     assert.match(body, /^The stored swarm limits are damaged at depth: no figure of yours applies until you set them again \(swarm\.limits\.change\)\.$/m);
     assert.match(body, /^liveChildren \(.*\): 4 \(the default\)$/m, "the swarm figures that can be read are still shown");
     assert.match(body, /^productive \(.*\): 7 \(you set it\); 0 running now$/m, "the quotas group is untouched");

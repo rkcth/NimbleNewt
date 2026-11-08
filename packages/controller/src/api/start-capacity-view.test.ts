@@ -65,6 +65,20 @@ test("the capacity view in chat shows what the owner set by the state API, in th
     assert.equal((await call("capacity.quotas.get", {})).result.item.limits.productive, 5);
     assert.equal((await call("swarm.limits.get", {})).result.item.limits.depth, 1);
 
+    // A damaged caps record is not a record that simply does nothing: admission refuses every new request until it is repaired, and the answer in the composed controller says so.
+    const capsRef = { kind: "capacity-limits-settings", id: "main" };
+    const stored = await c.storage.getAggregate(capsRef);
+    await c.storage.applyOperation({
+      operationId: "cap-damage", epoch: c.epoch, actor: "owner:rob", correlationId: "cap-damage", at: new Date().toISOString(),
+      changes: [{ type: "update", ref: capsRef, expectedRevision: stored!.revision, body: { perProject: { enabled: true, value: "many" } } }],
+      audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+    } as never);
+    const damaged = await ask();
+    assert.match(damaged, /^Capacity caps: the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity\.limits\.change; what is already running is not stopped\.$/m, "the honest consequence, in the controller as it starts");
+    assert.match(damaged, /^Host and global quotas/m, "the other two groups are still read");
+    assert.match(damaged, /^Limits on spawning child tasks/m);
+    assert.equal((await call("capacity.limits.get", {})).error?.code, "integrity", "the state API reads the same damaged record");
+
     // A caller that is not the owner reads exactly what it would read if nothing of the kind existed.
     assert.equal((await as(ann, "status.ask", { request: { kind: "capacity" } })).error?.code, "not_found");
     assert.equal((await as(ann, "capacity.limits.get", {})).error?.code, "forbidden", "the state API itself still refuses the read");
