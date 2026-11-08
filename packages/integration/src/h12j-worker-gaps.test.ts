@@ -18,14 +18,16 @@ const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const KEY = "sk-provider-SECRET-0123456789abcdef";
 
-interface Tap { readonly runs: { run: SandboxRun; out: string[]; in: string[]; env: Record<string, string> | undefined }[] }
+interface Tap { readonly runs: { run: SandboxRun; out: string[]; in: string[]; env: Record<string, string> | undefined }[]; readonly audit: unknown[] }
 
 async function rig(t: { skip: (why: string) => void }, model: { url: string }, context?: (order: WorkOrder) => ChannelContext | undefined) {
-  const real = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
+  // The launcher's audit log (one record per launch) is kept, so the key scan reads it too.
+  const audit: unknown[] = [];
+  const real = await SandboxLauncher.create({ protectedPaths: [], audit: (record) => { audit.push(record); } });
   const usable = real.capacity.available && real.capacity.backend === "bubblewrap" && !["/usr", "/bin", "/lib"].includes(nodeRoot);
   if (!usable && required && process.platform === "linux") assert.fail(`the sandbox is required but unusable: ${real.capacity.reason}`);
   if (!usable) { t.skip("bubblewrap or a node install it can mount is unusable"); return undefined; }
-  const tap: Tap = { runs: [] };
+  const tap: Tap = { runs: [], audit };
   // The launcher the host sees: the same one, with every byte of the channel recorded in both directions.
   const launcher = {
     launch: async (request: Parameters<SandboxLauncher["launch"]>[0]) => {
@@ -105,11 +107,12 @@ describe("the worker process is reaped however the attempt ends, and never holds
       const ended = await reaped(entry, r.directory);
       assert.ok(entry.out.length > 0 && entry.in.length > 0, "the channel was observed in both directions");
       const encodings = (k: string): string[] => [k, Buffer.from(k).toString("base64"), Buffer.from(k).toString("base64url"), encodeURIComponent(k), Buffer.from(k).toString("hex")].map((x) => x.replace(/=+$/, ""));
-      for (const [what, text] of [["channel from the worker", entry.out.join("")], ["channel to the worker", entry.in.join("")], ["standard error", ended.stderr], ["standard output", ended.stdout], ["launch environment", JSON.stringify(entry.env ?? {})]] as const) {
+      for (const [what, text] of [["channel from the worker", entry.out.join("")], ["channel to the worker", entry.in.join("")], ["standard error", ended.stderr], ["standard output", ended.stdout], ["launch environment", JSON.stringify(entry.env ?? {})], ["launcher's audit log", JSON.stringify(r.tap.audit)]] as const) {
         for (const form of encodings(KEY)) assert.equal(text.includes(form), false, `the provider key (${form === KEY ? "plain" : "encoded"}) is in the ${what}`);
         assert.equal(text.includes("sk-provider"), false, `part of the provider key is in the ${what}`);
       }
       assert.ok(entry.in.join("").includes("task-credential-1"), "the task credential is what the worker holds (positive control)");
+      assert.ok(r.tap.audit.length > 0 && JSON.stringify(r.tap.audit).includes("recipeRevision"), "the launch was logged (positive control for the audit-log scan)");
       const files = [r.dirs.home, r.dirs.scratch, r.dirs.checkout].flatMap(filesUnder).filter((f) => statSync(f).size < 20 * 1024 * 1024);
       assert.ok(files.some((f) => f.startsWith(join(r.dirs.home, "pi"))), "the conversation store in the agent's home was scanned");
       for (const file of files) { const bytes = readFileSync(file); for (const form of encodings(KEY)) assert.equal(bytes.includes(form), false, `the provider key (${form === KEY ? "plain" : "encoded"}) is in ${file}`); }

@@ -209,3 +209,28 @@ test("each call has its own monitor handle, so overlapping calls are never mixed
   await text((await a3.relay(req("http://relay.invalid/m0/chat/completions"))).body);
   assert.deepEqual([counts[0]!.inputTokens, counts[0]!.cachedTokens], [30750, 700]);
 });
+
+test("a model stream is relayed as it arrives, not buffered whole: the first piece is passed on while the endpoint is still sending (card H12b)", async () => {
+  const encoder = new TextEncoder();
+  let release: () => void = () => undefined;
+  // Each reply sends one event at once and the rest only when the test lets it.
+  const held = (): Response => {
+    const rest = new Promise<void>((ok) => { release = ok; });
+    return new Response(new ReadableStream({ async start(c) { c.enqueue(encoder.encode("data: first\n\n")); await rest; c.enqueue(encoder.encode("data: second\n\n")); c.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const { relay } = setup({ respond: held });
+  const attempt = relay.forAttempt({ route: "llama/local" });
+  // The first call of an attempt is read for the provider's count, a later one is passed on plainly: both stream.
+  for (const n of [1, 2]) {
+    const response = await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+    const pieces = response.body![Symbol.asyncIterator]();
+    let timer: NodeJS.Timeout | undefined;
+    const first = await Promise.race([pieces.next(), new Promise<"waited">((ok) => { timer = setTimeout(() => ok("waited"), 2000); })]).finally(() => clearTimeout(timer));
+    assert.notEqual(first, "waited", `call ${n}: the first piece was not passed on while the endpoint was still sending`);
+    assert.equal(Buffer.from((first as IteratorResult<Uint8Array>).value!).toString("utf8"), "data: first\n\n");
+    release();
+    let tail = "";
+    for (let next = await pieces.next(); next.done !== true; next = await pieces.next()) tail += Buffer.from(next.value).toString("utf8");
+    assert.equal(tail, "data: second\n\n");
+  }
+});

@@ -196,6 +196,11 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.equal((await gateOf()).observed?.state, "pausing");
       await sleep(400);
       assert.equal((await gateOf()).observed?.state, "pausing", "a model call is open, so it is not paused yet");
+      // The attempt's own processes, found by its private directory (card H12j: a paused attempt leaves no worker process behind). Linux only: elsewhere /proc is not there to look at.
+      const base = x.dirsOf(`agent:${AGENT}`).home.split("/").slice(0, -1).join("/");
+      // They are remembered by number too: a process inside the sandbox carries only guest paths, so one that outlived the sandbox would no longer be found by the directory.
+      const watched = process.platform === "linux" ? [...new Set([...processesMentioning(base).map((p) => p.pid), ...workerPids(base)])] : [];
+      if (process.platform === "linux") assert.ok(processesMentioning(base).length > 0 && workerPids(base).length > 0, "the check can see the running worker (positive control)");
       // A second interrupt while paused is not delivered.
       await x.c.api.handle(x.ownerToken, { v: 1, op: "message.send", commandId: "m2", args: { taskId, to: `agent:${AGENT}`, class: "urgent-control", purpose: "safety", text: "second thing" } } as never);
       await sleep(500);
@@ -208,6 +213,12 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.equal(gate2.observed?.state, "paused");
       assert.equal(gate2.observed?.boundary, "finished");
       assert.equal((await state()).state, "finished");
+      // The paused attempt's worker process, the sandbox and everything started in it are gone once the attempt has ended (card H12j); the sweep after the run may take a moment.
+      if (process.platform === "linux") {
+        // A process that has died but not been collected (a zombie) is gone for this purpose.
+        const alive = (): string[] => watched.filter((pid) => { const stat = read(pid, "stat"); return stat !== "" && stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z"; });
+        await until(() => alive().length === 0 && processesMentioning(base).length === 0, 10_000, () => `a process of the paused attempt is still running: ${JSON.stringify([...alive(), ...processesMentioning(base).map((p) => p.pid)])}`);
+      }
       // The task is paused (L05b): a paused task begins no new generation, so the turn's next model call is refused at the relay and the model is never called again. The interrupt was delivered (queued above) but a paused attempt takes no further model call; the second one never reached it either.
       assert.equal(answer.seen.length, 1, "no model call begins for a paused task");
       assert.equal(requestText(answer, 0).includes("second thing"), false);

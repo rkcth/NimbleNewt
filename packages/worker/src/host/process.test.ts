@@ -68,6 +68,25 @@ test("H12j: modelCallsInFlight counts relay calls from the request until they en
   process.kill("done");
 });
 
+test("H12b: the relay's answer is sent to the process piece by piece as it arrives, not after the whole stream", async () => {
+  const f = fake();
+  let release!: () => void;
+  const rest = new Promise<void>((ok) => { release = ok; });
+  async function* body(): AsyncGenerator<Uint8Array> { yield Buffer.from("data: first\n\n"); await rest; yield Buffer.from("data: second\n\n"); }
+  const process = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { bridge: handlers.bridge, relay: async () => ({ status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]], body: body() }) as never });
+  f.send({ t: "fetch", id: 1, url: "http://relay.invalid/m0/chat/completions", method: "POST", headers: [] });
+  const sent = (t: string): ToChild[] => f.written.filter((m) => m.t === t);
+  for (let i = 0; i < 100 && sent("fetch.chunk").length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(sent("fetch.chunk").length, 1, "the first piece went to the process while the stream was still open");
+  assert.equal(Buffer.from((sent("fetch.chunk")[0] as { data: string }).data, "base64").toString("utf8"), "data: first\n\n");
+  assert.equal(sent("fetch.end").length, 0, "the stream has not ended yet");
+  release();
+  for (let i = 0; i < 100 && sent("fetch.end").length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(sent("fetch.chunk").map((m) => Buffer.from((m as { data: string }).data, "base64").toString("utf8")), ["data: first\n\n", "data: second\n\n"]);
+  assert.equal(sent("fetch.end").length, 1);
+  process.kill("done");
+});
+
 test("H08b3: a lease.lost from the process is observed by the host with no turn open", async () => {
   const f = fake();
   const process = await launch(f);
