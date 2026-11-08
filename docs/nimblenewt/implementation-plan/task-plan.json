@@ -3746,12 +3746,15 @@
         "commits": [
           "5116e29f",
           "933f8e09",
-          "182a0e30"
+          "182a0e30",
+          "d9977ada",
+          "880839cd",
+          "edc70a5f"
         ],
         "ci_runs": [],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "The owner sets the host and global quotas (attempts in total and per host, places kept for reviews and inquiries, the queue) and declares hosts' CPUs and memory by API and chat; the owner's swarm limits (depth, live children and the fan-in total of children per parent) bound spawning, race-safe; a child needs the outcome and acceptance criteria its parent assigns and spends only the allowance delegated to it (a parent limited in a dimension must give some of it; a spawned task without an allowance does not run); cancelling a swarm seals it, settles children whose spawn is still in flight and carries on an unfinished stop, and a child waiting for a place is stopped without blocking on a checkpoint, all shown through startController. A nested cancel reopening an inner parent during an outer cancel is left open. Green exhaustive run pending (to be added to ci_runs)."
+        "note": "The owner sets the host and global quotas (attempts in total and per host, places kept for reviews and inquiries, the queue) and declares hosts' CPUs and memory by API and chat; the owner's swarm limits (depth, live children and the fan-in total of children per parent) bound spawning, race-safe; a child needs the outcome and acceptance criteria its parent assigns and spends only the allowance delegated to it (a parent limited in a dimension must give some of it; a spawned task without an allowance does not run); cancelling a swarm seals it, settles children whose spawn is still in flight and carries on an unfinished stop, and a child waiting for a place is stopped without blocking on a checkpoint, all shown through startController. A nested cancel no longer reopens an inner parent during an outer cancel; spawns at once up to the live-children limit and two cancels sent together all succeed. Green exhaustive run pending (to be added to ci_runs)."
       }
     },
     {
