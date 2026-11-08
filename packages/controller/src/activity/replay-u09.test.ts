@@ -93,6 +93,7 @@ for (const backend of backends) {
       assert.deepEqual([paged.entries.map((e) => e.seq), paged.next], [[2, 3], 5], "next is the next matching step");
       for (const bad of ["yesterday", "", "x".repeat(41), 5]) await refuses("invalid_command", () => replay.open(auditor, task, { since: bad as never }));
       await refuses("invalid_command", () => replay.open(auditor, task, { until: "soon" }));
+      await refuses("invalid_command", () => replay.open(auditor, task, { kind: "tool-calls" }));
       // The summary is not narrowed: lines of work and agents to follow.
       const sm = (await replay.open(auditor, task, { kind: "branch" })).summary;
       assert.deepEqual(sm.lanes, [{ lane: "main", steps: 3 }, { lane: "fix-b", steps: 2 }]);

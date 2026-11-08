@@ -101,6 +101,20 @@ test("replay through the state API: a task credential replays its own task only,
       assert.equal((await call(cred, op, { taskId: sibling, ...args })).error?.code, "forbidden", op);
     }
     assert.ok((await call(boot.token, "activity.replay.open", { taskId: sibling })).ok, "the owner replays any task");
+    // Time and kind filters through the running controller (card U09): the window narrows, the summary does not; a bad time or kind is refused; agent text is quoted in the chat view.
+    assert.ok((await call(boot.token, "activity.record", { taskId: mine, kind: "tool-call", summary: "ran \u202e it" }, "r-late")).ok);
+    const all = (await call(cred, "activity.replay.open", { taskId: mine })).result;
+    const at2 = all.entries[1].at as string;
+    const late = (await call(cred, "activity.replay.open", { taskId: mine, since: at2 })).result;
+    assert.deepEqual([late.entries.map((e: { seq: number }) => e.seq), late.summary.total], [[2], 2]);
+    assert.deepEqual((await call(cred, "activity.replay.open", { taskId: mine, until: all.entries[0].at, kind: "owner-message" })).result.entries.map((e: { seq: number }) => e.seq), [1]);
+    assert.equal((await call(cred, "activity.replay.open", { taskId: mine, since: "later" })).error?.code, "invalid_command");
+    assert.equal((await call(cred, "activity.replay.open", { taskId: mine, kind: "nonsense" })).error?.code, "invalid_command");
+    const said = await call(boot.token, "status.ask", { request: { kind: "replay", taskId: mine, stepKind: "tool-call", since: at2 } });
+    assert.ok(said.ok, JSON.stringify(said));
+    const text = (said.result.item.lines as { text: string }[]).map((l) => l.text);
+    assert.ok(text.some((l) => l.includes("tool-call - \"ran \\u202e it\"")), text.join("\n"));
+    assert.ok(text.some((l) => l.startsWith("Lines of work: main (2). Agents: ")), text.join("\n"));
     // The read bounds: owner only, chat-settable (set, enable, disable), race-safe.
     const g0 = (await call(boot.token, "replay.limits.get", {})).result.item;
     assert.deepEqual([g0.revision, g0.enabled, g0.values.scan], [0, true, 50000]);
