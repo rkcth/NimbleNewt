@@ -14,7 +14,7 @@ import { CUT_MARKER, HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, PauseServ
  * What holds today is asserted plainly. What does not hold is a finding: its test is marked `todo` with the follow-up card that fixes it, so it is reported on every run without failing the suite, and
  * the day the follow-up lands the test starts passing and the `todo` is removed. A seeded early decision and early failure detail are checked after the last hop.
  *
- * Not in this slice (recorded on the card): the first-call size sent to a worker, the stored conversation size and the resume note, which belong to the context and dispatch services.
+ * The first-call size sent to a worker, the stored conversation size and the resume note, which belong to the context and dispatch services, are measured over 50 hand-offs in `dispatch/first-call-hops.test.ts` (card C07l).
  */
 after(stopServer);
 
