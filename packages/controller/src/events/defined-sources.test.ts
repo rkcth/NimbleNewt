@@ -4,12 +4,19 @@ import { closeSync, constants as fsConstants, mkdirSync, mkdtempSync, openSync, 
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
+import { join, posix, win32 } from "node:path";
+import { test, type TestContext } from "node:test";
 import { DomainError } from "../domain/errors.js";
-import { checkDefinition, definedSource, fileSnapshot, httpHealth, repositoryRefs, type SourceDefinition } from "./defined-sources.js";
+import { checkDefinition, definedSource, fileSnapshot, gitDirFromPointer, httpHealth, insideName, readSmall, repositoryRefs, type SourceDefinition } from "./defined-sources.js";
 
 const NOW = "2026-11-08T10:00:00.000Z";
+/** Makes a symbolic link. Windows refuses one without the privilege (or developer mode): there, and only there, that refusal is reported and the caller leaves out what needs the link. */
+const linked = (target: string, link: string, t: TestContext): boolean => {
+  try { symlinkSync(target, link); return true; } catch (error) {
+    if (process.platform === "win32" && ((error as NodeJS.ErrnoException).code === "EPERM" || (error as NodeJS.ErrnoException).code === "EACCES")) { t.diagnostic(`symbolic links cannot be made here (${(error as NodeJS.ErrnoException).code}); the link checks are left out`); return false; }
+    throw error;
+  }
+};
 const refused = (raw: Record<string, unknown>, field: string): void => {
   assert.throws(() => checkDefinition(raw, NOW, "owner:rob"), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && e.field === field, `${JSON.stringify(raw)} should be refused on ${field}`);
 };
@@ -18,7 +25,9 @@ const base = { sourceId: "s1", projectId: "prj-aaaaaaaaaaaaaaaaaaaa" };
 test("a definition is checked field by field: the type's own fields only, bounded numbers, absolute paths, http(s) addresses without credentials, a single time not already past (card H13f)", () => {
   assert.deepEqual(checkDefinition({ ...base, type: "timer", everyMinutes: 15 }, NOW, "owner:rob"), { id: "s1", type: "timer", projectId: base.projectId, everyMinutes: 15, definedAt: NOW, definedBy: "owner:rob" });
   assert.equal(checkDefinition({ ...base, type: "timer", at: "2026-11-09T09:00:00+01:00" }, NOW, "o").at, "2026-11-09T08:00:00.000Z");
-  assert.equal(checkDefinition({ ...base, type: "file", path: "/srv/data/../data/in", taskId: "tsk-1" }, NOW, "o").path, "/srv/data/in");
+  // The path is kept as the owner wrote it (not re-resolved, so it reads the same on every platform); it must be absolute for the controller's own machine.
+  const absolute = process.platform === "win32" ? "C:\\srv\\data\\..\\data\\in" : "/srv/data/../data/in";
+  assert.equal(checkDefinition({ ...base, type: "file", path: absolute, taskId: "tsk-1" }, NOW, "o").path, absolute);
   assert.equal(checkDefinition({ ...base, type: "service", url: "http://127.0.0.1:8080/health", checkSeconds: 30 }, NOW, "o").url, "http://127.0.0.1:8080/health");
   refused({ ...base, sourceId: "bad id", type: "timer", everyMinutes: 1 }, "sourceId");
   refused({ ...base, type: "cron", everyMinutes: 1 }, "type");
@@ -39,7 +48,44 @@ test("a definition is checked field by field: the type's own fields only, bounde
   refused({ ...base, type: "service", url: "https://user:secret@host/health" }, "url");
 });
 
-test("a folder snapshot lists the files under it by their path inside it, skips .git and node_modules, does not follow symbolic links, and a missing path is empty (card H13f)", async () => {
+test("paths read the same on every platform: a watched path is checked with the controller's own path rules and kept as written, names inside a folder use '/', and a worktree's gitdir pointer resolves with either separator (card H13f, Windows)", () => {
+  const def = (path: string, p: typeof posix) => checkDefinition({ ...base, type: "repository", path }, NOW, "o", p);
+  const refusedOn = (path: string, p: typeof posix): void => { assert.throws(() => def(path, p), (e: unknown) => e instanceof DomainError && e.field === "path", `${path} should be refused`); };
+  // Windows: a drive path, a UNC share and a root-relative path are absolute; a drive-relative or relative one is not. Each is kept exactly as written.
+  for (const p of ["C:\\data\\in", "C:/data/in", "\\\\server\\share\\repo", "/srv/data"]) assert.equal(def(p, win32).path, p);
+  for (const p of ["C:data", "data\\in", "..\\in"]) refusedOn(p, win32);
+  // POSIX: a Windows drive path could never be opened there, so it is refused when defined, not watched as missing for ever.
+  assert.equal(def("/srv/data/in", posix).path, "/srv/data/in");
+  for (const p of ["C:\\data", "C:/data", "data/in"]) refusedOn(p, posix);
+  // Names inside a folder.
+  assert.equal(insideName("C:\\w", "C:\\w\\sub\\b.txt", win32), "sub/b.txt");
+  assert.equal(insideName("C:\\w", "C:\\w\\a.txt", win32), "a.txt");
+  assert.equal(insideName("/w", "/w/sub/b.txt", posix), "sub/b.txt");
+  // The `.git` file of a linked worktree: git on Windows writes `C:/...` or a relative path, possibly with CRLF; a byte-order mark is dropped; anything else names nothing.
+  assert.equal(gitDirFromPointer("C:\\work\\wt", "gitdir: C:/work/repo/.git/worktrees/wt\r\n", win32), "C:\\work\\repo\\.git\\worktrees\\wt");
+  assert.equal(gitDirFromPointer("C:\\work\\wt", "\uFEFFgitdir: ..\\repo\\.git\\worktrees\\wt", win32), "C:\\work\\repo\\.git\\worktrees\\wt");
+  assert.equal(gitDirFromPointer("/work/wt", "gitdir: /work/repo/.git/worktrees/wt\n", posix), "/work/repo/.git/worktrees/wt");
+  assert.equal(gitDirFromPointer("/work/wt", "gitdir: ../repo/.git/worktrees/wt\nextra line\n", posix), "/work/repo/.git/worktrees/wt");
+  assert.equal(gitDirFromPointer("/work/wt", "not a pointer", posix), undefined);
+  assert.equal(gitDirFromPointer("/work/wt", "gitdir:   \n", posix), undefined);
+});
+
+test("a git file that is a link is not read even where the open cannot refuse links (Windows has no O_NOFOLLOW), and a non-regular file is never read (card H13f, Windows)", async (t) => {
+  const d = mkdtempSync(join(tmpdir(), "nn-defsrc-read-"));
+  try {
+    writeFileSync(join(d, "ref"), `${"a".repeat(40)}\n`);
+    mkdirSync(join(d, "dir"));
+    assert.equal(await readSmall(join(d, "ref"), 100, fsConstants.O_RDONLY), `${"a".repeat(40)}\n`);
+    assert.equal(await readSmall(join(d, "ref"), 10, fsConstants.O_RDONLY), undefined, "larger than allowed");
+    assert.equal(await readSmall(join(d, "dir"), 100, fsConstants.O_RDONLY), undefined, "a directory");
+    await assert.rejects(() => readSmall(join(d, "missing"), 100, fsConstants.O_RDONLY), (e: NodeJS.ErrnoException) => e.code === "ENOENT");
+    if (!linked(join(d, "ref"), join(d, "link"), t)) return;
+    assert.equal(await readSmall(join(d, "link"), 100, fsConstants.O_RDONLY), undefined, "a link to a regular file, opened without O_NOFOLLOW");
+    assert.equal(await readSmall(join(d, "link"), 100), undefined, "and with the platform's flags");
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a folder snapshot lists the files under it by their path inside it, skips .git and node_modules, does not follow symbolic links, and a missing path is empty (card H13f)", async (t) => {
   const d = mkdtempSync(join(tmpdir(), "nn-defsrc-"));
   try {
     mkdirSync(join(d, "w", "sub"), { recursive: true });
@@ -50,7 +96,7 @@ test("a folder snapshot lists the files under it by their path inside it, skips 
     writeFileSync(join(d, "w", ".git", "HEAD"), "ref");
     writeFileSync(join(d, "w", "node_modules", "x.js"), "x");
     writeFileSync(join(d, "outside", "secret.txt"), "s");
-    symlinkSync(join(d, "outside"), join(d, "w", "link"));
+    linked(join(d, "outside"), join(d, "w", "link"), t);
     const first = await fileSnapshot(join(d, "w"));
     assert.deepEqual(first.map((e) => e.name), ["a.txt", "sub/b.txt"]);
     assert.match(first[0]!.version, /^3:\d+$/);
@@ -95,7 +141,6 @@ test("a repository's branches and tags are read from its files for a working cop
 });
 
 test("a hostile repository cannot hold or flood the source: a pipe, a link or an oversized file among git's own files is refused or left out, never read (card H13f review)", async (t) => {
-  if (process.platform === "win32") { t.skip("named pipes made with mkfifo are POSIX"); return; }
   const d = mkdtempSync(join(tmpdir(), "nn-defsrc-hostile-"));
   try {
     const repo = join(d, "repo"); const git = join(repo, ".git");
@@ -105,6 +150,11 @@ test("a hostile repository cannot hold or flood the source: a pipe, a link or an
     // A loose ref far larger than a commit name is left out (it is not read whole).
     writeFileSync(join(git, "refs", "heads", "huge"), `${"b".repeat(40)}\n${" ".repeat(100_000)}`);
     assert.deepEqual((await repositoryRefs(repo)).map((e) => e.name), ["refs/heads/main"]);
+    // packed-refs as a directory is refused (everywhere).
+    mkdirSync(join(git, "packed-refs"));
+    await assert.rejects(() => repositoryRefs(repo), /packed-refs is not a regular file/);
+    rmSync(join(git, "packed-refs"), { recursive: true });
+    if (process.platform === "win32") { t.diagnostic("named pipes made with mkfifo and /dev/zero are POSIX: the pipe and device checks are left out"); return; }
     // packed-refs as a pipe: reading it would wait for ever and hold every event source; it is refused at once.
     execFileSync("mkfifo", [join(git, "packed-refs")]);
     const outcome = await Promise.race([repositoryRefs(repo).then(() => "returned", (e: Error) => `refused: ${e.message}`), new Promise<string>((r) => setTimeout(() => r("hung"), 5000).unref())]);

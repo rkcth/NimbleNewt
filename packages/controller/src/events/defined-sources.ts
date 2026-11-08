@@ -3,7 +3,8 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
-import { basename, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import * as nodePath from "node:path";
+import { basename, join, resolve } from "node:path";
 import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import { serviceFailureSource, snapshotSource, timerSource, type EventSource, type SnapshotEntry, type SourceType } from "./adapters.js";
@@ -53,7 +54,15 @@ export const streamOfDefinition = (d: Pick<SourceDefinition, "projectId" | "task
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /** The flat fields of a definition as the owner gives them (the API and the chat), checked; `now` refuses a one-off time already past. Fields that do not belong to the type are refused, not ignored. */
-export function checkDefinition(raw: Readonly<Record<string, unknown>>, now: string, by: string): SourceDefinition {
+/** The path functions of a platform (node:path, or path.posix / path.win32 in tests, so both syntaxes are checked on every machine). */
+export type PathApi = Pick<typeof nodePath.posix, "isAbsolute" | "relative" | "resolve" | "sep">;
+
+/**
+ * `path` is the controller machine's path module (default node:path). A watched path must be absolute for the machine that will look at it (on Windows `C:\data`, `\\server\share` or a
+ * root-relative `/data`; elsewhere `/data`), so a path the controller could never open is refused when it is defined instead of being watched as missing for ever. It is kept exactly as the
+ * owner wrote it (not re-resolved), so the setting, the chat's own-words check and what is shown back all read the owner's own text on every platform.
+ */
+export function checkDefinition(raw: Readonly<Record<string, unknown>>, now: string, by: string, path: PathApi = nodePath): SourceDefinition {
   const id = raw["sourceId"];
   if (typeof id !== "string" || !SOURCE_ID.test(id)) return invalid("sourceId", "must be a source ID: letters, digits, dot, dash, colon or underscore, at most 64");
   const type = raw["type"];
@@ -81,9 +90,9 @@ export function checkDefinition(raw: Readonly<Record<string, unknown>>, now: str
       return { ...base, at: new Date(Date.parse(at)).toISOString() };
     }
     case "file": case "repository": {
-      const path = raw["path"];
-      if (typeof path !== "string" || path.length === 0 || path.length > DEFINED_SOURCE_LIMITS.path || path.includes("\0") || !isAbsolute(path)) return invalid("path", `must be an absolute path of at most ${DEFINED_SOURCE_LIMITS.path} characters`);
-      return { ...base, path: normalize(path), ...check };
+      const where = raw["path"];
+      if (typeof where !== "string" || where.length === 0 || where.length > DEFINED_SOURCE_LIMITS.path || where.includes("\0") || !path.isAbsolute(where)) return invalid("path", `must be an absolute path on the controller's machine, of at most ${DEFINED_SOURCE_LIMITS.path} characters`);
+      return { ...base, path: where, ...check };
     }
     case "service": {
       const url = raw["url"];
@@ -159,6 +168,22 @@ function timerDue(d: SourceDefinition, stream: string, nowMs: number): { id: str
   return [{ id: d.id, dueAt: new Date(start + slots * every).toISOString(), stream, text: `timer ${d.id} came due (every ${d.everyMinutes} min)` }];
 }
 
+/** The name of a file inside a watched folder, with `/` between its parts on every platform (event text and saved state do not depend on where the controller runs). */
+export function insideName(root: string, full: string, path: PathApi = nodePath): string {
+  return path.relative(root, full).split(path.sep).join("/");
+}
+
+/**
+ * The git directory a `.git` file names (`gitdir: <path>`, as git writes it for a linked worktree or a submodule), resolved against the working copy. On Windows git writes a drive letter with
+ * forward slashes (`C:/...`) or a relative path, and either separator is accepted there. Only the first line counts (a CRLF ending and a byte-order mark are dropped). Undefined when it names none.
+ */
+export function gitDirFromPointer(workingCopy: string, content: string, path: PathApi = nodePath): string | undefined {
+  const line = (content.split(/\r?\n/)[0] ?? "").trim(); // trim also drops a byte-order mark
+  if (!line.startsWith("gitdir:")) return undefined;
+  const named = line.slice("gitdir:".length).trim();
+  return named === "" ? undefined : path.resolve(workingCopy, named);
+}
+
 /** A file is one entry (its name); a folder is every file under it, named by its path inside the folder. The version is the size and the modification time in nanoseconds. A path that does not exist is empty (so its files read as removed). */
 export async function fileSnapshot(path: string): Promise<SnapshotEntry[]> {
   let top;
@@ -177,7 +202,7 @@ export async function fileSnapshot(path: string): Promise<SnapshotEntry[]> {
       if (s.isDirectory()) { if (!SKIPPED_DIRS.has(name)) await walk(full); continue; }
       if (!s.isFile()) continue; // symbolic links and special files are not followed
       if (out.length >= DEFINED_SOURCE_LIMITS.entries) throw new Error(`more than ${DEFINED_SOURCE_LIMITS.entries} files under the watched folder; watch a smaller one`);
-      out.push({ name: relative(path, full), version: version(s) });
+      out.push({ name: insideName(path, full), version: version(s) });
     }
   };
   await walk(path);
@@ -191,9 +216,14 @@ const GIT_FILE_BYTES = { ref: 1024, pointer: 4096, packed: 8 * 1024 * 1024 } as 
  * A small regular file of the repository, or undefined when it is not one: a symbolic link is not followed, a pipe or a device is not read (a pipe would wait for ever and a device never end,
  * holding the event-source loop), and nothing larger than `max` bytes is read into memory.
  */
-async function readSmall(path: string, max: number): Promise<string | undefined> {
+const OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+/** `flags` is the open mode (tests pass plain read-only, which is what Windows has, to check that the look before the open alone keeps a link from being followed). */
+export async function readSmall(path: string, max: number, flags: number = OPEN_FLAGS): Promise<string | undefined> {
+  // Looked at before it is opened, on every platform: Windows has no O_NOFOLLOW or O_NONBLOCK (both read as 0 below), so a link would otherwise be followed by the open. On POSIX the flags
+  // also close the gap between this look and the open; after the open the handle is checked again. A missing file is ENOENT, as from the open.
+  if (!(await lstat(path)).isFile()) return undefined;
   let handle;
-  try { handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)); } catch (error) {
+  try { handle = await open(path, flags); } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ELOOP" || code === "EMLINK" || code === "ENXIO" || code === "EISDIR") return undefined;
     throw error;
@@ -215,16 +245,17 @@ export async function repositoryRefs(path: string): Promise<SnapshotEntry[]> {
   const kind = await exists(dotGit);
   if (kind === "dir") gitDir = dotGit;
   else if (kind === "file") {
-    const line = (await readSmall(dotGit, GIT_FILE_BYTES.pointer))?.trim();
-    if (line === undefined || !line.startsWith("gitdir:")) throw new Error(`${dotGit} does not name a git directory`);
-    gitDir = resolve(path, line.slice("gitdir:".length).trim());
+    const content = await readSmall(dotGit, GIT_FILE_BYTES.pointer);
+    const named = content === undefined ? undefined : gitDirFromPointer(path, content);
+    if (named === undefined) throw new Error(`${dotGit} does not name a git directory`);
+    gitDir = named;
   } else if (await exists(join(path, "HEAD")) === "file" && await exists(join(path, "refs")) === "dir") gitDir = path;
   else throw new Error(`${path} is not a git repository`);
   // A linked worktree keeps its branches in the common directory.
   let common = gitDir;
   if (await exists(join(gitDir, "commondir")) === "file") {
-    const named = (await readSmall(join(gitDir, "commondir"), GIT_FILE_BYTES.pointer))?.trim();
-    if (named === undefined || named === "") throw new Error(`${join(gitDir, "commondir")} does not name a git directory`);
+    const named = ((await readSmall(join(gitDir, "commondir"), GIT_FILE_BYTES.pointer))?.split(/\r?\n/)[0] ?? "").trim();
+    if (named === "") throw new Error(`${join(gitDir, "commondir")} does not name a git directory`);
     common = resolve(gitDir, named);
   }
   const refs = new Map<string, string>();
