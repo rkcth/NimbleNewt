@@ -523,7 +523,11 @@ export class DispatcherService {
         await this.settle(by, id, { cancel: true }).catch(() => undefined);
         const checkpoint = await this.#checkpoint(id, "the controller shut down").catch(() => undefined);
         const current = (await this.#load(id))!;
-        await this.#live.get(id)?.handle.stop().catch(() => undefined);
+        // The turn is let go before its worker is stopped (as a move does): a turn that ends as soon as its process is closed (the local worker's does) is not this attempt's turn any more, so its
+        // `cancelled` or `failed` does not end the attempt that is about to wait for its resume (card C07l).
+        const live = this.#live.get(id);
+        this.#live.delete(id);
+        await live?.handle.stop().catch(() => undefined);
         // Its run on the route is over (card R04c): nothing is in flight on that route any more, and the next controller begins a new call when it starts the attempt again.
         await this.#endCall(id, "abandoned", "the controller shut down");
         this.#path.forget(id, current.body.parked);
