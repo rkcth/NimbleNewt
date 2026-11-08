@@ -1593,6 +1593,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H13f — Finish event watching: other real sources, choosing sources in settings, chat
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `49d2073c`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner defines timer, file or folder, git repository and service-health sources in settings (API and chat), polled from the next tick without a restart; a built-in source reports model outages from the router's health record to every active project; a chat view lists what is watched. Through startController, events from each real source wake the watched task's owner and its active attempt, and nobody else. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H13e, H12k.
 - **Deliverable:** Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command; a real model-availability source.
 - **Acceptance and verification:** Events from a real source wake the right agent.

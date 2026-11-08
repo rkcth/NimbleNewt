@@ -4453,12 +4453,21 @@
       ],
       "deliverable": "Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command; a real model-availability source",
       "acceptance_and_verification": "Events from a real source wake the right agent",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "49d2073c"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The owner defines timer, file or folder, git repository and service-health sources in settings (API and chat), polled from the next tick without a restart; a built-in source reports model outages from the router's health record to every active project; a chat view lists what is watched. Through startController, events from each real source wake the watched task's owner and its active attempt, and nobody else. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "R01",
