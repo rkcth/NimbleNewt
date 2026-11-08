@@ -29,6 +29,10 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
+import { CAP_NAMES } from "../admission/policy.js";
+import type { CapacityLimitsService } from "../admission/caps.js";
+import type { AdmissionService } from "../admission/service.js";
+import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
@@ -231,6 +235,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
+  capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
@@ -276,6 +281,7 @@ export type StatusRequest =
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "capacity" }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
@@ -310,6 +316,15 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** Which event sources are watched (card H13f). Absent: the view is not offered. */
   readonly eventSources?: { get(by: Principal): Promise<{ readonly revision: number; readonly sources: readonly { readonly id: string; readonly type: string; readonly enabled: boolean; readonly critical: boolean; readonly defined: boolean; readonly watches?: string }[] }> };
+  /**
+   * The owner's capacity settings (cards H10, H10b): the optional caps, the host and global quotas and the limits on spawning child tasks. Absent: the view is not offered.
+   * A group whose service is not here is one line and the other groups are still shown, so the whole view does not disappear with one service.
+   */
+  readonly capacity?: {
+    readonly limits?: Pick<CapacityLimitsService, "get">;
+    readonly quotas?: Pick<AdmissionService, "quotas">;
+    readonly swarm?: Pick<SwarmLimitsService, "get">;
+  };
   /** Whether reconnected remote workers take their attempts up again by themselves, and the attempts that wait for the owner's decision (card H09b). Absent: the view is not offered. */
   readonly reconnect?: {
     get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: string | null; readonly profile: string; readonly effective: string; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }>;
@@ -374,6 +389,24 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 const cite = (kind: string, id: string, revision?: number): Cite => ({ kind, id, ...(revision === undefined ? {} : { revision }) });
 const line = (text: string, ...cites: Cite[]): Line => ({ text, cites });
 const FRESH_WORDS: Readonly<Record<Freshness, string>> = { fresh: "recent", stale: "old", unknown: "not heard from lately" };
+/** How many declared hosts the capacity view lists before it counts the rest (the owner's own setting can name up to 200). */
+const CAPACITY_HOSTS = 10;
+/** The most lines the capacity view writes; a longer answer says how many figures it left out (the chat shows thirty lines of an answer). */
+const CAPACITY_LINES = 30;
+/** What each capacity figure lets the controller do, in the owner's words (cards H10, H10b). A name the code does not know is shown by its own name. */
+const CAPACITY_WORDS: Readonly<Record<string, string>> = {
+  perProject: "productive attempts running at once for one project", perAgent: "productive attempts running at once for one agent", fanIn: "running child attempts that report to one supervising agent",
+  productive: "productive attempts running at once, in total", perHost: "productive attempts running at once on one host", control: "places only inquiries and reviews may use", queue: "requests that may wait",
+  depth: "levels of child tasks below a task that was not spawned", liveChildren: "children of one parent that are not finished at once", totalChildren: "children of one parent in all (the fan-in)",
+};
+const capacityWord = (name: string): string => CAPACITY_WORDS[name] ?? name;
+/** Why one group of the capacity view cannot be shown, in one clause; anything but a damaged, refused or missing record is a real failure and is thrown. */
+function capacityProblem(error: unknown, repair: string): string {
+  if (!(error instanceof DomainError)) throw error;
+  if (error.code === "integrity") return `the record you stored is damaged and applies to nothing: set it again (${repair}) to repair it`;
+  if (error.code === "forbidden" || error.code === "unavailable") return "it cannot be read here";
+  throw error;
+}
 const STATE_WORDS: Readonly<Record<TaskState, string>> = { proposed: "proposed and not yet ready", ready: "ready to be worked on", in_progress: "marked in progress", blocked: "blocked", done: "marked done", cancelled: "cancelled" };
 
 interface BlockerIndex { readonly byTask: Map<string, View<BlockerBody>[]>; readonly unmapped: View<BlockerBody>[]; readonly partial: boolean }
@@ -465,6 +498,7 @@ export class StatusService {
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
+      case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "jobs": { onlyKnown(request, ["kind", "limit"]); return this.jobLines(by, request.limit); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
@@ -611,6 +645,75 @@ export class StatusService {
       ...shownSources.map((s) => line(`${shown(s.id, 64)} (${shown(s.type, 30)}${s.defined ? ", defined by you" : ", built in or from the host"}${s.critical ? ", cannot be turned off" : ""}): ${s.enabled ? "on" : "off"}${s.watches === undefined ? "" : `; ${shown(s.watches, 250)}`}.`, c)),
       ...(got.sources.length > shownSources.length ? [line(`${got.sources.length - shownSources.length} more are not shown.`, c)] : []),
     ] };
+  }
+
+  /**
+   * The capacity settings the owner can change in chat, read back from the same services the state API reads (cards H10, H10b): the optional caps, the host and global
+   * quotas and the limits on spawning child tasks. Every figure says whether it is the owner's own or the default, and an off one says so. A group whose service is not
+   * here, or whose stored record is damaged, is one line and the rest of the answer stands; only a real storage failure is thrown. Owner only.
+   */
+  async capacityLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const settings = this.#deps.capacity;
+    if (settings === undefined || by.kind !== "owner") return undefined;
+    const lines: Line[] = [];
+    // ---- the optional caps: off (nothing capped) unless the owner turned one on.
+    const capsAbsent = cite("capacity-limits-settings", "main");
+    if (settings.limits === undefined) lines.push(line("Capacity caps: this controller does not offer them.", capsAbsent));
+    else {
+      let caps: Awaited<ReturnType<NonNullable<typeof settings.limits>["get"]>> | undefined;
+      try { caps = await settings.limits.get(by); } catch (error) { lines.push(line(`Capacity caps: ${capacityProblem(error, "capacity.limits.change")}.`, capsAbsent)); }
+      if (caps !== undefined) {
+        const c = cite("capacity-limits-settings", "main", caps.revision === 0 ? undefined : caps.revision);
+        lines.push(line(`Capacity caps (your setting is at revision ${caps.revision}); all are off unless you turned one on:`, c));
+        for (const name of CAP_NAMES) {
+          const e = caps.limits[name];
+          const words = e === undefined ? "off, nothing is capped (the default)"
+            : e.enabled === true ? `${e.value} at once (you set it)`
+              : `off, nothing is capped (you set it)${e.value === undefined ? "" : `, the kept figure ${e.value} turns it back on`}`;
+          lines.push(line(`${name} (${capacityWord(name)}): ${words}`, c));
+        }
+      }
+    }
+    // ---- the host and global quotas: figures the owner set over the installation's defaults, and what holds them now.
+    const quotaAbsent = cite("admission-state", "admission");
+    if (settings.quotas === undefined) lines.push(line("Host and global quotas: this controller does not offer them.", quotaAbsent));
+    else {
+      let q: Awaited<ReturnType<NonNullable<typeof settings.quotas>["quotas"]>> | undefined;
+      try { q = await settings.quotas.quotas(by); } catch (error) { lines.push(line(`Host and global quotas: ${capacityProblem(error, "capacity.quotas.change")}.`, quotaAbsent)); }
+      if (q !== undefined) {
+        const c = cite("admission-state", "admission", q.revision === 0 ? undefined : q.revision);
+        const live: Readonly<Record<string, string>> = { productive: `; ${q.running.productive} running now`, perHost: "", control: `; ${q.running.control} of them in use now`, queue: `; ${q.waiting} waiting now` };
+        lines.push(line(`Host and global quotas (the setting is at revision ${q.revision}); the ones marked "you set it" are yours, the others are the installation's defaults:`, c));
+        for (const name of Object.keys(q.limits)) {
+          const value = (q.limits as Record<string, number>)[name]!;
+          const same = (q.defaults as Record<string, number>)[name] === value;
+          lines.push(line(`${name} (${capacityWord(name)}): ${value}${same ? " (the default)" : " (you set it)"}${live[name] ?? ""}`, c));
+        }
+        const hosts = Object.entries(q.hosts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+        if (hosts.length === 0) lines.push(line("No host has declared CPUs or memory, so work that needs a host is refused until you declare them (capacity.quotas.change).", c));
+        for (const [id, cap] of hosts.slice(0, CAPACITY_HOSTS)) lines.push(line(`Host ${quoted(id, 80)}: ${cap.cpus} CPU(s), ${cap.memoryMb} MB declared (you declared it); ${q.running.perHost[id] ?? 0} productive attempt(s) running on it.`, c));
+        if (hosts.length > CAPACITY_HOSTS) lines.push(line(`${hosts.length - CAPACITY_HOSTS} more host(s) are declared than are shown.`, c));
+      }
+    }
+    // ---- the owner's limits on spawning child tasks.
+    const swarmAbsent = cite("swarm-limits-settings", "main");
+    if (settings.swarm === undefined) lines.push(line("Limits on spawning child tasks: this controller does not offer them.", swarmAbsent));
+    else {
+      let s: Awaited<ReturnType<NonNullable<typeof settings.swarm>["get"]>> | undefined;
+      try { s = await settings.swarm.get(by); } catch (error) { lines.push(line(`Limits on spawning child tasks: ${capacityProblem(error, "swarm.limits.change")}.`, swarmAbsent)); }
+      if (s !== undefined) {
+        const c = cite("swarm-limits-settings", "main", s.revision === 0 ? undefined : s.revision);
+        lines.push(line(`Limits on spawning child tasks (your setting is at revision ${s.revision}):`, c));
+        if (s.damaged.length > 0) lines.push(line(`The stored swarm limits are damaged at ${s.damaged.map((n) => shown(String(n), 30)).join(", ")}: no figure of yours applies until you set them again (swarm.limits.change).`, c));
+        for (const name of Object.keys(SWARM_LIMIT_BOUNDS) as (keyof typeof SWARM_LIMIT_BOUNDS)[]) {
+          const e = s.limits[name];
+          lines.push(line(`${name} (${capacityWord(name)}): ${e === null ? "off, no total (you set it)" : e === undefined ? `${s.defaults[name]} (the default)` : `${e} (you set it)`}`, c));
+        }
+      }
+    }
+    const at = this.#runner.now();
+    if (lines.length > CAPACITY_LINES) return { observedAt: at, lines: [...lines.slice(0, CAPACITY_LINES - 1), line(`${lines.length - (CAPACITY_LINES - 1)} more figure(s) are not shown; the state API reads each group in full.`, capsAbsent)] };
+    return { observedAt: at, lines };
   }
 
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
