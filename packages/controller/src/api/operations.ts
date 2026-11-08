@@ -20,6 +20,7 @@ import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { View } from "../domain/model.js";
+import type { JobBody, JobService } from "../jobs/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import { describeRun, type RetentionService, type RetentionSettingsService } from "../retention/index.js";
 import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
@@ -168,6 +169,8 @@ export interface Context {
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
+  /** Durable job records and their control (cards T07, T07b). */
+  readonly jobs?: Pick<JobService, "get" | "list" | "live" | "unresolved" | "reconciliation" | "requestCancel" | "decide" | "reconcile">;
   readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline">;
   /** Absent when the controller runs without deliverable reads (card U13). */
@@ -283,6 +286,16 @@ const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> =>
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavailable("working notes");
 const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? unavailable("pause");
+const jobsOf = (c: Context): NonNullable<Context["jobs"]> => c.jobs ?? unavailable("jobs");
+/** A job the caller may read, and, for a task credential, only one of its own task (card T07b: a job started under one task's grants is never read or controlled from another task). */
+const jobOf = async (c: Context, jobId: unknown): Promise<View<JobBody>> => {
+  if (typeof jobId !== "string") return invalid("args.jobId", "is required and must be a job ID");
+  const job = await jobsOf(c).get(c.principal, jobId);
+  if (job === undefined || (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== job.taskId)) throw new DomainError("not_found", "no such job");
+  return job;
+};
+/** What a job record says, as the API shows it (the output's end is the redacted text the record keeps). */
+const jobItem = (job: View<JobBody>): JsonObject => asJson(job);
 const modelBudgetOf = (c: Context): NonNullable<Context["modelBudget"]> => c.modelBudget ?? unavailable("model budgets");
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
 const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => {
@@ -693,6 +706,22 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["scope"]); return asJson(await stopsOf(c).readiness(c.principal, a["scope"] as never) as never); } },
   { name: "lifecycle.sweep", kind: "command", summary: "Carries every unfinished suspension or stop on (owner only; nothing runs it by itself after a restart yet).", args: {}, result: "`{ advanced, failed }`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps lifecycle requests"); return asJson(await stopsOf(c).sweep(c.principal)); } },
+  { name: "job.get", kind: "query", summary: "One job (cards T07, T07b): a long-running operation tracked on its own, such as a tool an agent started through the bridge. Its state (admitted, dispatched, running, completed, failed, cancellation_requested, cancelled, outcome_unknown), kind, resumability, the end of its output (redacted), exit, orphans the stop could not end, its stop request, history and reconciliations. A task credential reads only its own task's jobs.", args: { jobId: "the job (job-...)" }, result: "`{ item }` or not found.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["jobId"]); return asJson({ item: jobItem(await jobOf(c, a["jobId"])) }); } },
+  { name: "job.list", kind: "query", summary: "The jobs of one task, in ID order, a page at a time.", args: { taskId: "the task", "after?": "the `next` of the previous page", "limit?": "1 to 100" }, result: "`{ items, next? }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["taskId", "after", "limit"]); const taskId = str(a, "taskId"); ownTaskOnly(c, taskId, "read another task's jobs"); const after = optStr(a, "after"); const r = await jobsOf(c).list(c.principal, taskId, { ...(after === undefined ? {} : { afterId: after }), limit: limitOf(a) }); return page({ items: r.jobs.map(jobItem), ...(r.next === undefined ? {} : { next: r.next }) }); } },
+  { name: "job.live", kind: "query", summary: "Every job that has not ended (admitted, dispatched, running, being stopped or outcome-unknown) that the caller may read, tracked exceptions left out: what a restart decides and what the owner or a supervisor may stop. Not for a task credential.", args: { "after?": "the `next` of the previous page", "limit?": "1 to 100" }, result: "`{ items, next? }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["after", "limit"]); notFromTask(c, "list the jobs of every task"); const after = optStr(a, "after"); const r = await jobsOf(c).live(c.principal, { ...(after === undefined ? {} : { afterId: after }), limit: limitOf(a) }); return page({ items: r.jobs.map(jobItem), ...(r.next === undefined ? {} : { next: r.next }) }); } },
+  { name: "job.unresolved", kind: "query", summary: "The outcome-unknown jobs of a task: what a dependent action must wait for until each is reconciled with evidence.", args: { taskId: "the task" }, result: "`{ items }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["taskId"]); const taskId = str(a, "taskId"); ownTaskOnly(c, taskId, "read another task's jobs"); return asJson({ items: (await jobsOf(c).unresolved(c.principal, taskId)).map(jobItem) }); } },
+  { name: "job.reconciliations", kind: "query", summary: "The reconciliation records that settled an outcome-unknown job: from which state, to which, on what evidence, by whom and when.", args: { jobId: "the job" }, result: "`{ items }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["jobId"]); const job = await jobOf(c, a["jobId"]); return asJson({ items: await jobsOf(c).reconciliation(c.principal, job.id) }); } },
+  { name: "job.cancel", kind: "command", summary: "Stops a job (Stop), or with `force` asks at once or escalates a stop that was not obeyed (Force Stop, a separate recorded step). The kind decides the operation (a model request is cancelled, a tool is stopped, a remote job or MCP operation is stopped remotely); a job the controller runs ends with its whole process tree, and what could not be ended is recorded on the job as orphans. Needs job.control; a task credential stops only its own task's jobs, with job.write there.", args: { jobId: "the job", reason: "why, in words", "force?": "true for Force Stop" }, result: "`{ id, operation, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["jobId", "reason", "force"]); const job = await jobOf(c, a["jobId"]); return asJson(await jobsOf(c).requestCancel(c.principal, { commandId: need(id), jobId: job.id, reason: str(a, "reason"), ...(a["force"] === undefined ? {} : { force: a["force"] as boolean }) })); } },
+  { name: "job.decide", kind: "command", summary: "The decision on a live job after a restart (card T07): `complete` it from evidence (needs `exit`), `cancel` it (the stop is then confirmed by its host), `restart` it from its tool checkpoint (only a tool that left one), or keep it as a tracked `exception` under a named `tracker`. An outcome-unknown job is settled by job.reconcile instead. The owner or a supervisor with job.control.", args: { jobId: "the job", decision: "`complete`, `cancel`, `restart` or `exception`", reason: "why, in words", "exit?": "`{ code?, signal?, reason? }` for complete", "tracker?": "who tracks an exception" }, result: "`{ id, state, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["jobId", "decision", "reason", "exit", "tracker"]); const job = await jobOf(c, a["jobId"]); return asJson(await jobsOf(c).decide(c.principal, { commandId: need(id), jobId: job.id, decision: a["decision"] as never, reason: str(a, "reason"), ...(a["exit"] === undefined ? {} : { exit: a["exit"] as never }), ...(a["tracker"] === undefined ? {} : { tracker: a["tracker"] as string }) })); } },
+  { name: "job.reconcile", kind: "command", summary: "Settles an outcome-unknown job with the evidence found, in a record of its own: it becomes completed, failed or cancelled. Nothing is invented; the evidence is required. The owner or a supervisor with job.control.", args: { jobId: "the job", to: "`completed`, `failed` or `cancelled`", evidence: "what shows how it ended", "exit?": "`{ code?, signal?, reason? }`" }, result: "`{ id, reconciliationId, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["jobId", "to", "evidence", "exit"]); const job = await jobOf(c, a["jobId"]); return asJson(await jobsOf(c).reconcile(c.principal, { commandId: need(id), jobId: job.id, to: a["to"] as never, evidence: str(a, "evidence"), ...(a["exit"] === undefined ? {} : { exit: a["exit"] as never }) })); } },
   { name: "routing.disable", kind: "command", summary: "The owner stops new work from reaching a model, endpoint, account, provider or local service. Running work is left alone; only the owner lifts it (routing.reenable).", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", commandId: "required" },
     result: "`{ revision, replayed }`.",
     run: async (c, a, id) => { only(a, ["level", "name", "reason"]); return asJson(await cutoverOf(c).disable(c.principal, { commandId: need(id), ...a } as never)); } },

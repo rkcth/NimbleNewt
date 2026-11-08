@@ -42,7 +42,7 @@ import { ReleaseActivationService, ReleaseService, type ActivationOptions } from
 import { SwarmLimitsService, SwarmService } from "../swarm/index.js";
 import { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
-import { GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
+import { DISPATCHER_PRINCIPAL, GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
 import { SqliteStorage, probeSqliteLibrary } from "../storage/sqlite/index.js";
 import { PostgresStorage, probePostgresLibrary } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -67,7 +67,8 @@ import { IntegrationPolicyService, PolicyService, ProtectedBranchService } from 
 import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
-import { JobService } from "../jobs/index.js";
+import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
+import { McpService } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
 import { ContinuationService, ResumeCheckService, ResumeSettingsService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
@@ -178,6 +179,11 @@ export interface StartOptions {
    */
   readonly tools?: Pick<ToolExecutionDeps, "runner" | "isLocalHost" | "facts" | "revocationPolicy" | "pauseTask" | "notice">;
   /**
+   * Card T07b: long-running jobs agents start through the tool bridge. `launcher` starts a job's process in the sandbox (the worker package's `jobLauncher` over the A03 launcher); `limits` bound how many run at once, how much output
+   * they write and how long a stop waits. Off unless given (and it needs `tools`): without it the bridge's job operations answer as unavailable. Whatever is given, every controller with a dispatcher decides the live jobs at start.
+   */
+  readonly jobs?: { readonly launcher: JobLauncher; readonly limits?: LocalJobRunsDeps["limits"] };
+  /**
    * Where the artifact files are kept (card U05b). Given, the status answers check each delivered artifact against its files and say whether they match, are damaged, or were not checked; absent: they are shown as not checked and never as verified.
    * This controller only reads through it (it publishes nothing here), but opening creates the folder if it is missing, so a mistyped path shows every artifact as not matching until it is corrected. Not defaulted from the remote hosts' blob folder: name it explicitly.
    */
@@ -256,6 +262,10 @@ export interface Controller {
   readonly dispatch?: DispatchHandle;
   /** The tool bridge's execution service, when `tools` was given and the dispatcher was built. It is the only one: it subscribes to revocations of `services.catalog`. */
   readonly tools?: ToolExecutionService;
+  /** The jobs this machine runs for agents (card T07b), when `jobs` and `tools` were given and the dispatcher was built. */
+  readonly jobRuns?: LocalJobRuns;
+  /** What the start-up rule decided for the jobs that were live when this controller started (card T07b), when the dispatcher was built. */
+  readonly jobsAtStart?: { readonly decided: number; readonly failed: number };
   /** The owner chat and the coordinator, when `chat` was given. */
   readonly chat?: ChatService;
   readonly coordinator?: CoordinatorService;
@@ -319,6 +329,7 @@ export async function startController(options: StartOptions): Promise<Controller
 async function startControllerWith(options: StartOptions, takeLock: (() => Promise<DataLockKeeper | undefined>) | undefined): Promise<Controller> {
   if (options.meetingWake !== undefined) checkMeetingWakeTimeout(options.meetingWake.timeoutMs);
   if (options.tools !== undefined && options.dispatch === undefined) throw new Error("options.tools needs options.dispatch: the tool bridge runs over the dispatcher, so without it the tools would be ignored");
+  if (options.jobs !== undefined && options.tools === undefined) throw new Error("options.jobs needs options.tools: agents start jobs through the tool bridge, so without it the launcher would never be used");
   const print = options.print ?? ((line: string) => { process.stderr.write(`${line}\n`); });
   const override = overrideRequested(options.argv, options.env);
   const facts = options.facts ?? detectEnvironment();
@@ -399,9 +410,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
 
   let dispatch: DispatchHandle | undefined;
   let toolsLive: ToolExecutionService | undefined;
+  let jobRuns: LocalJobRuns | undefined;
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
+    // Jobs admitted before this moment were live under an earlier controller: the start-up rule decides them (card T07b).
+    const startedAt = new Date().toISOString();
     // The retention policy (card K06): the owner's chat settings over the installation defaults. Cached for a few seconds for the write guard; a change refreshes it and sets the reserve again.
     let retentionCache: { at: number; values: RetentionValues } | undefined;
     const retentionSettings: RetentionSettingsService = RetentionSettingsService.withEpoch(storage, epoch, {
@@ -475,7 +489,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
-    const jobs = JobService.withEpoch(storage, epoch, { pauses }, { background: (principal, request) => pauses.recordFinishedJob(principal, request), longRunningGate: async (principal, taskId) => { const meeting = principal.kind === "agent" ? await dispatch?.attendance.meetingOfTask(taskId, principal.id) : undefined; if (meeting !== undefined) return `${principal.id} is in meeting ${meeting.occurrenceId} (until ${meeting.endsAt}); long-running work is not started during a meeting`; if (principal.kind !== "agent" || !/^agent:agt-[a-z2-7]{20}$/.test(principal.id)) return undefined; /* Only an agent made by the controller (agt-...) can be seated in a meeting. */ /* Without a dispatcher there is no attendance service, so no meeting room can seat an agent and nothing can be near one. */ if (dispatch === undefined) return undefined; let near: Awaited<ReturnType<typeof dispatch.attendance.admission>>; try { near = await dispatch.attendance.admission(dispatch.principal, { agent: principal.id, expectedMinutes: 1 }); } catch { return `${principal.id}: whether a meeting is near could not be checked, so long-running work is not started now; try again`; } return near.meeting === undefined ? undefined : `${principal.id} attends meeting ${near.meeting.occurrenceId} (${near.meeting.startsAt} to ${near.meeting.endsAt}); long-running work is not started on any task from the notice before a meeting until it ends`; }, onUsage: (u) => charged({ commandId: u.commandId, activity: "background-job", taskId: u.taskId, computeMs: u.computeMs }) });
+    // Card T07b: the dispatcher's principal is the job host (it runs agents' jobs here and decides the live ones at start); a stop asked for any job reaches the process that runs it here; an MCP operation is admitted only on an approved server.
+    const mcpForJobs = McpService.withEpoch(storage, epoch);
+    const jobs = JobService.withEpoch(storage, epoch, { pauses }, { host: DISPATCHER_PRINCIPAL, connections: { usable: (serverId) => mcpForJobs.usable(serverId) }, onCancel: (jobId, force) => { void jobRuns?.stop(jobId, force).catch((error: unknown) => options.onInternalError?.(error)); }, background: (principal, request) => pauses.recordFinishedJob(principal, request), longRunningGate: async (principal, taskId) => { const meeting = principal.kind === "agent" ? await dispatch?.attendance.meetingOfTask(taskId, principal.id) : undefined; if (meeting !== undefined) return `${principal.id} is in meeting ${meeting.occurrenceId} (until ${meeting.endsAt}); long-running work is not started during a meeting`; if (principal.kind !== "agent" || !/^agent:agt-[a-z2-7]{20}$/.test(principal.id)) return undefined; /* Only an agent made by the controller (agt-...) can be seated in a meeting. */ /* Without a dispatcher there is no attendance service, so no meeting room can seat an agent and nothing can be near one. */ if (dispatch === undefined) return undefined; let near: Awaited<ReturnType<typeof dispatch.attendance.admission>>; try { near = await dispatch.attendance.admission(dispatch.principal, { agent: principal.id, expectedMinutes: 1 }); } catch { return `${principal.id}: whether a meeting is near could not be checked, so long-running work is not started now; try again`; } return near.meeting === undefined ? undefined : `${principal.id} attends meeting ${near.meeting.occurrenceId} (${near.meeting.startsAt} to ${near.meeting.endsAt}); long-running work is not started on any task from the notice before a meeting until it ends`; }, onUsage: (u) => charged({ commandId: u.commandId, activity: "background-job", taskId: u.taskId, computeMs: u.computeMs }) });
     // The reviewer's host is the one its running attempt is on, or the host a moved attempt is pinned to (known once the dispatcher is built); without one, or when the lookup fails, the host is not judged.
     const reviews = ReviewService.withEpoch(storage, epoch, {
       onDecided: async (e) => { await activity.record({ id: "service:reviews", kind: "service", name: "reviews", grants: [] } as Principal, { commandId: `rev-act:${e.requestId}:${e.verdict}`, taskId: e.taskId, kind: "approval", summary: `${e.decidedBy} ${e.verdict === "allow" ? "approved" : "denied"} ${e.tool}: ${e.reason}`, manifest: { refs: [{ kind: "review", id: e.requestId }] } } as never); },
@@ -847,7 +863,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const activation = options.releases === undefined ? undefined : ReleaseActivationService.withEpoch(storage, epoch, options.releases);
     // An interrupted switch is resolved before anything is served: to the old release or the new, from what the launcher's pointer says.
     if (activation !== undefined) { try { const r = await activation.recover(); if (r.resolved === "unresolved") (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))("release activation: an interrupted switch could not be resolved (the pointer names neither release); see release.status"); } catch (error) { (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))(`release activation: recovery failed: ${(error as Error).message.slice(0, 160)}`); } }
-    const api = new StateApi({ ...(stagedRestore === undefined ? {} : { backupRestore: stagedRestore }), ...(databaseTransfer === undefined ? {} : { databaseTransfer }), maintenanceHeld: () => (barrier.held ? (barrier.state().reason ?? "starting") : undefined), streamSettings, contextRouteSettings, ...(activation === undefined ? {} : { activation }), maintenance, serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, catalogPolicy, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops, settings: swarmLimits }), swarmLimits, capacityQuotas: capacityAdmission, status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, replay, replayLimits, resumes, continuations, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size), readRouteArchive: async (by, taskId, digest) => dispatch?.readRouteArchive(by, taskId, digest) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ jobs, ...(stagedRestore === undefined ? {} : { backupRestore: stagedRestore }), ...(databaseTransfer === undefined ? {} : { databaseTransfer }), maintenanceHeld: () => (barrier.held ? (barrier.state().reason ?? "starting") : undefined), streamSettings, contextRouteSettings, ...(activation === undefined ? {} : { activation }), maintenance, serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, catalogPolicy, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops, settings: swarmLimits }), swarmLimits, capacityQuotas: capacityAdmission, status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, replay, replayLimits, resumes, continuations, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size), readRouteArchive: async (by, taskId, digest) => dispatch?.readRouteArchive(by, taskId, digest) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
@@ -902,6 +918,20 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     dispatch?.dispatcher.onEnd((attemptId, how) => workEnd.resolveOnEnd(attemptId, how));
     dispatch?.dispatcher.onEnded((attemptId, how) => workEnd.cleanupAfterEnd(attemptId, how.signal));
     if (dispatch !== undefined) await workEnd.recover().catch((error: unknown) => { options.onInternalError?.(error); });
+    // Card T07b: every job that was live when this controller started gets a decision by the rule for its class (decideAtStart), so none is left without one.
+    let jobsAtStart: { decided: number; failed: number } | undefined;
+    if (dispatch !== undefined) {
+      const local = options.tools?.isLocalHost ?? ((): boolean => options.dispatch?.local !== undefined);
+      try {
+        const report = await decideAtStart(jobs, dispatch.principal, { epoch, before: startedAt, isLocal: local });
+        jobsAtStart = { decided: report.decided.length, failed: report.failed.length };
+        if (report.failed.length > 0) print(`${report.failed.length} job(s) live at the last shutdown could not be decided at start: ${report.failed.slice(0, 3).map((f) => `${f.jobId} (${f.error})`).join("; ")}`);
+      } catch (error) { options.onInternalError?.(error); jobsAtStart = { decided: 0, failed: 1 }; }
+      if (options.jobs !== undefined && options.tools !== undefined) {
+        const host = dispatch.principal;
+        jobRuns = new LocalJobRuns({ jobs, principal: () => host, launcher: options.jobs.launcher, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }), ...(options.jobs.limits === undefined ? {} : { limits: options.jobs.limits }) });
+      }
+    }
     let tools: ToolExecutionService | undefined;
     if (options.tools !== undefined && dispatch !== undefined) {
       const ro = {};
@@ -909,7 +939,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         principal: dispatch.principal, credentials: taskCredentials, dispatch: { get: (...a) => dispatch!.dispatcher.get(...a), toolOperation: (...a) => dispatch!.dispatcher.toolOperation(...a) }, assignments, catalog: catalogService,
         hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks,
         // The task, artifact and message requests of the bridge go through the API and the message service every client uses (card C09h: without them a worker's output and messages never reached the task or its activity).
-        state: api, messages, activity: (step) => activity.record(dispatch!.principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded }; } }), revocationPolicy: () => catalogPolicy.effective(),
+        state: api, messages, activity: (step) => activity.record(dispatch!.principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(jobRuns === undefined ? {} : { jobs, jobRuns }), ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded }; } }), revocationPolicy: () => catalogPolicy.effective(),
       });
     }
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
@@ -929,12 +959,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
-      ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
+      ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { maintenanceStopped = true; if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
+      close: async () => { maintenanceStopped = true; if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     toolsLive?.dispose();
+    await jobRuns?.close().catch(() => undefined);
     await dispatch?.driver.stop().catch(() => undefined);
     await dispatch?.closeWorkers().catch(() => undefined);
     await storage.close().catch(() => undefined);
