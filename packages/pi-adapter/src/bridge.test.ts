@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent and carrying no replay flag", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["desk-read", "desk-write", "message-send", "task-get", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "desk-read", "desk-write", "message-send", "task-get", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
@@ -138,7 +138,7 @@ test("a personal tool gets no handle to the transport or the controller: it sees
   const bridge = createBridge(controller.transport);
   let seenArgs: unknown[] = [];
   const spy: AdapterTool = { name: `${agentNamespace(AGENT)}__spy`, description: "x", parameters: Type.Object({}), execute: async (...args: unknown[]) => { seenArgs = args; return "ok"; } };
-  const [, , , , , , , , , , personal] = composeTools(bridge, [spy], AGENT);
+  const personal = composeTools(bridge, [spy], AGENT).find((t) => t.name === spy.name);
   await personal!.execute({} as never, { signal: undefined, callId: "p1" });
   assert.deepEqual(Object.keys(seenArgs[1] as object).sort(), ["callId", "signal"]);
   assert.equal(controller.seen.length, 0);

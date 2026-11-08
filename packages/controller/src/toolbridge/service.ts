@@ -31,7 +31,7 @@ import { checkValue, schemaProblems } from "./schema.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "tool.register", "tool.discover", "tool.describe", "tool.invoke"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -87,6 +87,11 @@ export interface ToolExecutionDeps {
   /** Tells the owner something that needs them (a task that could not be paused). Never throws into the revocation. */
   readonly notice?: (notice: { readonly commandId: string; readonly taskId: string; readonly text: string }) => Promise<unknown>;
   /**
+   * Card C09h: records a write the agent made through the bridge (a desk record, a change of its task, a tool it registered) as a `tool-call` step of the task's activity. Best effort: a failure never changes
+   * the answer. Keyed by the attempt and call, so asking again records once. Artifacts and messages are recorded by their own services, and catalogue runs by the dispatcher's tool path; reads are not steps.
+   */
+  readonly activity?: (step: { readonly commandId: string; readonly taskId: string; readonly kind: "tool-call"; readonly summary: string; readonly refs: readonly { readonly kind: string; readonly id: string }[] }) => Promise<unknown>;
+  /**
    * What happens to a catalogue tool call already running when its version is revoked (card T02b): `finish` (the default when nothing is wired: the run ends on the bytes it started with; new runs are refused either way),
    * `cancel` (the run's signal is aborted and the call ends as failed) or `pause` (each running call is aborted and its task paused, see `pauseTask`). Read, only when calls are running, at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
    */
@@ -119,7 +124,7 @@ export interface ToolExecutionDeps {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "tool.register", "tool.invoke"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke"]);
 const refusal = (code: string, message: string): BridgeResponse => ({ ok: false, code, message: redactText(message).slice(0, 600) });
 const ok = (result: JsonObject): BridgeResponse => ({ ok: true, result });
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -270,6 +275,7 @@ export class ToolExecutionService {
             case "desk.write": response = await this.#deskWrite(context, args); break;
             case "task.get": case "task.update": case "task.transition": response = await this.#task(token, context, request.op as BridgeOperation, args); break;
             case "message.send": response = await this.#message(context, args); break;
+            case "artifact.publish": response = await this.#artifact(token, context, args); break;
             case "tool.register": response = await this.#register(context, args); break;
             case "tool.discover": response = await this.#discover(context, args); break;
             case "tool.describe": response = await this.#describe(context, args); break;
@@ -279,6 +285,7 @@ export class ToolExecutionService {
       } finally {
         this.#endCall(context.attemptId, request.callId, response?.ok === true);
       }
+      if (response?.ok === true) await this.#recordStep(context, request.op as BridgeOperation, response.result);
       return response!;
     } catch (error) {
       if (isDomainError(error, "unauthenticated")) return refusal("unauthenticated", "the credential was not accepted");
@@ -392,6 +399,31 @@ export class ToolExecutionService {
     const name = op;
     onlyKnown(args, name === "task.get" ? [] : name === "task.update" ? ["expectedRevision", "title", "description"] : ["expectedRevision", "to"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: name, ...(name === "task.get" ? {} : { commandId: `bridge:${c.attemptId}:${c.callId}` }), args: { ...args, taskId: c.taskId } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
+  /** The activity step of a write made through the bridge (see `ToolExecutionDeps.activity`), or nothing for a read or for what another service records. */
+  async #recordStep(c: Context, op: BridgeOperation, result: JsonObject): Promise<void> {
+    if (this.#deps.activity === undefined) return;
+    const id = (key: string): string => (typeof result[key] === "string" ? (result[key] as string).slice(0, 120) : "unknown");
+    const step = op === "desk.write" ? { summary: `${c.agent.id} wrote desk record ${id("id")} through the bridge.`, refs: [{ kind: "desk-record", id: id("id") }] }
+      : op === "task.update" ? { summary: `${c.agent.id} changed the task's title or description through the bridge.`, refs: [{ kind: "task", id: c.taskId }] }
+      : op === "task.transition" ? { summary: `${c.agent.id} moved the task through the bridge.`, refs: [{ kind: "task", id: c.taskId }] }
+      : op === "tool.register" ? { summary: `${c.agent.id} registered tool ${id("name")} through the bridge.`, refs: [{ kind: "catalog-version", id: id("versionId") }] }
+      : undefined;
+    if (step === undefined) return;
+    try { await this.#deps.activity({ commandId: `brs:${createHash("sha256").update(`${c.attemptId}|${c.callId}`).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", ...step }); } catch { /* the record of a step never changes what happened */ }
+  }
+
+  /**
+   * Card C09h: a local worker's output that is not code (a note, a document, a design description) becomes an artifact of the attempt's own task, through the same door every client uses
+   * (`artifact.publish` with the worker's task credential, so its right to publish and its task scope are checked there). The task comes from the attempt, never from the request; asking again
+   * with the call ID publishes once. The controller's artifact service records each publication as an `artifact-version` step of the task's activity.
+   */
+  async #artifact(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, ["name", "files"]);
+    const response = await this.#deps.state.handle(token, { v: 1, op: "artifact.publish", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, taskId: c.taskId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 

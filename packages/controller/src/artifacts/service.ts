@@ -11,7 +11,7 @@ import { MANIFEST_LIMITS, checkEntries, checkPath, manifestDigest, type Manifest
 
 export interface ArtifactOptions extends RunnerOptions {
   /** Told once an artifact of a task has been recorded (card C09g): the host puts the step in the task's activity record. Best effort; keyed by the artifact, so telling twice is harmless. */
-  readonly onPublished?: (event: { readonly artifactId: string; readonly name: string; readonly taskId: string; readonly projectId?: string; readonly files: number }) => Promise<unknown>;
+  readonly onPublished?: (event: { readonly artifactId: string; readonly name: string; readonly taskId: string; readonly projectId?: string; readonly files: number; /** Who published it (the command's actor). */ readonly actor: string }) => Promise<unknown>;
 }
 
 export interface PublishArtifact extends CommandMeta {
@@ -115,7 +115,7 @@ export class ArtifactService {
     const result = await this.#publish(command);
     // Told after the manifest committed, also on a repeat (the hook's own key makes that harmless), so a crash between the commit and the hook is made good by the repeated command. A failure here never undoes the publication.
     if (this.#onPublished !== undefined && typeof command.taskId === "string") {
-      try { await this.#onPublished({ artifactId: result.id, name: command.name, taskId: command.taskId, ...(command.projectId === undefined ? {} : { projectId: command.projectId }), files: command.files.length }); } catch { /* the activity step is best effort */ }
+      try { await this.#onPublished({ artifactId: result.id, name: command.name, taskId: command.taskId, actor: String(command.actor), ...(command.projectId === undefined ? {} : { projectId: command.projectId }), files: command.files.length }); } catch { /* the activity step is best effort */ }
     }
     return result;
   }

@@ -524,7 +524,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); }, tell: async (id, text) => (await dispatch?.attemptControl.tell(id, text)) ?? false, stop: async (id, reason) => { await dispatch?.attemptControl.stop(id, reason); } },
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
-    const checked = blobStore === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, blobStore);
+    // Card C09h: an artifact published for a task through the API (by the owner, or by an agent, including a local worker through its tool bridge) is an `artifact-version` step of the task's activity.
+    // The step is keyed by the artifact, so a repeated publish shows once; the name is the publisher's words and is quoted as such. Remote workers' artifacts are recorded by the dispatch composer's own service.
+    const checked = blobStore === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, blobStore, {
+      onPublished: async (e) => { await activity.record({ id: "service:artifacts", kind: "service", name: "artifacts", grants: [] } as Principal, { commandId: `artv:${e.artifactId}`, taskId: e.taskId, kind: "artifact-version", summary: `${e.actor} published artifact "${e.name}" (${e.files} file${e.files === 1 ? "" : "s"}).`, manifest: { refs: [{ kind: "artifact", id: e.artifactId }] } } as never); },
+    });
     // Replay reads: a reviewer reads only a task it was asked to review and sensitive content needs `history.sensitive.read` (card U09). The review-assignment source is the one the submissions use (Q01c): until it is composed (as it is not for submissions) no reviewer reads a task's activity.
     // A host reads the activity of a task only while it holds a live attempt of it (the attempts come from the dispatcher when it is composed; without one no host reads any task's steps).
     const activity = ActivityService.withEpoch(storage, epoch, {
@@ -897,7 +901,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       const ro = {};
       tools = toolsLive = new ToolExecutionService({
         principal: dispatch.principal, credentials: taskCredentials, dispatch: { get: (...a) => dispatch!.dispatcher.get(...a), toolOperation: (...a) => dispatch!.dispatcher.toolOperation(...a) }, assignments, catalog: catalogService,
-        hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks, pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded }; } }), revocationPolicy: () => catalogPolicy.effective(),
+        hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks,
+        // The task, artifact and message requests of the bridge go through the API and the message service every client uses (card C09h: without them a worker's output and messages never reached the task or its activity).
+        state: api, messages, activity: (step) => activity.record(dispatch!.principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded }; } }), revocationPolicy: () => catalogPolicy.effective(),
       });
     }
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport

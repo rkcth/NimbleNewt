@@ -465,7 +465,9 @@ for (const backend of backends) {
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (token: unknown, raw: unknown) => { seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
-      messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true });
+      messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
+      activity: async (step) => { steps.push(step); } });
+    const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = async ({ order, gateway }) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(order.credential, gateway, { op, callId, args });
@@ -475,6 +477,8 @@ for (const backend of backends) {
       out["get"] = await send("task.get", {}, "g1");
       out["message"] = await send("message.send", { to: "agent:ben", class: "informational", purpose: "fyi", text: "hello", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "m1");
       out["message2"] = await send("message.send", { to: "agent:ben", class: "informational", purpose: "fyi", text: "hello" }, "m1");
+      out["artifact"] = await send("artifact.publish", { name: "Findings", files: [{ path: "notes.md", text: "# n" }], taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "a1");
+      out["artifact2"] = await send("artifact.publish", { name: "Findings", files: [{ path: "notes.md", text: "# n" }] }, "a1");
       const w = good(await send("desk.write", { kind: "note", title: "mine", body: "text", visibility: "shared", status: "accepted" }, "w1"));
       const again = good(await send("desk.write", { kind: "note", title: "mine", body: "text", visibility: "shared", status: "accepted" }, "w1"));
       out["write-again"] = { ok: true, result: { same: w["id"] === again["id"], replayed: again["replayed"] as boolean } };
@@ -486,14 +490,30 @@ for (const backend of backends) {
     good(out["update2"]!); good(out["transition"]!); good(out["get"]!);
     assert.equal(bad(out["message"]!).code, "invalid_command");
     good(out["message2"]!);
-    const calls = seen.state as { token: string; raw: { op: string; commandId?: string; args: { taskId: string } } }[];
-    assert.deepEqual(calls.map((x) => [x.raw.op, x.raw.args.taskId]), [["task.update", taskId], ["task.transition", taskId], ["task.get", taskId]]);
+    assert.equal(bad(out["artifact"]!).code, "invalid_command", "an artifact for a task the caller names is not accepted (the attempt's task is the one)");
+    good(out["artifact2"]!);
+    const calls = seen.state as { token: string; raw: { op: string; commandId?: string; args: { taskId: string; name?: string; files?: unknown } } }[];
+    assert.deepEqual(calls.map((x) => [x.raw.op, x.raw.args.taskId]), [["task.update", taskId], ["task.transition", taskId], ["task.get", taskId], ["artifact.publish", taskId]]);
+    assert.deepEqual(calls[3]!.raw, { v: 1, op: "artifact.publish", commandId: calls[3]!.raw.commandId, args: { name: "Findings", files: [{ path: "notes.md", text: "# n" }], taskId } }, "the publication goes through the API as the worker's credential, for the attempt's own task");
+    assert.match(calls[3]!.raw.commandId!, /^bridge:[^:]+:a1$/, "its command ID derives from the attempt and call, so asking again publishes once");
+    assert.equal((calls[3] as { token: string }).token, calls[0]!.token, "with the worker's own task credential");
     assert.ok(calls[0]!.raw.commandId!.startsWith("bridge:"), "the command ID derives from the attempt and call");
     assert.equal(calls[2]!.raw.commandId, undefined, "a query takes none");
     assert.deepEqual((seen.messages[0] as { by: string; command: { taskId: string; commandId: string } }).by, "agent:ann");
     assert.equal((seen.messages[0] as { command: { taskId: string } }).command.taskId, taskId);
     assert.deepEqual(good(out["write-again"]!), { same: true, replayed: true }, "asking again with the call ID is the same write");
     assert.equal((good(out["read"]!)["record"] as { title: string }).title, "mine");
+    // Card C09h: each write is a step of the task's activity, keyed by the attempt and call (the repeated desk write has the same key); refused requests, reads, and what other services record
+    // (the artifact, the message) are not recorded here.
+    const record = (good(out["read"]!)["record"] as { id: string }).id;
+    assert.deepEqual(steps.map((s) => [s.kind, s.taskId, s.summary, s.refs]), [
+      ["tool-call", taskId, `agent:ann changed the task's title or description through the bridge.`, [{ kind: "task", id: taskId }]],
+      ["tool-call", taskId, `agent:ann moved the task through the bridge.`, [{ kind: "task", id: taskId }]],
+      ["tool-call", taskId, `agent:ann wrote desk record ${record} through the bridge.`, [{ kind: "desk-record", id: record }]],
+      ["tool-call", taskId, `agent:ann wrote desk record ${record} through the bridge.`, [{ kind: "desk-record", id: record }]],
+    ]);
+    assert.equal(steps[2]!.commandId, steps[3]!.commandId, "asking again is the same step");
+    assert.equal(new Set(steps.map((s) => s.commandId)).size, 3);
   });
 
   suite("restart recovery: a call asked again after a controller restart keeps its version; a manifest that approves a restart runs it again, one that does not leaves it uncertain and never runs it twice; the worker cannot claim the flag", async (c) => {
@@ -573,6 +593,7 @@ for (const backend of backends) {
       out["task.update"] = await send("task.update", { expectedRevision: 1, title: "x" }, "w2");
       out["task.transition"] = await send("task.transition", { expectedRevision: 1, to: "done" }, "w3");
       out["message.send"] = await send("message.send", { to: "agent:ben", class: "informational", purpose: "p", text: "t" }, "w4");
+      out["artifact.publish"] = await send("artifact.publish", { name: "n", files: [{ path: "a.md", text: "a" }] }, "w7");
       out["tool.register"] = await send("tool.register", { name: "x", kind: "skill", version: "1.0.0", manifest: JSON.parse(JSON.stringify(manifest({ entryPoint: undefined, interpreter: undefined }))), instructionsRecordId: doc["id"] as string }, "w5");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
       out["task.get"] = await send("task.get", {}, "r2");
@@ -581,7 +602,7 @@ for (const backend of backends) {
       out["after"] = await send("desk.write", { kind: "note", title: "n", body: "b3", visibility: "shared", status: "accepted" }, "w6");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "tool.register"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after"]) good(out[op]!);
     assert.deepEqual(touched, ["task.get"], "no write reached a service while paused");
   });

@@ -5005,7 +5005,7 @@ Result: `{ id, replayed }`.
 
 #### `artifact.publish`
 
-Publishes the output of a task that is not code (a research note, a document, a design description) as an artifact of that task: text files with a name. The agent holding `artifact.publish` for the task (roles author, docs and qa) or the owner; a task credential reaches its own task only. The artifact records the task, the project and the digest of every file; a deliverable (`deliverable.draft`) then names it, and a later change of the files is found when the deliverable is submitted or accepted. Publishing is not submitting and not acceptance. Repeating the same command ID publishes once.
+Publishes the output of a task that is not code (a research note, a document, a design description) as an artifact of that task: text files with a name. The agent holding `artifact.publish` for the task (roles author, docs and qa) or the owner; a task credential reaches its own task only. The artifact records the task, the project and the digest of every file; a deliverable (`deliverable.draft`) then names it, and a later change of the files is found when the deliverable is submitted or accepted. Publishing is not submitting and not acceptance. Each publication is an `artifact-version` step of the task's activity, naming who published it; a local worker publishes through its tool bridge (`nimblenewt__artifact-publish`, its own task only). Repeating the same command ID publishes once.
 
 Arguments:
 
