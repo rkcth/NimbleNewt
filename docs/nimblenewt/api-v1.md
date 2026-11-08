@@ -271,7 +271,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.get`
 
-The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window and refuses to start it if what must stay whole does not fit) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Shows the entries, the defaults and what applies now.
+The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Shows the entries, the defaults and what applies now.
 
 Arguments:
 
@@ -2279,7 +2279,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.change`
 
-The owner changes the route-change check (owner only), leaving the other as it is: `enable` or `disable` name `check` or `floorChars` (a disabled floor counts nothing for an unmeasured route; the figure is kept); `set` gives `floorChars` a figure (1 to 4000000); `unset` returns a setting to its default. With `check` off a task that moves to another route starts as before, and the first call on the route is still checked by admission.
+The owner changes the route-change check (owner only), leaving the other as it is: `enable` or `disable` name `check` or `floorChars` (a disabled floor counts nothing for an unmeasured route; the figure is kept); `set` gives `floorChars` a figure (1 to 4000000); `unset` returns a setting to its default. With `check` off a task that moves to another route starts as before (no rebuilt context in its first prompt), and the first call on the route is still checked by admission.
 
 Arguments:
 
