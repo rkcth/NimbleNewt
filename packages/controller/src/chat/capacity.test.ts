@@ -302,16 +302,18 @@ for (const backend of backends) {
     );
   });
 
-  suite("a record with more declared hosts than the view lists shows the first ones in order and counts the rest, inside the lines the chat shows", async (w, s) => {
+  suite("a record with more declared hosts than the view lists shows the first ones and counts the rest, inside the lines the chat shows", async (w, s) => {
     // More hosts than the owner's own command could ever store: `capacity.quotas.change` takes at most 50 hosts in one change (probed) and refuses a record that would hold more than 200, so a record this
-    // large can only arrive by another route and is written whole here. What is under test is the view's own bound and its order, not the command's.
+    // large can only arrive by another route and is written whole here. What is under test is the view's own bound, not the command's - and not its order either: the store keeps JSON object keys in
+    // code-point order (`packages/controller/src/storage/json.ts`), so a record written through it reads back sorted however it was written (asserted below). The sort belongs to the next case.
     const hosts: Record<string, unknown> = {};
-    for (let i = 499; i >= 0; i--) hosts[`host:h${String(i).padStart(3, "0")}`] = { cpus: 8, memoryMb: 16_384 }; // declared newest first, so a view that kept the record's order would show host:h499 first
+    for (let i = 499; i >= 0; i--) hosts[`host:h${String(i).padStart(3, "0")}`] = { cpus: 8, memoryMb: 16_384 }; // written last host first; the store sorts the keys, so this is not what puts the answer in order
     await damage(s.storage, s.epoch, { kind: "admission-state", id: "admission" }, { limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, capacity: hosts }, "many-hosts");
     const shown = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
     const hostLines = shown.filter((l) => l.text.startsWith('Host "')).map((l) => l.text);
     assert.equal(hostLines.length, 10, `ten of the five hundred declared hosts are listed, not ${hostLines.length}`);
-    assert.match(hostLines[0]!, /^Host "host:h000": 8 CPU\(s\), 16384 MB declared \(you declared it\); 0 productive attempt\(s\) running on it\.$/, "the list starts at the first host in order, not the first in the record");
+    assert.match(hostLines[0]!, /^Host "host:h000": 8 CPU\(s\), 16384 MB declared \(you declared it\); 0 productive attempt\(s\) running on it\.$/, "the list starts at the first host in order");
+    assert.deepEqual(Object.keys((await s.quotas.quotas(s.owner)).hosts).slice(0, 3), ["host:h000", "host:h001", "host:h002"], "the record itself reads back sorted, so this case never hands the view an unsorted one");
     assert.match(hostLines[9]!, /^Host "host:h009"/, "and stops after the tenth");
     assert.ok(!hostLines.some((l) => l.includes("host:h010")), "the eleventh host is not listed");
     const ids = hostLines.map((l) => l.slice(6, l.indexOf('", ')));
@@ -321,6 +323,32 @@ for (const backend of backends) {
     // ASSUMPTION: the answer is bounded by its own shape (one line per group and per damaged group, three caps, four quotas, three spawn limits, ten host lines and one counting line), so the view needs no
     // line-count branch of its own - the removed `CAPACITY_LINES` cut was unreachable, and the chat cuts a status answer to thirty lines and counts the rest whatever the view writes. This is the guard for that.
     assert.ok(shown.length <= 30, `the answer is ${shown.length} lines, and the chat shows thirty`);
+  });
+
+  suite("the host list is put in order by the view, not by the order the record's keys happen to come back in", async (w, s) => {
+    // The case the one above cannot be: a `quotas` port hands the same five hundred hosts over in reverse, which is what a record restored from another installation, or read by a store that keeps no key
+    // order, looks like. Taking the `.sort` out of `capacityLines` is caught here (`host:h499` comes first), and by nothing else in the file.
+    const hosts: Record<string, { cpus: number; memoryMb: number }> = {};
+    for (let i = 499; i >= 0; i--) hosts[`host:h${String(i).padStart(3, "0")}`] = { cpus: 8, memoryMb: 16_384 };
+    assert.equal(Object.keys(hosts)[0], "host:h499", "the figures really do come to the view in reverse");
+    const figures = { productive: 4, perHost: 2, control: 2, queue: 100 };
+    const view = StatusService.withEpoch(s.storage, s.epoch, {
+      assignments: w.assignments,
+      waits: WaitService.withEpoch(s.storage, s.epoch, w.assignments, options),
+      blockers: BlockerService.withEpoch(s.storage, s.epoch, options),
+      contracts: w.contracts,
+      capacity: { limits: s.limits, quotas: { quotas: async () => ({ revision: 7, limits: figures, defaults: figures, hosts, running: { productive: 0, control: 0, perHost: {} }, waiting: 0 }) }, swarm: s.swarm },
+    }, options);
+    const shown = (await view.ask(s.owner, { kind: "capacity" }))!.lines;
+    const hostLines = shown.filter((l) => l.text.startsWith('Host "')).map((l) => l.text);
+    assert.equal(hostLines.length, 10, `ten of the five hundred hosts are listed, not ${hostLines.length}`);
+    assert.equal(hostLines[0], 'Host "host:h000": 8 CPU(s), 16384 MB declared (you declared it); 0 productive attempt(s) running on it.', "the list starts at the first host in order, not the first the port handed over");
+    assert.equal(hostLines[9]!, 'Host "host:h009": 8 CPU(s), 16384 MB declared (you declared it); 0 productive attempt(s) running on it.', "and stops after the tenth");
+    const ids = hostLines.map((l) => l.slice(6, l.indexOf('", ')));
+    assert.deepEqual(ids, [...ids].sort(), "and the ten shown are in host-ID order");
+    assert.ok(!hostLines.some((l) => l.includes("host:h499")), "the host the record put first is not shown at all");
+    assert.match(text(shown), /^490 more host\(s\) are declared than are shown\.$/m, "the rest are counted");
+    assert.ok(shown.length <= 30, `and the answer is ${shown.length} lines, inside the thirty the chat shows`);
   });
 
   suite("a caller who is not the owner reads exactly what it would read if the view did not exist", async (w, s) => {
