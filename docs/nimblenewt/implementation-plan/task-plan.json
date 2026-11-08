@@ -3736,12 +3736,23 @@
       ],
       "deliverable": "Host/global quotas, spawn admission and bounded coordination",
       "acceptance_and_verification": "Swarm cancellation settles children; exhausted slots/budgets block expansion; stop/review control traffic remains responsive; parents assign outcomes and acceptance criteria and children spend only sub-budgets delegated through R05",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "5116e29f",
+          "933f8e09",
+          "182a0e30"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The owner sets the host and global quotas (attempts in total and per host, places kept for reviews and inquiries, the queue) and declares hosts' CPUs and memory by API and chat; the owner's swarm limits (depth, live children and the fan-in total of children per parent) bound spawning, race-safe; a child needs the outcome and acceptance criteria its parent assigns and spends only the allowance delegated to it (a parent limited in a dimension must give some of it; a spawned task without an allowance does not run); cancelling a swarm seals it, settles children whose spawn is still in flight and carries on an unfinished stop, and a child waiting for a place is stopped without blocking on a checkpoint, all shown through startController. A nested cancel reopening an inner parent during an outer cancel is left open. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "H11",

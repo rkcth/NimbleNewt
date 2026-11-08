@@ -1347,6 +1347,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H10 — Implement distributed agent capacity and fan-in limits
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `5116e29f`, `933f8e09`, `182a0e30`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner sets the host and global quotas (attempts in total and per host, places kept for reviews and inquiries, the queue) and declares hosts' CPUs and memory by API and chat; the owner's swarm limits (depth, live children and the fan-in total of children per parent) bound spawning, race-safe; a child needs the outcome and acceptance criteria its parent assigns and spends only the allowance delegated to it (a parent limited in a dimension must give some of it; a spawned task without an allowance does not run); cancelling a swarm seals it, settles children whose spawn is still in flight and carries on an unfinished stop, and a child waiting for a place is stopped without blocking on a checkpoint, all shown through startController. A nested cancel reopening an inner parent during an outer cancel is left open. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H07, H09, H03, R05.
 - **Deliverable:** Host/global quotas, spawn admission and bounded coordination.
 - **Acceptance and verification:** Swarm cancellation settles children; exhausted slots/budgets block expansion; stop/review control traffic remains responsive; parents assign outcomes and acceptance criteria and children spend only sub-budgets delegated through R05.
