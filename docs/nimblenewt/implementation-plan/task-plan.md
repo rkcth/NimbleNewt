@@ -779,7 +779,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C07g — Put the rebuilt context into the worker's prompt and rebuild during a live attempt
 
 - **Parent:** N07 / AII-257.
-- **Status:** implemented; commits `8ed7021c`, `9d2b79e3`, `466bb692`, `5c5034ee`, `09c1ca95`, `c5af322b`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `8ed7021c`, `9d2b79e3`, `466bb692`, `5c5034ee`, `09c1ca95`, `c5af322b`; CI runs 42508618808; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The owner's context rebuilt for a new route (kept pieces, cut items by full digest, header and footer counted) is put at the end of the first prompt of an attempt that starts on another route; the local worker measures its process and rebuilds a view made on an unmeasured route before the first call; a cutover's replacement on the next route gets the view, the cut text is in the route archive. Fixed: the C07f hook read the decision record as the dispatcher and got nothing. Left: remote workers do not rebuild an unmeasured view; a continued conversation gets the view in the turn content like the resume note. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** C07f.
 - **Deliverable:** Split from C07f (2026-10-31): the route-change decision is built from the owner's decision record only and is a check and an archive; the worker's own startup prompt (desk, history, retrieval pieces) is not yet built from the rebuilt view, a route never measured counts its fixed part as 0 until its first call is admitted, and a route changed in the middle of a live attempt is only seen when the next attempt starts.
@@ -1353,7 +1353,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H09b — Finish reconnect reconciliation: recovery handshake, explicit re-accept, adoption by a new primary
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `1b997e85`, `c0613f30`, `00b7d1d1`, `8efab289`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `1b997e85`, `c0613f30`, `00b7d1d1`, `8efab289`; CI runs 42508618808; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** Part 1 (earlier): the recovery handshake, the re-accept as the controller's decision (auto or the owner, with notice, list and patience). Part 2: a running attempt records the primary that started or took it over and only that primary renews its lease; a new primary's tick takes over the remote attempts it finds (a handle on the host's run, a fresh lease, a result already sent is taken) or ends them as lost when the host no longer runs them; a worker session opened with another primary is fenced, so the worker reconnects and the handshake decides; the handshake reports accepted attempts the worker did not list; the poller makes the handshake first in each new session; a deposed controller's close no longer hangs on remote turns. Tested with two startController instances on one SQLite store and on every backend. Left: the product worker process does not yet pass what it holds to the poller. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H09.
 - **Deliverable:** Split from H09 (2026-10-30): the connect handshake carries held attempts and the primary epoch, a re-accept is a controller decision, and a new primary adopts or ends the remote attempts it finds.
@@ -1363,7 +1363,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H10 — Implement distributed agent capacity and fan-in limits
 
 - **Parent:** N10 / AII-260.
-- **Status:** implemented; commits `5116e29f`, `933f8e09`, `182a0e30`, `d9977ada`, `880839cd`, `edc70a5f`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `5116e29f`, `933f8e09`, `182a0e30`, `d9977ada`, `880839cd`, `edc70a5f`; CI runs 42508618808; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** The owner sets the host and global quotas (attempts in total and per host, places kept for reviews and inquiries, the queue) and declares hosts' CPUs and memory by API and chat; the owner's swarm limits (depth, live children and the fan-in total of children per parent) bound spawning, race-safe; a child needs the outcome and acceptance criteria its parent assigns and spends only the allowance delegated to it (a parent limited in a dimension must give some of it; a spawned task without an allowance does not run); cancelling a swarm seals it, settles children whose spawn is still in flight and carries on an unfinished stop, and a child waiting for a place is stopped without blocking on a checkpoint, all shown through startController. A nested cancel no longer reopens an inner parent during an outer cancel; spawns at once up to the live-children limit and two cancels sent together all succeed. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H07, H09, H03, R05.
 - **Deliverable:** Host/global quotas, spawn admission and bounded coordination.
