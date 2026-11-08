@@ -5317,3 +5317,68 @@ Checked and left as built (nothing real found): Force Stop's reach (the scope's 
 - ASSUMPTION: a process ID that a `kill(pid, 0)` reaches (or is refused for) after the launched process was reaped belongs to another program; the group kill is skipped then. It can miss nothing of the run: while any member of the run's group lives, the ID cannot be handed out.
 - Left (added to L02e): an attempt that finished with its worker unconfirmed (its close could not end the process) is not live, so a later Stop of its task neither lists nor reaches what its sandbox holds (only attempts live or seen during that Stop are asked). On Linux such a process has already been sent SIGKILL and the private process list ends everything below it.
 - **Runs** (review worktree on the merge with main 49a9cb84, own `@nimblenewt` links, copied third-party packages, `NIMBLENEWT_REQUIRE_SANDBOX=1`): worker 283 tests, 282 pass, 1 skipped, 0 fail (the bubblewrap launcher file five more times, the host and proc files three more times, all green); pi-adapter 188 pass; controller lifecycle, dispatch, remote, workspace-ops, status and api 2896, 2892 pass, 4 todo (C07k), 0 fail; integration l02d-local-processes, h12q-landing-quiesce, h12m-workspace-host, h12bf-composed, h12k-composed-host, h12k-limit-enforcement and t07b-jobs 21 pass; `plan.test`, `roadmap:check`, `check:deps` green; `api:docs:write` changes nothing. Mutation checks (5, each applied, built, run, restored and rebuilt with `tsc --build --force`; all killed): the group kill skipped in the drain (launcher.test, real); `endLocalWork` back to one session after another (local-worker.test x4); the start-time check dropped from `linuxStillRunning` (proc.test); Force Stop's `mayControl` filter dropped (dispatch-ports.test); survivors of an ended run not listed (local.test).
+
+## Capacity view in chat (Pi)
+
+The owner can already change the capacity controls in chat (`capacity.limits.change`, `capacity.quotas.change`,
+`swarm.limits.change`) and read them through the state API, but no status kind showed them, so a free-form "what are
+my capacity limits?" had no view to answer from. One new owner-only kind, `capacity`, answers all three groups in
+plain lines.
+
+- **`packages/controller/src/status/status.ts`**: `capacity` in `STATUS_KINDS` (keys `[]`, the `about` text is what the
+  chat model is told), `{ kind: "capacity" }` in `StatusRequest`, `case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }`
+  in `ask`, and `capacityLines` built the way `eventSourceLines`/`retentionLines` are: `if (settings === undefined || by.kind !== "owner") return undefined`,
+  so a caller that is not the owner reads exactly what it would read if the kind did not exist (the chat answers `not_found`,
+  `status.ask` throws `not_found`). It calls the same service methods the operations call - `CapacityLimitsService.get`,
+  `AdmissionService.quotas`, `SwarmLimitsService.get` - and reads nothing else, so the view cannot drift from the API.
+- **What each line says**: every figure with its meaning in words, then `(the default)` or `(you set it)` (caps: an entry
+  the owner never made is the default; quotas: compared with the `defaults` the service returns; swarm: an absent entry is
+  the default, a `null` fan-in total is `off, no total`), plus what holds them now (`N running now`, `N of them in use now`,
+  `N waiting now`, `N productive attempt(s) running on it`). A cap that is off says `off, nothing is capped`, and a cap
+  turned off keeps saying which figure would turn it back on. A host that has declared nothing is named as such, because
+  work needing a host is then refused.
+- **Damaged or absent is one line, never a throw**: a group whose service is not composed in says `this controller does not
+  offer them`; a `DomainError` of code `integrity` (a damaged stored record - `CapacityLimitsService.get` throws it through `capsOf`)
+  says the record applies to nothing and names the operation that repairs it; `forbidden`/`unavailable` say it cannot be read
+  here; anything else is thrown, as every neighbouring view does. `SwarmLimitsService.get` does not throw: its `damaged` names
+  get their own line and the swarm figures that can be read are still listed. The other two groups are unaffected either way.
+- **Text from outside is quoted**: host IDs go through `quoted()`, so a host ID holding a double quote, a newline, U+2028, U+202E
+  and `[cut: ` stays on one line inside one quotation (the newline and U+2028 are folded, the quote escaped, the override written
+  as `\u202e`). Numbers are shown as themselves. The revision of each record read goes into the cite, and the three cite kinds are
+  `capacity-limits-settings/main`, `admission-state/admission` and `swarm-limits-settings/main`.
+- **Bounds**: the caps (3) and swarm (3) names are all shown, the quotas (4) likewise, and at most 10 declared hosts are listed
+  with a line counting the rest (the setting can hold 200), so a full answer is at most 25 lines. A guard keeps the answer under
+  30 lines whatever the services add later, ending with how many figures were left out.
+- **Wiring** (`packages/controller/src/api/start.ts`): the status service's `capacity` deps reach `capacityLimits`, `capacityAdmission`
+  and `swarmLimits` through closures, the way `handoffs`, `stopsLive` and `cutoverNow` already do for services built after it.
+- **`api/operations.ts`**: `capacity` is described in the `status.ask` summary (a test requires every `STATUS_KINDS` key to appear there),
+  and `docs/nimblenewt/api-v1.md` was regenerated with `npm run api:docs:write` (one line changes).
+- **Tests**: `packages/controller/src/chat/capacity.test.ts` (all four backends: reference store, SQLite, SQLite on a worker thread,
+  PostgreSQL) asks the real `ChatService` with a real `StatusService` over the real `CapacityLimitsService`, `AdmissionService` and
+  `SwarmLimitsService` on real storage: the free-words question answered with all three groups and every default marked, nothing written
+  (an audit count before and after); after the owner changes a cap (set, then disabled with the figure kept), a quota and two swarm limits
+  the same question shows each new figure as theirs and leaves the untouched ones marked as defaults; a non-owner (an agent principal) gets
+  `undefined`, the same as the other owner-only kind next to it; a host ID with the hostile text above stays one quoted line (exact text asserted);
+  a caps record damaged to `{ perProject: { enabled: true, value: "many" } }` and a swarm record damaged to `{ depth: "deep" }` (written with
+  `applyOperation`, as the damaged-setting tests do) each give their one line while the quotas group still shows, and a view built without the
+  caps service says so in one line with the other two groups present. `packages/controller/src/api/start-capacity-view.test.ts` runs the composed
+  controller (`startController`, SQLite, as its neighbours do): the chat answer, the changes made through the state-API operations
+  (`capacity.limits.change`, `capacity.quotas.change` with a declared host, `swarm.limits.change`), the same figures read back by the three
+  `*.get` operations, and an agent's `status.ask` answered `not_found`.
+- **Runs** (`NIMBLENEWT_REQUIRE_SANDBOX=1`, this worktree on main 67f49abf, `npx tsc --build` from the root first): `dist/status/*.test.js
+  dist/chat/*.test.js dist/api/api.test.js dist/api/start-capacity.test.js dist/api/start-swarm-limits.test.js` plus the two new files -
+  1068 tests, 1068 pass, 0 fail. On their own: `dist/chat/capacity.test.js` 20 pass (5 cases x 4 backends), `dist/api/start-capacity-view.test.js`
+  1 pass. From the root: `node --test scripts/plan.test.mjs` 6 pass, `npm run roadmap:check` ok, `npm run check:deps` ok.
+- ASSUMPTION: `capacity` is offered only when the `capacity` deps are composed in at all (like `retention`, `event_sources` and `jobs`);
+  with none of the three services the answer is `undefined` rather than three "not offered" lines, because an installation without them is not
+  offering the controls either.
+- ASSUMPTION: a hostile host ID cannot reach the view through the operations (`changeQuotas` and `setCapacity` check `host:...` first), so the
+  quoting test feeds one through the same `StatusService` with a `quotas` port that returns it. That is what a record written by anything other
+  than the owner's own command, or an older record, can hold; the view's own code is the real one in that test.
+- ASSUMPTION: `integrity`, `forbidden` and `unavailable` are told as one line and everything else is thrown (the neighbouring views rethrow
+  what is not one of their known codes), because a storage failure that would make the API fail should not read as an empty setting here.
+- ASSUMPTION: a quota figure equal to the default is called the default even when the owner set exactly that figure; the view reports what
+  applies and cannot tell an equal setting from an unset one, which is all `capacity.quotas.get` returns.
+- Left out: the attempt-spawn limits `depth`/`children`/`patience` that admission keeps as start-up figures (only the four `capacity.quotas`
+  figures are the owner's quotas, as the operation says); no `limit` argument, no per-group argument (the three groups are one answer, and it
+  fits); no line for what is waiting per host beyond the count, and no changes to `needs_you`, the interpreter's prompt text or the UI.
