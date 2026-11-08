@@ -38,6 +38,8 @@ import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.j
 import type { ContextRouteSettingsService } from "../context/route-settings.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
+import type { AdmissionService } from "../admission/service.js";
+import type { SwarmLimitsService } from "../swarm/limits.js";
 import type { StreamSettingsService } from "../generation/index.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
@@ -159,6 +161,10 @@ export interface StateApiDeps {
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly maintenance?: Pick<MaintenanceService, "request" | "get" | "list" | "decide" | "revoke" | "apply" | "settings" | "change" | "toggle" | "site" | "catalogue">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
+  /** The host and global admission quotas (card H10). */
+  readonly capacityQuotas?: Pick<AdmissionService, "quotas" | "changeQuotas">;
+  /** The owner's limits on spawning child tasks (card H10). */
+  readonly swarmLimits?: Pick<SwarmLimitsService, "get" | "change">;
   readonly streamSettings?: Pick<StreamSettingsService, "get" | "change">;
   readonly contextRouteSettings?: Pick<ContextRouteSettingsService, "get" | "change">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
@@ -312,6 +318,8 @@ export class StateApi {
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.maintenance === undefined ? {} : { maintenance: this.#deps.maintenance }),
         ...(this.#deps.capacityLimits === undefined ? {} : { capacityLimits: this.#deps.capacityLimits }),
+        ...(this.#deps.capacityQuotas === undefined ? {} : { capacityQuotas: this.#deps.capacityQuotas }),
+        ...(this.#deps.swarmLimits === undefined ? {} : { swarmLimits: this.#deps.swarmLimits }),
         ...(this.#deps.streamSettings === undefined ? {} : { streamSettings: this.#deps.streamSettings }),
         ...(this.#deps.contextRouteSettings === undefined ? {} : { contextRouteSettings: this.#deps.contextRouteSettings }),
         ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
