@@ -244,10 +244,11 @@ export interface DecisionContext {
 
 /**
  * Words that are not the owner's, as one quoted line for a worker's prompt (card C07g review): a JSON string, with the line and paragraph separators and the C1 controls (NEL among them) escaped too, since
- * `JSON.stringify` leaves them as they are and a model may read them as a line break.
+ * `JSON.stringify` leaves them as they are and a model may read them as a line break. So are the format characters (`\p{Cf}`: zero-width spaces, bidi overrides and isolates, the soft hyphen) — they show
+ * nothing, so an owner or a model reading the line cannot see that a word was written backwards or that a character separates two letters that are not really next to each other (card X09b part 2 review).
  */
 export function quotedLine(value: string): string {
-  return JSON.stringify(value).replace(/[\u0080-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return JSON.stringify(value).replace(/[\u0080-\u009f\u2028\u2029\p{Cf}]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 /**

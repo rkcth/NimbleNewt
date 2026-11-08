@@ -320,4 +320,32 @@ for (const backend of backends) {
       } finally { await w.close(); }
     } finally { unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
   });
+
+  test(`${backend.name}: the release status view escapes the invisible formatting characters a host or an agent writes into a summary or a reason (card X09b part 2 review)`, async () => {
+    let releaseS!: ReleaseService;
+    let status!: StatusService;
+    const w = await openWorld(backend, {}, undefined, (storage, epoch, built) => {
+      releaseS = ReleaseService.withEpoch(storage, epoch, options);
+      status = StatusService.withEpoch(storage, epoch, { assignments: built.assignments, waits: built.waits, blockers: BlockerService.withEpoch(storage, epoch, options), contracts: built.contracts, release: releaseS }, options);
+      return { release: releaseS };
+    });
+    try {
+      const worker = await w.agent("invis", [{ action: "release.report", project: "*" }]);
+      await releaseS.authorizeHost(w.owner, { commandId: cid("h"), hostId: "host:rig", os: "linux", arch: "x64" });
+      const artifacts = { "nimblenewt.tgz": sha("built bytes") };
+      const cand = (await releaseS.submit(w.owner, { commandId: cid("s"), manifest: { sourceCommit: "9".repeat(40), suiteRevision: "suite-7", artifacts, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] } })).candidateId;
+      // U+202E RIGHT-TO-LEFT OVERRIDE, U+2066 LEFT-TO-RIGHT ISOLATE, U+200B ZERO WIDTH SPACE: none of them end a line, all of them can rewrite what a reader sees.
+      const hostile = 'green \u202ebuild\u2066 ok\u200b done';
+      const first = await releaseS.issue(w.owner, { commandId: cid("i"), candidateId: cand, cell: linux, hostId: "host:rig", workerId: worker.principal.id, timeoutSeconds: 600, memoryMb: 512 });
+      await releaseS.report(worker.principal, { commandId: cid("r"), attemptId: first.attemptId, sourceCommit: "9".repeat(40), suiteRevision: "suite-7", artifactHashes: artifacts, dependencyLockHashes: { "package-lock.json": h("2") }, environment: linux, outcome: "fail", counts: { passed: 2, failed: 1, skipped: 0 }, logDigest: h("9"), summary: hostile });
+      const second = await releaseS.issue(w.owner, { commandId: cid("i"), candidateId: cand, cell: linux, hostId: "host:rig", workerId: worker.principal.id, timeoutSeconds: 600, memoryMb: 512 });
+      await releaseS.interrupt(w.owner, { commandId: cid("x"), attemptId: second.attemptId, reason: hostile });
+      const answer = await status.ask(w.owner, { kind: "release", candidateId: cand });
+      assert.ok(answer !== undefined);
+      const text = said(answer!.lines);
+      assert.match(text, /the host said "green \\u202ebuild\\u2066 ok\\u200b done"/, `the host's summary is escaped:\n${text}`);
+      assert.match(text, /reason: "green \\u202ebuild\\u2066 ok\\u200b done"/, `the interrupt reason is escaped:\n${text}`);
+      for (const l of answer!.lines) for (const ch of ["\u202e", "\u2066", "\u200b"]) assert.equal(l.text.includes(ch), false, `an invisible character reached the view unescaped: ${l.text}`);
+    } finally { await w.close(); }
+  });
 }
