@@ -129,9 +129,12 @@ for (const backend of backends) {
       const cand2 = await submit("c");
       const open = await call(w.ownerToken, "release.issue", { candidateId: cand2, cell: linux, hostId: "host:rig", workerId: "agent:none", timeoutSeconds: 600, memoryMb: 512 });
       assert.ok(open.ok, JSON.stringify(open));
-      const blindInt = "stop the release test that is running now";
-      const bi = await turn("m12", blindInt, [{ kind: "command", op: "release.interrupt", args: { attemptId: open.result["attemptId"], reason: "not needed" }, evidence: blindInt, basis: "owner" }]);
+      // Only the attempt ID is foreign: the reason is taken from the owner's own words, so this fails if `attemptId` is ever dropped from RELEASE_ID_KEYS (part 2 review, item 2).
+      const blindInt = "stop the release test that is running now, it is not needed";
+      const bi = await turn("m12", blindInt, [{ kind: "command", op: "release.interrupt", args: { attemptId: open.result["attemptId"], reason: "it is not needed" }, evidence: blindInt, basis: "owner" }]);
       assert.equal(bi[0]!.status, "refused", JSON.stringify(bi[0]));
+      assert.equal(bi[0]!.code, "unsupported_value", "the foreign value is the attempt ID the owner never named");
+      assert.match(bi[0]!.message!, /attemptId/, "the refusal names the attempt ID, not the owner's own reason");
       assert.equal((await attempts(cand2))[0]!.state, "issued", "nothing was interrupted");
       const blindApp = await turn("m13", "approve the current release", [{ kind: "command", op: "release.approve", args: { candidateId: cand }, evidence: "approve the current release", basis: "owner" }]);
       assert.equal(blindApp[0]!.status, "refused", JSON.stringify(blindApp[0]));

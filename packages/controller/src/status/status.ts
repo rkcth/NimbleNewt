@@ -641,6 +641,7 @@ export class StatusService {
     const lines: Line[] = [];
     let candidates: readonly CandidateRow[];
     let moreCandidates = false;
+    let scanLimited = false;
     if (request.candidateId !== undefined) candidates = [{ candidateId: request.candidateId, submittedAt: "", submittedBy: "", approved: false }];
     else {
       let got;
@@ -651,6 +652,7 @@ export class StatusService {
       }
       candidates = got.candidates;
       moreCandidates = got.more;
+      scanLimited = got.scanLimited;
       if (candidates.length === 0) lines.push(line("No release candidate has been submitted yet: release.submit is the start.", cite("release-candidates", "list")));
     }
     for (const candidate of candidates) {
@@ -675,7 +677,7 @@ export class StatusService {
       for (const cell of gate.cells) lines.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
       for (const a of attempts) lines.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
     }
-    if (moreCandidates) lines.push(line("More candidates have been submitted than are listed; ask again naming one (kind release with its candidateId) or with a larger limit.", cite("release-candidates", "list")));
+    if (moreCandidates) lines.push(line(scanLimited ? "More candidates were submitted than are listed, and the list had to stop at its read bound, so some older ones were never read: name one (kind release with its candidateId) to read it directly." : "More candidates were submitted than are listed (the newest are first); ask again naming one (kind release with its candidateId) or with a larger limit (1 to 10).", cite("release-candidates", "list")));
     const staging = cite("release-activation", "main");
     if (release.status === undefined) lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
     else {

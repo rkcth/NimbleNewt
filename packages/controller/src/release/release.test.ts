@@ -5,7 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { CommandRunner, type Built } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { ReleaseService, jobPayload, type Cell } from "./index.js";
+import { ReleaseService, candidateIdOf, checkManifest, jobPayload, type Cell } from "./index.js";
 
 after(stopServer);
 
@@ -250,5 +250,64 @@ for (const backend of backends) {
     const cell = gate.cells.find((x) => x.cell.os === "linux")!;
     assert.deepEqual([cell.state, cell.flaky, cell.earlierFailures.map((f) => [f.id, f.summary])], ["passed", true, [[first.attemptId, "2 failed"]]]);
     assert.equal(gate.needsAcknowledgement, true);
+  });
+
+  // ---- the owner's candidate list (card X09b part 2 review, item 3): it reads every candidate, so the newest by submit time is listed whatever order the digest IDs fall in.
+  const hoursAfter = (day: number): string => new Date(Date.parse("2026-11-01T00:00:00.000Z") + day * 3_600_000).toISOString();
+  const commitOf = (n: number): string => n.toString(16).padStart(40, "0");
+
+  suite("X09b part 2 review: candidates() pages past the 200-record scan so the newest by submit time is listed even when its ID is the highest, and more is exact", async (c) => {
+    const ids = [c.candidate];
+    for (let i = 0; i < 204; i++) ids.push((await c.at(hoursAfter(i)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(i) }) })).candidateId);
+    const top = ids.reduce((m, id) => (id > m ? id : m), "");
+    // The reviewer's probe: the newest candidate is submitted last and its ID is the highest of them all, so a list that reads 200 records in ID order and sorts them never sees it.
+    let newest: { candidateId: string } | undefined;
+    for (let i = 1; newest === undefined && i < 200_000; i++) {
+      const m = manifest({ sourceCommit: commitOf(0x10_0000 + i) });
+      if (candidateIdOf(checkManifest(m)) <= top) continue;
+      newest = await c.at(hoursAfter(5000)).submit(c.owner, { commandId: cid("s"), manifest: m });
+    }
+    assert.ok(newest !== undefined, "a manifest whose ID sorts above every other one was found");
+    assert.ok(newest.candidateId > top, "the newest candidate really does have the highest ID");
+
+    const got = await c.rel.candidates(c.owner, { limit: 5 });
+    assert.deepEqual(got.candidates.map((r) => r.candidateId), [newest.candidateId, ...ids.slice(1).reverse().slice(0, 4)].slice(0, 5), "the newest five by submit time, newest first");
+    assert.equal(got.candidates[0]!.candidateId, newest.candidateId, "the newest candidate is listed even though its ID is the highest");
+    assert.equal(got.more, true, "205 other candidates are not listed");
+    assert.equal(got.scanLimited, false, "the whole list was read: `more` is exact, not a scan bound");
+
+    const all = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.equal(all.candidates[0]!.candidateId, newest.candidateId);
+    assert.equal(all.candidates.length, 20);
+    assert.equal(all.more, true);
+    assert.equal(all.scanLimited, false);
+  });
+
+  suite("X09b part 2 review: candidates() reads a store of exactly 200 (and one below the old scan bound) to the end, so more says only what is truly left out", async (c) => {
+    // The suite's own candidate plus 199: exactly 200 records, the old bound. Every one of them is read, so `more` says that 180 are left out of the 20 asked for and nothing was left unscanned.
+    const ids = [c.candidate];
+    for (let i = 0; i < 199; i++) ids.push((await c.at(hoursAfter(i)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(i) }) })).candidateId);
+    assert.equal(ids.length, 200);
+    const got = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.deepEqual(got.candidates.map((r) => r.candidateId), ids.slice(1).reverse().slice(0, 20), "the newest 20 by submit time (the last 199 submitted, newest first)");
+    assert.equal(got.more, true);
+    assert.equal(got.scanLimited, false, "200 records are scanned to the end: the scan bound is no longer 200");
+
+    // A store with fewer candidates than the caller asked for lists them all and says nothing is left out.
+    const few = await c.at(hoursAfter(9000)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(0xff) }) });
+    const small = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.equal(small.candidates.length, 20, "at most `limit` are listed whatever the store holds");
+    assert.equal(small.candidates[0]!.candidateId, few.candidateId);
+    assert.equal(small.more, true);
+  });
+
+  suite("X09b part 2 review: candidates() lists what is there and says nothing is left out when everything fits", async (c) => {
+    const second = await c.at(hoursAfter(1)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(1) }) });
+    const got = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.deepEqual(got.candidates.map((r) => r.candidateId), [second.candidateId, c.candidate], "newest first");
+    assert.equal(got.more, false, "nothing was left out");
+    assert.equal(got.scanLimited, false);
+    assert.deepEqual((await c.rel.candidates(c.owner, { limit: 1 })).candidates.map((r) => r.candidateId), [second.candidateId]);
+    await refuses("invalid_command", () => c.rel.candidates(c.owner, { limit: 21 }), /1 to 20/);
   });
 }

@@ -54,6 +54,14 @@ export interface AttemptBody {
 export interface ApprovalBody { readonly candidateId: string; readonly by: string; readonly at: string; /** The earlier failed attempts the owner acknowledged when approving a release that passed only on a retry. */ readonly acknowledged?: readonly string[] }
 /** One submitted candidate as the owner's `release` status view lists them (card X09b part 2): what to ask about and whether it is approved. */
 export interface CandidateRow { readonly candidateId: string; readonly submittedAt: string; readonly submittedBy: string; readonly approved: boolean }
+/** The owner's candidate list: the newest kept, whether one is left out, and whether the whole store was read. */
+export interface CandidatePage {
+  readonly candidates: readonly CandidateRow[];
+  /** True when a submitted candidate is not listed. Exact while `scanLimited` is false; with a bounded scan it says "at least one, and possibly more that were never read". */
+  readonly more: boolean;
+  /** True when the scan stopped at its bound (`CANDIDATE_SCAN` records) before the end of the store, so candidates submitted earlier than those listed were not read at all. */
+  readonly scanLimited: boolean;
+}
 /** Index of the attempts of one platform of one candidate (so no list of all attempts is ever scanned). */
 export interface CellIndexBody { readonly candidateId: string; readonly cell: string; readonly attempts: readonly { readonly id: string; readonly n: number; readonly by: string }[] }
 /** Index of one host: the attempts still open on it and the recently ended ones it must stop. */
@@ -109,8 +117,11 @@ const ISSUERIDX = "release-issuer";
 /** The record kinds the activation part (K02) reads: it never writes them. */
 export const RELEASE_KINDS = { candidate: CANDIDATE, approval: APPROVAL } as const;
 const SETTINGS: AggregateRef = { kind: "release-settings", id: "main" };
-/** How many candidate records one list reads at most (the owner's `release` status view); a cut list says so. */
-const CANDIDATE_SCAN = 200;
+/** How many candidate records one page of the owner's candidate scan holds, and how many pages it reads at most (so a list never reads unbounded). */
+const CANDIDATE_SCAN_PAGE = 200;
+const CANDIDATE_SCAN_PAGES = 25;
+/** The most candidate records one `candidates()` call reads: `CANDIDATE_SCAN_PAGE * CANDIDATE_SCAN_PAGES`. */
+export const CANDIDATE_SCAN = CANDIDATE_SCAN_PAGE * CANDIDATE_SCAN_PAGES;
 const ROLE = /^[a-z][a-z0-9-]{0,39}$/;
 
 /** The issuer settings with the profile's default under any field not set. Pure. */
@@ -720,19 +731,27 @@ export class ReleaseService {
 
   /**
    * The submitted candidates, newest submitted first (ties by ID): what the owner's `release` status view lists when no candidate is named.
-   * At most `CANDIDATE_SCAN` records are read and `more` says the list was cut there; the gate and attempts of each listed candidate are read with `gate` and `attempts`. Owner only.
+   * A candidate's ID is a digest, so ID order says nothing about when it was submitted: the list pages through the records (up to `CANDIDATE_SCAN` of them) and keeps the newest `limit` by submit time.
+   * `more` is exact unless `scanLimited` says the bound was reached. The gate and attempts of each listed candidate are read with `gate` and `attempts`. Owner only.
    */
-  async candidates(owner: Principal, page: { limit?: number } = {}): Promise<{ candidates: readonly CandidateRow[]; more: boolean }> {
+  async candidates(owner: Principal, page: { limit?: number } = {}): Promise<CandidatePage> {
     this.#owner(owner, "list release candidates");
     const limit = page.limit ?? 5;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) bad("limit", "must be a whole number from 1 to 20");
-    const found = await this.#runner.list(CANDIDATE, { limit: CANDIDATE_SCAN });
-    const rows = found
-      .map((a) => ({ candidateId: a.id, submittedAt: (a.body as unknown as CandidateBody).submittedAt, submittedBy: (a.body as unknown as CandidateBody).submittedBy }))
-      .sort((x, y) => (x.submittedAt === y.submittedAt ? (x.candidateId < y.candidateId ? -1 : 1) : x.submittedAt < y.submittedAt ? 1 : -1));
+    const scanned: { candidateId: string; submittedAt: string; submittedBy: string }[] = [];
+    let after: string | undefined;
+    let scanLimited = true;
+    for (let read = 0; read < CANDIDATE_SCAN_PAGES; read++) {
+      const chunk = await this.#runner.list(CANDIDATE, { ...(after === undefined ? {} : { afterId: after }), limit: CANDIDATE_SCAN_PAGE });
+      for (const a of chunk) { const body = a.body as unknown as CandidateBody; scanned.push({ candidateId: a.id, submittedAt: body.submittedAt, submittedBy: body.submittedBy }); }
+      // A short page is the end of the store: everything was read, so what is left out is counted exactly.
+      if (chunk.length < CANDIDATE_SCAN_PAGE) { scanLimited = false; break; }
+      after = chunk[chunk.length - 1]!.id;
+    }
+    scanned.sort((x, y) => (x.submittedAt === y.submittedAt ? (x.candidateId < y.candidateId ? -1 : 1) : x.submittedAt < y.submittedAt ? 1 : -1));
     const listed: CandidateRow[] = [];
-    for (const r of rows.slice(0, limit)) listed.push({ ...r, approved: (await this.#runner.get(APPROVAL, r.candidateId)) !== undefined });
-    return { candidates: listed, more: found.length >= CANDIDATE_SCAN || rows.length > limit };
+    for (const r of scanned.slice(0, limit)) listed.push({ ...r, approved: (await this.#runner.get(APPROVAL, r.candidateId)) !== undefined });
+    return { candidates: listed, more: scanLimited || scanned.length > limit, scanLimited };
   }
 
   /** Every attempt of a candidate, read through each platform's own index (no scan of all attempts). */
