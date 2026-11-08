@@ -3116,6 +3116,32 @@
       ],
       "deliverable": "Split from L04b (2026-10-28): the dispatcher resumes attempts through the check, workers observe dependencies, a reviewer agent gives verdicts, sweep at start-up, chat commands and the continuation capture operation for hosts",
       "acceptance_and_verification": "A resumed attempt has been checked; changed inputs are reviewed; a crash during execution records one resume",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "c059b76c"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The dispatcher checks a resumed attempt and commits the check after the place and allowance are held, reading the pause gates and holds once more first (a late pause or hold gives the place and allowance back and leaves the check uncommitted); changes judged to matter hold it for the owner (resume.approve or resume.decline), and once approved the agent is told each change and the reviewer's reason, each quoted as one JSON string; a crash during the commit records one resume whoever carries it on. Hosts capture continuations, and read a task's continuation, dependencies and resume check, only for an attempt they run or are pinned to; agents record what their work relied on (resume.dependencies.record and .get, resume.for-task); the owner starts a task's resume check over or cancels it in chat by the task's title (an interpreter check ID that is not that task's current check is refused). Left for L04d: a real dependency observer, a reviewer agent, hosts calling continuation.capture, after: model-change, a per-tick prerequisite cache. Green exhaustive run pending (to be added to ci_runs)."
+      }
+    },
+    {
+      "id": "L04d",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish checked resume: real dependency observation, a reviewer agent and host captures",
+      "depends_on": [
+        "L04c"
+      ],
+      "deliverable": "Split from L04c (2026-11-08): L04c built the dispatcher's checked resume, the owner's hold, the host ports and the state-API operations; three pieces are still only ports or operations. A worker-side observer that reads each recorded file, directory, search and external dependency again before the resumed attempt's first turn (in the new sandbox or by a pre-start probe on the host) instead of `unknown`; a reviewer agent behind `ResumePorts.review` that gives reasoned verdicts instead of the controller's stand-in (every change relevant, so every changed resume waits for the owner); and the local and remote worker hosts calling `continuation.capture` at their safe boundaries. Also `after: model-change` when the route differs from the checkpoint's, and a per-tick cache of the prerequisite scan",
+      "acceptance_and_verification": "A resumed attempt on a new host has its file dependencies observed (changed or unchanged, not unknown); a change the reviewer agent judges not to matter is committed without the owner; a host captures a complete continuation at a turn boundary and a resume uses it; mutation check recorded",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -9241,6 +9267,7 @@
         "L03c",
         "L04b",
         "L04c",
+        "L04d",
         "C09b",
         "C09c",
         "U04b",
