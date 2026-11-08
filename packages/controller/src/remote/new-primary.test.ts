@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { after } from "node:test";
+import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { HostService } from "../hosts/index.js";
 import { RemoteWorkerClient, type ReconcileAnswer } from "./client.js";
+import { adoptable } from "./host.js";
 import { HostPoller } from "./poller.js";
 import { PROTOCOL_HEADER, SESSION_HEADER } from "./protocol.js";
 import { WorkerTransport } from "./server.js";
@@ -11,6 +12,18 @@ import { refuses, remoteSuite } from "./testing/suite.js";
 import { REMOTE_CAPS, rawRequest } from "./testing/world.js";
 
 after(stopServer);
+
+test("a new primary takes over only a run the asked host holds: accepted, or completed with its result; an offer, a run that ended or moved, or another host's run is not taken (card H09b)", async () => {
+  const by = { id: "service:dispatcher", kind: "service" } as never;
+  const at = (p: object | undefined) => ({ placement: async () => p as never });
+  const id = "att-abcdefghijklmnopqrst";
+  assert.equal(await adoptable(at({ hostId: "host:r1", placement: 3, state: "accepted" }), by, "host:r1", id), 3);
+  assert.equal(await adoptable(at({ hostId: "host:r1", placement: 4, state: "completed", result: { status: "completed" } }), by, "host:r1", id), 4);
+  assert.equal(await adoptable(at({ hostId: "host:r2", placement: 3, state: "accepted" }), by, "host:r1", id), undefined, "another host's run");
+  for (const state of ["offered", "ended", "relocating"]) assert.equal(await adoptable(at({ hostId: "host:r1", placement: 3, state }), by, "host:r1", id), undefined, state);
+  assert.equal(await adoptable(at({ hostId: "host:r1", placement: 3, state: "completed" }), by, "host:r1", id), undefined, "completed with no stored result");
+  assert.equal(await adoptable(at(undefined), by, "host:r1", id), undefined);
+});
 
 const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 /** Waits (up to 15 s) until the condition holds. */

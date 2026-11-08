@@ -87,6 +87,11 @@ export interface TurnUsage {
 export interface WorkerHandle {
   /** The version of the worker software that runs the attempt (recorded on the attempt). */
   readonly workerVersion: string;
+  /**
+   * A name for this turn's result that is the same in every controller process (a remote placement: `result:<attempt>:<placement>`), so figures the turn reports are charged once even when a new primary takes the attempt
+   * over and takes the same stored result after the old one had charged it (card H09b). Absent: the turn's figures are keyed per process (a local worker's turn cannot be taken over).
+   */
+  readonly resultKey?: string;
   /** Runs the turn. Every tool call goes through `gateway`. Resolves with the turn's result; rejects only when the worker itself broke. */
   run(gateway: ToolGateway): Promise<WorkerTurnResult>;
   /** Takes a conversation checkpoint at a safe boundary (after the in-flight calls have settled). */

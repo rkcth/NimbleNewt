@@ -1915,7 +1915,8 @@ export class DispatcherService {
       try {
         if (result.usage !== undefined) {
           // A turn's figures that could not be charged are not lost silently: the attempt's record says so (redacted, clipped).
-          await this.#usage(attemptId, result.usage).catch(async (error: unknown) => {
+          // A remote turn's result is stored once per placement: keyed by it, a new primary that takes the same result again (the old one charged it and lost the store before ending the attempt) charges nothing more (card H09b).
+          await this.#usage(attemptId, result.usage, handle.resultKey).catch(async (error: unknown) => {
             const why = clip(redactText(error instanceof Error ? error.message : String(error)), DISPATCH_LIMITS.diagnostic);
             await this.#update(attemptId, (b) => ({ ...b, usageError: why })).catch(() => undefined);
           });

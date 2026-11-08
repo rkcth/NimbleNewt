@@ -60,6 +60,7 @@ export class RemoteTestHandle implements WorkerHandle {
   readonly workerVersion = "remote-1.0.0";
   stopped = 0;
   constructor(private readonly host: RemoteTestHost, private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number) {}
+  get resultKey(): string { return `result:${this.attemptId}:${this.placement}`; }
   run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }
   async checkpoint(): Promise<JsonObject> {
     if (this.host.hang) await new Promise<never>(() => undefined);

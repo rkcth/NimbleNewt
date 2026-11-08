@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { AdmissionService } from "../admission/service.js";
+import { BudgetService } from "../budgets/index.js";
 import type { DispatchBody } from "../dispatch/model.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
@@ -142,6 +143,45 @@ test("a new primary does not renew a remote attempt it did not start until it ha
       assert.deepEqual([done.state, done.outcome?.status], ["finished", "succeeded"]);
     } finally { await second.close(); }
   } finally { await first.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a turn's figures the old primary already charged are not charged again when a new primary takes the attempt over and takes its result (card H09b, two controllers on one store)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-h09b-"));
+  const first = await open(d, "blobs-1");
+  let second: Controller | undefined;
+  // The old primary charges the turn's figures and loses the store before it can end the attempt: the second controller opens right after that charge.
+  const charge = BudgetService.prototype.charge;
+  let armed = true;
+  let tookOver: (c: Controller) => void = () => undefined;
+  const takenOver = new Promise<Controller>((resolve) => { tookOver = resolve; });
+  BudgetService.prototype.charge = async function (this: BudgetService, ...a: Parameters<BudgetService["charge"]>) {
+    const r = await charge.apply(this, a);
+    if (armed && a[1].activity === "model-call") { armed = false; second = await open(d, "blobs-2"); tookOver(second); }
+    return r;
+  };
+  try {
+    assert.ok(first.dispatch?.workerUrl !== undefined, first.dispatchProblem);
+    const s = await setup(first);
+    const { attempt } = await placed(first, s);
+    await attempt.complete({ status: "completed", usage: { costMicros: 700 } } as never);
+    second = await Promise.race([takenOver, new Promise<never>((_, reject) => { setTimeout(() => reject(new Error("the old primary never charged the turn")), 60_000).unref(); })]);
+    await first.dispatch!.dispatcher.idle();
+    assert.equal((await placementOf(second, s.attemptId)).state, "completed");
+    assert.equal((await dispatchOf(second, s.attemptId)).state, "running", "the old primary could not end the attempt");
+    const taken = await second.dispatch!.dispatcher.tick();
+    assert.deepEqual(taken.adopted, [s.attemptId], JSON.stringify(taken));
+    await second.dispatch!.dispatcher.idle();
+    const done = await dispatchOf(second, s.attemptId);
+    assert.deepEqual([done.state, done.outcome?.status], ["finished", "succeeded"]);
+    const usage = await call(second, s.ownerToken, "budget.usage", { taskId: s.taskId });
+    assert.ok(usage.ok, JSON.stringify(usage));
+    assert.equal(usage.result.item.byActivity["model-call"]?.costMicros, 700, JSON.stringify(usage.result));
+  } finally {
+    BudgetService.prototype.charge = charge;
+    await second?.close();
+    await first.close();
+    rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 });
 
 test("a new primary ends a remote attempt whose run is gone (only offered when the old controller stopped: the offer died with it) and admits a replacement; one whose worker already sent its result is taken with that result (card H09b, two controllers on one store)", async () => {

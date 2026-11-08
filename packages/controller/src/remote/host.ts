@@ -104,6 +104,8 @@ export async function adoptable(remote: Pick<RemoteWorkerService, "placement">, 
 export class RemoteWorkerHandle implements WorkerHandle {
   readonly workerVersion = "remote";
   constructor(private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number, private readonly options: RemoteWorkerHostOptions) {}
+  /** The placement's one stored result: a new primary that takes it again charges its figures under the same key (card H09b). */
+  get resultKey(): string { return `result:${this.attemptId}:${this.placement}`; }
   run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }
   /** The handle acts only while its own placement holds the attempt: after a move, an old handle controls nothing. */
   async #current(): Promise<void> {
