@@ -207,7 +207,7 @@ for (const backend of backends) {
   });
 
   suite("a record with more declared hosts than the view lists shows the first ones in order and counts the rest, inside the lines the chat shows", async (w, s) => {
-    // More hosts than the owner's own command could ever store: `capacity.quotas.change` takes at most 50 hosts in one change and refuses a record holding more than 200 (both probed), so a record this
+    // More hosts than the owner's own command could ever store: `capacity.quotas.change` takes at most 50 hosts in one change (probed) and refuses a record that would hold more than 200, so a record this
     // large can only arrive by another route and is written whole here. What is under test is the view's own bound and its order, not the command's.
     const hosts: Record<string, unknown> = {};
     for (let i = 499; i >= 0; i--) hosts[`host:h${String(i).padStart(3, "0")}`] = { cpus: 8, memoryMb: 16_384 }; // declared newest first, so a view that kept the record's order would show host:h499 first
