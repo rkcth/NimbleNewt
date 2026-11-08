@@ -308,7 +308,8 @@ export class WorkspaceHost {
       const summary = kept.length === 0 ? `${written} file(s) carried into the shared workspace${skipped === 0 ? "" : `, ${skipped} skipped`}` : `${written} file(s) carried, ${kept.length} kept for review because the shared file had moved since the base${skipped === 0 ? "" : `, ${skipped} skipped`}`;
       return { ok: true, summary, detail: { written, kept: kept.length, keptFiles: kept.slice(0, HOST_LIMITS.keptListed), skipped, markedIntegrated: marked, changed: written > 0 } };
     }
-    // quarantine
+    // Only a quarantine is left; anything else (release is refused before the journal) never falls through to it.
+    if (operation !== "quarantine") return no(`this host does not carry out ${operation} here`);
     try {
       const record = await quarantine({ root: where.quarantineRoot, path: where.checkout, reason: call.reason, by: call.assignee ?? `workspace:${call.requestId}`, ...(this.#options.clock === undefined ? {} : { clock: this.#options.clock }) });
       return { ok: true, summary: `the checkout was moved to the quarantine (${record.files} file(s)); the agent's git directory was left where it is`, detail: { quarantineId: record.id, files: record.files, directories: record.directories, symlinks: record.symlinks, bytes: record.bytes, copied: record.copied, changed: true, removed: true } };

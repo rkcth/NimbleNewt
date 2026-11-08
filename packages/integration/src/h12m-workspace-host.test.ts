@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { AdmissionService, HostService, LocalWorker, RemoteWorkerClient, WorkspaceResponder, startController, type WorkerHost, type WorkspaceCall } from "@nimblenewt/controller";
 import { PI, workGrants } from "@nimblenewt/controller/testing";
-import { GitBridge, WorkspaceHost, type CheckoutLocation } from "@nimblenewt/worker";
+import { GitBridge, LocalWorkspaces, WorkspaceHost, type CheckoutLocation } from "@nimblenewt/worker";
 
 // Card H12m, end to end through startController: the host that holds a real checkout (real git in temp directories) answers integration, refresh and quarantine for the controller's workspace.request, on the local worker and,
 // over the authenticated transport, on a remote worker, with the same typed outcomes.
@@ -46,9 +46,13 @@ async function machine(dir: string, name: string) {
 const api = async (c: { api: { handle(token: string, req: never): Promise<unknown> } }, token: string, op: string, args: Record<string, unknown>, commandId?: string) =>
   (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as { ok: boolean; result?: any; error?: { code: string; message: string } };
 
-test("local host: refresh, integration and quarantine of a running agent's real checkout; the agent is told, a quarantine stops it, and the host is found by the task's last placement (card H12m)", { skip }, async () => {
+test("local host: refresh, integration and quarantine of a running agent's real checkout by the production workspace port; release is a typed refusal; the agent is told, a quarantine stops it, and the host is found by the task's last placement (card H12m)", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-h12m-"));
   const m = await machine(dir, "w1");
+  // The production workspace port of a local host (LocalWorkspaces, card H12q): it makes each task's checkout in its own layout and answers the controller's requests for it, with the host's own busy check wired to the LocalWorker.
+  const ws = new LocalWorkspaces({ root: join(dir, "w1", "work"), git: m.git, shared: () => m.shared, busy: () => local?.busyAttempts() ?? [] });
+  const ran: WorkspaceCall[] = [];
+  const checkoutFor = async (taskId: string, projectId: string): Promise<CheckoutLocation> => { await ws.ensure({ taskId, projectId }); return ws.locate({ taskId, projectId })!; };
   const told: string[] = [];
   const turn: { started?: () => void; finish?: () => void } = {};
   const inTurn: Promise<void>[] = [];
@@ -66,7 +70,7 @@ test("local host: refresh, integration and quarantine of a running agent's real 
         build: () => {
           local = new LocalWorker({
             hostId: "host:w1", resources: { cpus: 1, memoryMb: 512 }, version: "w-1", capabilities: () => CAPS,
-            workspace: { run: async (call) => { entered?.(); if (gate !== undefined) await gate; return m.port.run(call); } },
+            workspace: { run: async (call) => { entered?.(); if (gate !== undefined) await gate; ran.push(call); return ws.port.run(call); } },
             sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
             runtimes: { open: async () => {
               let started!: () => void; inTurn.push(new Promise<void>((ok) => { started = ok; }));
@@ -110,7 +114,7 @@ test("local host: refresh, integration and quarantine of a running agent's real 
 
     // ---- a running agent: a dirty checkout refuses a refresh and nothing changes --------------------------------------------------
     const A = await attemptFor();
-    const where = await m.checkoutFor(A.task);
+    const where = await checkoutFor(A.task, project);
     const tick1 = await c.dispatch.dispatcher.tick();
     assert.deepEqual(tick1.started, [A.attempt], JSON.stringify({ s: tick1.skipped, f: tick1.failures }));
     await inTurn[0];
@@ -122,7 +126,7 @@ test("local host: refresh, integration and quarantine of a running agent's real 
     assert.equal(dirty.result.state, "refused");
     assert.match(dirty.result.summary, /changed or new file/);
     assert.equal(dirty.result.assignee, owned(A.agent), "recorded against the task's assignee");
-    assert.equal(m.ran.at(-1)!.assignee, owned(A.agent));
+    assert.equal(ran.at(-1)!.assignee, owned(A.agent));
     assert.equal(await readFile(join(where.checkout, "src", "a.ts"), "utf8"), "export const a = 2; // the agent's edit\n", "the agent's work is untouched");
     assert.equal(existsSync(join(where.checkout, "src", "c.ts")), false);
     assert.equal(m.state(), sharedBefore, "the shared repository is untouched");
@@ -140,9 +144,9 @@ test("local host: refresh, integration and quarantine of a running agent's real 
     assert.match(told[0]!, /integrated into the shared workspace/);
     assert.deepEqual(integ.result.told, [A.attempt]);
     // The same command again is the recorded answer: the host is not asked, the agent not told again.
-    const asked = m.ran.length;
+    const asked = ran.length;
     assert.equal((await api(c, boot.token, "workspace.request", { operation: "integration", taskId: A.task, reason: "ready to share" }, "r-int")).result.replayed, true);
-    assert.equal(m.ran.length, asked);
+    assert.equal(ran.length, asked);
     assert.equal(told.length, 1);
 
     // ---- refresh of a clean checkout: it moves, the agent is told --------------------------------------------------------------------
@@ -152,6 +156,18 @@ test("local host: refresh, integration and quarantine of a running agent's real 
     assert.equal(await readFile(join(where.checkout, "src", "c.ts"), "utf8"), "export const c = 1;\n");
     assert.equal(told.length, 2);
     assert.match(told[1]!, /was refreshed.*read them again/);
+
+    // ---- release: this host cannot commit through a workspace request (the commit needs the review gate's permit, card H12o) and says so as a typed refusal, after the quiesce; nothing changes and the agent runs on
+    const beforeRelease = m.state();
+    const rel = await api(c, boot.token, "workspace.request", { operation: "release", taskId: A.task, reason: "commit the reviewed work" }, "r-rel");
+    assert.equal(rel.ok, true, JSON.stringify(rel));
+    assert.equal(rel.result.state, "refused");
+    assert.match(rel.result.summary, /commit permit/);
+    assert.equal(ran.at(-1)!.operation, "release", "the refusal is the host's own");
+    assert.deepEqual(rel.result.quietAttempts, [A.attempt], "release runs behind the quiesce like the other operations");
+    assert.equal(m.state(), beforeRelease);
+    assert.equal((await state(A.attempt)).frozen, undefined);
+    assert.equal((await state(A.attempt)).state, "running");
 
     // ---- quarantine: the checkout goes to the owner-only root, the attempt is stopped, the task is left as it is -----------------------
     await writeFile(join(where.checkout, "src", "a.ts"), "export const a = 3; // unsaved\n");
@@ -169,7 +185,7 @@ test("local host: refresh, integration and quarantine of a running agent's real 
 
     // ---- an attempt that starts while an operation runs waits for it ------------------------------------------------------------------
     const B = await attemptFor();
-    await m.checkoutFor(B.task);
+    await checkoutFor(B.task, project);
     // Run B once so its last placement is on this host, then let it go.
     assert.deepEqual((await c.dispatch.dispatcher.tick()).started, [B.attempt]);
     await inTurn[1];
@@ -307,6 +323,14 @@ test("remote host: the same requests cross the authenticated transport to a work
     for (let i = 0; i < 10; i++) await new Promise((ok) => setTimeout(ok, 30));
     assert.equal(m.ran.length, askedBefore, "a withdrawn request is never started later");
     assert.equal((await state(c, attemptId))?.frozen, undefined, "the attempt is not left frozen");
+
+    // Release over the transport: the worker's typed refusal comes back as it is (the commit needs the review gate's permit, card H12o); nothing changes.
+    const beforeRelease = m.state();
+    const rel = await request("release", "x-rel", "commit the reviewed work");
+    assert.equal(rel.result.state, "refused", JSON.stringify(rel));
+    assert.match(rel.result.summary, /commit permit/);
+    assert.equal(m.ran.at(-1)!.operation, "release");
+    assert.equal(m.state(), beforeRelease);
 
     // Quarantine over the transport: the checkout moves on the worker's machine and the attempt is stopped.
     await writeFile(join(where.checkout, "src", "a.ts"), "export const a = 3; // unsaved\n");
