@@ -156,6 +156,7 @@ test("H08b: a process may not keep more renewals waiting at the controller than 
 // Card L02d: winding a process down is timed, a process that outlives its kill is reported (never waited on for ever), and Force Stop kills it again.
 test("L02d: close asks, kills after the grace, and gives up with ProcessNotEnded when the process is still there; the winding-down time counts from the first request; Force Stop kills again", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  t.mock.method(performance, "now", () => Date.now());
   let kills = 0;
   let killable = false;
   let finish!: (r: RunResult) => void;
@@ -199,6 +200,7 @@ test("L02d: close asks, kills after the grace, and gives up with ProcessNotEnded
 
 test("L02d: a process that obeys the close ends without a kill, and its winding-down time is what it took", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 5_000 });
+  t.mock.method(performance, "now", () => Date.now());
   const f = fake();
   const p = await launch(f);
   const closing = p.close();
@@ -210,4 +212,21 @@ test("L02d: a process that obeys the close ends without a kill, and its winding-
   await new Promise((r2) => setImmediate(r2));
   assert.equal(p.alive, false);
   assert.equal(p.windDownMs(), 40);
+});
+
+test("L02d review: the winding-down time is on the monotonic clock; a wall clock set back a day or forward a year changes nothing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 9_000_000_000 });
+  let mono = 1_000;
+  t.mock.method(performance, "now", () => mono);
+  const f = fake();
+  const p = await launch(f);
+  p.kill("stop");
+  mono += 250;
+  t.mock.timers.setTime(9_000_000_000 - 86_400_000);
+  assert.equal(p.windDownMs(), 250, "set back: never negative, never 0 while it winds down");
+  t.mock.timers.setTime(9_000_000_000 + 365 * 86_400_000);
+  mono += 50;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.alive, false);
+  assert.equal(p.windDownMs(), 300, "set forward: not a year of compute");
 });

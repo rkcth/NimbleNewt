@@ -67,4 +67,8 @@ test("a run's tree splits into the confinement down to the launched program, and
   assert.equal(plain.program?.pid, 5);
   assert.deepEqual(plain.started.map((x) => x.pid), [6]);
   assert.deepEqual(splitRunTree([]), { own: [], program: undefined, started: [] });
+  // Review of L02d: a name is the program's own choice. Below bubblewrap's two processes, a process that calls itself `bwrap` is the program, and what it started is still listed as the agent's work.
+  const renamed = splitRunTree([p(10, 1, "bwrap", 100), p(11, 10, "bwrap", 101), p(12, 11, "bwrap", 102), p(20, 12, "bwrap", 110), p(21, 20, "server", 111)]);
+  assert.equal(renamed.program?.pid, 12);
+  assert.deepEqual(renamed.started.map((x) => x.pid), [20, 21]);
 });

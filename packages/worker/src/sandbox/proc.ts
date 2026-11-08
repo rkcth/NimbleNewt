@@ -69,6 +69,8 @@ export function linuxStillRunning(processes: readonly RunProcess[], proc = "/pro
 
 /** Programs that make the confinement itself (the sandbox's own processes above the launched program), not the agent's work. */
 const CONFINEMENT = new Set(["bwrap", "sandbox-exec"]);
+/** At most this many confinement processes stand above the program (bubblewrap's monitor and its process 1). Below them the process is the program whatever it calls itself: a name is the program's own choice, so a process named `bwrap` deeper down is never taken as the confinement (review of L02d). */
+const MAX_CONFINEMENT = 2;
 
 /**
  * Splits a run's process tree (root first, parents before children) into the run's own processes and the work the agent started (card L02d). The run's own processes are the confinement (bubblewrap's, Seatbelt's) down to the
@@ -82,7 +84,7 @@ export function splitRunTree(tree: readonly RunProcess[]): { readonly own: reado
   let program: RunProcess | undefined;
   while (at !== undefined) {
     own.push(at);
-    if (!CONFINEMENT.has(at.name)) { program = at; break; }
+    if (!CONFINEMENT.has(at.name) || own.length > MAX_CONFINEMENT) { program = at; break; }
     const parent: RunProcess = at;
     // The oldest child goes on the chain (the confinement starts the program before anything else can exist below it).
     at = tree.filter((p) => p.parent === parent.pid).sort((a, b) => (a.started === b.started ? a.pid - b.pid : Number(a.started) - Number(b.started)))[0];

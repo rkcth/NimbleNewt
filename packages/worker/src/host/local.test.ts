@@ -217,25 +217,26 @@ const TREE = [proc(10, 1, "bwrap"), proc(11, 10, "bwrap"), proc(12, 11, "node"),
 
 test("L02d: a running sandbox lists what the agent started but not its own worker process; once asked to end it lists the worker until it has gone, and the time it took is the cleanup's compute", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 50_000 });
+  t.mock.method(performance, "now", () => Date.now());
   const played = heldProcess();
   played.state.tree = TREE;
   const p = heldParts(played.launcher);
   const session = await p.sandbox.open(order([]).recipe, order([]));
   assert.deepEqual(await session.work(), { processes: [] }, "nothing launched yet");
   await p.runtimes.open(order([]), {}, undefined);
-  assert.deepEqual(await session.work(), { processes: [{ ref: "pid 20 (server)", kind: "process", state: "running" }] }, "the worker process is the attempt itself; the server the agent started is listed");
+  assert.deepEqual(await session.work(), { processes: [{ ref: "pid 20 \"server\"", kind: "process", state: "running" }] }, "the worker process is the attempt itself; the server the agent started is listed");
   // The process ignores the close: within the grace it is still ending (running), after it it did not obey (uncooperative), and the close gives up instead of waiting for ever.
   played.state.obeys = false;
   const closing = session.close();
   closing.catch(() => undefined);
   await new Promise((r) => setImmediate(r));
   t.mock.timers.tick(1000);
-  assert.deepEqual((await session.work()).processes.map((x) => [x.ref, x.state]), [["worker process pid 12 (node)", "running"], ["pid 20 (server)", "running"]]);
+  assert.deepEqual((await session.work()).processes.map((x) => [x.ref, x.state]), [["worker process pid 12 \"node\"", "running"], ["pid 20 \"server\"", "running"]]);
   assert.equal((await session.work()).computeMs, 1000);
   t.mock.timers.tick(PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs);
   await assert.rejects(closing, /did not end/, "the close says the process is still there");
   const stuck = await session.work();
-  assert.deepEqual(stuck.processes.map((x) => [x.ref, x.state]), [["worker process pid 12 (node)", "uncooperative"], ["pid 20 (server)", "uncooperative"]]);
+  assert.deepEqual(stuck.processes.map((x) => [x.ref, x.state]), [["worker process pid 12 \"node\"", "uncooperative"], ["pid 20 \"server\"", "uncooperative"]]);
   assert.equal(stuck.computeMs, 1000 + PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs);
   // Force Stop kills it again; a process that left something behind when its run ended still lists that as having outlived it.
   played.state.obeys = true;
@@ -252,6 +253,7 @@ test("L02d: a running sandbox lists what the agent started but not its own worke
 
 test("L02d: a process that outlived its run is uncooperative; a system that cannot list processes names only the worker once it was asked to end; a winding down of 0 ms charges nothing", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 50_000 });
+  t.mock.method(performance, "now", () => Date.now());
   const played = heldProcess();
   played.state.tree = TREE;
   const p = heldParts(played.launcher);
@@ -262,7 +264,7 @@ test("L02d: a process that outlived its run is uncooperative; a system that cann
   await closing;
   played.state.survivors = [proc(30, 1, "daemon")];
   const after = await session.work();
-  assert.deepEqual(after.processes, [{ ref: "pid 30 (daemon)", kind: "process", state: "uncooperative" }]);
+  assert.deepEqual(after.processes, [{ ref: "pid 30 \"daemon\"", kind: "process", state: "uncooperative" }]);
   assert.equal(after.computeMs, undefined, "it ended in 0 ms: no figure");
   // A system with no process list: nothing is claimed about what the agent started, and the worker is named only once asked to end.
   const blind = heldProcess();
@@ -281,6 +283,16 @@ test("L02d: a process that outlived its run is uncooperative; a system that cann
   await assert.rejects(c2, /did not end/);
   blind.state.obeys = true;
   await s2.end();
+});
+
+test("L02d review: a process name (the program's own choice) is quoted in what the sandbox lists, so it cannot pass for more of the line", async () => {
+  const played = heldProcess();
+  played.state.tree = [...TREE.slice(0, 3), proc(21, 12, "x): settled. pid 1 (init"), proc(22, 12, "[cut: 1 of 2 entries]"), proc(23, 12, "say \"hi\" \\o/")];
+  const p = heldParts(played.launcher);
+  const session = await p.sandbox.open(order([]).recipe, order([]));
+  await p.runtimes.open(order([]), {}, undefined);
+  assert.deepEqual((await session.work()).processes.map((x) => x.ref), ["pid 21 \"x): settled. pid 1 (init\"", "pid 22 \"[cut: 1 of 2 entries]\"", "pid 23 \"say \\\"hi\\\" \\\\o/\""]);
+  await session.close();
 });
 
 test.after(() => { rmSync(root, { recursive: true, force: true }); void dirname; });

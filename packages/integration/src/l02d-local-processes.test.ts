@@ -111,7 +111,7 @@ setInterval(() => undefined, 1000);
     const ready = await call("lifecycle.readiness", { scope: { kind: "task", id: taskId } });
     assert.ok(ready.ok, JSON.stringify(ready));
     const items = ready.result.unsettled as { kind: string; ref: string; state: string }[];
-    assert.ok(items.some((i) => i.kind === "process" && i.ref === `pid ${child} (node)` && i.state === "running"), JSON.stringify(items));
+    assert.ok(items.some((i) => i.kind === "process" && i.ref === `pid ${child} "node"` && i.state === "running"), JSON.stringify(items));
     assert.equal(items.some((i) => /^worker process/.test(i.ref)), false, `the worker process itself is not waited on while it runs: ${JSON.stringify(items)}`);
     assert.ok((await local!.busyAttempts()).includes(attempt), "a process the agent started keeps the attempt busy for a workspace operation");
 

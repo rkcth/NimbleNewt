@@ -264,7 +264,8 @@ interface Reserved {
 async function heldBy(launched: readonly WorkerProcess[], foldedMs: number): Promise<{ processes: HostHeldProcess[]; computeMs?: number }> {
   const items: HostHeldProcess[] = [];
   let computeMs = foldedMs;
-  const named = (p: RunProcess): string => `pid ${p.pid} (${p.name})`;
+  // The name is the program's own (it can rename itself): printable ASCII, and quoted so that no name can pass for more of the line (another process, a state, a cut marker) where it is shown (review of L02d).
+  const named = (p: RunProcess): string => `pid ${p.pid} ${JSON.stringify(p.name)}`;
   for (const p of launched) {
     const spent = p.windDownMs();
     computeMs += spent;

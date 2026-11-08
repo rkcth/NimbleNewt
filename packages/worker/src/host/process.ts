@@ -68,7 +68,7 @@ export class WorkerProcess {
     process.#run = await launcher.launch({ ...request, stream: { onStdout: (chunk) => process.#onStdout(chunk) } });
     void process.#run.result.then((result) => {
       process.#exit = result;
-      process.#endedAt = Date.now();
+      process.#endedAt = performance.now();
       const tail = result.stderr.trim().split("\n").slice(-3).join(" | ").slice(0, 400);
       process.#end(new Error(`the worker process ended (${result.timedOut ? "time limit" : result.killed ? "stopped" : result.exitCode === null ? `signal ${String(result.signal)}` : `exit code ${result.exitCode}`})${tail === "" ? "" : `: ${tail}`}`));
     });
@@ -96,14 +96,17 @@ export class WorkerProcess {
   }
 
   /** Kills the process now (a protocol breach, a stop). */
-  kill(why: string): void { this.#endAskedAt ??= Date.now(); this.#end(new Error(why)); this.#run.kill(); }
+  kill(why: string): void { this.#endAskedAt ??= performance.now(); this.#end(new Error(why)); this.#run.kill(); }
 
   /** Whether the process (its run) has not ended yet. */
   get alive(): boolean { return this.#endedAt === undefined; }
   /** Whether the host has asked it to end (a close or a kill). */
   get endAsked(): boolean { return this.#endAskedAt !== undefined; }
-  /** How long winding the process down has taken, in whole ms: from the first request to end until its run ended (or until `now` while it has not). 0 when it was never asked to end (card L02d). */
-  windDownMs(now: number = Date.now()): number { return this.#endAskedAt === undefined ? 0 : Math.max(0, Math.round((this.#endedAt ?? now) - this.#endAskedAt)); }
+  /**
+   * How long winding the process down has taken, in whole ms: from the first request to end until its run ended (or until `now` while it has not). 0 when it was never asked to end (card L02d). Measured on the monotonic clock
+   * (`performance.now`), so a change of the wall clock never makes it negative or huge (review of L02d: it is charged as compute).
+   */
+  windDownMs(now: number = performance.now()): number { return this.#endAskedAt === undefined ? 0 : Math.max(0, Math.round((this.#endedAt ?? now) - this.#endAskedAt)); }
   /** The run's processes now (card L02d; see `SandboxRun.processes`); `undefined` where they cannot be listed. */
   async processes(): Promise<{ readonly processes: readonly RunProcess[]; readonly truncated: boolean } | undefined> { return this.#run.processes === undefined ? undefined : this.#run.processes(); }
   /** Force Stop (card L02d): kills the whole tree now (what outlived the run too) and waits at most `waitMs` for the run to end. */
@@ -276,7 +279,7 @@ export class WorkerProcess {
    * caller never takes it as gone, and the process stays listed (`processes`) as asked to end and still running.
    */
   async close(): Promise<RunResult> {
-    this.#endAskedAt ??= Date.now();
+    this.#endAskedAt ??= performance.now();
     if (this.#endedWith === undefined) await this.#send({ t: "close" });
     this.#run.endInput();
     const timer = setTimeout(() => this.#run.kill(), PROCESS_LIMITS.closeGraceMs);
