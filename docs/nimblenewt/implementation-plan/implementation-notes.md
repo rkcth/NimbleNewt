@@ -5347,11 +5347,11 @@ plain lines.
     productive work are all refused `integrity` while what already runs is left running and can still be released. The line
     says nothing new is admitted, inquiries and reviews included, until `capacity.limits.change` repairs it (it used to say the
     record "applies to nothing", which reads like a harmless setting).
-  - *swarm limits* - `SwarmLimitsService.get` does not throw, but `SwarmService` takes its limits from `effective()`, which does:
-    a damaged record spawns nothing at all (a spawn against one is refused `integrity`, and the same spawn goes through once the
-    record reads again). The group line says that; a name whose stored figure cannot be read is marked `damaged: the figure stored
-    cannot be read` and never `(the default)`; the sound names in the same record are marked `- not in force while the record is
-    damaged`, because none of them is in use while one name is unreadable.
+  - *swarm limits* - `SwarmLimitsService.get` does not throw, but `SwarmService` takes its limits from `effective()` before it makes any
+    child, which does: a damaged record spawns nothing at all (probed through the composed controller - the spawn is refused `integrity`, and
+    once the record is readable again the same call gets past that gate and on to its next check). The group line says that; a name whose stored
+    figure cannot be read is marked `damaged: the figure stored cannot be read` and never `(the default)`; the sound names in the same record are
+    marked `- not in force while the record is damaged`, because none of them is in use while one name is unreadable.
   - *quotas* - `AdmissionService.quotas()` hands back the admission record without checking it, so damage reaches the view as it
     is: `{ capacity: null }` used to throw `TypeError: Cannot convert undefined or null to object` out of the view and lose the
     whole answer, a record whose `limits` lack `queue` printed `queue: undefined (you set it)`, and a host entry that is not a
@@ -5367,9 +5367,9 @@ plain lines.
   as `\u202e`). Numbers are shown as themselves. The revision of each record read goes into the cite, and the three cite kinds are
   `capacity-limits-settings/main`, `admission-state/admission` and `swarm-limits-settings/main`.
 - **Bounds**: the caps (3) and swarm (3) names are all shown, the quotas (4) likewise, and at most 10 declared hosts are listed
-  (`CAPACITY_HOSTS`), in host-ID order, with one line counting the rest - `capacity.quotas.change` takes at most 50 hosts per change
-  and refuses a record holding more than 200, both asserted in the test), so a full answer is at most 25 lines. There is no line-count
-  cut of the view's own: the answer is bounded by its own shape (see the ASSUMPTION below), and the chat cuts any status answer to
+  (`CAPACITY_HOSTS`), in host-ID order, with one line counting the rest - `capacity.quotas.change` takes at most 50 hosts in one change (probed)
+  and refuses a record that would hold more than 200 (`at most 200 hosts are tracked`) - so a full answer is at most 25 lines. There is no
+  line-count cut of the view's own: the answer is bounded by its own shape (see the ASSUMPTION below), and the chat cuts any status answer to
   `CHAT_LIMITS.statusLines` (30) and counts what it left out in `moreLines` whatever the view writes.
 - **Wiring** (`packages/controller/src/api/start.ts`): the status service's `capacity` deps reach `capacityLimits`, `capacityAdmission`
   and `swarmLimits` through closures, the way `handoffs`, `stopsLive` and `cutoverNow` already do for services built after it.
@@ -5389,8 +5389,8 @@ plain lines.
   so for both; five hundred declared hosts come back as ten host lines from `host:h000` in order plus the line counting the other 490, the
   whole answer inside thirty lines; and an admission record damaged four ways (`{ capacity: null }`, `limits` without `queue`, a host entry
   that is text, `running: null`) costs the quotas group its one line each - the view answering, not throwing - with the caps and swarm groups
-  still read and the group coming back whole once the record reads again; and a view built without the
-  caps service says so in one line with the other two groups present. A test outside the backend loop ties the kind to the chat: `capacity` is
+  still read, and the group whole again once the record reads. A view built without the caps service says that in one line with the other two
+  groups present. A test outside the backend loop ties the kind to the chat: `capacity` is
   in `STATUS_KINDS` with no keys, the system prompt the `ModelInterpreter` sends lists `capacity()` with its `about` text, and the `status.ask`
   operation's own summary names the kind. `packages/controller/src/api/start-capacity-view.test.ts` runs the composed
   controller (`startController`, SQLite, as its neighbours do): the chat answer, the changes made through the state-API operations
@@ -5399,7 +5399,7 @@ plain lines.
   as it starts (its record written with `applyOperation`, the state API's own `capacity.limits.get` refusing `integrity` for the same record).
 - ASSUMPTION: the damaged records above, and the record holding five hundred declared hosts, are written with `applyOperation` because no command
   can store them: `capacity.limits.change`, `capacity.quotas.change` and `swarm.limits.change` each check their figures, and `capacity.quotas.change`
-  takes at most 50 hosts in one change and refuses a record holding more than 200 (both probed). A record holding `value: "many"`, `depth: "deep"`,
+  takes at most 50 hosts in one change (probed) and refuses a record that would hold more than 200. A record holding `value: "many"`, `depth: "deep"`,
   hosts that is not a record, `running: null` or 500 hosts can only come from an older installation, a restored record or something other than the
   owner's own command - which is exactly what the view has to survive.
 - **Runs** (`NIMBLENEWT_REQUIRE_SANDBOX=1`, this worktree, `npx tsc --build` from `packages/controller` first): `dist/chat/capacity.test.js`
