@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { AdmissionService } from "../admission/service.js";
 import { BudgetService } from "../budgets/index.js";
+import { ScriptedInterpreter } from "../chat/index.js";
 import type { DispatchBody } from "../dispatch/model.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import { DomainError } from "../domain/errors.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { RemoteWorkerClient, WorkerRequestError, type RemoteAttempt } from "../remote/client.js";
+import { RemoteWorkerHost } from "../remote/host.js";
 import { PLACEMENT_KIND, type PlacementBody } from "../remote/service.js";
 import { PROTOCOL_HEADER, SESSION_HEADER } from "../remote/protocol.js";
 import { FULL_ABILITIES } from "../remote/testing/suite.js";
@@ -25,8 +27,12 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
 const AGENT = "agt-abcdefghijklmnopqrst";
 
+/** What the scripted chat model makes of a message (the owner's words to intents). */
+const say: Record<string, unknown[]> = {};
+
 const open = (d: string, blobs: string): Promise<Controller> => startController({
   storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+  chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
   dispatch: {
     timer: new ManualTimer(), manual: true,
     route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
@@ -130,6 +136,12 @@ test("a new primary does not renew a remote attempt it did not start until it ha
       assert.ok(waiting.ok, JSON.stringify(waiting));
       const item = waiting.result.items.find((x: { attemptId: string }) => x.attemptId === s.attemptId);
       assert.equal(item.sessionId, session.sessionId);
+      // The same is read by chat, with what the decision needs (card H09b): the owner asks in their own words.
+      const ask = "Which reconnected workers are waiting for me?";
+      say[ask] = [{ kind: "status", request: { kind: "reconnect" }, evidence: ask, basis: "owner" }];
+      const shown = JSON.stringify((await second.chat!.submit(s.ownerToken, { messageId: "m-rc", text: ask })).outcomes[0]);
+      assert.match(shown, /takes its attempt up again only when you approve it \(owner\), from the approval profile/, shown.slice(0, 800));
+      assert.ok(shown.includes(`Attempt ${s.attemptId} (placement ${placement}) on host:r1 waits for your decision since ${item.at}; the worker's session is ${item.sessionId}.`), shown.slice(0, 800));
       const approved = await call(second, s.ownerToken, "reconnect.reaccept", { attemptId: s.attemptId, placement, sessionId: item.sessionId, waitingSince: item.at, decision: "approve" }, "ok-1");
       assert.ok(approved.ok, JSON.stringify(approved));
       assert.equal((await again.accept()).placement, placement);
@@ -141,8 +153,52 @@ test("a new primary does not renew a remote attempt it did not start until it ha
       await second.dispatch!.dispatcher.idle();
       const done = await dispatchOf(second, s.attemptId);
       assert.deepEqual([done.state, done.outcome?.status], ["finished", "succeeded"]);
+      const quiet = JSON.stringify((await second.chat!.submit(s.ownerToken, { messageId: "m-rc2", text: ask })).outcomes[0]);
+      assert.match(quiet, /No reconnected worker waits for your decision\./, quiet.slice(0, 800));
+      // Only the owner is told.
+      const notOwner = await call(second, s.hostToken, "status.ask", { request: { kind: "reconnect" } });
+      assert.ok(!notOwner.ok && !JSON.stringify(notOwner).includes("reconnects"), JSON.stringify(notOwner));
     } finally { await second.close(); }
   } finally { await first.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("an attempt that ends while a new primary is asking its host for the run is not taken over: the takeover's write finds it changed, stamps nothing and starts no turn (card H09b, two controllers on one store)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-h09b-"));
+  const first = await open(d, "blobs-1");
+  const adopt = RemoteWorkerHost.prototype.adopt;
+  try {
+    assert.ok(first.dispatch?.workerUrl !== undefined, first.dispatchProblem);
+    const s = await setup(first);
+    await placed(first, s);
+    const second = await open(d, "blobs-2");
+    try {
+      // The host's answer is held back until the owner's emergency stop on the new primary has ended the attempt.
+      let asked: () => void = () => undefined;
+      const askedP = new Promise<void>((resolve) => { asked = resolve; });
+      let answer: () => void = () => undefined;
+      const answerP = new Promise<void>((resolve) => { answer = resolve; });
+      RemoteWorkerHost.prototype.adopt = async function (this: RemoteWorkerHost, attemptId: string) {
+        const handle = await adopt.call(this, attemptId);
+        asked();
+        await answerP;
+        return handle;
+      };
+      const ticking = second.dispatch!.dispatcher.tick();
+      await askedP;
+      const rob = await second.services.principals.authenticate(s.ownerToken);
+      await second.dispatch!.dispatcher.stop(rob, s.attemptId, { emergency: true, reason: "stopped by the owner during the takeover" });
+      assert.equal((await dispatchOf(second, s.attemptId)).state, "finished");
+      answer();
+      const tick = await ticking;
+      await second.dispatch!.dispatcher.idle();
+      assert.deepEqual(tick.adopted, [], JSON.stringify(tick));
+      assert.ok(tick.failures.some((f) => f.attemptId === s.attemptId && /changed while it was taken over/.test(f.error)), JSON.stringify(tick.failures));
+      const after = await dispatchOf(second, s.attemptId);
+      assert.deepEqual([after.state, after.outcome?.status, after.primaryEpoch, after.adoptedAt], ["finished", "abandoned", first.epoch, undefined], "nothing stamped on the ended attempt");
+      // A later tick has nothing to take over.
+      assert.deepEqual((await second.dispatch!.dispatcher.tick()).adopted, []);
+    } finally { RemoteWorkerHost.prototype.adopt = adopt; await second.close(); }
+  } finally { RemoteWorkerHost.prototype.adopt = adopt; await first.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("a turn's figures the old primary already charged are not charged again when a new primary takes the attempt over and takes its result (card H09b, two controllers on one store)", async () => {

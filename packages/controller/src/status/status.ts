@@ -228,6 +228,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
+  reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
   owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
 };
@@ -271,6 +272,7 @@ export type StatusRequest =
   | { readonly kind: "event_sources" }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
+  | { readonly kind: "reconnect"; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string }
@@ -299,6 +301,11 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** Which event sources are watched (card H13f). Absent: the view is not offered. */
   readonly eventSources?: { get(by: Principal): Promise<{ readonly revision: number; readonly sources: readonly { readonly id: string; readonly type: string; readonly enabled: boolean; readonly critical: boolean; readonly defined: boolean; readonly watches?: string }[] }> };
+  /** Whether reconnected remote workers take their attempts up again by themselves, and the attempts that wait for the owner's decision (card H09b). Absent: the view is not offered. */
+  readonly reconnect?: {
+    get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: string | null; readonly profile: string; readonly effective: string; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }>;
+    pending(by: Principal, page: { limit?: number }): Promise<{ readonly items: readonly { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly sessionId: string; readonly at: string }[]; readonly next?: string }>;
+  };
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
@@ -444,6 +451,7 @@ export class StatusService {
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
+      case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -587,6 +595,36 @@ export class StatusService {
       line(`Retention values in force (settings revision ${got.revision}); the ones marked "set" are yours, the others are the installation's:`, c),
       ...Object.keys(got.effective).sort().map((k) => line(`${shown(k, 60)}: ${shown(word(got.effective[k]), 60)}${Object.prototype.hasOwnProperty.call(got.settings, k) ? " (set)" : ""}`, c)),
     ] };
+  }
+
+  /**
+   * Reconnected remote workers (card H09b): whether they take their attempts up again by themselves (and where that comes from), and the attempts that wait for the owner's decision, oldest attempt ID first, with what
+   * `reconnect.reaccept` needs. Owner only. Remote workers that are not running here read as nothing waiting, said so.
+   */
+  async reconnectLines(by: Principal, request: { limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.reconnect === undefined || by.kind !== "owner") return undefined;
+    const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    let s;
+    try { s = await this.#deps.reconnect.get(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const c = cite("reconnect-settings", "main", s.revision === 0 ? undefined : s.revision);
+    const lines: Line[] = [
+      line(`A worker that reconnects ${s.effective === "auto" ? "takes its attempt up again by itself" : "takes its attempt up again only when you approve it"} (${shown(s.effective, 10)}), from ${s.reaccept === null ? `the approval profile (${shown(s.profile, 20)})` : "your setting"}. An attempt waiting for you ${s.patienceHours === "off" ? "keeps no extra lease" : `keeps its lease for ${s.patienceHours} hour(s)`}${s.patienceChosen ? " (your choice)" : " (the default)"}.`, c),
+    ];
+    let pending;
+    try { pending = await this.#deps.reconnect.pending(by, { limit }); } catch (error) {
+      if (error instanceof DomainError && error.code === "unavailable") return { observedAt: this.#runner.now(), lines: [...lines, line("Remote workers are not running here, so no attempt waits for your decision.", c)] };
+      if (error instanceof DomainError && error.code === "forbidden") return undefined;
+      throw error;
+    }
+    if (pending.items.length === 0) lines.push(line("No reconnected worker waits for your decision.", c));
+    for (const p of pending.items) {
+      lines.push(line(`Attempt ${shown(p.attemptId, 40)} (placement ${p.placement}) on ${shown(p.hostId, 80)} waits for your decision since ${shown(p.at, 40)}; the worker's session is ${shown(p.sessionId, 40)}. Approve it or stop it (reconnect.reaccept).`, cite("attempt", p.attemptId)));
+    }
+    if (pending.next !== undefined) lines.push(line("More attempts wait than are shown.", c));
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */
