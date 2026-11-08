@@ -1317,6 +1317,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H08b — Run the lease watchdog in the real worker process
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `87adfd9e`, `d52b16e3`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The worker process gets the lease as a duration in its start, renews it over the channel (each renewal is the attempt's heartbeat; the answer counts from the send), and stops on a fenced renewal; a fenced bridge answer holds further calls until a renewal answers. The remote client renews with the controller's leaseMs and every attempt request (control poll, checkpoint, publish, artifacts) stops the attempt on a fenced answer. A process that does not wind down is ended inside the grace (store close within a share of it, exit 75; the host ends it too). On Linux a corrected wall clock is not a wake (boot clock); macOS and Windows keep the wall-clock check. Supervisor pulses stay unwired (channel close and --die-with-parent cover supervisor death on Linux). Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H08, H12b.
 - **Deliverable:** Split from H08 (2026-10-28): the worker entry point creates and runs the watchdog, the controller sends the lease as a duration (not a deadline against the worker clock), and every call that touches the controller reacts to a fenced answer and checks that work is still allowed.
 - **Acceptance and verification:** A worker whose clock is wrong gets the lease the controller meant; a fenced poll, checkpoint or publish stops the attempt; the process is ended inside the grace time.

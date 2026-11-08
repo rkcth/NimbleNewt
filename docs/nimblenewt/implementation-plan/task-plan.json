@@ -3642,12 +3642,22 @@
       ],
       "deliverable": "Split from H08 (2026-10-28): the worker entry point creates and runs the watchdog, the controller sends the lease as a duration (not a deadline against the worker clock), and every call that touches the controller reacts to a fenced answer and checks that work is still allowed",
       "acceptance_and_verification": "A worker whose clock is wrong gets the lease the controller meant; a fenced poll, checkpoint or publish stops the attempt; the process is ended inside the grace time",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "87adfd9e",
+          "d52b16e3"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The worker process gets the lease as a duration in its start, renews it over the channel (each renewal is the attempt's heartbeat; the answer counts from the send), and stops on a fenced renewal; a fenced bridge answer holds further calls until a renewal answers. The remote client renews with the controller's leaseMs and every attempt request (control poll, checkpoint, publish, artifacts) stops the attempt on a fenced answer. A process that does not wind down is ended inside the grace (store close within a share of it, exit 75; the host ends it too). On Linux a corrected wall clock is not a wake (boot clock); macOS and Windows keep the wall-clock check. Supervisor pulses stay unwired (channel close and --die-with-parent cover supervisor death on Linux). Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "H09",

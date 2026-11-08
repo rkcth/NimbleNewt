@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **228 of 341 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **229 of 341 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,7 +109,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓░░░` 81% | 22 of 27 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 85% | 23 of 27 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 78% | 22 of 28 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
@@ -208,7 +208,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓░░░ 22 of 27</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 23 of 27</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -222,7 +222,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
 - [x] **L03** · P32 · Implement prepared release and reassignment _(needs L02, S02, S05)_
 - [x] **L04** · P32 · Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
-- [ ] **H08b** · P33 · Run the lease watchdog in the real worker process _(needs H08, H12b)_
+- [x] **H08b** · P33 · Run the lease watchdog in the real worker process _(needs H08, H12b)_
 - [x] **L02b** · P33 · Resume stops after a restart and cover every scope _(needs L02, L03)_
 - [x] **L03b** · P33 · Compose prepared hand-off into the running controller (operations) _(needs L03)_
 - [x] **L04b** · P33 · Compose checked resume into the running controller (operations) _(needs L04)_
