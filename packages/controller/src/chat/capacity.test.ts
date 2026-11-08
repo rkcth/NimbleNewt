@@ -323,6 +323,31 @@ for (const backend of backends) {
     assert.ok(shown.every((l) => !/[\n\r]/.test(l.text)), "every line of the answer is one line");
   });
 
+  suite("a host named like a member of Object.prototype counts what the record says runs on it, not what the prototype holds", async (w, s) => {
+    const ADM = { kind: "admission-state", id: "admission" };
+    // `running.perHost` is a plain object the service builds from what runs. A host declared as `constructor` or `toString` reached `Object.prototype` through a plain lookup, and the view printed the
+    // function it found there as the running count. Only a record from outside the owner's own command can name a host like that (both `capacity.quotas.change` and `setCapacity` check `host:...` first), which is why it is written whole here.
+    for (const id of ["constructor", "toString"]) {
+      await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2, queue: 100, depth: 3, children: 4, patience: 5 }, capacity: { [id]: { cpus: 8, memoryMb: 1024 } }, running: [], queue: [], withdrawn: [] }, `proto-${id}`);
+      const shown = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
+      const host = text(shown).split("\n").filter((l) => l.startsWith('Host "'));
+      assert.equal(host.length, 1, `one line for the one declared host: ${text(shown)}`);
+      assert.equal(host[0], `Host "${id}": 8 CPU(s), 1024 MB declared (you declared it); 0 productive attempt(s) running on it.`, "nought, because the record says nothing runs on it");
+      assert.ok(!/function|Object|native code|\[native/.test(host[0]!), `no prototype member is printed as a count: ${host[0]}`);
+    }
+    // A count that is not a figure is damaged too, and says so. The service builds the counts itself, so this shape reaches the view only through the `quotas` port.
+    const view = StatusService.withEpoch(s.storage, s.epoch, {
+      assignments: w.assignments,
+      waits: WaitService.withEpoch(s.storage, s.epoch, w.assignments, options),
+      blockers: BlockerService.withEpoch(s.storage, s.epoch, options),
+      contracts: w.contracts,
+      capacity: { limits: s.limits, quotas: { quotas: async () => ({ revision: 1, limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, defaults: { productive: 4, perHost: 2, control: 2, queue: 100 }, hosts: { "host:pc": { cpus: 8, memoryMb: 1024 } }, running: { productive: 1, control: 0, perHost: { "host:pc": "three" } as unknown as Record<string, number> }, waiting: 0 }) }, swarm: s.swarm },
+    }, options);
+    const counted = text((await view.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.ok(counted.includes('Host and global quotas: the stored admission record is damaged ("host:pc" does not count what runs on it as a figure)'), `a count that is not a figure is damaged: ${counted}`);
+    assert.ok(!counted.includes('Host "host:pc"'), `no host line is shown with a count that is not a figure: ${counted}`);
+  });
+
   suite("a damaged record or a missing service is one line, and the other groups are still shown", async (w, s, script) => {
     script[QUESTION] = [ask({ kind: "capacity" }, QUESTION)];
     await s.quotas.changeQuotas(s.owner, { commandId: cid("quota"), set: { productive: 7 } });

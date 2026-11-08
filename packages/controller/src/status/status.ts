@@ -401,7 +401,7 @@ const CAPACITY_WORDS: Readonly<Record<string, string>> = {
   productive: "productive attempts running at once, in total", perHost: "productive attempts running at once on one host", control: "places only inquiries and reviews may use", queue: "requests that may wait",
   depth: "levels of child tasks below a task that was not spawned", liveChildren: "children of one parent that are not finished at once", totalChildren: "children of one parent in all (the fan-in)",
 };
-const capacityWord = (name: string): string => CAPACITY_WORDS[name] ?? name;
+const capacityWord = (name: string): string => (Object.hasOwn(CAPACITY_WORDS, name) ? CAPACITY_WORDS[name] : undefined) ?? name;
 /**
  * What a damaged record of each kind does to the controller, in the owner's words - said per group because each one gates something different, and borrowing one group's words for another would be a guess:
  * `AdmissionService.request` reads the caps record before it admits anything, so a damaged caps record refuses every new request (inquiries and reviews included) while what already runs keeps running and is
@@ -418,14 +418,19 @@ const isFigure = (v: unknown): v is number => typeof v === "number" && Number.is
  * does not hold is not a quota at all and is checked as a figure only - `checkLimits` itself cannot be called here, because it wants all seven figures and the quotas carry four of them.
  */
 const quotaFigure = (name: string, v: unknown): boolean => {
-  const bound = LIMIT_BOUNDS[name as keyof Limits];
+  const bound = Object.hasOwn(LIMIT_BOUNDS, name) ? LIMIT_BOUNDS[name as keyof Limits] : undefined;
   return bound !== undefined && typeof v === "number" && Number.isSafeInteger(v) && v >= bound[0] && v <= bound[1];
 };
 /** What a stored quota figure has to be, in the owner's words - the same words `capacity.quotas.change` refuses a bad figure with (`must be a whole number from 1 to 64`). */
 const quotaBoundWords = (name: string): string => {
-  const bound = LIMIT_BOUNDS[name as keyof Limits];
+  const bound = Object.hasOwn(LIMIT_BOUNDS, name) ? LIMIT_BOUNDS[name as keyof Limits] : undefined;
   return bound === undefined ? "a figure the controller can work from" : `a whole number from ${bound[0]} to ${bound[1]}`;
 };
+/**
+ * How many productive attempts a quotas record says run on one host. `running.perHost` is a plain object, so a lookup that goes through the prototype answers with `Object.prototype`'s own members for a
+ * host declared as `constructor` or `toString` - a function printed as the running count. A name the record does not carry simply runs nothing.
+ */
+const runningOn = (perHost: Readonly<Record<string, number>>, id: string): number => (Object.hasOwn(perHost, id) ? perHost[id]! : 0);
 /** A stored record read as a field map; undefined for anything that is not one (missing, null, an array, text, a number). */
 const asRecord = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 /**
@@ -449,6 +454,9 @@ function quotaProblem(q: { readonly limits: unknown; readonly defaults: unknown;
   if (badHosts.length > 0) return `${badHosts.slice(0, 3).map((id) => quoted(id, 60)).join(", ")} ${badHosts.length === 1 ? "does" : "do"} not declare CPUs and memory as figures${badHosts.length > 3 ? ` (and ${badHosts.length - 3} more)` : ""}`;
   const running = asRecord(q.running);
   if (running === undefined || !isFigure(running["productive"]) || !isFigure(running["control"]) || asRecord(running["perHost"]) === undefined) return "the counts of what runs now are not figures";
+  const perHost = asRecord(running["perHost"])!;
+  const badCounts = Object.keys(perHost).filter((id) => !isFigure(perHost[id]));
+  if (badCounts.length > 0) return `${badCounts.slice(0, 3).map((id) => quoted(id, 60)).join(", ")} ${badCounts.length === 1 ? "does not count what runs on it as a figure" : "do not count what runs on them as figures"}${badCounts.length > 3 ? ` (and ${badCounts.length - 3} more)` : ""}`;
   if (!isFigure(q.waiting)) return "the count of what waits now is not a figure";
   return undefined;
 }
@@ -750,12 +758,13 @@ export class StatusService {
         lines.push(line(`Host and global quotas (the setting is at revision ${q.revision}); the ones marked "you set it" are yours, the others are the installation's defaults:`, c));
         for (const name of Object.keys(q.limits)) {
           const value = (q.limits as Record<string, number>)[name]!;
-          const same = (q.defaults as Record<string, number>)[name] === value;
-          lines.push(line(`${name} (${capacityWord(name)}): ${value}${same ? " (the default)" : " (you set it)"}${live[name] ?? ""}`, c));
+          // Every lookup by a name read out of a record is an own-property one: a quota or host named `constructor` must not be compared with, or described by, what `Object.prototype` holds.
+          const same = Object.hasOwn(q.defaults, name) && (q.defaults as Record<string, number>)[name] === value;
+          lines.push(line(`${name} (${capacityWord(name)}): ${value}${same ? " (the default)" : " (you set it)"}${Object.hasOwn(live, name) ? live[name]! : ""}`, c));
         }
         const hosts = Object.entries(q.hosts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
         if (hosts.length === 0) lines.push(line("No host has declared CPUs or memory, so work that needs a host is refused until you declare them (capacity.quotas.change).", c));
-        for (const [id, cap] of hosts.slice(0, CAPACITY_HOSTS)) lines.push(line(`Host ${quoted(id, 80)}: ${cap.cpus} CPU(s), ${cap.memoryMb} MB declared (you declared it); ${q.running.perHost[id] ?? 0} productive attempt(s) running on it.`, c));
+        for (const [id, cap] of hosts.slice(0, CAPACITY_HOSTS)) lines.push(line(`Host ${quoted(id, 80)}: ${cap.cpus} CPU(s), ${cap.memoryMb} MB declared (you declared it); ${runningOn(q.running.perHost, id)} productive attempt(s) running on it.`, c));
         if (hosts.length > CAPACITY_HOSTS) lines.push(line(`${hosts.length - CAPACITY_HOSTS} more host(s) are declared than are shown.`, c));
       }
     }
