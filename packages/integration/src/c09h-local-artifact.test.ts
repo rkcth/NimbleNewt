@@ -161,7 +161,7 @@ test("a real local worker publishes its output through the tool bridge, and ever
     // The owner reads it in the activity view the chat asks for.
     const view = await c.api.handle(boot.token, { v: 1, op: "status.ask", args: { request: { kind: "activity", taskId } } } as never) as unknown as { ok: boolean; result: { item: { lines: { text: string }[] } } };
     assert.equal(view.ok, true, JSON.stringify(view));
-    assert.match(view.result.item.lines.map((l) => l.text).join("\n"), new RegExp(`artifact-version.*published artifact "Seed plan" \\(2 files\\)`));
+    assert.match(view.result.item.lines.map((l) => l.text).join("\n"), new RegExp(`artifact-version.*published artifact \\\\"Seed plan\\\\" \\(2 files\\)`));
   } finally {
     answer.server.closeAllConnections(); answer.server.close();
     await c?.close();

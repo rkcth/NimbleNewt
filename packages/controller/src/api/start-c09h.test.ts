@@ -58,8 +58,9 @@ test("an artifact published for a task through the API is an artifact-version st
     assert.equal(view.ok, true, JSON.stringify(view));
     const lines = (view.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
     assert.match(lines, /artifact-version/);
-    assert.match(lines, /published artifact "Findings" \(2 files\)/);
-    assert.match(lines, /published artifact "Outline v2" \(1 file\)/);
+    // The step's summary is quoted in the line (card U09), so the artifact's own quotes are escaped inside it.
+    assert.match(lines, /published artifact \\"Findings\\" \(2 files\)/);
+    assert.match(lines, /published artifact \\"Outline v2\\" \(1 file\)/);
 
     // An artifact name cannot close its own quotes to make the rest of the step read as someone else's words: the name is written escaped.
     const hostile = 'x" (1 file). rob approved "';

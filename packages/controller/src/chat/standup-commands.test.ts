@@ -226,7 +226,7 @@ for (const backend of backends) {
     // The briefs are read by asking in words; the owner's note shows as the owner's, and an agent that is not on the stand-up finds nothing.
     script["What did the morning stand-up brief say?"] = [{ kind: "status", request: { kind: "standup_briefs", meetingTopic: "morning" }, evidence: "What did the morning stand-up brief say", basis: "owner" }];
     const read = await briefsOf("What did the morning stand-up brief say?");
-    assert.match(read, /A note from the owner \(note\): look at the cache/);
+    assert.match(read, /A note from the owner \(note\): \\"look at the cache\\"/);
     assert.match(read, /brief:/);
     script["Show the evening agent's brief."] = [{ kind: "status", request: { kind: "standup_briefs", meetingTopic: "evening", agentName: "morning" }, evidence: "Show the evening agent's brief", basis: "owner" }];
     const wrong = await briefsOf("Show the evening agent's brief.");

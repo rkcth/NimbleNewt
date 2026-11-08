@@ -10,8 +10,10 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { derivedId } from "../domain/ids.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
-import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import { LIMITS as STORAGE_LIMITS, type AggregateRef, type Change, type ControllerStorage, type JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
+// A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
+import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { saysMainAutomatic, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
@@ -450,7 +452,7 @@ export class ChatService {
           const candidates = exact.length > 0 ? exact : partial;
           if (candidates.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no task called "${wanted.slice(0, 80)}" in that project` }); continue; }
           if (exact.length !== 1) {
-            push({ i, kind: "asked", question: exact.length > 1 ? `More than one task is called "${wanted.slice(0, 80)}". Which one?` : `No task is called "${wanted.slice(0, 80)}", but ${candidates.length === 1 ? "one task fits" : "these tasks fit"}. Which one do you mean?`, options: candidates.slice(0, CHAT_LIMITS.options).map((m) => `${m.id}: ${m.title.slice(0, 80)} (${m.state})`) });
+            push({ i, kind: "asked", question: exact.length > 1 ? `More than one task is called "${wanted.slice(0, 80)}". Which one?` : `No task is called "${wanted.slice(0, 80)}", but ${candidates.length === 1 ? "one task fits" : "these tasks fit"}. Which one do you mean?`, options: candidates.slice(0, CHAT_LIMITS.options).map((m) => `${m.id}: ${quotedText(m.title, 80)} (${m.state})`) });
             continue;
           }
           const matches = exact;
@@ -1440,7 +1442,7 @@ export class ChatService {
   async #execute(owner: Principal, token: string, turnId: string, turn: TurnBody): Promise<TurnBody> {
     const outcomes: Outcome[] = [];
     for (const item of turn.plan) outcomes.push(await this.#do(owner, token, turnId, item, turn.text));
-    const done: TurnBody = { ...turn, status: "done", outcomes, completedAt: this.#runner.now() };
+    const done: TurnBody = fitAnswers({ ...turn, status: "done", outcomes, completedAt: this.#runner.now() });
     try {
       await this.#finishTurn(owner, turnId, done);
     } catch (error) {
@@ -1925,6 +1927,29 @@ const redactForModel = (text: string): string => {
 };
 
 /** The owner-facing answer: one plain line per outcome. */
+/** Room kept free in a finished turn's record for what the size estimate does not count exactly. */
+const TURN_SLACK_BYTES = 8 * 1024;
+/**
+ * A finished turn is one record of at most `bodyBytes` (card U09 review, round 3). Each status answer is at most 30 lines, but a message may ask eight questions and a line holding agent text in a
+ * three-byte script can be over a kilobyte, so eight long answers could pass the limit and the turn could never be recorded as done. Lines are left out from the end of the last answers first until the
+ * record fits; each answer counts what it left out in `moreLines`, as an answer cut at 30 lines does.
+ */
+export function fitAnswers(body: TurnBody): TurnBody {
+  const bytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");
+  let excess = bytes(body) - (STORAGE_LIMITS.bodyBytes - TURN_SLACK_BYTES);
+  if (excess <= 0) return body;
+  const outcomes = [...(body.outcomes ?? [])];
+  for (let k = outcomes.length - 1; k >= 0 && excess > 0; k--) {
+    const o = outcomes[k]!;
+    if (o.status !== "answered" || o.lines === undefined || o.lines.length === 0) continue;
+    const lines = [...o.lines];
+    while (lines.length > 0 && excess > 0) excess -= bytes(lines.pop()) + 1;
+    // `moreLines` itself takes a few bytes, which the slack covers.
+    outcomes[k] = { ...o, lines, moreLines: (o.moreLines ?? 0) + o.lines.length - lines.length };
+  }
+  return { ...body, outcomes };
+}
+
 export function replyOf(outcomes: readonly Outcome[]): string[] {
   const lines: string[] = [];
   for (const o of outcomes) {
