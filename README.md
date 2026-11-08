@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **222 of 341 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **223 of 341 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -117,7 +117,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 60% | 12 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 64% | 32 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 8 of 9 |
-| Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
+| Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓░░░` 78% | 25 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓░░░` 77% | 14 of 18 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 33% | 6 of 18 |
@@ -443,7 +443,7 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 </details>
 
 <details>
-<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 5 of 6</summary>
+<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 6 of 6</summary>
 
 Stall detection and bounded supervisor recovery.
 
@@ -452,7 +452,7 @@ Stall detection and bounded supervisor recovery.
 - [x] **V01c** · P30 · Read the declared model speed from the routing table and the cache share from the cache adapter _(needs V01b)_
 - [x] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
 - [x] **V02b** · P34 · Finish supervisor recovery: action ladder, escalation, loop recovery, carried context _(needs V02)_
-- [ ] **V02c** · P35 · Finish supervisor recovery: the action ladder _(needs V02b)_
+- [x] **V02c** · P35 · Finish supervisor recovery: the action ladder _(needs V02b)_
 
 </details>
 

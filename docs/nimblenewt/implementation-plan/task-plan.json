@@ -6124,12 +6124,22 @@
       ],
       "deliverable": "Split from V02b (2026-10-30): the ordered ladder of supervisor actions after an escalation goes unanswered",
       "acceptance_and_verification": "An unanswered escalation climbs the ladder one rung at a time and each rung is recorded",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e7f524f0",
+          "cb20b18d"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "An unanswered stall concern climbs the recovery action ladder one rung at a time, each recorded: by its holder or the owner (recovery.step, also in chat), or, when the owner switches autoStep on (off by default, 240 minutes per rung by default), by the controller in the holder's name and with the holder's own rights, never choosing a reassignment target and stopping when the concern is answered, clears or reaches the owner. The owner lists, answers and steps concerns in free-form chat. No per-project ladder. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "M00",

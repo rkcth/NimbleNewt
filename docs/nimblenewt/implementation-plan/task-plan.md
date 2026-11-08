@@ -2177,6 +2177,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### V02c — Finish supervisor recovery: the action ladder
 
 - **Parent:** N11 / AII-261.
+- **Status:** implemented; commits `e7f524f0`, `cb20b18d`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** An unanswered stall concern climbs the recovery action ladder one rung at a time, each recorded: by its holder or the owner (recovery.step, also in chat), or, when the owner switches autoStep on (off by default, 240 minutes per rung by default), by the controller in the holder's name and with the holder's own rights, never choosing a reassignment target and stopping when the concern is answered, clears or reaches the owner. The owner lists, answers and steps concerns in free-form chat. No per-project ladder. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** V02b.
 - **Deliverable:** Split from V02b (2026-10-30): the ordered ladder of supervisor actions after an escalation goes unanswered.
 - **Acceptance and verification:** An unanswered escalation climbs the ladder one rung at a time and each rung is recorded.
