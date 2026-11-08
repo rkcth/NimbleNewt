@@ -280,4 +280,44 @@ for (const backend of backends) {
       } finally { await w.close(); }
     } finally { unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
   });
+
+  test(`${backend.name}: the release status view reads each candidate's attempts once, not once for the gate and again for the list (card X09b part 2 review)`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "nn-rel-reads-"));
+    let releaseS!: ReleaseService;
+    let status!: StatusService;
+    const reads = { gate: 0, attempts: 0, both: 0 };
+    try {
+      const w = await openWorld(backend, {}, undefined, (storage, epoch, built) => {
+        releaseS = ReleaseService.withEpoch(storage, epoch, options);
+        const act = ReleaseActivationService.withEpoch(storage, epoch, { root, switcher: "pointer", platform: linux, runner: options });
+        status = StatusService.withEpoch(storage, epoch, { assignments: built.assignments, waits: built.waits, blockers: BlockerService.withEpoch(storage, epoch, options), contracts: built.contracts, release: {
+          gate: async (b, id) => { reads.gate++; return releaseS.gate(b, id); },
+          attempts: async (b, id) => { reads.attempts++; return releaseS.attempts(b, id); },
+          gateAndAttempts: async (b, id) => { reads.both++; return releaseS.gateAndAttempts(b, id); },
+          candidates: (b, page) => releaseS.candidates(b, page),
+          status: (b) => act.status(b),
+        } }, options);
+        return { release: releaseS };
+      });
+      try {
+        const worker = await w.agent("reader", [{ action: "release.report", project: "*" }]);
+        await releaseS.authorizeHost(w.owner, { commandId: cid("h"), hostId: "host:rig", os: "linux", arch: "x64" });
+        const artifacts = { "nimblenewt.tgz": sha("built bytes") };
+        const cand = (await releaseS.submit(w.owner, { commandId: cid("s"), manifest: { sourceCommit: "e".repeat(40), suiteRevision: "suite-7", artifacts, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] } })).candidateId;
+        const attempt = await releaseS.issue(w.owner, { commandId: cid("i"), candidateId: cand, cell: linux, hostId: "host:rig", workerId: worker.principal.id, timeoutSeconds: 600, memoryMb: 512 });
+        await releaseS.report(worker.principal, { commandId: cid("r"), attemptId: attempt.attemptId, sourceCommit: "e".repeat(40), suiteRevision: "suite-7", artifactHashes: artifacts, dependencyLockHashes: { "package-lock.json": h("2") }, environment: linux, outcome: "pass", counts: { passed: 3, failed: 0, skipped: 0 }, logDigest: h("9"), summary: "green" });
+
+        const one = await status.ask(w.owner, { kind: "release", candidateId: cand });
+        assert.ok(one !== undefined);
+        assert.match(said(one!.lines), new RegExp(`Candidate ${cand}: not approved; every platform passed`), "the gate is still read");
+        assert.match(said(one!.lines), /attempt rat-/, "the attempts are still read");
+        assert.deepEqual(reads, { gate: 0, attempts: 0, both: 1 }, "one read gives the gate and the attempts of the candidate");
+
+        await releaseS.submit(w.owner, { commandId: cid("s"), manifest: { sourceCommit: "f".repeat(40), suiteRevision: "suite-7", artifacts, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] } });
+        const many = await status.ask(w.owner, { kind: "release", limit: 2 });
+        assert.ok(many !== undefined);
+        assert.deepEqual(reads, { gate: 0, attempts: 0, both: 3 }, "each candidate listed is read once, the same way");
+      } finally { await w.close(); }
+    } finally { unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  });
 }

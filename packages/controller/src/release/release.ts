@@ -52,8 +52,8 @@ export interface AttemptBody {
   readonly reason?: string;
 }
 export interface ApprovalBody { readonly candidateId: string; readonly by: string; readonly at: string; /** The earlier failed attempts the owner acknowledged when approving a release that passed only on a retry. */ readonly acknowledged?: readonly string[] }
-/** One submitted candidate as the owner's `release` status view lists them (card X09b part 2): what to ask about and whether it is approved. */
-export interface CandidateRow { readonly candidateId: string; readonly submittedAt: string; readonly submittedBy: string; readonly approved: boolean }
+/** One submitted candidate as the owner's `release` status view lists them (card X09b part 2): what to ask about. Whether it is approved comes from its gate, which the view reads anyway. */
+export interface CandidateRow { readonly candidateId: string; readonly submittedAt: string; readonly submittedBy: string }
 /** The owner's candidate list: the newest kept, whether one is left out, and whether the whole store was read. */
 export interface CandidatePage {
   readonly candidates: readonly CandidateRow[];
@@ -690,14 +690,31 @@ export class ReleaseService {
     const candidate = (await this.#runner.get(CANDIDATE, String(candidateId)))?.body as unknown as CandidateBody | undefined;
     if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
     const attempts = await this.#attempts(candidateId, candidate.manifest.matrix);
-    const cells: GateCell[] = candidate.manifest.matrix.map((cell) => {
+    const approved = (await this.#runner.get(APPROVAL, candidateId)) !== undefined;
+    return this.#gateOf(candidateId, candidate.manifest.matrix, attempts, approved);
+  }
+
+  /**
+   * The gate and every attempt of one candidate from ONE read of its attempts (the owner's `release` status view needs both, and reading them separately reads every attempt record twice).
+   * The same `gate` and `attempts` answer, in the same order (oldest attempt first). Owner only.
+   */
+  async gateAndAttempts(owner: Principal, candidateId: string): Promise<{ gate: Gate; attempts: (AttemptBody & { id: string })[] }> {
+    this.#owner(owner, "read the release gate");
+    const candidate = (await this.#runner.get(CANDIDATE, String(candidateId)))?.body as unknown as CandidateBody | undefined;
+    if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
+    const attempts = (await this.#attempts(candidateId, candidate.manifest.matrix)).sort((a, b) => (a.n - b.n) || (a.id < b.id ? -1 : 1));
+    return { gate: this.#gateOf(candidateId, candidate.manifest.matrix, attempts, (await this.#runner.get(APPROVAL, String(candidateId))) !== undefined), attempts };
+  }
+
+  /** Where each platform stands, from the attempts already read. */
+  #gateOf(candidateId: string, matrix: readonly Cell[], attempts: readonly (AttemptBody & { id: string })[], approved: boolean): Gate {
+    const cells: GateCell[] = matrix.map((cell) => {
       const mine = attempts.filter((a) => cellKey(a.cell) === cellKey(cell)).sort((a, b) => a.n - b.n);
       const latest = mine.at(-1);
       const state: CellState = latest === undefined ? "missing" : latest.state === "issued" ? "running" : latest.state;
       const earlier: EarlierFailure[] = state !== "passed" ? [] : mine.filter((a) => a.state === "failed").map((a) => ({ id: a.id, n: a.n, ...(a.issuedBy === undefined ? {} : { issuedBy: a.issuedBy }), ...(a.result === undefined ? {} : { summary: a.result.summary }), ...(a.endedAt === undefined ? {} : { endedAt: a.endedAt }) }));
       return { cell, state, attempts: mine.length, ...(latest === undefined ? {} : { latest: latest.id }), flaky: earlier.length > 0, earlierFailures: earlier };
     });
-    const approved = (await this.#runner.get(APPROVAL, candidateId)) !== undefined;
     return { candidateId, ready: cells.every((c) => c.state === "passed"), needsAcknowledgement: cells.some((c) => c.flaky), approved, cells };
   }
 
@@ -749,9 +766,8 @@ export class ReleaseService {
       after = chunk[chunk.length - 1]!.id;
     }
     scanned.sort((x, y) => (x.submittedAt === y.submittedAt ? (x.candidateId < y.candidateId ? -1 : 1) : x.submittedAt < y.submittedAt ? 1 : -1));
-    const listed: CandidateRow[] = [];
-    for (const r of scanned.slice(0, limit)) listed.push({ ...r, approved: (await this.#runner.get(APPROVAL, r.candidateId)) !== undefined });
-    return { candidates: listed, more: scanLimited || scanned.length > limit, scanLimited };
+    // Whether a candidate is approved is not read here: the view reads each candidate's gate, which says it, so a list of N candidates costs no extra approval records.
+    return { candidates: scanned.slice(0, limit), more: scanLimited || scanned.length > limit, scanLimited };
   }
 
   /** Every attempt of a candidate, read through each platform's own index (no scan of all attempts). */

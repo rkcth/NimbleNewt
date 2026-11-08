@@ -250,6 +250,12 @@ for (const backend of backends) {
     const cell = gate.cells.find((x) => x.cell.os === "linux")!;
     assert.deepEqual([cell.state, cell.flaky, cell.earlierFailures.map((f) => [f.id, f.summary])], ["passed", true, [[first.attemptId, "2 failed"]]]);
     assert.equal(gate.needsAcknowledgement, true);
+    // The owner's status view needs the gate and every attempt: one read gives exactly what the two separate reads say (card X09b part 2 review).
+    const both = await c.rel.gateAndAttempts(c.owner, c.candidate);
+    assert.deepEqual(both.gate, gate, "the same gate from one read");
+    assert.deepEqual(both.attempts, await c.rel.attempts(c.owner, c.candidate), "and the same attempts, oldest first");
+    await refuses("not_found", () => c.rel.gateAndAttempts(c.owner, "rcn-not-a-candidate"));
+    await refuses("forbidden", () => c.rel.gateAndAttempts(c.w1, c.candidate), /may not/);
   });
 
   // ---- the owner's candidate list (card X09b part 2 review, item 3): it reads every candidate, so the newest by submit time is listed whatever order the digest IDs fall in.
@@ -305,6 +311,7 @@ for (const backend of backends) {
     const second = await c.at(hoursAfter(1)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(1) }) });
     const got = await c.rel.candidates(c.owner, { limit: 20 });
     assert.deepEqual(got.candidates.map((r) => r.candidateId), [second.candidateId, c.candidate], "newest first");
+    assert.equal(Object.prototype.hasOwnProperty.call(got.candidates[0]!, "approved"), false, "a listed row carries no approval record: the view reads the candidate's gate, which says it (part 2 review)");
     assert.equal(got.more, false, "nothing was left out");
     assert.equal(got.scanLimited, false);
     assert.deepEqual((await c.rel.candidates(c.owner, { limit: 1 })).candidates.map((r) => r.candidateId), [second.candidateId]);

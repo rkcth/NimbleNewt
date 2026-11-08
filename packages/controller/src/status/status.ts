@@ -315,9 +315,10 @@ export interface StatusDeps {
   readonly eventSources?: { get(by: Principal): Promise<{ readonly revision: number; readonly sources: readonly { readonly id: string; readonly type: string; readonly enabled: boolean; readonly critical: boolean; readonly defined: boolean; readonly watches?: string }[] }> };
   /**
    * Release testing (card X09b part 2): the same reads the API's `release.gate`, `release.attempts` and `release.status` make, and the candidate list for the owner's `release` status view.
+   * `gateAndAttempts` gives a candidate's gate and attempts from one read and is used when it is there (`gate` and `attempts` are the fallback for a service that has no such read);
    * `status` is the staging and activation state; absent: the view says staging is not set up here. Absent altogether: the view is not offered.
    */
-  readonly release?: Pick<ReleaseService, "gate" | "attempts" | "candidates"> & { status?(by: Principal): Promise<ActivationStatus> };
+  readonly release?: Pick<ReleaseService, "gate" | "attempts" | "candidates"> & { gateAndAttempts?(by: Principal, candidateId: string): Promise<{ gate: Gate; attempts: readonly (ReleaseAttemptBody & { id: string })[] }>, status?(by: Principal): Promise<ActivationStatus> };
   /** Whether reconnected remote workers take their attempts up again by themselves, and the attempts that wait for the owner's decision (card H09b). Absent: the view is not offered. */
   readonly reconnect?: {
     get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: string | null; readonly profile: string; readonly effective: string; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }>;
@@ -643,7 +644,7 @@ export class StatusService {
     let candidates: readonly CandidateRow[];
     let moreCandidates = false;
     let scanLimited = false;
-    if (request.candidateId !== undefined) candidates = [{ candidateId: request.candidateId, submittedAt: "", submittedBy: "", approved: false }];
+    if (request.candidateId !== undefined) candidates = [{ candidateId: request.candidateId, submittedAt: "", submittedBy: "" }];
     else {
       let got;
       try { got = await release.candidates(by, { limit }); }
@@ -665,20 +666,26 @@ export class StatusService {
       // The budget is gone: the rest of the candidates are not read at all (so a wide list costs one page of reads, not a hundred).
       if (body.length >= budget) { candidatesSkipped++; continue; }
       const c = cite("release-candidate", candidate.candidateId);
+      // One read where the service can give the gate and the attempts together; otherwise the two reads, as before.
       let gate: Gate;
-      try { gate = await release.gate(by, candidate.candidateId); }
+      let attempts: (ReleaseAttemptBody & { id: string })[];
+      try {
+        if (release.gateAndAttempts !== undefined) {
+          const both = await release.gateAndAttempts(by, candidate.candidateId);
+          gate = both.gate;
+          attempts = [...both.attempts];
+        } else {
+          gate = await release.gate(by, candidate.candidateId);
+          attempts = await release.attempts(by, candidate.candidateId);
+        }
+      }
       catch (error) {
-        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) {
+        if (error instanceof DomainError && error.code === "forbidden") return undefined;
+        if (error instanceof DomainError && error.code === "not_found") {
           // A named candidate that is missing or unreadable reads like a missing subject; a listed one (it moved in the moment of the read) is simply skipped.
           if (request.candidateId !== undefined) return undefined;
           continue;
         }
-        throw error;
-      }
-      let attempts: (ReleaseAttemptBody & { id: string })[];
-      try { attempts = await release.attempts(by, candidate.candidateId); }
-      catch (error) {
-        if (error instanceof DomainError && error.code === "forbidden") return undefined;
         throw error;
       }
       const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: approving needs acknowledgeFlaky)" : ""}.`, c)];
