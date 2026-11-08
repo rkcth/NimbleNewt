@@ -11,7 +11,7 @@ import { onlyKnown, taskId as checkTaskId, type TaskBody, type View } from "../d
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AdmissionService } from "../admission/index.js";
-import { BudgetClosedError, type BudgetService } from "../budgets/index.js";
+import { BudgetClosedError, reservationIdFor, type BudgetService } from "../budgets/index.js";
 import type { DecisionGuard } from "../decisions/index.js";
 import type { EnvironmentService } from "../environments/index.js";
 import type { GenerationService } from "../generation/index.js";
@@ -291,6 +291,8 @@ export class DispatcherService {
    * a landing) never runs beside a worker that is still coming up; set before the running record is written, so a freeze either lands first (the start is refused) or finds the start here.
    */
   readonly #starting = new Map<string, Promise<void>>();
+  /** Attempts this process is advancing (it may still ask for a place or hold for them): an end that lands meanwhile marks what the advance may yet take, so a process that dies just after taking it leaves it marked (H12q review). */
+  readonly #asking = new Set<string>();
   /** Loops that started in an earlier tick and have not ended (a hung one is not started again on top of itself). */
   readonly #loopsRunning = new Set<string>();
   readonly #path: ToolPath;
@@ -1384,6 +1386,12 @@ export class DispatcherService {
 
   /** Takes a claimed attempt as far as it can go: asks for a place, and starts the worker when it has one. */
   async #advance(d: Loaded): Promise<AdvanceOutcome> {
+    const attemptId = d.body.attemptId;
+    this.#asking.add(attemptId);
+    try { return await this.#advanceNow(d); } finally { this.#asking.delete(attemptId); }
+  }
+
+  async #advanceNow(d: Loaded): Promise<AdvanceOutcome> {
     // A release a stopped process began is finished before anything is judged: the hold it still shows would count against the task's own allowance.
     if (d.body.releasingId !== undefined) { await this.#giveBack(d); d = (await this.#load(d.body.attemptId)) ?? d; }
     const b = d.body;
@@ -1393,8 +1401,9 @@ export class DispatcherService {
     if (task === undefined || assignment === undefined || attempt === undefined) return { kind: "skipped", check: "generation", reason: "the task, its assignment or the attempt is missing" };
     const current = assignment.generation === b.generation && assignment.state === "assigned" && assignment.activeAttemptId === b.attemptId && attempt.state === "active";
     // The attempt was superseded, released or finished elsewhere while it waited: the claim is closed, its place given back.
-    if (!current) { await this.#end(b.attemptId, "abandoned", "the attempt is no longer the task's active attempt at the current generation", { readmit: false }); return { kind: "skipped", check: "generation", reason: "the attempt was superseded while it waited" }; }
-    if (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now()) { await this.#end(b.attemptId, "abandoned", "the attempt expired before it was started", { readmit: false }); return { kind: "skipped", check: "expired", reason: "the attempt expired before it started" }; }
+    // The advance ends the attempt itself below and asks for nothing after: no place or hold is marked as possibly taken.
+    if (!current) { this.#asking.delete(b.attemptId); await this.#end(b.attemptId, "abandoned", "the attempt is no longer the task's active attempt at the current generation", { readmit: false }); return { kind: "skipped", check: "generation", reason: "the attempt was superseded while it waited" }; }
+    if (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now()) { this.#asking.delete(b.attemptId); await this.#end(b.attemptId, "abandoned", "the attempt expired before it was started", { readmit: false }); return { kind: "skipped", check: "expired", reason: "the attempt expired before it started" }; }
     const pre = await this.#checks(task, true, b.attemptId, b.agentId);
     if (pre.kind === "skipped" || pre.kind === "blocked") {
       // A passing reason gives the place back (nothing waits on a place for work that may not start); a lasting one is already a blocker.
@@ -1488,9 +1497,11 @@ export class DispatcherService {
       }
       throw error;
     }
-    // Ended meanwhile: the hold is marked as taken late (see `#request`), never recorded as the finished attempt's own.
+    // Ended meanwhile: the hold is marked as taken late (see `#request`), never recorded as the finished attempt's own. A hold that IS the attempt's own (a second dispatcher whose copy was older than the start
+    // repeats the reserve command and is answered with the started attempt's hold) is not marked: its end settles it, and a late give-back would release a hold that carries what was used.
     const attemptId = d.body.attemptId;
-    await this.#update(attemptId, (x) => (x.state === "finished" ? { ...x, lateHeld: { ...x.lateHeld, reservationId: id } } : { ...x, reservationId: id, used: x.used ?? { costMicros: 0, computeMs: 0 } }), async (x) => (x.state === "finished" ? this.#liveChange(attemptId, true, true) : []));
+    const own = (x: DispatchBody): boolean => id === x.reservationId || id === x.releasingId;
+    await this.#update(attemptId, (x) => (x.state === "finished" ? (own(x) ? x : { ...x, lateHeld: { ...x.lateHeld, reservationId: id } }) : { ...x, reservationId: id, used: x.used ?? { costMicros: 0, computeMs: 0 } }), async (x) => (x.state === "finished" && !own(x) ? this.#liveChange(attemptId, true, true) : []));
     return undefined;
   }
 
@@ -1532,7 +1543,8 @@ export class DispatcherService {
     }
     // Ended meanwhile (a stop that landed during this advance): the end already gave back what the record held, so this place is marked as taken late, in the same commit, and the tick gives it back (H12q review).
     const id = d.body.attemptId;
-    await this.#update(id, (b) => (b.state === "finished" ? { ...b, lateHeld: { ...b.lateHeld, requestId: asked.id }, requests: Math.max(b.requests ?? 0, n + 1) } : { ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }), async (b) => (b.state === "finished" ? this.#liveChange(id, true, true) : []));
+    // The attempt's own place (a stale copy repeating the request command is answered with it) is not marked: its end gave it back.
+    await this.#update(id, (b) => (b.state === "finished" ? (asked.id === b.requestId ? b : { ...b, lateHeld: { ...b.lateHeld, requestId: asked.id }, requests: Math.max(b.requests ?? 0, n + 1) }) : { ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }), async (b) => (b.state === "finished" && asked.id !== b.requestId ? this.#liveChange(id, true, true) : []));
     return asked.id;
   }
 
@@ -1850,8 +1862,20 @@ export class DispatcherService {
     if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
     if (b.resumeFrom !== undefined) await this.#dropResumeCheck(attemptId, b.taskId, b.projectId);
     // A place or hold an advance recorded after `b` was read was not given back above: it is marked as taken late, and the attempt stays in the live list until the tick gives it back (H12q review).
+    // An attempt still waiting that this process is advancing may yet be given the place and hold its advance is asking for, after this write: those are marked too, by the IDs the advance's commands derive
+    // (the place of its current request number, the hold of its current round), so a process that dies just after admission or the budget answered leaves them marked and the next controller lets go of
+    // them; one that was never taken is `not_found` there. The attempt's own place and hold (given back or settled above) are never marked.
+    const asking = this.#asking.has(attemptId);
+    const own = (id: string): boolean => id === b.requestId || id === b.reservationId || id === b.releasingId;
+    const mayTake = (x: DispatchBody): { requestId?: string; reservationId?: string } => {
+      if (!asking || x.state !== "waiting") return {};
+      const place = derivedId("req", `dpa-req:${attemptId}:${x.requests ?? 0}`);
+      const round = x.reserveRound ?? 0;
+      const hold = this.#deps.budgets?.reserve === undefined ? undefined : reservationIdFor(this.#deps.principal.id, `dpa-res:${attemptId}${round === 0 ? "" : `:${round}`}`);
+      return { ...(own(place) ? {} : { requestId: place }), ...(hold === undefined || own(hold) ? {} : { reservationId: hold }) };
+    };
     const lateOf = (x: DispatchBody): DispatchBody["lateHeld"] => {
-      const late = { ...x.lateHeld, ...(x.requestId !== undefined && x.requestId !== b.requestId ? { requestId: x.requestId } : {}), ...(x.reservationId !== undefined && x.reservationId !== b.reservationId ? { reservationId: x.reservationId } : {}) };
+      const late = { ...mayTake(x), ...x.lateHeld, ...(x.requestId !== undefined && x.requestId !== b.requestId ? { requestId: x.requestId } : {}), ...(x.reservationId !== undefined && x.reservationId !== b.reservationId ? { reservationId: x.reservationId } : {}) };
       return Object.keys(late).length === 0 ? undefined : late;
     };
     await this.#update(attemptId, (x) => { const late = lateOf(x); return { ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },

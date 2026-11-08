@@ -189,6 +189,9 @@ const addTo = (target: Mutable<Amounts>, a: Amounts): void => { target.costMicro
 const subFrom = (target: Mutable<Amounts>, a: Amounts): void => { target.costMicros -= a.costMicros; target.computeMs -= a.computeMs; };
 const short = (a: Amounts, have: Amounts): string => `needs ${a.costMicros} micros and ${a.computeMs} ms; ${have.costMicros} micros and ${have.computeMs} ms are available`;
 
+/** The ID of the hold `reserve` makes for this principal and command ID (a repeat of the command finds the same hold): the dispatcher uses it to let go of a hold it may have taken for an attempt that ended meanwhile, without asking again. */
+export const reservationIdFor = (principalId: string, commandId: string): string => derivedId("bgr", scopedCommandId(principalId, commandId));
+
 /**
  * Cost and resource attribution and delegated budgets (card R05). Money (provider spend, in millionths of one currency per tree) and local compute (occupied worker-slot milliseconds)
  * are tracked as two separate figures, never converted.
@@ -396,7 +399,7 @@ export class BudgetService {
     const purpose = plain(command.purpose, "purpose", BUDGET_LIMITS.purpose);
     const treeId = await this.#treeIdOf(taskId, () => new DomainError("not_found", "that task has no budget"));
     const treeRef: AggregateRef = { kind: TREE, id: treeId };
-    const id = derivedId("bgr", scopedCommandId(by.id, command.commandId));
+    const id = reservationIdFor(by.id, command.commandId);
     let refused: AggregateRefusal | undefined;
     let result: Awaited<ReturnType<CommandRunner["command"]>>;
     try { result = await this.#retrying(() => this.#runner.command("budget.reserve", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({

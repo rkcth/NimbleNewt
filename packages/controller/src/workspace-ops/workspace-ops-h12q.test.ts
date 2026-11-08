@@ -407,6 +407,146 @@ for (const backend of backends) {
     });
   }
 
+  for (const at of ["reserve", "request"] as const) test(`${backend.name}: a second dispatcher whose copy is older than the start, and that repeats the ${at === "reserve" ? "hold" : "place request"} after the attempt was stopped with its settle failing, does not mark or release the attempt's own ${at === "reserve" ? "hold" : "place or hold"} (card H12q review)`, async () => {
+    let first = true;
+    const r = await rig({ budget: true, budgetMs: 100 * 3_600_000, busy: async () => false });
+    const budgets = r.w.budgets as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    const realReserve = budgets["reserve"]!.bind(budgets), realSettle = budgets["settle"]!.bind(budgets);
+    let armed = false, settleFails = 0;
+    budgets["settle"] = async (...a: unknown[]) => { if (settleFails > 0) { settleFails--; throw new Error("the ledger did not answer"); } return realSettle(...a); };
+    // The second dispatcher read the waiting record; the first starts the attempt (its place and hold), the attempt uses compute, and inside the second's repeat of the hold the first stops it with the settle failing.
+    const d2 = r.w.restart({ workers: [r.local], workspaceBusy: async () => { if (first) { first = false; assert.deepEqual((await r.d.tick()).started, [r.attemptId]); await r.d.gateway(r.attemptId).usage({ computeMs: 1000 }); armed = true; } return false; } });
+    const stopFirst = async () => { if (armed) { armed = false; settleFails = 1; await r.d.stop(r.w.owner, r.attemptId, { reason: "owner says stop" }); } };
+    if (at === "reserve") budgets["reserve"] = async (...a: unknown[]) => { await stopFirst(); return realReserve(...a); };
+    else { const adm = r.w.admission as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const realRequest = adm["request"]!.bind(adm); adm["request"] = async (...a: unknown[]) => { await stopFirst(); return realRequest(...a); }; }
+    try {
+      const own = (await r.d.get(r.w.owner, r.attemptId))?.reservationId;
+      assert.equal(own, undefined);
+      const late = lateReleases(r);
+      const tick = await d2.tick();
+      assert.deepEqual(tick.failures, []);
+      assert.deepEqual(tick.skipped.map((s) => s.reason), [at === "reserve" ? "the attempt has ended" : "the request for a place is gone"]);
+      const body = (await r.d.get(r.w.owner, r.attemptId))!;
+      assert.equal(body.state, "finished");
+      assert.equal(body.lateHeld, undefined, "the attempt's own hold (and place) is not marked as taken late");
+      assert.deepEqual(late, [], "nothing was given back as late");
+      assert.deepEqual((await d2.tick()).failures, []);
+      assert.deepEqual(late, [], "nor by a later tick");
+      const report = (await r.w.budgets.report(r.w.owner, r.taskId))!;
+      assert.deepEqual(report.reservations.map((h) => h.id), [body.reservationId], "the hold that carries what the attempt used stays open for its settle, not released");
+    } finally { r.turn.end!(); await r.d.idle(); await d2.idle(); await r.store.close(); }
+  });
+
+  // The stop is made by this controller (whose end also marks what the advance may yet take) or by another controller over the same records (whose end knows nothing of this advance: the advance marks it).
+  for (const by of ["this", "another"] as const) test(`${backend.name}: a place taken after the end (no allowance to hold; stopped by ${by} controller) whose give-back fails once is given back by the next tick, which takes the mark off (card H12q review)`, async () => {
+    let first = true;
+    const r = await rig({ busy: async () => { if (first) { first = false; await (by === "this" ? r.d : r.w.restart({ workers: [r.local] })).stop(r.w.owner, r.attemptId, { reason: "owner says stop" }); } return false; } });
+    try {
+      faulty(r.w.admission, "release", 0, { left: 1, mode: "fail" });
+      const tick = await r.d.tick();
+      assert.deepEqual(tick.failures, []);
+      assert.deepEqual(tick.skipped.map((s) => s.reason), ["the attempt has ended"]);
+      assert.notEqual((await r.d.get(r.w.owner, r.attemptId))!.lateHeld?.requestId, undefined, "the place stays marked");
+      assert.equal(await places(r), 1);
+      assert.deepEqual((await r.d.tick()).failures, []);
+      assert.equal(await places(r), 0, "the next tick gave the place back");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.lateHeld, undefined, "and took the mark off");
+    } finally { await r.d.idle(); await r.store.close(); }
+  });
+
+  for (const by of ["this", "another"] as const) test(`${backend.name}: a hold taken after the end (the stop came once the place was recorded; stopped by ${by} controller) whose give-back fails once is given back by the next tick, which takes the mark off (card H12q review)`, async () => {
+    const r = await rig({ budget: true, busy: async () => false });
+    const stopper = by === "this" ? r.d : r.w.restart({ workers: [r.local] });
+    try {
+      const budgets = r.w.budgets as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const real = budgets["reserve"]!.bind(budgets);
+      let armed = true;
+      budgets["reserve"] = async (...a: unknown[]) => { const out = await real(...a); if (armed) { armed = false; await stopper.stop(r.w.owner, r.attemptId, { reason: "owner says stop" }); } return out; };
+      faulty(r.w.budgets, "release", 1, { left: 1, mode: "fail" });
+      const tick = await r.d.tick();
+      assert.deepEqual(tick.failures, []);
+      assert.deepEqual(tick.skipped.map((s) => s.reason), ["the attempt has ended"]);
+      const marked = (await r.d.get(r.w.owner, r.attemptId))!.lateHeld;
+      assert.ok(marked?.reservationId !== undefined, "the hold is marked");
+      // Another controller's end gave back the place it found and marks nothing; this controller's end also marked the place of the next request number, which was never taken and is let go as `not_found`.
+      if (by === "another") assert.equal(marked.requestId, undefined, "only the hold is marked: the end gave back the place it found");
+      assert.equal(await places(r), 0);
+      assert.equal((await holds(r)).open, 1);
+      assert.deepEqual((await r.d.tick()).failures, []);
+      assert.equal((await holds(r)).open, 0, "the next tick gave the hold back");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.lateHeld, undefined, "and took the mark off");
+    } finally { await r.d.idle(); await r.store.close(); }
+  });
+
+  test(`${backend.name}: an attempt that used compute, shut down and is stopped while its next advance pins the checkout, with the settle failing, keeps its own hold for the settle: the end's mark of what the advance may yet take never names it (card H12q review)`, async () => {
+    const r = await rig({ budget: true, busy: async () => false });
+    let d2: typeof r.d | undefined;
+    try {
+      assert.deepEqual((await r.d.tick()).started, [r.attemptId]);
+      await r.d.gateway(r.attemptId).usage({ computeMs: 1000 });
+      assert.equal((await r.d.shutdown()).closed, 1);
+      const own = (await r.d.get(r.w.owner, r.attemptId))!.reservationId;
+      assert.notEqual(own, undefined, "the attempt kept the hold that carries what it used");
+      const local2 = await r.another();
+      d2 = r.w.restart({ workers: [local2], workspaceBusy: async () => false });
+      const budgets = r.w.budgets as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const realSettle = budgets["settle"]!.bind(budgets);
+      let settleFails = 0;
+      budgets["settle"] = async (...a: unknown[]) => { if (settleFails > 0) { settleFails--; throw new Error("the ledger did not answer"); } return realSettle(...a); };
+      const res = r.w.resources as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const realPin = res["dispatchCheckout"]!.bind(res);
+      let armed = true;
+      res["dispatchCheckout"] = async (...a: unknown[]) => { if ((a[0] as { pin?: boolean }).pin === true && armed) { armed = false; settleFails = 1; await d2!.stop(r.w.owner, r.attemptId, { reason: "owner says stop" }); } return realPin(...a); };
+      const tick = await d2.tick();
+      assert.deepEqual(tick.failures, []);
+      assert.deepEqual(tick.skipped.map((s) => s.reason), ["the attempt has ended"]);
+      assert.deepEqual((await d2.tick()).failures, []);
+      const body = (await d2.get(r.w.owner, r.attemptId))!;
+      assert.equal(body.state, "finished");
+      assert.equal(body.lateHeld, undefined);
+      assert.deepEqual((await r.w.budgets.report(r.w.owner, r.taskId))!.reservations.map((h) => h.id), [own], "the hold that carries the 1000 ms used stays open for its settle");
+      assert.equal(await places(r), 0, "the place the advance took was given back");
+      await d2.idle();
+    } finally { r.turn.end!(); await r.d.idle(); await d2?.idle(); await r.store.close(); }
+  });
+
+  test(`${backend.name}: a controller that dies just after any one storage write of a stop inside the advance (place and hold taken after the end) leaves nothing held once the next controller has run and the owner's stop is repeated (card H12q review)`, async () => {
+    // Every write (records, admission, budget) goes through `applyOperation`; `after` runs once the write is committed and may throw to stand for the process dying there.
+    const tapAfter = (storage: unknown, after: () => void): (() => void) => {
+      const s = storage as { applyOperation: (input: never) => Promise<unknown> };
+      const had = Object.prototype.hasOwnProperty.call(s, "applyOperation"); const orig = s.applyOperation;
+      s.applyOperation = function (this: unknown, input: never) { return orig.call(s, input).then((out) => { after(); return out; }); };
+      return () => { if (had) s.applyOperation = orig; else delete (s as Partial<typeof s>).applyOperation; };
+    };
+    const run = async (dieAt: number): Promise<number> => {
+      let first = true;
+      const r = await rig({ budget: true, busy: async () => { if (first) { first = false; await r.d.stop(r.w.owner, r.attemptId, { reason: "owner says stop" }); } return false; } });
+      let writes = 0, dead = false;
+      const put = tapAfter(r.w.storage, () => { writes++; if (writes === dieAt) { dead = true; throw new Error("the process died after this write"); } if (dead) throw new Error("the process is gone"); });
+      try {
+        await r.d.tick().catch(() => undefined);
+        await r.d.idle().catch(() => undefined);
+        put();
+        if (dieAt === 0) return writes;
+        // The next controller over the same records; the owner repeats a stop that did not finish.
+        const d2 = r.w.restart({ workers: [r.local], workspaceBusy: async () => false });
+        // Died before the attempt was claimed: the next controller claims it (and may start it) and the owner's stop ends it.
+        if ((await d2.get(r.w.owner, r.attemptId)) === undefined) await d2.tick();
+        if ((await d2.get(r.w.owner, r.attemptId))!.state !== "finished") await d2.stop(r.w.owner, r.attemptId, { reason: "owner says stop" });
+        for (let i = 0; i < 2; i++) assert.deepEqual((await d2.tick()).failures, [], `write ${dieAt}: the next controller's ticks do not fail`);
+        const body = (await d2.get(r.w.owner, r.attemptId))!;
+        assert.equal(body.state, "finished", `write ${dieAt}`);
+        assert.equal(body.lateHeld, undefined, `write ${dieAt}: nothing is left marked`);
+        assert.equal(await places(r), 0, `write ${dieAt}: no place is held`);
+        assert.equal((await holds(r)).open, 0, `write ${dieAt}: no hold is open`);
+        await d2.idle();
+        return writes;
+      } finally { put(); r.turn.end!(); await r.store.close(); }
+    };
+    const total = await run(0);
+    assert.ok(total > 5, `the clean run made ${total} writes`);
+    const bad: string[] = [];
+    for (let at = 1; at <= total; at++) await run(at).catch((e: unknown) => { bad.push(e instanceof Error ? e.message.split("\n")[0]! : String(e)); });
+    assert.deepEqual(bad, [], `of ${total} writes`);
+  });
+
   test(`${backend.name}: a queued attempt that is then frozen gives back its queued place at the next tick (card H12q review)`, async () => {
     const r = await rig({ busy: async () => false });
     try {
