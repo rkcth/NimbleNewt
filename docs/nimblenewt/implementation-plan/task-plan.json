@@ -5829,12 +5829,13 @@
           "1a12619d",
           "c8bdcd5f",
           "7d12dc26",
-          "4639e3c6"
+          "4639e3c6",
+          "fde73281"
         ],
         "ci_runs": [],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "Read-only activity timeline and replay: the project timeline (agent and time filters, gaps), the replay service (summary first with lines of work and agents to follow, step-through windows filtered by line, agent, kind and time, one step in full with versions used then and labelled explanations, what led to a step as links, search and export under the same checks, owner-only thinking as a recorded look), its state-API operations and the chat views; nothing is written while replaying (every storage mutator counted). The completion check quoted every agent-written text in the replay, timeline, activity and explanation chat lines (one JSON line, C1, separators and format characters escaped) and added the time and kind filters. Left to U09b: the web view, the producers of outcome, branch and supersedes, the composed thinking store and retention marker, links resolved to diffs and comments, rerun or simulation. Green exhaustive run pending (to be added to ci_runs)."
+        "note": "Read-only activity timeline and replay: the project timeline (agent and time filters, gaps), the replay service (summary first with lines of work and agents to follow, step-through windows filtered by line, agent, kind and time, one step in full with versions used then and labelled explanations, what led to a step as links, search and export under the same checks, owner-only thinking as a recorded look), its state-API operations and the chat views; nothing is written while replaying (every storage mutator counted). The completion check quoted every agent-written text in the replay, timeline, activity and explanation chat lines (one JSON line, C1, separators and format characters escaped) and added the time and kind filters; the independent review made the time filters zoned ISO times (never the host's zone), bounded each quotation after escaping and cut long step lists. Left to U09b: the web view, the producers of outcome, branch and supersedes, the composed thinking store and retention marker, links resolved to diffs and comments, rerun or simulation. Green exhaustive run pending (to be added to ci_runs)."
       }
     },
     {
