@@ -1011,7 +1011,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L02d — Finish Stop: local processes, child work, cleanup spend
 
 - **Parent:** N05 / AII-255.
-- **Status:** implemented; commits `133178e1`, `114f3ba8`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `133178e1`, `114f3ba8`, `e6264da7`; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** Parts 1-3 built the Stop inventory contract, the ending of jobs and swarm children, the per-attempt cleanup charge ledger and its chat view. This closing part: the sandbox lists a run's real processes (Linux /proc, macOS descendants), the worker process itself only once asked to end, what the agent started while it runs; a close that cannot end the process reports it (ProcessNotEnded) instead of hanging, so the worker is not confirmed stopped and the Stop names it (uncooperative, Force Stop offered); Force Stop tells the hosts to kill what they hold (endLocalWork); winding the worker down is charged once as stop-cleanup compute. Tested end to end with a real bubblewrap worker that ignores the close. Left for L02e: swarm children of wider scopes, charge-window starvation, a task's view of a wider-scope Stop, chat name resolution for scopes, a remote worker's process report. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** L02c.
 - **Deliverable:** Split from L02c (2026-10-29): count local processes and child work in the inventory (uncooperative ones named, offered Force Stop), take the cleanup spend from the runtime.
