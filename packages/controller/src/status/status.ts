@@ -714,10 +714,21 @@ export class StatusService {
       if (s !== undefined) {
         const c = cite("swarm-limits-settings", "main", s.revision === 0 ? undefined : s.revision);
         lines.push(line(`Limits on spawning child tasks (your setting is at revision ${s.revision}):`, c));
-        if (s.damaged.length > 0) lines.push(line(`The stored swarm limits are damaged at ${s.damaged.map((n) => shown(String(n), 30)).join(", ")}: no figure of yours applies until you set them again (swarm.limits.change).`, c));
+        const damaged = s.damaged.map((n) => String(n));
+        // `SwarmService` takes its limits from `SwarmLimitsService.effective()`, which throws on a damaged record: while one name is unreadable no child task is made at all, so the group says that first.
+        if (damaged.length > 0) lines.push(line(`The stored swarm limits are damaged at ${damaged.map((n) => shown(n, 30)).join(", ")}: no child task can be spawned until ${damaged.length === 1 ? "it is" : "they are"} repaired (swarm.limits.change).`, c));
         for (const name of Object.keys(SWARM_LIMIT_BOUNDS) as (keyof typeof SWARM_LIMIT_BOUNDS)[]) {
           const e = s.limits[name];
-          lines.push(line(`${name} (${capacityWord(name)}): ${e === null ? "off, no total (you set it)" : e === undefined ? `${s.defaults[name]} (the default)` : `${e} (you set it)`}`, c));
+          const isDamaged = damaged.includes(name);
+          // A name whose stored figure cannot be read is called damaged; a sound one says whether it is the owner's or the default, and that it is not in force while another name is damaged.
+          const words = isDamaged ? "damaged: the figure stored cannot be read"
+            : e === null ? "off, no total (you set it)"
+              : e === undefined ? `${s.defaults[name]} (the default)`
+                : `${e} (you set it)`;
+          // A nought in either of the first two is the owner turning spawning off, which the figure alone does not say.
+          const none = !isDamaged && (e === undefined ? s.defaults[name] : e) === 0
+            ? name === "depth" ? ": no child task may be spawned at all" : ": no new child task may be spawned now" : "";
+          lines.push(line(`${name} (${capacityWord(name)}): ${words}${none}${!isDamaged && damaged.length > 0 ? " - not in force while the record is damaged" : ""}`, c));
         }
       }
     }

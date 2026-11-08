@@ -142,6 +142,21 @@ for (const backend of backends) {
     }
   });
 
+  suite("a swarm limit of nought is told as the stop it is, and a record damaged in two names says so for both", async (w, s) => {
+    await s.swarm.change(s.owner, { commandId: cid("zero"), set: { depth: 0, liveChildren: 0 } });
+    const body = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.match(body, /^depth \(.*\): 0 \(you set it\): no child task may be spawned at all$/m, "depth 0 is the owner's way of turning spawning off");
+    assert.match(body, /^liveChildren \(.*\): 0 \(you set it\): no new child task may be spawned now$/m);
+    assert.match(body, /^totalChildren \(.*\): 16 \(the default\)$/m, "a name the owner left alone is still the plain default");
+    // Two damaged names: both are named, and neither is shown as a figure.
+    await damage(s.storage, s.epoch, SWARM_LIMITS_REF, { depth: "deep", liveChildren: -2 }, "two");
+    const both = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.match(both, /^The stored swarm limits are damaged at depth, liveChildren: no child task can be spawned until they are repaired \(swarm\.limits\.change\)\.$/m);
+    assert.match(both, /^totalChildren \(.*\): 16 \(the default\) - not in force while the record is damaged$/m);
+    const depthLine = both.split("\n").find((l) => l.startsWith("depth ")) ?? "";
+    assert.ok(!depthLine.includes("(the default)"), `neither damaged name is called the default: ${depthLine}`);
+  });
+
   suite("a caller who is not the owner reads exactly what it would read if the view did not exist", async (w, s) => {
     const ann = await w.agent("ann", [{ action: "task.read", project: "*" }]);
     assert.equal(await s.status.ask(ann.principal, { kind: "capacity" }), undefined, "nothing at all, not an empty answer");
@@ -178,8 +193,11 @@ for (const backend of backends) {
     const broken = (await s.status.ask(s.owner, { kind: "capacity" }))!;
     const body = text(broken.lines);
     assert.match(body, /^Capacity caps: the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity\.limits\.change; what is already running is not stopped\.$/m, "a damaged caps record stops admission, and the line says that rather than sounding harmless");
-    assert.match(body, /^The stored swarm limits are damaged at depth: no figure of yours applies until you set them again \(swarm\.limits\.change\)\.$/m);
-    assert.match(body, /^liveChildren \(.*\): 4 \(the default\)$/m, "the swarm figures that can be read are still shown");
+    assert.match(body, /^The stored swarm limits are damaged at depth: no child task can be spawned until it is repaired \(swarm\.limits\.change\)\.$/m, "a damaged swarm record spawns nothing, and the line says that");
+    assert.match(body, /^depth \(.*\): damaged: the figure stored cannot be read$/m, "the name that cannot be read is called damaged, not the default");
+    assert.ok(!/^depth \(.*\): 3 \(the default\)$/m.test(body), "a damaged name is never shown as the default figure");
+    assert.match(body, /^liveChildren \(.*\): 4 \(the default\) - not in force while the record is damaged$/m, "the sound names are marked as not in force, because spawning reads the whole record");
+    await assert.rejects(() => s.swarm.effective(), (error: unknown) => error instanceof DomainError && error.code === "integrity", "the call SwarmService makes for every child task throws, so no child can be spawned");
     assert.match(body, /^productive \(.*\): 7 \(you set it\); 0 running now$/m, "the quotas group is untouched");
     assert.match(body, /^Host and global quotas/m, "and its header is there");
     // A group whose service is not composed in says so in one line, and the rest of the answer stands.
