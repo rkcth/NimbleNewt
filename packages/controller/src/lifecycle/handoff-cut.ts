@@ -8,8 +8,8 @@ import { quotedLine } from "../decisions/records.js";
 
 /** The controller's marker: the first line of a cut section, and only there. `left` entries of `total` were left out or shortened; the whole section is in `archive`. */
 export const CUT_MARKER = /^\[cut: (\d+) of (\d+) entries, archive ([a-z]+-[a-z2-7]{20})\]/;
-const help = (archiveId: string): string => ` Older entries were left out to fit; the whole section is kept: read it with the state API query handoff.archive.read { "archiveId": "${archiveId}" }.`;
-const marker = (left: number, total: number, archiveId: string): string => `[cut: ${left} of ${total} entries, archive ${archiveId}]${help(archiveId)}`;
+const help = (archiveId: string, archivedChars: number | undefined): string => ` Entries were left out to fit (the owner's marked ones and the newest are kept); ${archivedChars === undefined ? "the whole section is kept" : `the first ${archivedChars} characters of the section are kept (it was longer than an archive holds)`}: read it with the state API query handoff.archive.read { "archiveId": "${archiveId}" }.`;
+const marker = (left: number, total: number, archiveId: string, archivedChars: number | undefined): string => `[cut: ${left} of ${total} entries, archive ${archiveId}]${help(archiveId, archivedChars)}`;
 /** Said at the end of an entry that was shortened to fill the room left (it still counts as cut). */
 export const SHORTENED = " [... shortened; whole in the archive]";
 /** A shortened entry is kept only when at least this much of it fits; less says nothing useful. */
@@ -51,12 +51,12 @@ export interface SectionCut {
  * Cuts `text` to at most `limit` characters. Entries the owner marked are kept first (newest first, as many as fit); then the most recent entries, newest first, until one does not fit, which is shortened
  * into the room left (from its start) when enough of it fits. The kept entries stay in their order, below the marker.
  */
-export function cutSection(text: string, limit: number, marks: readonly string[], archiveId: string): SectionCut {
+export function cutSection(text: string, limit: number, marks: readonly string[], archiveId: string, /** Set when the archive holds only the first this many characters of the section. */ archivedChars?: number): SectionCut {
   if (text.length <= limit) return { text };
   const entries = text.split("\n");
   const total = entries.length;
   // The marker is sized for its longest form (every entry left out), so the count it finally shows can only make it shorter.
-  const room = limit - marker(total, total, archiveId).length - 1;
+  const room = limit - marker(total, total, archiveId, archivedChars).length - 1;
   if (room < MIN_SHORT + SHORTENED.length) throw new RangeError(`a section limit of ${limit} leaves no room beside the cut marker`);
   const marked = markedBy(marks);
   const chosen = new Map<number, string>();
@@ -78,7 +78,7 @@ export function cutSection(text: string, limit: number, marks: readonly string[]
   }
   const whole = chosen.size - (shortened ? 1 : 0);
   const kept = [...chosen.keys()].sort((x, y) => x - y).map((i) => chosen.get(i)!);
-  const out = [marker(total - whole, total, archiveId), ...kept].join("\n");
+  const out = [marker(total - whole, total, archiveId, archivedChars), ...kept].join("\n");
   if (out.length > limit) throw new RangeError(`cut section is ${out.length} characters, over ${limit}`);
   return { text: out, cut: { left: total - whole, total } };
 }

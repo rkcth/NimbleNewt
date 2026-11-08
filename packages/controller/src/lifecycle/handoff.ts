@@ -605,7 +605,7 @@ export class HandoffService {
       if (shown.length <= HANDOFF_LIMITS.section) { sections[name] = shown; continue; }
       marks ??= await this.#marks(b.taskId);
       const archived = await this.#archive(handoffId, b, name, original);
-      const cut = cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId);
+      const cut = cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId, archived.truncated ? archived.chars : undefined);
       sections[name] = cut.text;
       cuts.push({ section: name, archiveId: archived.archiveId, left: cut.cut?.left ?? 0, total: cut.cut?.total ?? 0, chars: original.length, ...(archived.truncated ? { archiveTruncated: true } : {}) });
     }
@@ -617,16 +617,16 @@ export class HandoffService {
    * Keeps the whole of a section before it is cut, in parts that each fit a record, named by the hand-off, the section and its content: collecting the same package again (after a crash) finds the same
    * archive. Written before the cut package is, so a package never names an archive that does not exist.
    */
-  async #archive(handoffId: string, b: Pick<TaskHandoffBody, "taskId" | "projectId">, section: string, original: string): Promise<{ archiveId: string; truncated: boolean }> {
+  async #archive(handoffId: string, b: Pick<TaskHandoffBody, "taskId" | "projectId">, section: string, original: string): Promise<{ archiveId: string; truncated: boolean; chars: number }> {
     const digest = createHash("sha256").update(original).digest("hex");
     const base = `archive\0${handoffId}\0${section}\0${digest}`;
     const head: AggregateRef = { kind: ARCHIVE, id: derivedId("hnd", base) };
     const kept = safeSlice(original, HANDOFF_LIMITS.archiveChars);
     const truncated = kept.length < original.length;
-    if ((await this.#runner.get(head.kind, head.id)) !== undefined) return { archiveId: head.id, truncated };
+    if ((await this.#runner.get(head.kind, head.id)) !== undefined) return { archiveId: head.id, truncated, chars: kept.length };
     // Each part ends on a whole character (never between the halves of a surrogate pair), so every part is valid text in every store and the parts joined are the original.
     const parts: string[] = [];
-    for (let at = 0; at < kept.length || parts.length === 0;) { const piece = safeSlice(kept.slice(at, at + HANDOFF_LIMITS.archivePart), HANDOFF_LIMITS.archivePart); parts.push(piece); at += piece.length; }
+    for (let at = 0; at < kept.length || parts.length === 0;) { const piece = safeSlice(kept.slice(at, at + HANDOFF_LIMITS.archivePart + 1), HANDOFF_LIMITS.archivePart); parts.push(piece); at += piece.length; }
     const entries = original.split("\n").length;
     const changes = parts.map((text, i) => ({
       type: "create" as const, ref: i === 0 ? head : { kind: ARCHIVE, id: derivedId("hnd", `${base}\0${i}`) },
@@ -636,7 +636,7 @@ export class HandoffService {
       payload: { handoffId, section, digest },
       build: async () => ({ ref: head, creates: true, changes, detail: { section, parts: parts.length } }),
     }));
-    return { archiveId: head.id, truncated };
+    return { archiveId: head.id, truncated, chars: kept.length };
   }
 
   static #marksRef = (taskId: string): AggregateRef => ({ kind: MARKS, id: derivedId("hnd", `marks\0${taskId}`) });
