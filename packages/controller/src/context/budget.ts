@@ -76,7 +76,9 @@ export function buildStartup(items: readonly StartupItem[], budget: ContextBudge
   const cuttable = state.filter((s) => s.mode === "full").sort((a, b) => (a.it.at < b.it.at ? -1 : a.it.at > b.it.at ? 1 : a.i - b.i));
   for (const s of cuttable) {
     if (sum() <= room) break;
-    const cutText = (): string => `${s.text.slice(0, head)}\n[… ${s.text.length - head - tail} characters cut; full text archived as ${digestOf(s.it.text)}]\n${s.text.slice(-tail)}`;
+    // The head, the mark and the tail stay on one line (card C07g review): a cut never puts a line break the item did not have before the tail, so a tail taken from inside an agent's quoted words (an open
+    // question) does not start a line of its own, where it could read as an owner's item such as "[AUTHORITATIVE] ...".
+    const cutText = (): string => `${s.text.slice(0, head)} [… ${s.text.length - head - tail} characters cut; full text archived as ${digestOf(s.it.text)}] ${s.text.slice(-tail)}`;
     const candidate = s.text.length > head + tail ? cutText() : s.text;
     if (candidate.length < s.text.length) { s.text = candidate; s.mode = "cut"; }
   }

@@ -485,9 +485,12 @@ export class ContextEnforcementService {
     const blocker = await this.#blockers.getBlocker(id);
     const ref = ContextEnforcementService.#routeBlockRef(taskId);
     // The mark names the route the refusal was for (card C07g review), so that being on that same route does not count as having moved back.
-    const marked = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string; route?: string } | undefined;
+    const markFound = await this.#runner.get(ref.kind, ref.id);
+    const marked = markFound?.body as unknown as { blockerId?: string; route?: string } | undefined;
     if (blocker !== undefined && blocker.summary.startsWith(ROUTE_BLOCK) && (marked?.blockerId !== id || marked.route !== route)) {
-      await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}-${sha256(route).slice(0, 12)}`, actor: principal.id }, async () => ({
+      // The command ID carries the mark's revision as read: a blocker kept open while its refusals go A, then B, then A again is marked for A again (the ID of the first marking would replay it and leave the mark on B,
+      // and the task then placed on A would close the refusal as stale).
+      await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}-${sha256(route).slice(0, 12)}-${markFound?.revision ?? 0}`, actor: principal.id }, async () => ({
         payload: { taskId, blockerId: id, route },
         build: async () => {
           const old = await this.#runner.get(ref.kind, ref.id);
