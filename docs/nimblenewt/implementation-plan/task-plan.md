@@ -34,7 +34,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U09b, U08, U10, U11, U11b, U11c, U11d, U14 |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12q, H12s, H12t, H12r, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
@@ -825,9 +825,51 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C07l — Extend the 50-hand-off test to the first call, the stored conversation and the resume note
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `7a8e5185`, `19c22f38`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The 50-hand-off test of what the next agent is sent (dispatch/first-call-hops.test.ts, every backend): the real hand-off service, dispatcher, local worker and context guards, with lease timeouts, controller restarts that resume (whole, compacted, or fresh past the resume share) and the smaller-window route. Every call stays under its route's startup limit, the last 10 hops are no larger than the first 10, stored conversations are resumed only within the resume share and a fresh start says why, resume notes are given and bounded, and the owner's words, goal and permissions are in every call (8 mutation checks). Fixed: a shutdown ended a local attempt instead of leaving it to resume. Findings, each a card with todo checks: the call names no hand-off package, controller note or open blocker (C07m); an unknown window admits everything (C07n); remote hosts have no first-call check (C07o); silent cuts in the hand-off and verdict notes (C07p); the controller's summariser is unused and the lineage unbounded (C07q). Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** C07h.
 - **Deliverable:** Split from C07h (2026-11-06): the first slice measures the hand-off package and checks the owner's words, goal, permissions, open question, acceptance criteria, next action and the seeded early items. This card also covers the retention items the first slice could not show without the other services: open blockers, and every recorded decision present whole or retrievable by reference after compaction. This adds what the next agent is actually given in a call: the first-call size sent, the stored conversation size and the resume note, with retries, lease timeouts, resumes, a fallback to a smaller-window route and compactions in the 50 hops, and checks the audit's other candidates (a route with an unknown window admits everything, the remote worker host has no first-call check, the brief cut at its tail, the compaction lineage cap of 200, the controller's own summariser and handoff note never used) with file and line for each, each becoming its own card.
 - **Acceptance and verification:** Every hop's first call stays under the limit for its route and the last 10 hops average no more than 5 percent above the first 10; retention items are present whole or retrievable by reference at every hop; deliberately removing a bound or cutting a retained item makes the test fail (mutation check recorded); each unbounded path or lossy cut found has a follow-up card with file and line.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07m — Give the next agent its hand-off: the first call names the package, the controller's hand-off note and the open blockers
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07l.
+- **Deliverable:** Split from C07l (2026-11-08), finding 1: what the next agent is given in its first call is the task's title and description, the rules that bind it and the route view only (dispatch/dispatcher.ts line 1863, the order's content), plus a resume note for a resumed attempt. Nothing names the hand-off package (the next action, decisions, acceptance criteria, open questions, pending effects: readable only through handoff.get, which the call never names), the controller's own hand-off note of the ended attempt (written at dispatch/dispatcher.ts line 2163 through ContextEnforcementService.ensureHandoff, and read by no production caller of latestHandoff, context/enforcement.ts line 914), or the task's open blockers (in neither the package nor the call). A fresh start after a stored conversation over the resume share says it starts 'from the continuation record', which the call does not carry either.
+- **Acceptance and verification:** The first call of a new or resumed attempt carries, bounded and JSON-quoted on one line where agent-written, or names by ID with the operation that reads it: the latest hand-off package, the controller's hand-off note of the previous attempt and the task's open blockers; the C07l test's three todo checks (hand-off named, open blocker named, controller note given) pass on every backend and lose their todo, with its first-call limit and size-trend checks still passing.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07n — Check the first call on a route whose window the controller does not know
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07l.
+- **Deliverable:** Split from C07l (2026-11-08), finding 2: dispatch/runtime-guards.ts line 57 admits every first call (admit: true, no record, no measurement) and line 74 resumes every stored conversation when the binding's window for the order's route is undefined, so a route missing from the embedder's window map is never checked.
+- **Acceptance and verification:** A route with no known window uses the routing table's contextTokens for it, and with neither it is refused visibly (a blocker naming the route and how to set its window), never admitted unchecked; the stored-conversation resume is judged the same way; the C07l todo case (a first call of a million tokens on a route of unknown window) passes and loses its todo.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07o — Check the first call and the stored conversation for attempts on remote worker hosts
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07l.
+- **Deliverable:** Split from C07l (2026-11-08), finding 3: a remote host is offered the order as it is (remote/service.ts place, line 584; the offer at line 643): the controller makes no first-call admission and no resume decision for it, and the remote API has no operation through which a remote host could ask (remote/server.ts states that no route admits work); only the local worker's guards (dispatch/local-worker.ts with dispatch/runtime-guards.ts) check the first call.
+- **Acceptance and verification:** A remote host's first call and stored conversation are admitted or refused against the route's budgets before the first call is sent, through a state-API operation scoped to the attempt the host holds (or by the controller before the offer), recorded like the local worker's admission and refused with a context_overflow blocker; a test through startController with a remote host shows an oversized first call refused and a fitting one admitted.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07p — Mark and keep what is cut from an attempt's hand-off note and resume note
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07l.
+- **Deliverable:** Split from C07l (2026-11-08), finding 4: two notes an attempt is given or left are cut silently. context/budget.ts line 178 (handoffFromFacts) cuts the controller's hand-off note at its tail with '[… hand-off cut at N characters]' and keeps no original, so the newest effects and artifacts are the ones lost; dispatch/dispatcher.ts line 493 cuts the note listing how each parked call was decided to 500 characters with no marker, so the agent that resumes is not told the later verdicts.
+- **Acceptance and verification:** A cut note keeps the newest lines, says how much was left out and names where the whole text can be read (an archive readable through the state API by whoever may read the note), never splits a surrogate pair, and quotes agent-written text on one line; the C07l todo case for the controller's note passes and loses its todo, and a test with more parked verdicts than fit shows every verdict readable.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07q — Use the controller's summariser for compaction and keep the compaction lineage bounded
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07l.
+- **Deliverable:** Split from C07l (2026-11-08), finding 5: ContextEnforcementService.compact, registerCompressor and keptDecisions (context/enforcement.ts lines 535-747), which keep up to 12 owner decisions through every compaction, have no production caller: compaction is the model process's own (packages/worker/src/host/local.ts compact). The controller's lineage grows by one ID with each compaction and is never cut (context/enforcement.ts line 635), and a continuation capture is refused outright when its manifest's summaryLineage has more than 200 entries (continuation/continuation.ts line 250), so a long-running task's captures fail after 200 compactions instead of keeping the newest with a reference to the rest.
+- **Acceptance and verification:** Compaction of a task's conversation goes through the controller's summariser with the owner's decisions pinned (or the plan records why the process's own compaction is kept and the pinned decisions are given to it); the lineage is bounded with the older part kept by reference; a capture after 250 compactions is accepted and every recorded decision is still present whole or retrievable by reference.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C08 — Implement owner decision records and correction propagation
@@ -3237,7 +3279,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
