@@ -361,6 +361,34 @@ for (const backend of backends) {
     } finally { await r.d.idle(); await r.store.close(); }
   });
 
+  test(`${backend.name}: an emergency stop whose end read the waiting record before the advance held the allowance and started the attempt settles what the attempt then used: its hold is never given back as taken late (card H12q review)`, async () => {
+    let first = true;
+    let stopping: Promise<unknown> | undefined;
+    let inEnd!: () => void; const reached = new Promise<void>((ok) => { inEnd = ok; });
+    let go!: () => void; const gate = new Promise<void>((ok) => { go = ok; });
+    // An emergency stop does not freeze first, so the advance may start the attempt while the end is under way.
+    const r = await rig({ budget: true, busy: async () => { if (first) { first = false; stopping = r.d.stop(r.w.owner, r.attemptId, { reason: "force stop", emergency: true }); await reached; } return false; } });
+    try {
+      const asg = r.w.assignments as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>; const realGet = asg["getAssignment"]!.bind(asg);
+      let armed = true;
+      // The end has read the record (no place, no hold) and waits here, before it finishes the assignment, while the advance holds the allowance and starts the worker.
+      asg["getAssignment"] = async (...a: unknown[]) => { if (armed && (new Error().stack ?? "").includes("endInner")) { armed = false; inEnd(); await gate; } return realGet(...a); };
+      const late = lateReleases(r);
+      assert.deepEqual((await r.d.tick()).started, [r.attemptId]);
+      await r.d.gateway(r.attemptId).usage({ computeMs: 1000 });
+      go(); await stopping;
+      assert.deepEqual((await r.d.tick()).failures, []);
+      const body = (await r.d.get(r.w.owner, r.attemptId))!;
+      assert.equal(body.state, "finished");
+      assert.equal(body.lateHeld, undefined);
+      assert.deepEqual(late, ["place"], "only the place is given back as taken late");
+      const report = (await r.w.budgets.report(r.w.owner, r.taskId))!;
+      assert.equal(report.reservations.length, 0, "no hold is left open");
+      assert.equal(report.spent.computeMs, 1000, "what the attempt used is settled, not freed");
+      assert.equal(await places(r), 0);
+    } finally { r.turn.end!(); await r.d.idle(); await r.store.close(); }
+  });
+
   for (const at of ["pin", "reserve"] as const) {
     test(`${backend.name}: a stop that ends a waiting attempt ${at === "pin" ? "while its checkout is being pinned" : "just after its allowance was held"} ends it cleanly: no tick failure, "the attempt has ended", no place or hold left (card H12q review)`, async () => {
       const r = await rig({ budget: true, busy: async () => false });

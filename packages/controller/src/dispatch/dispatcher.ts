@@ -1866,20 +1866,25 @@ export class DispatcherService {
     // (the place of its current request number, the hold of its current round), so a process that dies just after admission or the budget answered leaves them marked and the next controller lets go of
     // them; one that was never taken is `not_found` there. The attempt's own place and hold (given back or settled above) are never marked.
     const asking = this.#asking.has(attemptId);
-    const own = (id: string): boolean => id === b.requestId || id === b.reservationId || id === b.releasingId;
+    // A hold recorded after `b` was read on which the attempt then ran (another start won the race with this end: an emergency stop does not freeze first) carries what it used: it is the attempt's own,
+    // settled below with what the record shows, never marked as taken late (a late give-back would release it and free allowance that was used).
+    const ran = (x: DispatchBody): string | undefined => (x.reservationId !== undefined && x.reservationId !== b.reservationId && (x.state === "running" || x.state === "parked" || (x.used?.costMicros ?? 0) !== (b.used?.costMicros ?? 0) || (x.used?.computeMs ?? 0) !== (b.used?.computeMs ?? 0)) ? x.reservationId : undefined);
+    const own = (id: string, x: DispatchBody): boolean => id === b.requestId || id === b.reservationId || id === b.releasingId || id === ran(x);
     const mayTake = (x: DispatchBody): { requestId?: string; reservationId?: string } => {
       if (!asking || x.state !== "waiting") return {};
       const place = derivedId("req", `dpa-req:${attemptId}:${x.requests ?? 0}`);
       const round = x.reserveRound ?? 0;
       const hold = this.#deps.budgets?.reserve === undefined ? undefined : reservationIdFor(this.#deps.principal.id, `dpa-res:${attemptId}${round === 0 ? "" : `:${round}`}`);
-      return { ...(own(place) ? {} : { requestId: place }), ...(hold === undefined || own(hold) ? {} : { reservationId: hold }) };
+      return { ...(own(place, x) ? {} : { requestId: place }), ...(hold === undefined || own(hold, x) ? {} : { reservationId: hold }) };
     };
     const lateOf = (x: DispatchBody): DispatchBody["lateHeld"] => {
-      const late = { ...mayTake(x), ...x.lateHeld, ...(x.requestId !== undefined && x.requestId !== b.requestId ? { requestId: x.requestId } : {}), ...(x.reservationId !== undefined && x.reservationId !== b.reservationId ? { reservationId: x.reservationId } : {}) };
+      const late = { ...mayTake(x), ...x.lateHeld, ...(x.requestId !== undefined && x.requestId !== b.requestId ? { requestId: x.requestId } : {}), ...(x.reservationId !== undefined && x.reservationId !== b.reservationId && ran(x) === undefined ? { reservationId: x.reservationId } : {}) };
       return Object.keys(late).length === 0 ? undefined : late;
     };
-    await this.#update(attemptId, (x) => { const late = lateOf(x); return { ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
+    let settleLate: string | undefined;
+    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
       async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
+    if (settleLate !== undefined && finished.reservationId === settleLate) { const { releasingId: _r, ...rest } = finished; void _r; await this.#settleReservation(rest, options.lost === true, `:${settleLate}`); }
     // A worker registered while this end was running (its start answered after the end began) is let go too.
     const late = this.#live.get(attemptId);
     if (late !== undefined && late.handle !== live?.handle && !(await late.handle.stop().then(() => true, () => false))) { workerStopped = false; await this.#update(attemptId, (x) => ({ ...x, workerStopped: false })).catch(() => undefined); }
@@ -1894,7 +1899,7 @@ export class DispatcherService {
   }
 
   /** Settles the attempt's hold to what it used, or holds it as uncertain when the worker was lost (its last calls are not known). Settling is by command ID derived from the attempt, so an end done again settles once. */
-  async #settleReservation(b: DispatchBody, lost: boolean): Promise<void> {
+  async #settleReservation(b: DispatchBody, lost: boolean, suffix = ""): Promise<void> {
     const budgets = this.#deps.budgets;
     // A release that was begun and not finished (the process stopped, or the ledger failed) is finished here, so an attempt that ends first does not leave its hold open for good.
     if (b.releasingId !== undefined && budgets?.release !== undefined) {
@@ -1904,8 +1909,8 @@ export class DispatcherService {
     }
     if (b.reservationId === undefined || budgets?.settle === undefined) return;
     try {
-      if (lost && budgets.markUncertain !== undefined) await budgets.markUncertain(this.#deps.principal, { commandId: `dpa-unc:${b.attemptId}`, reservationId: b.reservationId, reason: "the worker was lost; what its last calls cost is not known" });
-      else await budgets.settle(this.#deps.principal, { commandId: `dpa-set:${b.attemptId}`, reservationId: b.reservationId, ...(b.used === undefined || b.used.costMicros === 0 ? {} : { costMicros: b.used.costMicros }), ...(b.used === undefined || b.used.computeMs === 0 ? {} : { computeMs: b.used.computeMs }) });
+      if (lost && budgets.markUncertain !== undefined) await budgets.markUncertain(this.#deps.principal, { commandId: `dpa-unc:${b.attemptId}${suffix}`, reservationId: b.reservationId, reason: "the worker was lost; what its last calls cost is not known" });
+      else await budgets.settle(this.#deps.principal, { commandId: `dpa-set:${b.attemptId}${suffix}`, reservationId: b.reservationId, ...(b.used === undefined || b.used.costMicros === 0 ? {} : { costMicros: b.used.costMicros }), ...(b.used === undefined || b.used.computeMs === 0 ? {} : { computeMs: b.used.computeMs }) });
     } catch (error) {
       // Already settled or already uncertain (this end ran before): fine. Anything else is told and does not keep the attempt from ending; the hold stays visible in the task's report.
       if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "command_conflict")) this.#options.onError?.(error);
