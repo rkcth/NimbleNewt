@@ -32,7 +32,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F04n, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L06, L06b, H08, H08b |
+| N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L02e, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
@@ -1011,9 +1011,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L02d — Finish Stop: local processes, child work, cleanup spend
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `133178e1`, `114f3ba8`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Parts 1-3 built the Stop inventory contract, the ending of jobs and swarm children, the per-attempt cleanup charge ledger and its chat view. This closing part: the sandbox lists a run's real processes (Linux /proc, macOS descendants), the worker process itself only once asked to end, what the agent started while it runs; a close that cannot end the process reports it (ProcessNotEnded) instead of hanging, so the worker is not confirmed stopped and the Stop names it (uncooperative, Force Stop offered); Force Stop tells the hosts to kill what they hold (endLocalWork); winding the worker down is charged once as stop-cleanup compute. Tested end to end with a real bubblewrap worker that ignores the close. Left for L02e: swarm children of wider scopes, charge-window starvation, a task's view of a wider-scope Stop, chat name resolution for scopes, a remote worker's process report. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** L02c.
 - **Deliverable:** Split from L02c (2026-10-29): count local processes and child work in the inventory (uncooperative ones named, offered Force Stop), take the cleanup spend from the runtime.
 - **Acceptance and verification:** A process that ignores the request is listed and Force Stop offered; the cleanup spend is charged.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L02e — Finish Stop: swarm children of wider scopes, charge-window starvation, the stop view through a wider scope
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L02d.
+- **Deliverable:** Split from L02d (2026-11-08): L02d lists a sandbox's real processes, ends them (Force Stop kills what a close could not end) and charges winding them down as the cleanup's compute. Left: a Stop of an agent, team or the installation walks the swarm descendants of their tasks (today only a task's Stop does; `swarm.cancel` settles the rest); the stop-charge sweep's window is not starved by entries that stay only for an unfinished request (the first 2000 open entries all listing a blocked Stop keep later entries from being paid); a task's `stop_cleanup` view finds a Stop made through its agent, team, swarm parent or the installation; chat resolves an agent's or team's name for the scope form; a per-request cumulative cleanup total; a remote worker's own report of its processes (today one unknown item per live placement).
+- **Acceptance and verification:** A Stop of an agent ends its tasks' swarm children's work; 2000 settled entries listing a blocked Stop do not keep a later unpaid charge from being paid by the sweep; asking about a task stopped through its agent shows that Stop's cleanup; mutation check recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L03 — Implement prepared release and reassignment
@@ -3237,7 +3247,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, L02e, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
