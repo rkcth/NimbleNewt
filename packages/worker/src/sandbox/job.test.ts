@@ -90,7 +90,9 @@ test("the orphan scan ends what still holds a job's directory and names only wha
     for (let i = 0; i < 100 && holding(directory).length === 0; i++) await sleep(20);
     // A process that cannot be ended (the kill is refused) is reported by pid and name only.
     const named = await linuxOrphans(directory, { kill: () => { throw new Error("not permitted"); }, settleMs: 20 });
-    assert.deepEqual(named, [`pid ${stuck.pid} (node)`]);
+    // The name is the one the kernel gives the process: "node" on most Node builds, "MainThread" on others (Node 24 on the CI runners), so it is read from the process itself.
+    const kernelName = readFileSync(`/proc/${stuck.pid}/comm`, "utf8").trim();
+    assert.deepEqual(named, [`pid ${stuck.pid} (${kernelName})`]);
     // One that can be ended is ended and not reported.
     assert.deepEqual(await linuxOrphans(directory, { settleMs: 300 }), []);
     for (let i = 0; i < 50 && holding(directory).length > 0; i++) await sleep(20);
