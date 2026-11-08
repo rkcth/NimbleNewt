@@ -253,25 +253,34 @@ export interface SourceLoopOptions {
   readonly unreadableAfter?: number;
 }
 
-export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[], disabled?: () => Promise<ReadonlySet<string>>, options: SourceLoopOptions = {}): DispatcherLoop[] {
-  if (list.length === 0) return [];
+/** `list` is the sources, or (card H13f) a function read at every tick, so sources the owner defines in settings are polled from the next tick without a restart. */
+export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[] | (() => Promise<readonly EventSource[]>), disabled?: () => Promise<ReadonlySet<string>>, options: SourceLoopOptions = {}): DispatcherLoop[] {
+  if (typeof list !== "function" && list.length === 0) return [];
   const limit = options.unreadableAfter ?? 5;
   let lastGood: ReadonlySet<string> | undefined;
+  let lastList: readonly EventSource[] | undefined = typeof list === "function" ? undefined : list;
   let failures = 0;
   let episode = 0;
   return [{ name: "events.sources", run: async (by) => {
-    // H13f: the owner's choice is read at every tick. When it cannot be read, the last choice that could be read is used (fail open on what the owner last said, with the failure logged); with no such choice nothing is polled and the loop shows as failing.
+    // H13f: the owner's choice (and the sources the owner defined) are read at every tick. When they cannot be read, the last ones that could be read are used (fail open on what the owner last said, with the failure logged); with none nothing is polled and the loop shows as failing.
     let off: ReadonlySet<string> | undefined;
-    if (disabled !== undefined) {
-      try { off = await disabled(); lastGood = off; if (failures >= limit) episode++; failures = 0; } catch (error) {
-        failures++;
-        options.log?.(`event source setting could not be read (${failures} in a row): ${error instanceof Error ? error.message : String(error)}`);
-        if (failures === limit) await options.tell?.({ id: `event-sources-unreadable:${episode}`, text: "Event watching is not running: the source setting cannot be read." }).catch(() => undefined);
-        if (lastGood === undefined) throw error;
-        off = lastGood;
-      }
+    let current: readonly EventSource[] | undefined = lastList;
+    try {
+      if (typeof list === "function") { current = await list(); }
+      if (disabled !== undefined) { off = await disabled(); lastGood = off; }
+      lastList = current;
+      if (failures >= limit) episode++;
+      failures = 0;
+    } catch (error) {
+      failures++;
+      options.log?.(`event source setting could not be read (${failures} in a row): ${error instanceof Error ? error.message : String(error)}`);
+      if (failures === limit) await options.tell?.({ id: `event-sources-unreadable:${episode}`, text: "Event watching is not running: the source setting cannot be read." }).catch(() => undefined);
+      if (lastList === undefined || (disabled !== undefined && lastGood === undefined)) throw error;
+      current = lastList;
+      off = lastGood;
     }
-    const chosen = off === undefined || off.size === 0 ? list : list.filter((s) => !off.has(s.id));
+    const all = current ?? [];
+    const chosen = off === undefined || off.size === 0 ? all : all.filter((s) => !off.has(s.id));
     if (chosen.length === 0) return;
     const runs = await sources.run(by, chosen);
     // A source whose saved position is older than what it can still see lost events: told once per gap (the notice id names the source and where the gap began).

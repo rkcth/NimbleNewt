@@ -307,13 +307,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `events.sources.get`
 
-Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.
+Which event sources the controller watches (owner only): every source the host configured and every source the owner defined (`events.sources.define`), with its type and whether the owner left it on, and the list of those turned off.
 
 Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`, `critical`).
+Result: `{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`, `critical`, `defined`; a defined one also has `watches`, a short description, and `definition`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1086,7 +1086,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set: `{ kind: "retention" }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set: `{ kind: "retention" }`), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2345,6 +2345,38 @@ Arguments:
 - `enable` (optional): source IDs to turn on
 
 Result: `{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A critical source cannot be turned off.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.sources.define`
+
+The owner defines an event source in settings, or replaces one they defined under the same ID (owner only): a `timer` (every `everyMinutes`, counted from now, or once `at` a time; it fires `timer.fired`), a `file` or folder on the controller's machine (`path`; `file.changed` and `file.removed` naming the path inside it, its size and modification time, never its content; `.git` and `node_modules` are skipped, symbolic links are not followed, at most 5000 files), a git `repository` (`path` of a working copy or a bare repository; `repository.changed` when a branch or tag points at another commit, read from its files) or a `service` health address (`url`, http or https with no user name or password; asked with one GET that waits 10 seconds and follows no redirect; 2xx or 3xx is healthy; `service.failed` once per failure and `service.recovered`). It reports into the project's stream, or the task's when `taskId` is given, and is polled from the next tick, starting from what is there now; file, repository and service sources are looked at every `checkSeconds` (default 60). A watch (`watch.create`) on that stream wakes the task's owner. At most 50 are defined; the ID may not be one of the host's sources.
+
+Arguments:
+
+- `sourceId`: a name for it (letters, digits, `.`, `-`, `:`, `_`; at most 64)
+- `type`: `timer`, `file`, `repository` or `service`
+- `projectId`: the project whose stream it reports into
+- `taskId` (optional): report into this task's stream instead (a task of that project)
+- `everyMinutes` (optional): timer: 1 to 43200
+- `at` (optional): timer: a single time, not already past
+- `path` (optional): file or repository: an absolute path
+- `url` (optional): service: the health address
+- `checkSeconds` (optional): file, repository or service: 10 to 86400
+
+Result: `{ revision, replaced }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.sources.remove`
+
+The owner removes an event source they defined (owner only). It is not polled from the next tick and leaves the list of sources turned off. A source the host configured cannot be removed; it can be turned off.
+
+Arguments:
+
+- `sourceId`: the defined source
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 

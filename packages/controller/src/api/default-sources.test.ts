@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { EventService } from "../events/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
-import { defaultEventSources, DEFAULT_SOURCE_LIMITS } from "./default-sources.js";
+import { activeProjectIds, defaultEventSources, DEFAULT_SOURCE_LIMITS, modelAvailabilityEvents, MODEL_SOURCE_LIMITS } from "./default-sources.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -83,4 +83,35 @@ test("a controller with no sources given polls the built-in one: a task marked d
       } finally { await c.close(); }
     }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the built-in model-availability source tells every active project once per outage and once on the return, keeps each project's position, and is bounded (card H13f)", async () => {
+  type T = { scope: string; name: string; state: "down" | "healthy"; lastClass?: string };
+  let targets: T[] = [{ scope: "endpoint", name: "gpu1", state: "healthy" }];
+  let projects = ["prj-a", "prj-b"];
+  const src = modelAvailabilityEvents({ health: async () => ({ items: targets, truncated: false }), projects: async () => projects });
+  assert.deepEqual([src.id, src.type, src.critical === true], ["models", "model-availability", false]);
+  const poll = async (state: unknown, limit = 50) => src.poll({ state: state as never, now: "2026-11-08T10:00:00.000Z", limit });
+  const p0 = await poll(undefined);
+  assert.deepEqual(p0.signals, [], "a healthy route is a baseline");
+  targets = [{ scope: "endpoint", name: "gpu1", state: "down", lastClass: "outage" }];
+  const p1 = await poll(p0.state);
+  assert.deepEqual(p1.signals.map((s) => [s.kind, s.stream, s.ref.kind, s.text]), [["model.unavailable", "project:prj-a", "model", "endpoint gpu1 is down (outage)"], ["model.unavailable", "project:prj-b", "model", "endpoint gpu1 is down (outage)"]]);
+  assert.deepEqual((await poll(p1.state)).signals, [], "the same outage is told once");
+  // Past the limit: the project not told keeps its position and is told by the next poll.
+  targets = [{ scope: "endpoint", name: "gpu1", state: "healthy" }];
+  const p2 = await poll(p1.state, 1);
+  assert.deepEqual([p2.signals.map((s) => [s.kind, s.stream]), p2.more], [[["model.available", "project:prj-a"]], true]);
+  const p3 = await poll(p2.state, 1);
+  assert.deepEqual(p3.signals.map((s) => [s.kind, s.stream]), [["model.available", "project:prj-b"]]);
+  // A project archived since is no longer told.
+  projects = ["prj-a"];
+  targets = [{ scope: "endpoint", name: "gpu1", state: "down" }];
+  assert.deepEqual((await poll(p3.state)).signals.map((s) => s.stream), ["project:prj-a"]);
+  projects = Array.from({ length: MODEL_SOURCE_LIMITS.pairs + 1 }, (_, i) => `prj-${i}`);
+  await assert.rejects(() => poll(p3.state), /model-route pairs/);
+  // Archived projects are left out of the list it reads.
+  const listed = await activeProjectIds({ listProjects: async ({ afterId }) => (afterId === undefined ? [{ id: "prj-1", state: "active" }, { id: "prj-2", state: "archived" }] : []) as never });
+  assert.deepEqual(listed, ["prj-1"]);
+  assert.equal(defaultEventSources({ listTasks: async () => ({ items: [] }) } as never).length, 1, "without the router's health the model source is not built");
 });

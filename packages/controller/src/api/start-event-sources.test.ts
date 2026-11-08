@@ -147,3 +147,19 @@ test("the loop tells the owner once about a source's gap (card H13f review)", as
   assert.match(told[0]!.text, /Events from tasks between 2026-10-01T00:00:00.000Z and 2026-10-20T00:00:00.000Z were not watched/);
   assert.equal(told[0]!.id, told[1]!.id, "the same id each time, so the notification is not repeated");
 });
+
+test("sources given as a function are read at every tick, and when that read fails the last list read is polled (card H13f)", async () => {
+  const polled: string[][] = [];
+  let list: { id: string; type: string }[] = [{ id: "a", type: "file" }];
+  let broken = false;
+  const [loop] = sourceLoops({ run: async (_by, l) => { polled.push(l.map((s) => s.id)); return []; } }, async () => { if (broken) throw new Error("storage unavailable"); return list as never; }, async () => new Set<string>());
+  const by = { id: "service:dispatcher", kind: "service" } as never;
+  await loop!.run(by);
+  list = [{ id: "a", type: "file" }, { id: "b", type: "timer" }];
+  await loop!.run(by);
+  broken = true;
+  await loop!.run(by);
+  assert.deepEqual(polled, [["a"], ["a", "b"], ["a", "b"]], "a source added is polled from the next tick; an unreadable list keeps the last one");
+  const [cold] = sourceLoops({ run: async () => [] }, async () => { throw new Error("storage unavailable"); });
+  await assert.rejects(() => cold!.run(by), /storage unavailable/);
+});

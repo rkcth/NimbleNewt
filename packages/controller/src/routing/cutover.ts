@@ -323,6 +323,20 @@ export class CutoverService {
     }
   }
 
+  /** Every recorded health state (accounts, endpoints and models that have failed at some time), at most `limit` (card H13f: the model-availability event source reads it). */
+  async healthStates(limit = 1000): Promise<{ readonly items: HealthBody[]; readonly truncated: boolean }> {
+    const items: HealthBody[] = [];
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("route-health", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const rec of page) {
+        after = rec.id;
+        if (items.length >= limit) return { items, truncated: true };
+        items.push(rec.body as unknown as HealthBody);
+      }
+      if (page.length < 100) return { items, truncated: false };
+    }
+  }
+
   async health(scope: HealthScope, name: string): Promise<HealthBody | undefined> {
     return (await this.#runner.get("route-health", healthId(scope, name)))?.body as unknown as HealthBody | undefined;
   }

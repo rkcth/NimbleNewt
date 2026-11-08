@@ -1,5 +1,5 @@
 import type { ProjectService } from "../domain/index.js";
-import type { EventSource, Signal } from "../events/index.js";
+import { modelAvailabilitySource, type EventSource, type Signal } from "../events/index.js";
 import type { JsonObject } from "../storage/types.js";
 
 /** How far back a closed task is still reported by the built-in source, and how much one poll reads. */
@@ -13,7 +13,7 @@ export const DEFAULT_SOURCE_LIMITS = { recentDays: 7, scan: 5000, page: 200, rem
  * - **Bounded reading.** One poll reads at most `scan` tasks and keeps a cursor in the source's state, so a store with more tasks than that is read in turns instead of the same first part every time (task IDs are random).
  * - **Bounded memory.** What it remembers is only the closed tasks of the last week (each with the time it was closed), at most `remembered` of them (the most recently closed; the state record has a size limit); older entries are dropped at every poll. What the cap forgets is remembered as a floor (the latest closing time dropped): nothing closed at or before it is reported afterwards, so a busy store does not report the same tasks again on every pass. A task closed again later has a new closing time and so a new key.
  */
-export function defaultEventSources(projects: Pick<ProjectService, "listTasks">, clock: () => number = Date.now): EventSource[] {
+export function defaultEventSources(projects: Pick<ProjectService, "listTasks">, clock: () => number = Date.now, models?: ModelHealthPort): EventSource[] {
   return [{
     id: "tasks",
     type: "task-completion",
@@ -65,5 +65,55 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
       if (!finished && cursor !== undefined) next["cursor"] = cursor;
       return { signals, state: next as JsonObject, more };
     },
-  }];
+  }, ...(models === undefined ? [] : [modelAvailabilityEvents(models)])];
+}
+
+/** What the model-availability source reads: the recorded health of model routes (accounts, endpoints, models) and the projects to tell. */
+export interface ModelHealthPort {
+  health(): Promise<{ readonly items: readonly { readonly scope: string; readonly name: string; readonly state: "down" | "healthy"; readonly lastClass?: string }[]; readonly truncated: boolean }>;
+  projects(): Promise<readonly string[]>;
+}
+/** The IDs of the projects that are not archived, a page at a time. */
+export async function activeProjectIds(projects: Pick<ProjectService, "listProjects">): Promise<string[]> {
+  const out: string[] = [];
+  for (let after: string | undefined; ;) {
+    const page = await projects.listProjects({ ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+    for (const p of page) { after = p.id; if (p.state !== "archived") out.push(p.id); }
+    if (page.length < 100) return out;
+  }
+}
+/** At most this many project-and-route pairs are followed (the saved state is one record of limited size). */
+export const MODEL_SOURCE_LIMITS = { pairs: 1500 } as const;
+
+/**
+ * The built-in model-availability source (card H13f): a model route (an account, an endpoint or a model) that the router records as down is reported as `model.unavailable` on every active project's
+ * stream, once per outage, and its return as `model.available`. A route that has never failed is not reported. What it reads is the router's own health record (R02/R04), so a watcher of
+ * `model.unavailable` is woken by what the dispatcher actually saw, not by a separate probe. It is not critical: the owner may turn it off.
+ */
+export function modelAvailabilityEvents(port: ModelHealthPort): EventSource {
+  return {
+    id: "models",
+    type: "model-availability",
+    async poll({ state, now, limit }) {
+      const prev = ((typeof state === "object" && state !== null ? (state as Record<string, unknown>)["byProject"] : undefined) ?? {}) as Record<string, JsonObject>;
+      const targets = (await port.health()).items;
+      const projects = await port.projects();
+      if (projects.length * targets.length > MODEL_SOURCE_LIMITS.pairs) throw new Error(`more than ${MODEL_SOURCE_LIMITS.pairs} project and model-route pairs to follow; model availability is not watched`);
+      const byProject: Record<string, JsonObject> = {};
+      const signals: Signal[] = [];
+      let more = false;
+      for (const projectId of projects) {
+        const left = limit - signals.length;
+        // Past the limit a project keeps its saved state (what it has not been told is found again by the next poll).
+        if (left <= 0) { if (prev[projectId] !== undefined) byProject[projectId] = prev[projectId]!; more = true; continue; }
+        const stream = `project:${projectId}`;
+        const source = modelAvailabilitySource({ id: "models", models: () => targets.map((t) => ({ provider: t.scope, model: t.name, available: t.state === "healthy", stream, ...(t.state === "down" ? { reason: `${t.scope} ${t.name} is down${t.lastClass === undefined ? "" : ` (${t.lastClass})`}` } : {}) })) });
+        const r = await source.poll({ state: prev[projectId], now, limit: left });
+        signals.push(...r.signals);
+        if (r.more) more = true;
+        byProject[projectId] = r.state;
+      }
+      return { signals, state: { byProject } as unknown as JsonObject, more };
+    },
+  };
 }

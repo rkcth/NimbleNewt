@@ -164,7 +164,7 @@ export interface StateApiDeps {
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** Which event sources are watched (card H13f). */
-  readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
+  readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change" | "define" | "remove">;
   /** Revoking a catalogue version and listing its running calls (card T02b). */
   readonly catalogRevocation?: CatalogRevocationPort;
   readonly catalogPolicy?: Pick<CatalogPolicyService, "get" | "change">;

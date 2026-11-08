@@ -223,6 +223,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
   retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
+  event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
@@ -265,6 +266,7 @@ export type StatusRequest =
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
+  | { readonly kind: "event_sources" }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
@@ -290,6 +292,8 @@ export interface StatusDeps {
   readonly stall?: Pick<StallService, "list">;
   /** Pause gates (card L01). Absent: no gate is shown and none is assumed. */
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
+  /** Which event sources are watched (card H13f). Absent: the view is not offered. */
+  readonly eventSources?: { get(by: Principal): Promise<{ readonly revision: number; readonly sources: readonly { readonly id: string; readonly type: string; readonly enabled: boolean; readonly critical: boolean; readonly defined: boolean; readonly watches?: string }[] }> };
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
@@ -433,6 +437,7 @@ export class StatusService {
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
+      case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -512,6 +517,24 @@ export class StatusService {
   }
 
   /** The retention values in force and which of them the owner set. Owner only. */
+  /** Which event sources are watched (card H13f): each source the controller has, its kind, whether it is on, and for one the owner defined what it watches. Owner only. */
+  async eventSourceLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.eventSources === undefined || by.kind !== "owner") return undefined;
+    let got;
+    try { got = await this.#deps.eventSources.get(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const c = cite("event-source-settings", "main", got.revision === 0 ? undefined : got.revision);
+    if (got.sources.length === 0) return { observedAt: this.#runner.now(), lines: [line("No event sources are configured; nothing outside is watched.", c)] };
+    const shownSources = got.sources.slice(0, 50);
+    return { observedAt: this.#runner.now(), lines: [
+      line(`${got.sources.length} event source(s); ${got.sources.filter((s) => s.enabled).length} watched:`, c),
+      ...shownSources.map((s) => line(`${shown(s.id, 64)} (${shown(s.type, 30)}${s.defined ? ", defined by you" : ", built in or from the host"}${s.critical ? ", cannot be turned off" : ""}): ${s.enabled ? "on" : "off"}${s.watches === undefined ? "" : `; ${shown(s.watches, 250)}`}.`, c)),
+      ...(got.sources.length > shownSources.length ? [line(`${got.sources.length - shownSources.length} more are not shown.`, c)] : []),
+    ] };
+  }
+
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
     let got;

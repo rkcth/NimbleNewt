@@ -236,8 +236,8 @@ export interface ComposeInput {
   readonly retention?: { readonly sweep: (by: Principal) => Promise<unknown>; readonly restoreReserve?: () => Promise<unknown> };
   /** The nightly backup is started by the tick when the newest one is older than a day (card K01). */
   readonly backups?: Pick<BackupService, "runScheduled">;
-  /** External event sources polled each tick (card H13d). None are built in. */
-  readonly eventSources?: readonly EventSource[];
+  /** External event sources polled each tick (card H13d). None are built in. A function is read at every tick (card H13f: the owner's defined sources count without a restart). */
+  readonly eventSources?: readonly EventSource[] | (() => Promise<readonly EventSource[]>);
   /** The limits for the next local agent: the start-up figures with the owner's setting over them (card H12k). Throws when unreadable. */
   readonly workerLimits?: () => Promise<LocalWorkerLimits | undefined>;
   /** The landing policy of a task from the settings (card H12s), handed to the local host builder. */
