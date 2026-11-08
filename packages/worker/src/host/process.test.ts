@@ -113,9 +113,10 @@ test("H08b: the host answers a renewal with the controller's duration or as fenc
   assert.deepEqual(f.written.filter((m) => m.t.startsWith("lease.")), [{ t: "lease.ok", id: 1, leaseMs: 60_000 }, { t: "lease.fenced", id: 3, reason: "the attempt has been replaced" }]);
   // The grace timer does not hold the host's event loop (the controller does); the test holds it while it waits.
   const hold = setInterval(() => undefined, 1000);
-  const ended = await process.exited;
+  const ended = await Promise.race([process.exited, new Promise<undefined>((r) => { setTimeout(() => r(undefined), 2000); })]);
   clearInterval(hold);
-  assert.equal(ended.killed, true, "the process did not end itself within the grace, so the host ended it");
+  assert.equal(ended?.killed, true, "the process did not end itself within the grace, so the host ended it");
+  if (ended === undefined) f.exit();
 });
 
 test("H08b: a process that says its lease ended and then exits on its own is not killed; a host with no renewal answers nothing", async () => {

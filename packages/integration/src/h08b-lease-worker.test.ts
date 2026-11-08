@@ -24,6 +24,7 @@ describe("the worker process keeps its lease by renewing it and stops when it is
     const model = await endpoint([{ call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { text: "never reached" }]);
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn h08b ")));
     let answer: ((reply: BridgeReplyMessage) => void) | undefined;
+    let stop: (() => Promise<void>) | undefined;
     try {
       const dirs = { checkout: join(directory, "checkout"), gitDir: join(directory, "git"), home: join(directory, "home"), scratch: join(directory, "scratch") };
       for (const d of Object.values(dirs)) mkdirSync(d);
@@ -54,6 +55,7 @@ describe("the worker process keeps its lease by renewing it and stops when it is
         },
       } as unknown as ToolGateway;
       const handle = await worker.start(order);
+      stop = () => handle.stop();
       const running = handle.run(gateway);
       for (let i = 0; i < 200 && answer === undefined; i++) await new Promise((r) => setTimeout(r, 50));
       assert.ok(answer !== undefined, "the turn reached the tool call");
@@ -72,6 +74,7 @@ describe("the worker process keeps its lease by renewing it and stops when it is
       assert.equal(exited, "stopped");
     } finally {
       answer?.({ ok: true, result: {} });
+      await stop?.().catch(() => undefined);
       model.server.close();
       rmSync(directory, { recursive: true, force: true });
     }
