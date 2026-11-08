@@ -408,8 +408,32 @@ const capacityWord = (name: string): string => CAPACITY_WORDS[name] ?? name;
  */
 const CAPS_DAMAGED = "the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity.limits.change; what is already running is not stopped";
 const SWARM_DAMAGED = "the stored swarm limits are damaged - no child task can be spawned until they are repaired with swarm.limits.change";
-/** Why the host and global quotas are not shown, in one clause. `AdmissionService.quotas()` hands back the admission record without checking it, so a figure that is not a figure reaches the view as it is. */
-const quotasDamaged = (what: string): string => `the record you stored is damaged (${what}): nothing in this group is shown, and what admission admits from that same record is not what these figures would allow (repair it with capacity.quotas.change)`;
+/** A stored figure the controller can work from: a number that is neither missing, nor NaN, nor an infinity. */
+const isFigure = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+/** A stored record read as a field map; undefined for anything that is not one (missing, null, an array, text, a number). */
+const asRecord = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
+/**
+ * Why the host and global quotas cannot be shown, in one clause; undefined when every figure in them reads. `AdmissionService.quotas()` hands back what the admission record holds without checking it, so a
+ * record no command could store reaches the view as it is: a figure that is missing or is not a number, hosts that is not a record of declared CPUs and memory. Admission works from that same record, and a
+ * bound it cannot read is simply not applied (a record whose `queue` was missing let a queue of any length build up instead of refusing), so the group is refused in one line rather than shown wrongly.
+ */
+function quotaProblem(q: { readonly limits: unknown; readonly defaults: unknown; readonly hosts: unknown; readonly running: unknown; readonly waiting: unknown }): string | undefined {
+  const limits = asRecord(q.limits);
+  if (limits === undefined || Object.keys(limits).length === 0) return "the limits are not a record of figures";
+  const bad = Object.keys(limits).filter((n) => !isFigure(limits[n]));
+  if (bad.length > 0) return `${bad.join(", ")} ${bad.length === 1 ? "is" : "are"} not a figure the controller can work from`;
+  if (asRecord(q.defaults) === undefined) return "the defaults are not a record of figures";
+  const hosts = asRecord(q.hosts);
+  if (hosts === undefined) return "the declared hosts are not a record of CPUs and memory";
+  const badHosts = Object.keys(hosts).filter((id) => { const h = asRecord(hosts[id]); return h === undefined || !isFigure(h["cpus"]) || !isFigure(h["memoryMb"]); });
+  if (badHosts.length > 0) return `${badHosts.slice(0, 3).map((id) => quoted(id, 60)).join(", ")} ${badHosts.length === 1 ? "does" : "do"} not declare CPUs and memory as figures${badHosts.length > 3 ? ` (and ${badHosts.length - 3} more)` : ""}`;
+  const running = asRecord(q.running);
+  if (running === undefined || !isFigure(running["productive"]) || !isFigure(running["control"]) || asRecord(running["perHost"]) === undefined) return "the counts of what runs now are not figures";
+  if (!isFigure(q.waiting)) return "the count of what waits now is not a figure";
+  return undefined;
+}
+/** Why the host and global quotas are not shown, in one line: the group is refused whole, because a figure that is not in force would be worse to read than nothing. */
+const quotasDamaged = (what: string): string => `the stored admission record is damaged (${what}): nothing in this group is shown, and what admission admits from it is not what these figures would allow (repair it with capacity.quotas.change)`;
 /** Why one group of the capacity view cannot be shown, in one clause; anything but a damaged, refused or missing record is a real failure and is thrown. `damaged` is what that group's record being unreadable does, because the groups gate different things. */
 function capacityProblem(error: unknown, damaged: string): string {
   if (!(error instanceof DomainError)) throw error;
@@ -689,8 +713,11 @@ export class StatusService {
     if (settings.quotas === undefined) lines.push(line("Host and global quotas: this controller does not offer them.", quotaAbsent));
     else {
       let q: Awaited<ReturnType<NonNullable<typeof settings.quotas>["quotas"]>> | undefined;
-      try { q = await settings.quotas.quotas(by); } catch (error) { lines.push(line(`Host and global quotas: ${capacityProblem(error, quotasDamaged("the record cannot be read at all"))}.`, quotaAbsent)); }
-      if (q !== undefined) {
+      // A record the service itself cannot read (its list of what runs is not a list) fails as a plain TypeError, not a `DomainError`; like every other damage here it costs this group one line, never the whole answer.
+      try { q = await settings.quotas.quotas(by); } catch (error) { lines.push(line(`Host and global quotas: ${error instanceof DomainError ? capacityProblem(error, quotasDamaged("it cannot be read at all")) : quotasDamaged("it cannot be read as figures")}.`, quotaAbsent)); }
+      const problem = q === undefined ? undefined : quotaProblem(q);
+      if (q !== undefined && problem !== undefined) lines.push(line(`Host and global quotas: ${quotasDamaged(problem)}.`, quotaAbsent));
+      if (q !== undefined && problem === undefined) {
         const c = cite("admission-state", "admission", q.revision === 0 ? undefined : q.revision);
         const live: Readonly<Record<string, string>> = { productive: `; ${q.running.productive} running now`, perHost: "", control: `; ${q.running.control} of them in use now`, queue: `; ${q.waiting} waiting now` };
         lines.push(line(`Host and global quotas (the setting is at revision ${q.revision}); the ones marked "you set it" are yours, the others are the installation's defaults:`, c));

@@ -157,6 +157,41 @@ for (const backend of backends) {
     assert.ok(!depthLine.includes("(the default)"), `neither damaged name is called the default: ${depthLine}`);
   });
 
+  suite("a damaged admission record costs the quotas group alone: the view still answers, and never shows a figure it cannot stand behind", async (w, s) => {
+    const ADM = { kind: "admission-state", id: "admission" };
+    // Hosts that is not a record of declared capacity: this used to throw the whole answer away (a TypeError out of `Object.entries(q.hosts)`).
+    await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, capacity: null }, "adm-hosts");
+    const shown = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
+    const body = text(shown);
+    assert.match(body, /^Host and global quotas: the stored admission record is damaged \(the declared hosts are not a record of CPUs and memory\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(repair it with capacity\.quotas\.change\)\.$/m);
+    assert.match(body, /^Capacity caps \(your setting is at revision 0\)/m, "the caps group is still read");
+    assert.match(body, /^Limits on spawning child tasks \(your setting is at revision 0\):$/m, "and so the swarm group");
+    assert.ok(shown.every((l) => l.cites.length > 0), "every line still cites a record");
+    // A figure that is not a figure: a record whose `queue` is missing reads back as `undefined`, which used to be shown as one of the owner's own figures.
+    await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2 }, capacity: {} }, "adm-queue");
+    const missing = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.match(missing, /^Host and global quotas: the stored admission record is damaged \(queue is not a figure the controller can work from\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(repair it with capacity\.quotas\.change\)\.$/m);
+    assert.ok(!missing.includes("undefined"), `no figure is shown as undefined: ${missing}`);
+    assert.ok(!missing.split("\n").some((l) => l.startsWith("queue ")), "the queue line is not shown at all");
+    // One declared host whose CPUs and memory are not figures.
+    await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, capacity: { "host:pc": "eight" } }, "adm-host");
+    const host = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.match(host, /^Host and global quotas: the stored admission record is damaged \("host:pc" does not declare CPUs and memory as figures\): nothing in this group is shown/m);
+    assert.ok(!host.split("\n").some((l) => l.startsWith('Host "host:pc"')), "no host line is shown with figures that are not figures");
+    // A record the service itself cannot read (what runs now is not a list): the group is one line, and the answer still stands.
+    await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, capacity: {}, running: null }, "adm-running");
+    const unreadable = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.match(unreadable, /^Host and global quotas: the stored admission record is damaged \(it cannot be read as figures\): nothing in this group is shown/m);
+    assert.match(unreadable, /^Capacity caps \(your setting is at revision 0\)/m, "the other two groups are still read");
+    assert.match(unreadable, /^Limits on spawning child tasks \(your setting is at revision 0\):$/m);
+    // The same record made sound again (written whole, because a record this broken is not what `capacity.quotas.change` reads to change): the group comes back with no damaged note left behind.
+    await damage(s.storage, s.epoch, ADM, { limits: { productive: 6, perHost: 2, control: 2, queue: 100, depth: 3, children: 4, patience: 5 }, capacity: { "host:pc": { cpus: 8, memoryMb: 16_384 } }, running: [], queue: [], withdrawn: [] }, "adm-fixed");
+    const fixed = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.ok(!fixed.includes("damaged"), "nothing is called damaged once the record reads");
+    assert.match(fixed, /^productive \(.*\): 6 \(you set it\); 0 running now$/m);
+    assert.match(fixed, /^Host "host:pc": 8 CPU\(s\), 16384 MB declared \(you declared it\); 0 productive attempt\(s\) running on it\.$/m);
+  });
+
   suite("a caller who is not the owner reads exactly what it would read if the view did not exist", async (w, s) => {
     const ann = await w.agent("ann", [{ action: "task.read", project: "*" }]);
     assert.equal(await s.status.ask(ann.principal, { kind: "capacity" }), undefined, "nothing at all, not an empty answer");
