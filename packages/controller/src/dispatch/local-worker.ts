@@ -100,6 +100,12 @@ export interface RuntimeGuards {
     resume(order: WorkOrder, storedTokens: number): Promise<{ readonly resume: boolean; readonly reason: string }>;
     /** The size of the conversation a checkpoint holds, in tokens, when it says. */
     storedTokens?(from: JsonObject): number | undefined;
+    /**
+     * The order's rebuilt view was made for a route whose fixed part nobody had measured (card C07g): `fixed` is what this worker's process will send besides the prompt (its system prompt and tool schemas). The controller keeps
+     * it as the route's measurement and builds the view again with it. `text`: the view to put in the first prompt instead (empty: nothing to show); `refused`: the context does not fit the route with its real fixed part (a
+     * blocker is open), so nothing is sent; `undefined`: keep the view the order carries.
+     */
+    rebuildView?(order: WorkOrder, fixed: { readonly systemPromptChars: number; readonly toolSchemaChars: number }, launch: string, /** The rest of the first prompt besides the view (the task's text and notes), in characters. */ promptChars: number): Promise<{ readonly text: string } | { readonly refused: string } | undefined>;
   };
   readonly pause?: {
     isPaused(order: WorkOrder): Promise<boolean>;
@@ -237,7 +243,6 @@ export class LocalWorker implements WorkerHost {
         note = note === undefined ? "the stored conversation could not be checked against the context budget; starting fresh" : `${note}\nthe stored conversation could not be checked against the context budget; starting fresh`;
       }
     }
-    const content = note === undefined ? order.content : `${order.content}\n\n[${note}]`;
     let sandbox = await options.sandbox.open(order.recipe, order);
     this.#remember(order.attemptId, sandbox);
     let gateway: ToolGateway | undefined;
@@ -270,10 +275,28 @@ export class LocalWorker implements WorkerHost {
     };
     try { runtime = await options.runtimes.open(order, call, from, lease); } catch (error) { await sandbox.close().catch(() => undefined); throw error; }
 
-    // The first call is admitted or refused before anything is sent (C07b). A refused one is made smaller once, if the runtime can, and asked again.
-    let round = 0;
     // Each start of the worker is judged afresh: an attempt resumed after a restart, a host loss or a move has the same attempt ID but a conversation that has grown since, so an earlier round's answer is never replayed for it.
     const launch = randomBytes(6).toString("hex");
+    // Card C07g: the order's view of the owner's context was built for a route nobody had measured. Now that the process is up its fixed part is known: it is measured, and the view is built again with it before
+    // anything is sent, so the first prompt never rests on the assumed figure. A view that no longer fits refuses the first call; a rebuild that fails keeps the view (the first call is still checked with its real size).
+    let body = order.content;
+    let viewRefusal: string | undefined;
+    const view = order.startupView;
+    if (view !== undefined && !view.measured && guards?.context?.rebuildView !== undefined && runtime.firstCall !== undefined && Number.isSafeInteger(view.chars) && view.chars > 0 && view.chars <= order.content.length) {
+      try {
+        const fixed = runtime.firstCall("");
+        if (fixed !== undefined) {
+          const rest = order.content.length - view.chars + (note === undefined ? 0 : note.length + 4);
+          const rebuilt = await guards.context.rebuildView(order, { systemPromptChars: fixed.systemPromptChars, toolSchemaChars: fixed.toolSchemaChars }, launch, rest);
+          if (rebuilt !== undefined && "refused" in rebuilt) viewRefusal = rebuilt.refused;
+          else if (rebuilt !== undefined) body = `${order.content.slice(0, order.content.length - view.chars)}${rebuilt.text === "" ? "" : `\n\n${rebuilt.text}`}`;
+        }
+      } catch (error) { report("context rebuild", error); }
+    }
+    const content = note === undefined ? body : `${body}\n\n[${note}]`;
+
+    // The first call is admitted or refused before anything is sent (C07b). A refused one is made smaller once, if the runtime can, and asked again.
+    let round = 0;
     const admitFirst = async (rt: AttemptRuntime, text: string): Promise<string | undefined> => {
       if (guards?.context === undefined || rt.firstCall === undefined) return undefined;
       let refusal: string | undefined;
@@ -292,7 +315,7 @@ export class LocalWorker implements WorkerHost {
       } catch (error) { refusal = `the context check failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`; report("context admission", error); }
       return refusal;
     };
-    const refusal = await admitFirst(runtime, content);
+    const refusal = viewRefusal !== undefined ? `the owner's context does not fit route ${order.route} with its measured prompt and tools: ${viewRefusal}` : await admitFirst(runtime, content);
     if (refusal !== undefined) {
       await runtime.close().catch(() => undefined);
       await sandbox.close().catch(() => undefined);

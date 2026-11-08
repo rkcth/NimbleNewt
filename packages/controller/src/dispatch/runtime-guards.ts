@@ -25,6 +25,8 @@ export interface GuardBinding {
   readonly window: (order: WorkOrder) => number | undefined;
   /** The size of the conversation a checkpoint holds (the host knows how it writes its checkpoints). */
   readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
+  /** Card C07g: the route's fixed part measured by the worker's process, and the owner's context built again with it (the composer binds the context and decision services). */
+  readonly rebuildView?: NonNullable<RuntimeGuards["context"]>["rebuildView"];
 }
 
 const MESSAGE_LIMIT = 20;
@@ -73,6 +75,7 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
         return resumeDecision(storedTokens, context.budget(window));
       },
       ...(binding.storedTokens === undefined ? {} : { storedTokens: binding.storedTokens }),
+      ...(binding.rebuildView === undefined ? {} : { rebuildView: binding.rebuildView }),
     },
     pause: {
       isPaused: (order) => pause.isPaused(order.taskId),

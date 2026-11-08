@@ -65,6 +65,11 @@ export interface WorkOrder {
   readonly resumeFrom?: JsonObject;
   /** Set when the attempt resumes after calls waited for an approval: what to tell the agent (which calls were approved, denied or ran out). */
   readonly resumeNote?: string;
+  /**
+   * Set when the attempt starts on a route other than the one its task last ran on (card C07g): `content` ends with the owner's context rebuilt for this route (`chars` characters, the separator included), its kept pieces and
+   * the references of what was cut. `measured` is false when the route's fixed part was not measured yet: a host that can measure its own process rebuilds that part before the first call (`RuntimeGuards.context.rebuildView`).
+   */
+  readonly startupView?: { readonly route: string; readonly measured: boolean; readonly chars: number };
   /** The dispatch contract (card H12a). A remote worker confirms it before its first tool call; a local host applies the same figures through its own builder. */
   readonly contract?: DispatchContract;
 }

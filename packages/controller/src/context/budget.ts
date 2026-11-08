@@ -76,13 +76,13 @@ export function buildStartup(items: readonly StartupItem[], budget: ContextBudge
   const cuttable = state.filter((s) => s.mode === "full").sort((a, b) => (a.it.at < b.it.at ? -1 : a.it.at > b.it.at ? 1 : a.i - b.i));
   for (const s of cuttable) {
     if (sum() <= room) break;
-    const cutText = (): string => `${s.text.slice(0, head)}\n[… ${s.text.length - head - tail} characters cut; full text archived as ${digestOf(s.it.text).slice(0, 19)}]\n${s.text.slice(-tail)}`;
+    const cutText = (): string => `${s.text.slice(0, head)}\n[… ${s.text.length - head - tail} characters cut; full text archived as ${digestOf(s.it.text)}]\n${s.text.slice(-tail)}`;
     const candidate = s.text.length > head + tail ? cutText() : s.text;
     if (candidate.length < s.text.length) { s.text = candidate; s.mode = "cut"; }
   }
   for (const s of cuttable) {
     if (sum() <= room) break;
-    s.text = `[${s.it.kind} ${s.it.id} left out; full text archived as ${digestOf(s.it.text).slice(0, 19)}]`; s.mode = "dropped";
+    s.text = `[${s.it.kind} ${s.it.id} left out; full text archived as ${digestOf(s.it.text)}]`; s.mode = "dropped";
   }
   const tokens = sum();
   const cuts: StartupCut[] = []; const archive: { id: string; digest: string; text: string }[] = [];

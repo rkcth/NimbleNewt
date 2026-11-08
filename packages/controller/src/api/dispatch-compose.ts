@@ -10,7 +10,7 @@ import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate }
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, startupItems, type DecisionDeps } from "../decisions/index.js";
-import { ContextEnforcementService, type ContextRouteSettingsService } from "../context/index.js";
+import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, type ContextRouteSettingsService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
 import type { LandingPolicyFigures } from "./landing-policy.js";
@@ -413,6 +413,25 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   };
   // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
   const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, { ...ro, ...(i.contextRouteSettings === undefined ? {} : { routeSettings: i.contextRouteSettings }), ...(i.onError === undefined ? {} : { onError: i.onError }) });
+  /**
+   * A task's context built again for the route an attempt moves to (cards C07f, C07g): the owner's decision record as startup items, cut to the route's window and measured fixed part. `undefined` when there is nothing to build
+   * for (the owner turned the check off, or the route says no window); otherwise the context service's answer, with the view the first prompt carries.
+   */
+  const moveContext = async (c: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string }, promptChars: number): Promise<Awaited<ReturnType<ContextEnforcementService["routeMoved"]>> | undefined> => {
+    // The owner can turn the check off (chat-settable; on by default): the attempt then starts as it did before.
+    if (i.contextRouteSettings !== undefined && !(await i.contextRouteSettings.effective()).check) return undefined;
+    // The window of the new route (the local host's, else the routing table's); a route that says none has nothing to rebuild for (the first call on it is still checked by admission).
+    const window = (() => { try { return i.options.local?.window({ route: c.route } as WorkOrder); } catch { return undefined; } })() ?? (await i.routing.get())?.routes[c.route]?.contextTokens;
+    if (window === undefined) return undefined;
+    // Read as the controller: the dispatcher's own principal holds no project grants, and through `context` it would read nothing (the C07f hook was built on an empty record until card C07g).
+    const record = await decisions.controllerContext({ projectId: c.projectId, taskId: c.taskId });
+    const moved = await context.routeMoved(principal, { taskId: c.taskId, attemptId: c.attemptId, route: c.route, ...(c.harness === undefined ? {} : { harness: c.harness }), window, items: record === undefined ? [] : startupItems(record), promptChars });
+    // A route nobody has measured is not refused on a guess: the owner is told (a notice, once per attempt and route), and the first call on it is checked with its real size.
+    const unmeasuredId = createHash("sha256").update(`${c.attemptId}\0${c.route}`).digest("hex").slice(0, 24);
+    if (moved.rebuilt && moved.warning !== undefined) await notifications.emitFromController({ commandId: `ctx-unmeasured:${unmeasuredId}`, kind: "maintenance", level: "notice", ref: { kind: "route-move", id: unmeasuredId }, detail: `Route ${c.route.slice(0, 80)} has not been measured yet: the move was built on an assumed prompt size, and its first call will be checked with its real size.`.slice(0, 200), projectId: c.projectId }).catch((error: unknown) => i.onError?.(error));
+    return moved;
+  };
+  const remedies = "choose a route with a larger window, reduce the task contract, supersede decisions or reassign the task";
   // Remote MCP servers (cards T03, H12g, H12k): built before the local host so the host is given the same connector and client the handle carries.
   const mcpParts = (() => {
     const o = i.options.mcp;
@@ -429,6 +448,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       assignee: (order) => i.taskCredentials.agentOf(principal, order.attemptId),
       window: i.options.local.window,
       ...(i.options.local.storedTokens === undefined ? {} : { storedTokens: i.options.local.storedTokens }),
+      // Card C07g: the worker's process is up and says what it sends besides the prompt; the route is measured with that, and the view built again on the measured figure before the first call.
+      rebuildView: async (order, fixed, launch, promptChars) => {
+        await context.measureRoute(principal, { taskId: order.taskId, attemptId: order.attemptId, launch, route: order.route, ...(order.harness === undefined ? {} : { harness: order.harness }), systemPromptChars: fixed.systemPromptChars, toolSchemaChars: fixed.toolSchemaChars });
+        // The rest of the prompt is known exactly now.
+        const moved = await moveContext(order, promptChars);
+        if (moved === undefined) return undefined;
+        return moved.rebuilt ? { text: moved.view } : { refused: `${moved.reason ?? "the context does not fit the route"} (${remedies})` };
+      },
     });
     let cache: { forOrder(order: WorkOrder): Promise<AttemptCache> } | undefined;
     if (i.options.cache !== undefined) {
@@ -570,17 +597,11 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       routeChange: async (c) => {
-        // The owner can turn the check off (chat-settable; on by default): the attempt then starts as it did before.
-        if (i.contextRouteSettings !== undefined && !(await i.contextRouteSettings.effective()).check) return { ok: true };
-        // The window of the new route (the local host's, else the routing table's); a route that says none has nothing to rebuild for (the first call on it is still checked by admission).
-        const window = (() => { try { return i.options.local?.window({ route: c.route } as WorkOrder); } catch { return undefined; } })() ?? (await i.routing.get())?.routes[c.route]?.contextTokens;
-        if (window === undefined) return { ok: true };
-        const record = await decisions.context(principal, { projectId: c.projectId, taskId: c.taskId });
-        const moved = await context.routeMoved(principal, { taskId: c.taskId, attemptId: c.attemptId, route: c.route, ...(c.harness === undefined ? {} : { harness: c.harness }), window, items: record === undefined ? [] : startupItems(record) });
-        // A route nobody has measured is not refused on a guess: the owner is told (a notice, once per attempt and route), and the first call on it is checked with its real size.
-        const unmeasuredId = createHash("sha256").update(`${c.attemptId}\0${c.route}`).digest("hex").slice(0, 24);
-        if (moved.rebuilt && moved.warning !== undefined) await notifications.emitFromController({ commandId: `ctx-unmeasured:${unmeasuredId}`, kind: "maintenance", level: "notice", ref: { kind: "route-move", id: unmeasuredId }, detail: `Route ${c.route.slice(0, 80)} has not been measured yet: the move was built on an assumed prompt size, and its first call will be checked with its real size.`.slice(0, 200), projectId: c.projectId }).catch((error: unknown) => i.onError?.(error));
-        return moved.rebuilt ? { ok: true } : { ok: false, reason: `${moved.reason ?? "the context does not fit the new route"} (moved from ${c.previousRoute} to ${c.route}; choose a route with a larger window, reduce the task contract, supersede decisions or reassign the task)` };
+        // The task's own text is in the prompt beside the view; the notes added to it (the rules, a resume note) are not known in full yet, so room is kept for them.
+        const moved = await moveContext(c, c.taskChars + PROMPT_NOTE_RESERVE_CHARS);
+        if (moved === undefined) return { ok: true };
+        // The view (card C07g) goes in the first prompt of the attempt on the new route: its kept pieces and the references of what was cut.
+        return moved.rebuilt ? { ok: true, view: { text: moved.view, measured: moved.measured } } : { ok: false, reason: `${moved.reason ?? "the context does not fit the new route"} (moved from ${c.previousRoute} to ${c.route}; ${remedies})` };
       },
       routeKept: async (k) => { await context.routeKept(principal, { taskId: k.taskId }); },
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
