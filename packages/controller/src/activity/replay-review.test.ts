@@ -192,7 +192,7 @@ for (const backend of backends) {
       assert.ok(said.some((l) => /^Step 6, .*confirmed, reported by agent, branch invented \(unverified lane\)/.test(l)), said.join("\n"));
       assert.ok(said.some((l) => /^Step 7, .*confirmed, branch svc-line\)/.test(l) && !/reported by/.test(l)), said.join("\n"));
       assert.ok(said.includes("More steps follow; continue from step 8."), said.join("\n"));
-      assert.match((await status.replayLines(owner, { taskId: assignedTask, from: 8, limit: 2 }))!.lines[1]!.text, /^Step 8, /, "the continuation starts at the step named, repeating none");
+      assert.match((await status.replayLines(owner, { taskId: assignedTask, from: 8, limit: 2 }))!.lines[2]!.text, /^Step 8, /, "the continuation starts at the step named, repeating none");
 
       // 10. Zero effects: no storage call other than a read goes through while replaying (opening, stepping, linking, searching, exporting, thinking, the status view), as any principal.
       const spy = counting(world.storage);

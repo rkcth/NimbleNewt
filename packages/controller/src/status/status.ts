@@ -30,7 +30,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import {
-  BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, routeFor, shown, whoText,
+  BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
 } from "./explain.js";
 
@@ -223,7 +223,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
   agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
   explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
-  replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent"], about: "a replay of a task's recorded run" },
+  replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"], about: "a replay of a task's recorded run, read only: a summary (lines of work and agents to follow) and a window of steps, narrowed to one line (lane), one agent, one kind of step (stepKind) or a time span (since, until); with seq, one step in full with what led to it" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
@@ -270,7 +270,7 @@ export type StatusRequest =
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "decision_log"; readonly projectId?: string; readonly changeKind?: string; readonly outcome?: string; readonly after?: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
-  | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
+  | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string; readonly stepKind?: string; readonly since?: string; readonly until?: string }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
@@ -456,7 +456,7 @@ export class StatusService {
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
-      case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent"]); return this.replayLines(by, request); }
+      case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
@@ -501,8 +501,8 @@ export class StatusService {
       throw error;
     }
     const lines: Line[] = steps.map((s) => ("unavailable" in s
-      ? line(`Step ${s.seq} is no longer available: ${shown(s.unavailable)}.`, cite("task", taskId))
-      : line(`Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}${s.corrections > 0 ? ` (corrected ${s.corrections} time${s.corrections === 1 ? "" : "s"})` : ""}`, cite("task", taskId))));
+      ? line(`Step ${s.seq} is no longer available: ${quoted(s.unavailable)}.`, cite("task", taskId))
+      : line(`Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${quoted(s.summary)}${s.corrections > 0 ? ` (corrected ${s.corrections} time${s.corrections === 1 ? "" : "s"})` : ""}`, cite("task", taskId))));
     if (lines.length === 0) lines.push(line("No steps are recorded for this task yet.", cite("task", taskId)));
     else if (next !== undefined) lines.push(line(`There are more steps; ask again after step ${next}.`, cite("task", taskId)));
     return { observedAt: this.#runner.now(), lines };
@@ -518,8 +518,8 @@ export class StatusService {
       if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
       throw error;
     }
-    const lines: Line[] = got.steps.map((s) => line(`${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`, cite("task", s.taskId)));
-    for (const g of got.gaps ?? []) lines.push(line(`Step ${g.seq} of a task is no longer available: ${shown(g.reason)}.`, cite("task", g.taskId)));
+    const lines: Line[] = got.steps.map((s) => line(`${s.at}, ${shown(s.actor)}: ${s.kind} - ${quoted(s.summary)}`, cite("task", s.taskId)));
+    for (const g of got.gaps ?? []) lines.push(line(`Step ${g.seq} of a task is no longer available: ${quoted(g.reason)}.`, cite("task", g.taskId)));
     if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
     else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity (usually the most recently active tasks).", cite("project", request.projectId)));
     return { observedAt: this.#runner.now(), lines };
@@ -929,31 +929,40 @@ export class StatusService {
    * Replay of a task's activity in plain lines (card U09): without `seq` a summary and a window of steps; with `seq` that step in full with what led to it. Read only: nothing is run, sent, submitted or asked of a model.
    * Where a step stood, the branch it is on, whether a later step replaced it, redactions and gaps are said in words; an agent's words are shown as such.
    */
-  async replayLines(by: Principal, request: { taskId: string; seq?: number; from?: number; limit?: number; lane?: string; agent?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async replayLines(by: Principal, request: { taskId: string; seq?: number; from?: number; limit?: number; lane?: string; agent?: string; stepKind?: string; since?: string; until?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const replay = this.#deps.replay;
     if (replay === undefined) return undefined;
     const taskId = checkTaskId(request.taskId);
     const task = cite("task", taskId);
+    // Whatever someone recorded (a summary, a reason, a reference) is quoted; only the controller's own words and checked values (numbers, kinds, line names, principal IDs) are not.
     const describe = (s: ReplayStep): string => [
-      `Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`,
-      `(${s.outcome === "not-recorded" ? REPLAY_LABELS.notRecorded : `${s.outcome}${s.outcomeNote === undefined ? "" : `, ${s.outcomeNote}`}`}${s.lane === "main" ? "" : `, branch ${shown(s.lane)}${s.laneNote === undefined ? "" : ` (${s.laneNote})`}`}${s.authority === "superseded" ? `, replaced by step ${(s.supersededBy ?? []).join(", ")}: ${REPLAY_LABELS.superseded}` : ""}${s.content.state === "stored" && (s.content.redactions ?? 0) > 0 ? `, ${s.content.redactions} redaction${s.content.redactions === 1 ? "" : "s"}` : ""}${s.content.state === "missing" ? `, content missing: ${shown(s.content.reason)}` : ""}${s.corrections > 0 ? `, ${s.corrections} correction${s.corrections === 1 ? "" : "s"}` : ""})`,
+      `Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${quoted(s.summary)}`,
+      `(${s.outcome === "not-recorded" ? REPLAY_LABELS.notRecorded : `${s.outcome}${s.outcomeNote === undefined ? "" : `, ${s.outcomeNote}`}`}${s.lane === "main" ? "" : `, branch ${shown(s.lane)}${s.laneNote === undefined ? "" : ` (${s.laneNote})`}`}${s.authority === "superseded" ? `, replaced by step ${(s.supersededBy ?? []).join(", ")}: ${REPLAY_LABELS.superseded}` : ""}${s.content.state === "stored" && (s.content.redactions ?? 0) > 0 ? `, ${s.content.redactions} redaction${s.content.redactions === 1 ? "" : "s"}` : ""}${s.content.state === "missing" ? `, content missing: ${quoted(s.content.reason)}` : ""}${s.corrections > 0 ? `, ${s.corrections} correction${s.corrections === 1 ? "" : "s"}` : ""})`,
     ].join(" ");
+    const ref = (kind: string | undefined, id: string | undefined, version: string | undefined): string => `${shown(kind ?? "")} ${quoted(id ?? "", 120)}${version === undefined ? "" : ` @${quoted(version, 80)}`}`;
+    const counted = (items: readonly { name: string; steps: number }[], max = 10): string => `${items.slice(0, max).map((x) => `${x.name} (${x.steps})`).join(", ")}${items.length > max ? ` and ${items.length - max} more` : ""}`;
     try {
       if (request.seq !== undefined) {
         const d = await replay.step(by, taskId, request.seq);
         const led = await replay.led(by, taskId, request.seq);
         const lines: Line[] = [line(describe(d.step), task)];
-        lines.push(line(d.step.versionsThen.state === "recorded" ? `Context then: ${d.step.versionsThen.refs.length === 0 ? "none listed" : d.step.versionsThen.refs.map((r) => `${shown(r.kind)} ${shown(r.id)}${r.version === undefined ? "" : ` @${shown(r.version)}`}`).join(", ")}${d.step.versionsThen.summaryId === undefined ? "" : `; summary ${shown(d.step.versionsThen.summaryId)} stood in for earlier history`}.` : `Context then: not recorded (${shown(d.step.versionsThen.reason)}).`, task));
-        for (const e of d.explanations.contemporaneous.items) lines.push(line(`${REPLAY_LABELS.contemporaneous} ${shown(e.by)} chose ${shown(e.choice)}. Uncertain: ${shown(e.uncertainty)}`, task));
-        for (const e of d.explanations.retrospective.items) lines.push(line(`${REPLAY_LABELS.retrospective} ${shown(e.choice)}`, task));
-        lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${shown(l.kind)} ${shown(l.id ?? "")}${l.version === undefined ? "" : ` @${shown(l.version)}`} (${l.relation})` : `${l.relation}: ${shown(l.note ?? "")}`)).join("; ")}.` : led.note, task));
+        lines.push(line(d.step.versionsThen.state === "recorded" ? `Context then: ${d.step.versionsThen.refs.length === 0 ? "none listed" : d.step.versionsThen.refs.map((r) => ref(r.kind, r.id, r.version)).join(", ")}${d.step.versionsThen.summaryId === undefined ? "" : `; summary ${quoted(d.step.versionsThen.summaryId, 120)} stood in for earlier history`}.` : `Context then: not recorded (${quoted(d.step.versionsThen.reason)}).`, task));
+        for (const e of d.explanations.contemporaneous.items) lines.push(line(`${REPLAY_LABELS.contemporaneous} ${shown(e.by)} chose ${quoted(e.choice)}. Uncertain: ${quoted(e.uncertainty)}`, task));
+        for (const e of d.explanations.retrospective.items) lines.push(line(`${REPLAY_LABELS.retrospective} ${quoted(e.choice, 400)}`, task));
+        lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${ref(l.kind, l.id, l.version)} (${l.relation})` : `${l.relation}: ${quoted(l.note ?? "")}`)).join("; ")}.` : led.note, task));
         if (d.thinking !== undefined) lines.push(line(d.thinking.state === "removed-by-retention" || d.thinking.state === "unavailable" ? d.thinking.label : "The model's thinking is kept collapsed; ask to expand it. It is model output, not an explanation.", task));
         return { observedAt: this.#runner.now(), lines };
       }
-      const v = await replay.open(by, taskId, { ...(request.from === undefined ? {} : { from: request.from }), limit: request.limit ?? 10, ...(request.lane === undefined ? {} : { lane: request.lane }), ...(request.agent === undefined ? {} : { actor: request.agent }) });
+      const v = await replay.open(by, taskId, {
+        ...(request.from === undefined ? {} : { from: request.from }), limit: request.limit ?? 10, ...(request.lane === undefined ? {} : { lane: request.lane }), ...(request.agent === undefined ? {} : { actor: request.agent }),
+        ...(request.stepKind === undefined ? {} : { kind: request.stepKind }), ...(request.since === undefined ? {} : { since: request.since }), ...(request.until === undefined ? {} : { until: request.until }),
+      });
       const sm = v.summary;
       const lines: Line[] = [line(`${sm.total} step${sm.total === 1 ? "" : "s"}${sm.scanLimited ? ` (steps ${sm.range.first} to ${sm.range.last} of ${sm.range.of}; the record is longer)` : ""}; ${sm.lanes.length} line${sm.lanes.length === 1 ? "" : "s"} of work; ${sm.unavailable.length} unavailable; ${sm.superseded} replaced; ${sm.stepsWithoutManifest} without a recorded context.`, task)];
-      for (const e of v.entries) lines.push("unavailable" in e ? line(`Step ${e.seq} is no longer available: ${shown(e.unavailable)}.`, task) : line(describe(e), task));
+      // Lines of work and agents to follow: each can be asked for on its own (lane, agent).
+      if (sm.lanes.length > 0) lines.push(line(`Lines of work: ${counted(sm.lanes.map((l) => ({ name: shown(l.lane), steps: l.steps })))}. Agents: ${counted(sm.agents.map((a) => ({ name: shown(a.actor), steps: a.steps })))}.`, task));
+      for (const e of v.entries) lines.push("unavailable" in e ? line(`Step ${e.seq} is no longer available: ${quoted(e.unavailable)}.`, task) : line(describe(e), task));
+      if (v.entries.length === 0 && sm.total > 0) lines.push(line("No step in this window matches.", task));
       if (v.note !== undefined) lines.push(line(v.note, task));
       if (v.next !== undefined) lines.push(line(`More steps follow; continue from step ${v.next}.`, task));
       return { observedAt: this.#runner.now(), lines };
@@ -980,10 +989,10 @@ export class StatusService {
     for (const e of latest) {
       const where = e.seq === undefined ? "on the task" : `at step ${e.seq}`;
       const how = e.mode === "retrospective" ? (e.grounded === false ? "Written afterwards, and the records could not explain it" : "Written afterwards, from the records") : "Written at the time";
-      lines.push(line(`${how} by ${shown(e.by)} ${where}, ${e.at}: chose ${shown(e.choice)}.`, cite("task", taskId)));
-      for (const a of e.alternatives) lines.push(line(`Not ${shown(a.option)}: ${shown(a.whyNot)}`, cite("task", taskId)));
-      for (const ev of e.evidence) lines.push(line(`Evidence: ${shown(ev.statement)}`, cite("task", taskId)));
-      if (e.uncertainty !== "") lines.push(line(`Uncertain: ${shown(e.uncertainty)}`, cite("task", taskId)));
+      lines.push(line(`${how} by ${shown(e.by)} ${where}, ${e.at}: chose ${quoted(e.choice)}.`, cite("task", taskId)));
+      for (const a of e.alternatives) lines.push(line(`Not ${quoted(a.option)}: ${quoted(a.whyNot)}`, cite("task", taskId)));
+      for (const ev of e.evidence) lines.push(line(`Evidence: ${quoted(ev.statement)}`, cite("task", taskId)));
+      if (e.uncertainty !== "") lines.push(line(`Uncertain: ${quoted(e.uncertainty)}`, cite("task", taskId)));
     }
     if (lines.length === 0) lines.push(line("No explanations are written for this task yet.", cite("task", taskId)));
     else if (all.length > latest.length) lines.push(line(`${all.length - latest.length} older explanation${all.length - latest.length === 1 ? " is" : "s are"} not shown.`, cite("task", taskId)));

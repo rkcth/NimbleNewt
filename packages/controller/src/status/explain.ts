@@ -80,6 +80,15 @@ export function shown(value: string | undefined, max = 200): string {
 }
 
 /**
+ * Text someone else wrote (an agent's step summary, an explanation, a reference it gave), shown in a status line as a quotation (card U09): credentials removed, whitespace folded to one line, cut to `max`, then
+ * JSON-quoted with C0 and C1 controls, the line and paragraph separators and invisible format characters (`\p{Cf}`: bidirectional overrides, zero-width characters) written as `\uXXXX`. The quotes mark where the
+ * other party's words begin and end, so a summary cannot pass itself off as the controller's own wording (a fake "confirmed", a fake next line) or reach a terminal as an escape sequence.
+ */
+export function quoted(value: string | undefined, max = 200): string {
+  return JSON.stringify(shown(value, max)).replace(/[\u0080-\u009f\u2028\u2029]|\p{Cf}/gu, (c) => [...Array(c.length).keys()].map((i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`).join(""));
+}
+
+/**
  * Who is working on a task, as far as the records show (card U05). The latest sign of life is the newer of the host activity (card H01) and the stall evidence (card V01); either counts only when it is of the
  * current generation and from the owner of record (or the one that has been reporting for it). Time never promotes anything: an old sign is `stale` and the state is `unknown`, not `working`.
  */

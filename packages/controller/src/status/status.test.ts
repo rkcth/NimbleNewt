@@ -1307,9 +1307,9 @@ for (const backend of backends) {
     } };
     const status = c.rebuild({}, { activity });
     const first = (await status.ask(c.owner, { kind: "activity", taskId: t.id, limit: 3 }))!;
-    assert.match(first.lines[0]!.text, /^Step 1, 2026-10-22T10:00:00.000Z, agent:ann: tool - step 1 summary/);
+    assert.match(first.lines[0]!.text, /^Step 1, 2026-10-22T10:00:00.000Z, agent:ann: tool - "step 1 summary"/);
     assert.match(first.lines[1]!.text, /\(corrected 1 time\)/);
-    assert.equal(first.lines[2]!.text, "Step 3 is no longer available: archived.");
+    assert.equal(first.lines[2]!.text, "Step 3 is no longer available: \"archived\".");
     assert.match(first.lines.at(-1)!.text, /ask again after step 3/);
     const last = (await status.ask(c.owner, { kind: "activity", taskId: t.id, latest: true, limit: 2 }))!;
     assert.deepEqual(last.lines.map((l) => l.text.slice(0, 7)), ["Step 6,", "Step 7,"]);
@@ -1331,9 +1331,9 @@ for (const backend of backends) {
     const activity = { steps: async () => ({ steps: [] }), explanations: async (by: Principal, _t: string, seq?: number) => { asked.push(seq); if (by.kind !== "owner") throw new DomainError("forbidden", "no"); return list as never[]; } };
     const status = c.rebuild({}, { activity });
     const got = (await status.ask(c.owner, { kind: "explanations", taskId: t.id, limit: 2 }))!;
-    assert.match(got.lines[0]!.text, /^Written afterwards, and the records could not explain it by agent:ann at step 3, 2026-10-22T10:00:00.000Z: chose choice at 2026-10-22T10:00:00.000Z\./);
-    assert.ok(got.lines.some((l) => l.text === "Not plan B: slower"));
-    assert.ok(got.lines.some((l) => l.text === "Uncertain: the load is unknown"));
+    assert.match(got.lines[0]!.text, /^Written afterwards, and the records could not explain it by agent:ann at step 3, 2026-10-22T10:00:00.000Z: chose "choice at 2026-10-22T10:00:00.000Z"\./);
+    assert.ok(got.lines.some((l) => l.text === "Not \"plan B\": \"slower\""));
+    assert.ok(got.lines.some((l) => l.text === "Uncertain: \"the load is unknown\""));
     assert.match(got.lines.at(-1)!.text, /1 older explanation is not shown/);
     await status.ask(c.owner, { kind: "explanations", taskId: t.id, seq: 2 });
     assert.deepEqual(asked, [undefined, 2]);
@@ -1652,7 +1652,7 @@ for (const backend of backends) {
     };
     const status = c.rebuild({}, { activity: activity as never });
     const got = (await status.ask(c.owner, { kind: "timeline", projectId: c.project, agent: "agent:ann", limit: 5 }))!.lines.map((l) => l.text);
-    assert.equal(got[0], "2026-10-22T10:00:00.000Z, agent:ann: tool-call - ran the tests");
+    assert.equal(got[0], "2026-10-22T10:00:00.000Z, agent:ann: tool-call - \"ran the tests\"");
     assert.match(got[1]!, /more tasks than were looked at/);
     assert.deepEqual(calls[0], { limit: 5, agent: "agent:ann" });
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
