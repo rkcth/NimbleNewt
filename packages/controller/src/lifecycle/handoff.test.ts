@@ -56,7 +56,7 @@ class Sources implements HandoffSources {
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; mgr: Principal; ann: Principal; task: string; a: { kind: string; id: string }; b: { kind: string; id: string }; rt: Runtime; src: Sources; stops: StopService; pauses: PauseService;
-    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; resp: ResponsibilityHandover; told: { handoffId: string; reassigned?: unknown }[]; crash: { lift: number; afterStop?: number }; hook: { beforeStop?: (() => Promise<void>) | undefined }; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
+    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; resp: ResponsibilityHandover; told: { handoffId: string; reassigned?: unknown }[]; crash: { lift: number; afterStop?: number; liftError?: Error }; hook: { beforeStop?: (() => Promise<void>) | undefined }; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -86,13 +86,13 @@ for (const backend of backends) {
         const told: { handoffId: string; reassigned?: unknown }[] = [];
         const resp: ResponsibilityHandover = { check: async () => undefined, apply: async (_by, r) => ({ moved: [...r.ids], failed: [] }) };
         // The hand-off's lift of its own hold can be made to die before it is written, as a crash right after the hand-off ended would.
-        const crash: { lift: number; afterStop?: number } = { lift: 0 };
+        const crash: { lift: number; afterStop?: number; liftError?: Error } = { lift: 0 };
         // Something that happens just before a hand-off asks for its suspension (once).
         const hook: { beforeStop?: (() => Promise<void>) | undefined } = {};
         const mk = (asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService => {
           const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
           const lift = pauses.resumeOwnHold.bind(pauses);
-          pauses.resumeOwnHold = async (...x) => { if (crash.lift > 0) { crash.lift--; throw new Error("process died before the lift"); } return lift(...x); };
+          pauses.resumeOwnHold = async (...x) => { if (crash.lift > 0) { crash.lift--; throw crash.liftError ?? new Error("process died before the lift"); } return lift(...x); };
           const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
           const request = stops.request.bind(stops);
           // A crash right after the suspension was asked for, before the hand-off recorded it, can be made too.
@@ -585,6 +585,50 @@ for (const backend of backends) {
     assert.equal(h3.phase, "ready");
     assert.equal((await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h3.id })).phase, "transferred");
     assert.equal(await paused(c), false);
+  });
+
+  suite("a storage failure at the lift of a hand-off's hold is not taken for a hold already gone: the hand-off has not let go, and a sweep or the next hand-off lifts it (card L04c review 5)", async (c) => {
+    // Completed, and the store fails at the lift: the task stays held only until the sweep.
+    const h1 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    c.crash.lift = 1; c.crash.liftError = new DomainError("unavailable", "storage could not complete the request: disk busy");
+    await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h1.id }), /disk busy/);
+    assert.equal(await ownerOf(c), `${c.b.id}@2`);
+    assert.equal((await c.handoffs.get(c.owner, h1.id))?.released, undefined, "a hold that was not lifted is not let go");
+    assert.equal(await paused(c), true);
+    assert.deepEqual(await c.reopen().sweep(c.owner), { advanced: [h1.id], failed: [] });
+    assert.equal(await paused(c), false, "the sweep lifts it");
+    // Cancelled, the store fails at the lift, and the next hand-off begins before any sweep: it lets the old hold go first and takes one of its own, so nothing is left paused at the end.
+    const h2 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.a, reason: "back again" });
+    c.crash.lift = 1;
+    await assert.rejects(c.handoffs.cancel(c.mgr, { handoffId: h2.id }), /disk busy/);
+    assert.equal(await paused(c), true);
+    const h3 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.a, reason: "back again" });
+    assert.equal(h3.heldBefore, false, "the old hold was lifted before the next hand-off looked");
+    assert.equal((await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h3.id })).phase, "transferred");
+    assert.equal(await paused(c), false, "no hold is left after the next hand-off");
+  });
+
+  suite("a hand-off back that fails is told once even when the store fails at the lift of its hold, and the sweep lifts the hold later (card L04c review 5)", async (c) => {
+    const hour = 3_600_000;
+    const given: { handoffId: string; taskId: string; reason: string }[] = [];
+    const sweeper = c.reopen(async (id) => (id === c.mgr.id ? c.mgr : undefined), given);
+    const h = await sweeper.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover for two hours", returnAt: new Date(now + 2 * hour).toISOString() });
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id });
+    now += 3 * hour;
+    await sweeper.sweep(c.owner);
+    const back = (await c.handoffs.get(c.owner, h.id))!.returned!.handoffId!;
+    assert.equal((await c.handoffs.get(c.owner, back))?.phase, "ready");
+    assert.equal(await paused(c), true, "the hand-off back holds the task");
+    // The asker is gone: the hand-off back fails, and the store fails at the lift of its hold.
+    c.crash.lift = 1; c.crash.liftError = new DomainError("unavailable", "storage could not complete the request: disk busy");
+    const gone = c.reopen(async () => undefined, given);
+    assert.ok((await gone.sweep(c.owner)).failed.includes(back));
+    assert.equal((await c.handoffs.get(c.owner, back))?.phase, "failed");
+    assert.equal(given.filter((g) => g.handoffId === back && /the hand-off back failed/.test(g.reason)).length, 1, "the failure is told although the lift failed");
+    assert.equal(await paused(c), true);
+    await gone.sweep(c.owner);
+    assert.equal(await paused(c), false, "the sweep lifts the hold");
+    assert.equal(given.filter((g) => g.handoffId === back).length, 1, "told once");
   });
 
   // ---- card C07j: a cut is marked and the original kept ----------------------------------------------------------------------

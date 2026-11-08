@@ -764,8 +764,10 @@ export class HandoffService {
   async #fail(by: Principal, id: string, why: string): Promise<void> {
     const before = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
     const changed = await this.#update(id, (x) => ({ ...x, phase: "failed", blocked: undefined, failure: why, history: this.#push(x, "failed", by.id, why) }), LIVE);
-    if (changed) await this.#letGo(by, id);
-    if (changed && before?.autoComplete === true) { try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: before.taskId, reason: `the hand-off back failed: ${why}` }); } catch { /* best effort */ } }
+    // Told even when the lift fails (the sweep lifts it later): only this caller ended the hand-off, so nobody else would tell it.
+    try { if (changed) await this.#letGo(by, id); } finally {
+      if (changed && before?.autoComplete === true) { try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: before.taskId, reason: `the hand-off back failed: ${why}` }); } catch { /* best effort */ } }
+    }
   }
 
   #responsibilityIds(value: unknown): string[] {
@@ -813,7 +815,11 @@ export class HandoffService {
           const own = gate.requestId !== undefined && gate.requestId === b.holdRequestId ? gate.requestId : await this.#pauses.ownPause(scope, b.holdOps ?? []);
           if (own !== undefined) await this.#pauses.resumeOwnHold(by, { commandId: `${id}-resume`, scope, reason, requestId: own });
         }
-      } catch (error) { if (!(error instanceof DomainError)) throw error; }
+      } catch (error) {
+        // A refusal (not paused, or held by a later pause) means the hold is gone or not this hand-off's to lift. Any other failure of a hand-off that names its hold (storage unavailable, the caller's right) is thrown
+        // before `released` is written, so the sweep or the next hand-off lifts it later (card L04c review 5); writing `released` here would leave the task paused for good.
+        if (!(error instanceof DomainError) || (named(b) && error.code !== "invalid_command")) throw error;
+      }
     }
     if (named(b) && b.released === undefined) await this.#update(id, (x) => ({ ...x, released: this.#runner.now() }), TERMINAL);
   }
