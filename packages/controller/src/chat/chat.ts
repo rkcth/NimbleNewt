@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, saysAcknowledgeFlaky, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, saysAcknowledgeFlaky, wholeWord, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -207,8 +207,6 @@ type Resolved =
  */
 /** The owner saying a running-call choice in their own words, with its usual endings ("cancel", "cancelled", "cancels"; "finish", "finished"; "pause", "paused"). */
 const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { finish: /\bfinish(?:ed|es|ing)?\b/i, cancel: /\bcancel(?:l?ed|s|l?ing)?\b/i, pause: /\bpause(?:d|s)?\b|\bpausing\b/i };
-/** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
-const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
 
@@ -527,6 +525,11 @@ export class ChatService {
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
       // Accepting a platform that passed only after earlier failures is the owner's own word, never the interpreter's (card X09b part 2 review): `acknowledgeFlaky` is refused unless their message says it.
+      // Which machine, and which platform of it, a destructive release test may run on is the owner's choice: `os` and `arch` are fixed choices, so the words check lets them through and they are checked here (card X09b part 2 review).
+      if (intent.op === "release.host") {
+        const platform = (["os", "arch"] as const).find((key) => typeof intent.args[key] === "string" && !wholeWord(words, intent.args[key] as string));
+        if (platform !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${platform} is not in your message, so no host was authorized. Say which ${platform} the host is authorized for (linux, darwin or win32; x64 or arm64).` }); continue; }
+      }
       if (intent.op === "release.approve" && intent.args["acknowledgeFlaky"] !== undefined && intent.args["acknowledgeFlaky"] !== false && !saysAcknowledgeFlaky(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "A release that passed only after earlier failures is approved only when your own words accept those failures (for example \"I have read the gate and accept the earlier failures, approve it with acknowledgeFlaky\"). The interpreter's acknowledgeFlaky was not used." }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }

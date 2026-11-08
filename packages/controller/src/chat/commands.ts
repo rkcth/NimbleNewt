@@ -394,6 +394,15 @@ export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candi
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 
+/**
+ * True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action (card X09b part 2 review: "host:rig2" said by the owner is not "host:rig").
+ * A word may be joined to a full stop that ends the sentence, but to nothing else that could be part of a name.
+ */
+export const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
+
+/** Keys whose value is a machine or record name rather than a sentence: the owner must have said it as a whole word, not merely as the start of a longer one. Release IDs (which `foreignValue`'s `strict` set makes checked) are matched the same way. */
+export const WHOLE_WORD_KEYS: ReadonlySet<string> = new Set(["hostId"]);
+
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 /** Fixed choices and record references of one command only: `response` is one of three choices and `decisionId` is checked against the decisions waiting for the owner (card M02h). */
 export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "decisionId"]);
@@ -409,7 +418,12 @@ export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: s
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
   const own = norm(ownText);
   const walk = (value: unknown, where: string, key: string): string | undefined => {
-    if (typeof value === "string") return ((EXEMPT.has(key) || alsoExempt.has(key)) && !strict.has(key)) || value.length === 0 || own.includes(norm(value)) ? undefined : where;
+    if (typeof value === "string") {
+      // A name (a host, a release ID the strict set makes checked) must stand as a whole word in the owner's message; a sentence (a reason, a summary) only has to be in it.
+      const exempt = (EXEMPT.has(key) || alsoExempt.has(key)) && !strict.has(key);
+      if (exempt || value.length === 0) return undefined;
+      return (strict.has(key) || WHOLE_WORD_KEYS.has(key) ? wholeWord(own, norm(value)) : own.includes(norm(value))) ? undefined : where;
+    }
     if (Array.isArray(value)) { for (const [i, v] of value.entries()) { const bad = walk(v, `${where}[${i}]`, key); if (bad !== undefined) return bad; } return undefined; }
     if (value !== null && typeof value === "object") { for (const [k, v] of Object.entries(value)) { const bad = walk(v, `${where}.${k}`, k); if (bad !== undefined) return bad; } }
     return undefined;

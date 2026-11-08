@@ -126,6 +126,18 @@ for (const backend of backends) {
       const bh = await turn("m11", blindHost, [{ kind: "command", op: "release.host", args: { hostId: "host:secret", os: "win32", arch: "x64" }, evidence: blindHost, basis: "owner" }]);
       assert.equal(bh[0]!.status, "refused", JSON.stringify(bh[0]));
       assert.equal(bh[0]!.code, "unsupported_value");
+      // ---- a name that only starts like another host, and a platform the interpreter picked: both refused (part 2 review, item 7).
+      const near = "authorize host:rig2 for release tests on win32 x64";
+      const nearShown = await turn("m11b", near, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", os: "win32", arch: "x64" }, evidence: near, basis: "owner" }]);
+      assert.equal(nearShown[0]!.status, "refused", `host:rig2 is not host:rig: ${JSON.stringify(nearShown[0])}`);
+      assert.match(nearShown[0]!.message!, /hostId/);
+      const otherCell = "let host:yard run release tests on linux x64";
+      const otherShown = await turn("m11c", otherCell, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "darwin", arch: "arm64" }, evidence: otherCell, basis: "owner" }]);
+      assert.equal(otherShown[0]!.status, "refused", `the platform the model chose is refused: ${JSON.stringify(otherShown[0])}`);
+      assert.match(otherShown[0]!.message!, /os|arch/);
+      const ownCell = "let host:yard run release tests on darwin arm64 too";
+      const ownCellShown = await turn("m11d", ownCell, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "darwin", arch: "arm64" }, evidence: ownCell, basis: "owner" }]);
+      assert.equal(ownCellShown[0]!.status, "proposed", `the platform the owner named is proposed: ${JSON.stringify(ownCellShown[0])}`);
       const cand2 = await submit("c");
       const open = await call(w.ownerToken, "release.issue", { candidateId: cand2, cell: linux, hostId: "host:rig", workerId: "agent:none", timeoutSeconds: 600, memoryMb: 512 });
       assert.ok(open.ok, JSON.stringify(open));
