@@ -749,4 +749,20 @@ for (const backend of backends) {
     await runs.close();
   });
 
+  suite("a task credential never decides or reconciles a job, even its own task's with job.control, and never stops another task's job; the same agent without the task scope may (card T07b review)", async (c) => {
+    const scoped: Principal = { ...c.both, taskScope: { taskId: c.t1, projectId: c.project } };
+    const own = await c.admit(c.t1), others = await c.admit(c.t2), unknown = await c.admit(c.t1);
+    await c.jobs.report(c.worker, { commandId: cid("d"), jobId: unknown, state: "dispatched" });
+    await c.jobs.markUnknown(c.worker, { commandId: cid("u"), jobId: unknown, reason: "the controller restarted" });
+    await refuses("forbidden", () => c.jobs.decide(scoped, { commandId: cid("dx"), jobId: own, decision: "exception", tracker: "owner", reason: "keep it" }), (e) => assert.match(e.message, /task credential may not decide/));
+    await refuses("forbidden", () => c.jobs.reconcile(scoped, { commandId: cid("rc"), jobId: unknown, to: "completed", evidence: "I say it finished" }));
+    await refuses("forbidden", () => c.jobs.requestCancel(scoped, { commandId: cid("cx"), jobId: others, reason: "not mine" }));
+    assert.equal((await c.jobs.requestCancel(scoped, { commandId: cid("cx"), jobId: own, reason: "mine" })).operation, "stop_tool", "its own task's job it may stop");
+    // The same agent, not bound to a task (a supervisor), may.
+    await c.jobs.reconcile(c.both, { commandId: cid("rc"), jobId: unknown, to: "completed", evidence: "the build log shows it finished" });
+    assert.equal((await c.read(unknown)).state, "completed");
+    await c.jobs.requestCancel(c.both, { commandId: cid("cx"), jobId: others, reason: "a supervisor's stop" });
+    assert.equal((await c.read(others)).state, "cancellation_requested");
+  });
+
 }

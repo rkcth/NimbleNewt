@@ -650,6 +650,8 @@ export class JobService {
       // A stop (`cancel`) needs the right to control jobs, or is asked by a task credential of the job's own task that may record jobs there (card T07b: an agent stops the jobs it started; a credential of another task never can).
       const allowed = level === "write" ? this.#mayWrite(principal, task, job.taskId) : this.#mayControl(principal, task, job.taskId) || (level === "cancel" && principal.taskScope?.taskId === job.taskId && this.#mayWrite(principal, task, job.taskId));
       if (!allowed) throw new DomainError("forbidden", `${principal.id} may not ${level === "write" ? "record" : "control"} that job`);
+      // A task credential never decides or reconciles a job (that records how work ended: the owner or a supervisor does it), and never stops a job of another task, whatever grants it carries (card T07b review).
+      if (principal.taskScope !== undefined && (level === "control" || (level === "cancel" && principal.taskScope.taskId !== job.taskId))) throw new DomainError("forbidden", level === "control" ? "a task credential may not decide or reconcile a job; the owner or a supervisor does" : "a task credential may not stop a job of another task");
       await pre?.(job);
       const next = change(job);
       after = next;
