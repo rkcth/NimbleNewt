@@ -37,22 +37,34 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeo
 export async function linuxOrphans(directory: string, options: { readonly proc?: string; readonly kill?: (pid: number) => void; readonly settleMs?: number } = {}): Promise<string[]> {
   const proc = options.proc ?? "/proc";
   const kill = options.kill ?? ((pid: number) => { process.kill(pid, "SIGKILL"); });
-  const holding = (): number[] => {
+  const holds = (pid: number): boolean => {
+    try { return readFileSync(join(proc, String(pid), "cmdline")).toString("utf8").split("\0").some((arg) => arg === directory || arg.startsWith(`${directory}/`)); } catch { return false; /* gone, or not ours to read */ }
+  };
+  // The process's start time (field 22 of its stat, after the name, which may hold spaces or parentheses): a process ID can be reused by an unrelated program between the scan and the kill, so a process is ended only if
+  // it is still the one the scan saw (same start time, still holding the directory) (card T07b review 4).
+  const startOf = (pid: number): string => {
+    try { const stat = readFileSync(join(proc, String(pid), "stat"), "utf8"); return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? "?"; } catch { return "?"; }
+  };
+  const holding = (): Map<number, string> => {
     let names: string[];
-    try { names = readdirSync(proc); } catch { return []; }
-    const found: number[] = [];
+    try { names = readdirSync(proc); } catch { return new Map(); }
+    const found = new Map<number, string>();
     for (const name of names) {
       if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
-      try { if (readFileSync(join(proc, name, "cmdline")).toString("utf8").split("\0").some((arg) => arg === directory || arg.startsWith(`${directory}/`))) found.push(Number(name)); } catch { /* gone, or not ours to read */ }
+      const pid = Number(name);
+      if (holds(pid)) found.set(pid, startOf(pid));
     }
     return found;
   };
   const first = holding();
-  if (first.length === 0) return [];
-  for (const pid of first) { try { kill(pid); } catch { /* reported below if it stays */ } }
+  if (first.size === 0) return [];
+  for (const [pid, started] of first) {
+    if (startOf(pid) !== started || !holds(pid)) continue; // gone, or its ID now names another process
+    try { kill(pid); } catch { /* reported below if it stays */ }
+  }
   await sleep(options.settleMs ?? 200);
-  const left = new Set(holding());
-  return first.filter((pid) => left.has(pid)).map((pid) => {
+  const left = holding();
+  return [...first].filter(([pid, started]) => left.get(pid) === started).map(([pid]) => {
     let comm = "unknown";
     // The job's program can rename itself (prctl PR_SET_NAME), so its name is reduced to printable ASCII: a terminal escape or a control character would reach the owner, the agent and the record.
     try { comm = readFileSync(join(proc, String(pid), "comm"), "utf8").trim().replace(/[^\x20-\x7e]/g, "?").slice(0, 40) || "unknown"; } catch { /* name unknown */ }

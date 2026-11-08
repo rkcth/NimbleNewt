@@ -711,6 +711,58 @@ for (const backend of backends) {
     });
   }
 
+  suite("job-start is refused for a version revoked before it, and for one revoked between the owner's approval and the start (nothing is admitted or started); an attempt that has ended can neither start nor stop a job (card T07b review 4)", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: "job.write", project: c.project }]);
+    await c.task("t", ann);
+    const jobs = JobService.withEpoch(c.storage, c.epoch, { pauses: c.pauses }, { ...c.options, host: "service:dispatcher" });
+    const started: string[] = [];
+    const admitted: string[] = [];
+    c.svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true,
+      jobs: { admit: async (...a: Parameters<JobService["admit"]>) => { const j = await jobs.admit(...a); admitted.push(j.id); return j; }, get: (...a: Parameters<JobService["get"]>) => jobs.get(...a), requestCancel: (...a: Parameters<JobService["requestCancel"]>) => jobs.requestCancel(...a) },
+      jobRuns: { room: () => undefined, start: async (jobId: string) => { started.push(jobId); }, ended: async () => undefined } });
+    const out: Record<string, BridgeResponse> = {};
+    let late: { token: string; gateway: BoundGateway } | undefined;
+    let running = "";
+    c.worker.script = c.session(async (s) => {
+      late = { token: s.token, gateway: s.gateway };
+      // Revoked before the start is asked.
+      const gone = await c.install(s, "gone", "1.0.0");
+      await c.catalog.revoke(c.owner, { commandId: uid("rv"), name: gone, version: "1.0.0", reason: "bad" });
+      out["revoked-before"] = await s.send("job.start", { tool: gone, version: "1.0.0", input: { url: "https://a.test" } }, "j-gone");
+      // Approved, then revoked before the agent asks again: the start is refused (a choice about running calls is not about one that has not started).
+      const late1 = await c.install(s, "late", "1.0.0");
+      const args = { tool: late1, version: "1.0.0", input: { url: "https://a.test" } };
+      const first = good(await s.send("job.start", args, "j-late"));
+      assert.equal(first["state"], "awaiting-approval");
+      const review = (await c.reviews.get(c.owner, first["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+      await c.catalog.revoke(c.owner, { commandId: uid("rv"), name: late1, version: "1.0.0", reason: "bad" });
+      out["revoked-after-approval"] = await s.send("job.start", args, "j-late");
+      // One job that does start, for the ended attempt to try to stop.
+      const ok = await c.install(s, "fine", "1.0.0");
+      const okArgs = { tool: ok, version: "1.0.0", input: { url: "https://a.test" } };
+      const asked = good(await s.send("job.start", okArgs, "j-ok"));
+      const okReview = (await c.reviews.get(c.owner, asked["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: okReview.id, expectedRevision: okReview.revision, verdict: "allow", reason: "fine" });
+      running = good(await s.send("job.start", okArgs, "j-ok"))["jobId"] as string;
+    });
+    await c.tick();
+    assert.equal(bad(out["revoked-before"]!).code, "forbidden");
+    assert.match(bad(out["revoked-before"]!).message, /revoked/);
+    const refused = out["revoked-after-approval"]!;
+    // Refused either before the dispatcher's tool path or by the run's own check at the start: in both cases nothing is admitted or started.
+    assert.ok(!refused.ok || (refused.result["state"] !== "confirmed" && refused.result["jobId"] === undefined), JSON.stringify(refused));
+    assert.match(running, /^job-/);
+    assert.deepEqual([admitted, started], [[running], [running]], "only the job of the live version was admitted and started");
+    // The attempt has ended: its credential and gateway start and stop nothing.
+    const afterStart = await c.svc.handle(late!.token, late!.gateway, { op: "job.start", callId: "after-end", args: { tool: "anything", input: {} } });
+    const afterStop = await c.svc.handle(late!.token, late!.gateway, { op: "job.cancel", callId: "after-end-stop", args: { jobId: running } });
+    for (const r of [afterStart, afterStop]) assert.ok(["unauthenticated", "fenced"].includes(bad(r).code), JSON.stringify(r));
+    assert.deepEqual([admitted.length, started.length, (await jobs.get(c.owner, running))!.state], [1, 1, "admitted"]);
+  });
+
   suite("registering a tool under a contract that restricts tools is allowed, but running it is still governed by the contract's ceiling", async (c) => {
     const ann = await c.agentFor("ann", [{ action: "tool.read-file", project: c.project }]);
     const { taskId } = await c.task("t", ann);

@@ -111,3 +111,28 @@ test("an orphan's name is reduced to printable ASCII: a process the job renamed 
     assert.deepEqual(named, ["pid 4242 (?[2J?evil?)"]);
   } finally { rmSync(proc, { recursive: true, force: true }); }
 });
+
+test("the orphan scan ends a process only while its ID still names the process the scan saw: an ID reused by another program after the scan is never killed nor reported (card T07b review 4)", async () => {
+  const proc = realpathSync(mkdtempSync(join(tmpdir(), "nn-fakeproc-")));
+  try {
+    const directory = "/runs/job-def";
+    const write = (pid: number, cmdline: string, started: number): void => {
+      mkdirSync(join(proc, String(pid)), { recursive: true });
+      writeFileSync(join(proc, String(pid), "cmdline"), cmdline);
+      writeFileSync(join(proc, String(pid), "comm"), "node\n");
+      // A name with a space and a parenthesis, as a program may choose: the start time is read after the last ")".
+      writeFileSync(join(proc, String(pid), "stat"), `${pid} (no (de) S 1 ${pid} ${pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 ${started} 1000 10 18446744073709551615\n`);
+    };
+    for (const pid of [5001, 5002, 5003]) write(pid, `bwrap\0${directory}/work\0`, 100 + pid);
+    const killed: number[] = [];
+    // While the first is being ended, the other two exit and their IDs are taken: one by a program started later that also names the directory, one by an unrelated program.
+    const kill = (pid: number): void => {
+      if (killed.length === 0) for (const other of [5001, 5002, 5003].filter((p) => p !== pid)) write(other, other % 2 === 0 ? `bwrap\0${directory}/work\0` : "/usr/bin/unrelated\0--serve\0", 9_000 + other);
+      killed.push(pid);
+    };
+    const named = await linuxOrphans(directory, { proc, kill, settleMs: 1 });
+    assert.equal(killed.length, 1, `only the process still known by its start time is ended: ${killed.join(", ")}`);
+    // The first is still listed (the fake kill ended nothing) and is reported; the reused IDs are not reported as the job's.
+    assert.deepEqual(named, [`pid ${killed[0]} (node)`]);
+  } finally { rmSync(proc, { recursive: true, force: true }); }
+});

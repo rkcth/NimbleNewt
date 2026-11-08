@@ -859,4 +859,56 @@ for (const backend of backends) {
     assert.equal((await c.read(others)).state, "cancellation_requested");
   });
 
+  suite("the local runs never record a line of a multi-line private key or a spaced secret written across many writes, and a job stopped in the middle of one writes its held-back end redacted (card T07b review 4)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const jobs = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    const procs: { out: (t: string) => void; end: (e: Partial<JobProcessEnd>) => void }[] = [];
+    const launcher: JobLauncher = {
+      start: async (_launch, out) => {
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { out, end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        return { stop: () => { p.end({ signal: "SIGKILL", stopped: true }); }, ended };
+      },
+    };
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, limits: { flushMs: 5, graceMs: 5_000, sweepMs: 3_600_000 } });
+    const launch: ScriptLaunch = { program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name: "a_x.build", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} };
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    // Pieces of the secrets below, each of which must never be in the record.
+    const fragments = ["MIIEowIBAAKC", "secretlineone", "Zm9vYmFyc2Vj", "cmV0bGluZXR3bw", "hunter2", "abcdefghijklmnop", "qrstuvwxyz0123456789ABCD", "sk-abcdef", "ghijklmnopqrst", "lastpass"];
+    const leaks = (tail: string): string[] => fragments.filter((s) => tail.includes(s));
+    const seen: string[] = [];
+    // Every write the record takes is looked at: no piece of a secret may be there at any moment, not only at the end.
+    const watch = async (id: string): Promise<void> => { const tail = (await c.read(id)).output.tail; seen.push(...leaks(tail).map((s) => `${s} in ${JSON.stringify(tail)}`)); };
+    const id = await c.admit(c.t1);
+    await runs.start(id, c.t1, launch);
+    const pieces = ["build started\n-----BEGIN RSA", " PRIVATE", " KEY-----\nMIIEowIBAAKCAQEA", "secretlineone\nZm9vYmFyc2Vj", "cmV0bGluZXR3bw\n-----END RSA PRIVATE KEY-----\nstep 2\npassword:", " hunter2", "hunter2\nAuthorization: Bearer", " abcdefghijklmnop", "qrstuvwxyz0123456789ABCD\nkey sk-abcdef", "ghijklmnopqrst in use\nstep 3\n-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKC"];
+    const write = async (piece: string): Promise<void> => {
+      procs.at(-1)!.out(piece);
+      // Long enough for the write due after each piece to happen.
+      await new Promise((r) => setTimeout(r, 30));
+      await watch(procs.length === 1 ? id : second);
+    };
+    let second = "";
+    for (const piece of pieces) await write(piece);
+    // Stopped in the middle of the second key: the end is recorded, the key's start never is.
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: id, reason: "enough" });
+    await waitFor(async () => (await c.read(id)).state === "cancelled");
+    await watch(id);
+    const tail = (await c.read(id)).output.tail;
+    for (const visible of ["build started", "step 2", "step 3"]) assert.ok(tail.includes(visible), tail);
+    // A job stopped while its last word (a secret) is held back: the word is written at the end, redacted.
+    second = await c.admit(c.t2);
+    await runs.start(second, c.t2, launch);
+    await write("step 4 password:lastpass99");
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: second, reason: "enough" });
+    await waitFor(async () => (await c.read(second)).state === "cancelled");
+    await watch(second);
+    assert.equal((await c.read(second)).output.tail, "step 4 [redacted]");
+    assert.deepEqual(seen, [], "no part of a secret was in the record at any moment");
+    await runs.close();
+  });
+
 }
