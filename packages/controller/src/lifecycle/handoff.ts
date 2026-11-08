@@ -62,6 +62,10 @@ export interface TaskHandoffBody {
   /** A takeover ends the prepared hand-off it replaces; recorded so a restart finishes that too. */
   readonly replaces?: string;
   readonly stopIntentId?: string;
+  /** The pause request the hand-off's own suspension or force stop holds the task with (when it was not held before): only that very pause is lifted when the hand-off ends, never one set after it (card L04c review). */
+  readonly holdRequestId?: string;
+  /** When the hand-off's end let go of its hold (lifted it, or found it already gone or replaced by a later pause). A sweep lifts the hold of an ended hand-off that has none (a crash after the end). */
+  readonly released?: string;
   readonly package?: { readonly collectedAt: string; readonly sections: Readonly<Record<string, string>>; readonly missing: readonly string[]; readonly ready: boolean };
   readonly blocked?: { readonly reason: string; readonly choices: readonly ("wait" | "force-takeover" | "cancel")[] } | undefined;
   /** Set when the package was handed over with required sections missing. */
@@ -172,7 +176,8 @@ export class HandoffService {
     await this.#create(by, command.commandId, id, scope.id, target.projectId, from, to, assignment.generation, "prepared", reason, heldBefore, undefined, extra);
     // The suspension that prepares the hand-off. Its command ID follows the hand-off's, so repeating the request repeats it.
     const stop = await this.#stops.request(by, { commandId: `${String(command.commandId)}-suspend`, scope, mode: "suspend", reason: `hand-off: ${reason}`.slice(0, 500), ...(command.deadlineMs === undefined ? {} : { deadlineMs: command.deadlineMs }) });
-    await this.#update(id, (b) => ({ ...b, stopIntentId: b.stopIntentId ?? stop.intentId }), LIVE);
+    const hold = heldBefore ? undefined : (await this.#pauses.gateState(scope))?.requestId;
+    await this.#update(id, (b) => ({ ...b, stopIntentId: b.stopIntentId ?? stop.intentId, ...(b.holdRequestId !== undefined || hold === undefined ? {} : { holdRequestId: hold }) }), LIVE);
     return this.advance(by, { handoffId: id });
   }
 
@@ -273,12 +278,13 @@ export class HandoffService {
       const b = found.body as unknown as TaskHandoffBody;
       if (TERMINAL.includes(b.phase) || b.phase === "ready" || b.phase === "blocked") return view<TaskHandoffBody>(found);
       if (b.phase === "preparing" && b.mode === "forced") {
-        if (b.replaces !== undefined) await this.#update(b.replaces, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "replaced by a forced takeover") }), LIVE);
+        if (b.replaces !== undefined) await this.#update(b.replaces, (x) => ({ ...x, phase: "cancelled", blocked: undefined, released: this.#runner.now(), history: this.#push(x, "cancelled", by.id, "replaced by a forced takeover") }), LIVE); // its hold is the takeover's now: a sweep never lifts it for the replaced one
         // Force Stop is repeatable under this hand-off's own command ID, so a crash anywhere here is finished by the next pass.
         const stopped = await this.#stops.force(by, { commandId: `${id}-force`, scope: { kind: "task", id: b.taskId }, reason: `takeover: ${b.reason}`.slice(0, 500) });
         const collected = await this.#collect(b.taskId, b.from, b.to);
+        const hold = b.heldBefore || b.holdRequestId !== undefined ? undefined : (await this.#pauses.gateState({ kind: "task", id: b.taskId }))?.requestId;
         await this.#update(id, (x) => ({
-          ...x, stopIntentId: stopped.intentId, package: collected, phase: "transferring",
+          ...x, stopIntentId: stopped.intentId, package: collected, phase: "transferring", ...(hold === undefined ? {} : { holdRequestId: hold }),
           exception: { by: by.id, reason: x.reason, at: this.#runner.now(), missingCleanup: collected.missing, uncertainEffects: stopped.outcome.unresolved.slice(0, 50) },
           history: this.#push(x, "transferring", by.id, "forced takeover: stopped without preparation"),
         }), ["preparing"]);
@@ -327,6 +333,10 @@ export class HandoffService {
       for (const rec of page) {
         after = rec.id;
         const b = rec.body as unknown as TaskHandoffBody;
+        // A hand-off that ended but whose hold was never let go (the process died between the end and the lift) lets go now; only its own pause is lifted, never a later one (card L04c review).
+        if (TERMINAL.includes(b.phase) && !b.heldBefore && b.holdRequestId !== undefined && b.released === undefined) {
+          try { await this.#letGo(by, rec.id); advanced.push(rec.id); } catch { failed.push(rec.id); }
+        }
         // A temporary reassignment that has run its time goes back, and a return that is ready is completed (card L03e).
         if (b.phase === "transferred" && b.returnAt !== undefined && b.returned === undefined) {
           try { if (await this.#returnDue(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
@@ -592,8 +602,16 @@ export class HandoffService {
     const b = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
     if (b === undefined || b.heldBefore) return;
     const scope: PauseScope = { kind: "task", id: b.taskId };
-    if ((await this.#pauses.gate(by, scope))?.intent !== "pause") return;
-    try { await this.#pauses.resume(by, { commandId: `${id}-resume`, scope, reason: b.phase === "transferred" ? "hand-off complete" : "hand-off ended" }); } catch (error) { if (!(error instanceof DomainError)) throw error; }
+    const reason = b.phase === "transferred" ? "hand-off complete" : "hand-off ended";
+    const gate = await this.#pauses.gateState(scope);
+    // Only the pause this hand-off holds the task with is lifted, checked in the same write as the lift: a pause set after it (the owner's) stands. A hand-off recorded before the hold was named lifts any pause, as before.
+    if (gate?.intent === "pause" && (b.holdRequestId === undefined || gate.requestId === b.holdRequestId)) {
+      try {
+        if (b.holdRequestId === undefined) await this.#pauses.resume(by, { commandId: `${id}-resume`, scope, reason });
+        else await this.#pauses.resumeOwnHold(by, { commandId: `${id}-resume`, scope, reason, requestId: b.holdRequestId });
+      } catch (error) { if (!(error instanceof DomainError)) throw error; }
+    }
+    if (b.holdRequestId !== undefined && b.released === undefined) await this.#update(id, (x) => ({ ...x, released: this.#runner.now() }), TERMINAL);
   }
 }
 

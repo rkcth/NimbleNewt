@@ -249,6 +249,17 @@ export class PauseService implements PauseGuard, PauseLookup {
   }
 
   /**
+   * Lifts the scope's gate only while it is still the very pause `requestId` made (checked in the same write), for a service that lifts a hold of its own (a hand-off, card L04c review): a pause someone set
+   * after that one (the owner paused again) is never lifted by it. Refused (`invalid_command`) when the gate is not paused or is paused by another request.
+   */
+  async resumeOwnHold(principal: Principal, command: ResumeRequest & { readonly requestId: string }): Promise<{ gateId: string; requestId: string; replayed: boolean }> {
+    const scope = checkScope(command.scope);
+    const reason = plain(command.reason, "reason", PAUSE_LIMITS.reason);
+    const target = await this.#authorize(principal, scope, "control", false);
+    return this.#request(principal, command.commandId, "resume", scope, reason, undefined, target.projectId, undefined, String(command.requestId));
+  }
+
+  /**
    * Records, ahead of time, the condition on which a pause is lifted without anyone being asked again (card L06b). Only the owner can; it names one scope and one time, and the gate must be paused now.
    * It belongs to this pause: resuming or pausing again drops it. Setting it again replaces it. Nothing lifts a pause that has no recorded condition.
    */
@@ -405,7 +416,7 @@ export class PauseService implements PauseGuard, PauseLookup {
     }
   }
 
-  async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined, onlyIf?: { requestId: string | undefined; at: string }) {
+  async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined, onlyIf?: { requestId: string | undefined; at: string }, onlyHold?: string) {
     const scoped = scopedCommandId(principal.id, commandId);
     const gateId = gateIdOf(scope);
     const result = await this.#retrying(() => this.#runner.command(`pause.${action}`, { commandId: scoped, actor: principal.id }, async () => ({
@@ -418,6 +429,7 @@ export class PauseService implements PauseGuard, PauseLookup {
         if (action === "resume" && gate.intent !== "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is not paused`, { field: "scope" });
         // A lift by recorded condition applies only to the very pause and time it was read with.
         if (onlyIf !== undefined && (gate.requestId !== onlyIf.requestId || gate.resumeAt?.at !== onlyIf.at || gate.takenOver === true)) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} no longer has that condition`, { field: "scope" });
+        if (onlyHold !== undefined && gate.requestId !== onlyHold) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is held by a later pause`, { field: "scope" });
         const at = this.#runner.now();
         const seq = gate.requests + 1;
         const requestId = requestIdOf(gateId, seq);
