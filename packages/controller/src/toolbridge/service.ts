@@ -126,7 +126,7 @@ export interface ToolExecutionDeps {
    * `job.cancel`) from any later attempt of the same task. Absent: the job operations answer as unavailable.
    */
   readonly jobs?: Pick<JobService, "admit" | "get" | "requestCancel">;
-  readonly jobRuns?: Pick<LocalJobRuns, "room" | "start">;
+  readonly jobRuns?: Pick<LocalJobRuns, "room" | "start" | "ended">;
 }
 
 /** The bound gateway of the attempt the request came through. */
@@ -643,10 +643,25 @@ export class ToolExecutionService {
       {
         kind: "local",
         run: async () => {
-          await this.#authorizeStart(c, v, facts, new AbortController());
-          const admitted = await jobs.admit(c.scoped, { commandId: `bridge:${c.attemptId}:${c.callId}`, taskId: c.taskId, kind: "tool", label: label ?? `${v.name} ${v.version}`, operationId, background, longRunning: true, attemptId: c.attemptId, host: c.hostId });
-          await runs.start(admitted.id, c.taskId, launch);
-          return { text: JSON.stringify({ jobId: admitted.id }) };
+          // The job is a running call of its version until its end is recorded (card T07b review): a revocation that cancels or pauses the version's running calls lists it and stops it (a recorded Stop by the job host),
+          // as it aborts a `tool.invoke` run; one that lets them finish leaves it alone.
+          const own = new AbortController();
+          const key = `${v.name}|${v.version}`;
+          const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
+          const set = this.#running.get(key) ?? new Set<typeof entry>();
+          set.add(entry); this.#running.set(key, set);
+          const forget = (): void => { const now = this.#running.get(key); now?.delete(entry); if (now !== undefined && now.size === 0) this.#running.delete(key); };
+          let handed = false;
+          try {
+            await this.#authorizeStart(c, v, facts, own);
+            const admitted = await jobs.admit(c.scoped, { commandId: `bridge:${c.attemptId}:${c.callId}`, taskId: c.taskId, kind: "tool", label: label ?? `${v.name} ${v.version}`, operationId, background, longRunning: true, attemptId: c.attemptId, host: c.hostId });
+            await runs.start(admitted.id, c.taskId, launch);
+            const stopRevoked = (): void => { void jobs.requestCancel(this.#deps.principal, { commandId: `jrev:${admitted.id}`, jobId: admitted.id, reason: `${v.name} ${v.version} was revoked while the job ran`.slice(0, 300) }).catch(() => undefined); };
+            if (own.signal.aborted) stopRevoked(); else own.signal.addEventListener("abort", stopRevoked, { once: true });
+            handed = true;
+            void runs.ended(admitted.id).then(forget, forget);
+            return { text: JSON.stringify({ jobId: admitted.id }) };
+          } finally { if (!handed) forget(); }
         },
       },
     );

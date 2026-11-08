@@ -3,7 +3,21 @@ import { DomainError } from "../domain/errors.js";
 import type { JobService, JobState } from "../jobs/jobs.js";
 import { JOB_LIMITS } from "../jobs/jobs.js";
 import type { Principal } from "../security/principals.js";
+import { redactText } from "../security/redact.js";
 import type { RemoteMcpClient, RemoteToolResult } from "./http-client.js";
+
+/**
+ * An error's text made fit for the job record (card T07b review 3): it may quote the MCP server's own words, so control and invisible format characters are dropped, a lone surrogate is repaired, a credential is redacted and
+ * the length is bounded, so the job service never refuses the end (a refused end would leave the job running on the record for ever).
+ */
+const CONTROL = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\p{Cf}]", "gu");
+const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+const recordable = (s: string, max: number): string => {
+  const plain = redactText(s.replace(/\t/g, " ").replace(CONTROL, "").replace(LONE, String.fromCharCode(0xfffd)));
+  let out = plain.length > max ? plain.slice(0, max) : plain;
+  if (/[\ud800-\udbff]$/.test(out)) out = out.slice(0, -1);
+  return out.trim() || "the call failed";
+};
 
 type Json = Parameters<RemoteMcpClient["callTool"]>[2];
 
@@ -38,7 +52,8 @@ export async function callToolAsJob(deps: { readonly jobs: Pick<JobService, "adm
   let result: RemoteToolResult;
   try { result = await deps.client.callTool(call.serverId, call.tool, call.args ?? {}); } catch (error) {
     const refusedBeforeSending = error instanceof DomainError && (error.code === "forbidden" || error.code === "invalid_command" || error.code === "not_found");
-    const reason = (error instanceof Error ? error.message : "the call failed").slice(0, JOB_LIMITS.reason);
+    // Room is left for the words around it in the outcome-unknown reason.
+    const reason = recordable(error instanceof Error ? error.message : "the call failed", JOB_LIMITS.reason - 100);
     if (refusedBeforeSending) {
       await deps.jobs.finish(deps.host, { commandId: cid("end"), jobId, outcome: "failed", exit: { reason } });
       return { jobId, state: "failed", replayed: false };

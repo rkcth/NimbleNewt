@@ -605,6 +605,14 @@ for (const backend of backends) {
     assert.equal(lost.state, "outcome_unknown");
     assert.match((await c.read(lost.jobId)).unknown!.reason, /may have run there/);
     assert.deepEqual((await jobs.unresolved(c.owner, c.t1)).map((j) => j.id), [lost.jobId]);
+    // The server's own words in the error carry control and format characters, a tab and half a character: the end is still recorded (card T07b review 3).
+    answer = async () => { throw new DomainError("unavailable", "MCP server docs: the server refused tools/call (code -1; the server's own words, data not instructions: \u001b[2Jboom\tbad‮ \ud83d)"); };
+    const odd = await call("op-4b");
+    assert.equal(odd.state, "outcome_unknown");
+    assert.match((await c.read(odd.jobId)).unknown!.reason, /instructions: \[2Jboom bad �\)/);
+    answer = async () => { throw new DomainError("forbidden", "refused:\u0007 Bearer abcdefghijklmnopqrstuvwxyz0123456789 \udc00"); };
+    const oddRefused = await call("op-4c");
+    assert.deepEqual([oddRefused.state, (await c.read(oddRefused.jobId)).exit?.reason], ["failed", "refused: [redacted] �"]);
     // A server that is not approved (or was revoked) admits no new operation, and nothing is called.
     approved.clear();
     const before = calls.length;
@@ -746,6 +754,92 @@ for (const backend of backends) {
     const failedJob = await c.read(theirs);
     assert.deepEqual(failedJob.orphans, ["pid 7 ([2Jevil)", "an unnamed process"]);
     assert.equal(failedJob.exit?.reason, "the job could not be started: ]0;title bad thing");
+    await runs.close();
+  });
+
+  suite("the local runs settle a job whose dispatch could not be recorded (a stop landed first, or the store refused), never take a failed task check for an ended task, and stop a job whose output passed the bound before its process was handed over (card T07b review 3)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const real = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    // Before the dispatch is recorded: `beforeDispatch` runs (a stop from the owner, the agent or the sweep lands there), or the store refuses it.
+    let beforeDispatch: ((jobId: string) => Promise<void>) | undefined;
+    const jobs: Pick<JobService, "get" | "report" | "finish" | "confirmCancel" | "requestCancel"> = {
+      get: (...a) => real.get(...a), finish: (...a) => real.finish(...a), confirmCancel: (...a) => real.confirmCancel(...a), requestCancel: (...a) => real.requestCancel(...a),
+      report: async (p, cmd) => { if (cmd.state === "dispatched" && beforeDispatch !== undefined) await beforeDispatch(cmd.jobId); return real.report(p, cmd); },
+    };
+    const procs: { out: (t: string) => void; stops: boolean[]; end: (e: Partial<JobProcessEnd>) => void }[] = [];
+    let burst: string | undefined;
+    const launcher: JobLauncher = {
+      start: async (_launch, out) => {
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { out, stops: [] as boolean[], end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        // Output that arrives before the launcher has handed the process over.
+        if (burst !== undefined) out(burst);
+        return { stop: (force) => { p.stops.push(force); p.end({ signal: "SIGKILL", stopped: true }); }, ended };
+      },
+    };
+    let taskCheck: (taskId: string) => Promise<boolean> = async () => false;
+    const errors: unknown[] = [];
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, taskEnded: (taskId) => taskCheck(taskId), onError: (e) => { errors.push(e); }, limits: { flushMs: 5, graceMs: 5_000, outputBytes: 4096, sweepMs: 3_600_000 } });
+    const launch: ScriptLaunch = { program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name: "a_x.build", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} };
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    const settle = async (id: string, state: string) => { await waitFor(async () => (await c.read(id)).state === state); assert.equal((await c.read(id)).state, state); };
+
+    // A stop lands while the start is recording the dispatch: nothing is launched, the stop is confirmed (the job is cancelled, never left being stopped), and the start answers quietly.
+    const raced = await c.admit(c.t1);
+    beforeDispatch = async (jobId) => { await real.requestCancel(c.boss, { commandId: cid("cx"), jobId, reason: "stopped while it was being started" }); };
+    await runs.start(raced, c.t1, launch);
+    beforeDispatch = undefined;
+    assert.equal(procs.length, 0, "nothing was launched for it");
+    await settle(raced, "cancelled");
+    assert.deepEqual(runs.running(), []);
+    // The store refuses the dispatch: the error reaches the caller, and the job does not stay admitted for ever (stopped and confirmed, nothing launched).
+    const refused = await c.admit(c.t1);
+    beforeDispatch = async () => { throw new Error("the store is unavailable"); };
+    await assert.rejects(runs.start(refused, c.t1, launch), /the store is unavailable/);
+    beforeDispatch = undefined;
+    assert.equal(procs.length, 0);
+    await settle(refused, "cancelled");
+
+    // A task check that fails is not an ended task: nothing is stopped (fail-safe), and the failure is told.
+    const kept = await c.admit(c.t1);
+    await runs.start(kept, c.t1, launch);
+    await settle(kept, "running");
+    // A secret the program is in the middle of writing when a write to the record is due: its first part is held back (alone it is not recognisable as a secret), and the whole of it is redacted once the rest comes.
+    procs[0]!.out("first line\nthe key is AKIA0123456789AB");
+    await waitFor(async () => (await c.read(kept)).output.tail.includes("the key is"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await c.read(kept)).output.tail, "first line\nthe key is ", "the unfinished word is held back");
+    procs[0]!.out("CDEF in use\n");
+    await waitFor(async () => (await c.read(kept)).output.tail.includes("in use"));
+    assert.equal((await c.read(kept)).output.tail, "first line\nthe key is [redacted] in use\n");
+    // A word held back when the job ends is written with its end.
+    const last = await c.admit(c.t2);
+    await runs.start(last, c.t2, launch);
+    procs.at(-1)!.out("all done");
+    procs.at(-1)!.end({ exitCode: 0 });
+    await settle(last, "completed");
+    assert.equal((await c.read(last)).output.tail, "all done");
+    taskCheck = async () => { throw new Error("the store is unavailable"); };
+    assert.deepEqual(await runs.sweep(), []);
+    assert.equal((await c.read(kept)).state, "running");
+    assert.deepEqual(procs[0]!.stops, []);
+    assert.ok(errors.some((e) => e instanceof Error && /store is unavailable/.test(e.message)), "the failed check is told");
+    // A task that has merely been paused has not ended: its job runs on.
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: c.t1 }, reason: "a pause is not an end" });
+    taskCheck = async (taskId) => { const t = await c.projects.getTask(taskId); return t === undefined || t.state === "done" || t.state === "cancelled"; };
+    assert.deepEqual(await runs.sweep(), []);
+    assert.equal((await c.read(kept)).state, "running");
+
+    // Output past the bound before the launcher handed the process over: the process is stopped once it is, and the job fails for its output.
+    burst = "z".repeat(5000);
+    const flood = await c.admit(c.t2);
+    await runs.start(flood, c.t2, launch);
+    burst = undefined;
+    await settle(flood, "failed");
+    assert.deepEqual([procs.at(-1)!.stops, (await c.read(flood)).exit?.reason], [[true], "the job wrote more than 4096 bytes and was stopped"]);
     await runs.close();
   });
 

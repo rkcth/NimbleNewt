@@ -76,6 +76,8 @@ interface Run {
   finish(): void;
 }
 
+/** The longest trailing word a write before the end keeps back (see `#flush`); a longer one is written as it is. */
+const HELD_WORD = 1024;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms).unref(); });
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
 /**
@@ -150,6 +152,9 @@ export class LocalJobRuns {
   /** The jobs running in this process now. */
   running(): string[] { return [...this.#live.keys()]; }
 
+  /** Resolves once the job's end is recorded here (at once when it does not run here). */
+  ended(jobId: string): Promise<void> { return this.#live.get(jobId)?.done ?? Promise.resolve(); }
+
   /**
    * Starts an admitted job's process. A job that is no longer `admitted` (asking again after it started) or already runs here is left alone. A job that cannot be started (no room, the launcher refused) fails with the reason, never
    * stays admitted.
@@ -182,17 +187,39 @@ export class LocalJobRuns {
         return;
       }
       run.proc = proc;
-      // A stop that was asked while the process was being started is honoured now.
-      if (run.stopAsked === true || this.#closed) proc.stop(run.force === true || this.#closed);
+      // A stop that was asked while the process was being started is honoured now, and so is output past the bound that came before the process was handed over.
+      if (run.stopAsked === true || this.#closed || run.outputCut) proc.stop(run.force === true || this.#closed || run.outputCut);
       await this.#deps.jobs.report(host, { commandId: `jrun:${jobId}:${run.nonce}:r`, jobId, state: "running" }).catch((error: unknown) => {
         // A stop that landed first leaves the job cancellation_requested: it cannot become running, and the process is being ended.
         if (!(error instanceof DomainError && error.code === "invalid_command")) this.#deps.onError?.(error);
       });
       void proc.ended.then((end) => this.#end(run, host, end), (error: unknown) => this.#end(run, host, { exitCode: null, signal: null, timedOut: false, stopped: run.stopAsked === true, orphans: [], problem: error instanceof Error ? error.message : "the process was lost" }));
     } catch (error) {
-      if (run.proc === undefined) { this.#live.delete(jobId); run.finish(); }
+      if (run.proc === undefined) {
+        this.#live.delete(jobId);
+        // Nothing was launched (recording the dispatch failed: a stop landed first, from the owner, the agent or the sweep, or the store refused). The job never stays admitted or being stopped for a process that never
+        // comes: its stop is confirmed, or it is stopped and confirmed (card T07b review).
+        let settled = false;
+        try { settled = await this.#neverStarted(host, jobId); } catch (problem) { this.#deps.onError?.(problem); }
+        run.finish();
+        if (settled) return;
+      }
       throw error;
     }
+  }
+
+  /**
+   * A job nothing was launched for: a stop asked of it is confirmed (answers true: the stop is what happened); one still admitted (its dispatch failed otherwise) is stopped and confirmed, and the failure stays the caller's
+   * (answers false).
+   */
+  async #neverStarted(host: Principal, jobId: string): Promise<boolean> {
+    const job = await this.#deps.jobs.get(host, jobId);
+    if (job === undefined || job.history.some((h) => h.state === "dispatched" || h.state === "running")) return false;
+    const asked = job.state === "cancellation_requested";
+    if (job.state === "admitted") await this.#deps.jobs.requestCancel(host, { commandId: `jstop:${jobId}:not-dispatched`, jobId, reason: "the job could not be dispatched; nothing was started" });
+    else if (!asked) return false;
+    await this.#deps.jobs.confirmCancel(host, { commandId: `jstop:${jobId}:never-started`, jobId, result: "stopped" });
+    return asked;
   }
 
   /**
@@ -235,11 +262,18 @@ export class LocalJobRuns {
     if (run.timer === undefined) { run.timer = setTimeout(() => { run.timer = undefined; this.#flush(run); }, this.#limits.flushMs); run.timer.unref(); }
   }
 
-  /** Writes what is waiting to the job record, in pieces the record takes, one write after the other. */
-  #flush(run: Run): Promise<void> {
+  /**
+   * Writes what is waiting to the job record, in pieces the record takes, one write after the other. Before the end (`final` false) a trailing word of at most `HELD_WORD` characters is kept back for the next write: a secret
+   * cut there by the timing of a write would otherwise sit in the record, half of it unrecognisable to the redaction, until the rest came (card T07b review 3).
+   */
+  #flush(run: Run, final = false): Promise<void> {
     if (run.timer !== undefined) { clearTimeout(run.timer); run.timer = undefined; }
-    const text = run.pending;
+    let text = run.pending;
     run.pending = "";
+    if (!final) {
+      const word = /\S+$/u.exec(text);
+      if (word !== null && word[0].length <= HELD_WORD) { run.pending = word[0]; text = text.slice(0, word.index); }
+    }
     if (text.length === 0) return run.flushing;
     const host = this.#deps.principal();
     run.flushing = run.flushing.then(async () => {
@@ -259,7 +293,7 @@ export class LocalJobRuns {
   /** Records the end once: the stop confirmed when one was asked, else completed (exit 0) or failed with the reason. */
   async #end(run: Run, host: Principal, end: JobProcessEnd): Promise<void> {
     try {
-      await this.#flush(run);
+      await this.#flush(run, true);
       const job = await this.#deps.jobs.get(host, run.jobId);
       const orphans = end.orphans.slice(0, JOB_LIMITS.orphans).map((o) => clip(redactText(plainLine(o)).trim() || "an unnamed process", JOB_LIMITS.orphan));
       if (job === undefined) return;

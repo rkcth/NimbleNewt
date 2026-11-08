@@ -592,7 +592,7 @@ for (const backend of backends) {
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (_t: unknown, raw: unknown) => { touched.push((raw as { op: string }).op); return { v: 1, op: "x", ok: true, result: {} } as never; } },
       messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
-      jobs: { admit: async () => { touched.push("job.admit"); return { id: "job-x", replayed: false }; }, get: async () => { touched.push("job.get"); return undefined; }, requestCancel: async () => { touched.push("job.cancel"); return { id: "job-x", operation: "stop_tool", replayed: false }; } }, jobRuns: { room: () => undefined, start: async () => { touched.push("job.run"); } } });
+      jobs: { admit: async () => { touched.push("job.admit"); return { id: "job-x", replayed: false }; }, get: async () => { touched.push("job.get"); return undefined; }, requestCancel: async () => { touched.push("job.cancel"); return { id: "job-x", operation: "stop_tool", replayed: false }; } }, jobRuns: { room: () => undefined, start: async () => { touched.push("job.run"); }, ended: async () => undefined } });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = c.session(async (s) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
@@ -630,7 +630,7 @@ for (const backend of backends) {
     const fresh = (): ToolExecutionService => new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true,
-      jobs, jobRuns: { room: () => undefined, start: async (jobId: string) => { started.push(jobId); } } });
+      jobs, jobRuns: { room: () => undefined, start: async (jobId: string) => { started.push(jobId); }, ended: async () => undefined } });
     let handle = "";
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = c.session(async (s) => {
@@ -670,6 +670,46 @@ for (const backend of backends) {
     const status = good(out["status"]!);
     assert.deepEqual([(status["exit"] as JsonObject)["reason"], status["orphans"]], ["it ended badly", ["pid 9 (evil)"]]);
   });
+
+  for (const mode of ["finish", "cancel"] as const) {
+    suite(`a job of a tool version is one of its running calls until it ends: a revocation with policy ${mode} ${mode === "finish" ? "lists it and lets it run" : "lists it and stops it (a recorded Stop by the job host)"} (card T07b review 3)`, async (c) => {
+      c.revocation.mode = mode;
+      const ann = await c.agentFor("ann", [{ action: "job.write", project: c.project }]);
+      await c.task("t", ann);
+      const host = { id: "service:dispatcher", kind: "service", name: "dispatcher", grants: [] } as never;
+      const jobs = JobService.withEpoch(c.storage, c.epoch, { pauses: c.pauses }, { ...c.options, host: "service:dispatcher" });
+      const ends = new Map<string, () => void>();
+      const svc = new ToolExecutionService({
+        principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+        facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true, revocationPolicy: () => (mode === "finish" ? "finish" : "cancel"),
+        jobs, jobRuns: { room: () => undefined, start: async (jobId: string) => { await jobs.report(host, { commandId: uid("d"), jobId, state: "dispatched" }); await jobs.report(host, { commandId: uid("r"), jobId, state: "running" }); }, ended: (jobId: string) => new Promise<void>((resolve) => { ends.set(jobId, resolve); }) } });
+      let handle = "", name = "";
+      const listed: number[] = [];
+      c.worker.script = c.session(async (s) => {
+        c.svc = svc;
+        name = await c.install(s, "slow", "1.0.0");
+        const args = { tool: name, version: "1.0.0", input: { url: "https://a.test" } };
+        const first = good(await s.send("job.start", args, "j1"));
+        assert.equal(first["state"], "awaiting-approval");
+        const review = (await c.reviews.get(c.owner, first["reviewId"] as string))!;
+        await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+        handle = good(await s.send("job.start", args, "j1"))["jobId"] as string;
+        listed.push(svc.runningTotal(name, "1.0.0"));
+        await c.catalog.revoke(c.owner, { commandId: uid("rv"), name, version: "1.0.0", reason: "bad" });
+        await new Promise((r) => setTimeout(r, 50));
+        // The job's end is recorded: it is no longer a running call of the version.
+        ends.get(handle)!();
+        await new Promise((r) => setTimeout(r, 10));
+        listed.push(svc.runningTotal(name, "1.0.0"));
+      });
+      await c.tick();
+      assert.match(handle, /^job-/);
+      assert.deepEqual(listed, [1, 0], "listed while it runs, forgotten once it has ended");
+      const job = (await jobs.get(c.owner, handle))!;
+      if (mode === "finish") assert.equal(job.state, "running", "a revocation that lets running calls finish leaves the job alone");
+      else assert.deepEqual([job.state, job.cancel?.requestedBy, job.cancel?.reason], ["cancellation_requested", "service:dispatcher", `${name} 1.0.0 was revoked while the job ran`]);
+    });
+  }
 
   suite("registering a tool under a contract that restricts tools is allowed, but running it is still governed by the contract's ceiling", async (c) => {
     const ann = await c.agentFor("ann", [{ action: "tool.read-file", project: c.project }]);
