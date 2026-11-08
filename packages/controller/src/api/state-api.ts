@@ -182,7 +182,7 @@ export interface StateApiDeps {
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate" | "setResumeCondition">;
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
-  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
+  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen" | "archive" | "marks" | "mark">;
   readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;

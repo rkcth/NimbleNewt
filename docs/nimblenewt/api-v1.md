@@ -528,6 +528,27 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `handoff.archive.read`
+
+The whole of a hand-off package section that was cut to fit (card C07j). A cut section begins with `[cut: N of M entries, archive <id>]` and its package lists it in `cuts`; this reads the original by that archive ID, one part at a time. Readable by the owner, whoever may control the task, and the hand-off's sender and recipient; anyone else gets not found.
+
+Arguments:
+
+- `archiveId`: the archive the cut marker names (`hnd-…`)
+- `part` (optional): the part, from 0 (the answer says how many `parts` there are)
+
+Result: `{ item: { archiveId, handoffId, taskId, section, entries, chars, part, parts, text, truncated? } }`: `text` is part `part`; the parts joined are the section as the source gave it (credentials removed). `truncated` is set when the section was longer than an archive keeps (1,000,000 characters) and only its start is kept.
+
+#### `handoff.marks.get`
+
+What the owner marked for a task's hand-offs to keep (card C07j): when a package section is cut to fit, its entries holding one of these words or IDs are kept before the newest ones. Needs the right to control the task.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item: { taskId, marks: [text], revision } }`.
+
 #### `continuation.latest`
 
 The latest complete continuation of a task (for those who may work on it or read its history), or nothing when none was captured or none was durable.
@@ -2841,6 +2862,19 @@ Arguments:
 - `commandId`: required
 
 Result: `{ advanced: [id], failed: [id] }`.
+
+#### `handoff.marks.change`
+
+The owner marks what a task's hand-offs must keep when a package section is cut to fit (owner only, card C07j): an entry holding one of the marks (any case) is kept before the newest ones; the rest of the section stays readable through `handoff.archive.read`. `add` and `remove` take words or record IDs (3 to 200 characters, one line each, at most 20 marks per task); `remove` names marks there are. It applies from the next package collected. This is the form the chat uses.
+
+Arguments:
+
+- `taskId`: the task
+- `add` (optional): marks to add, for example `["dsk-…", "UTF-8 decision"]`
+- `remove` (optional): marks to take off, by their words
+- `commandId`: required
+
+Result: `{ item: { taskId, marks, revision, replayed } }`.
 
 #### `continuation.capture`
 
