@@ -107,3 +107,34 @@ test("a process that is not its own group leader is refused, not reported gone",
     assert.equal(child.exitCode, null, "left alone");
   } finally { child.kill("SIGKILL"); }
 });
+
+/** A clock with a boot clock too (card H08b): `step` sets the wall clock only (a correction); `sleep` advances wall and boot time (the machine was off); `coarse` rounds boot readings down to 10 ms, like Linux's `/proc/uptime`. */
+function bootClock(coarse = false) {
+  const c = { m: 1000, w: 1_700_000_000_000, b: 5_000_000.004 };
+  const k: WatchdogClock & { advance(ms: number): void; sleep(ms: number): void; step(ms: number): void } = {
+    mono: () => c.m, wall: () => c.w, boot: () => (coarse ? Math.floor(c.b / 10) * 10 : c.b),
+    advance: (ms) => { c.m += ms; c.w += ms; c.b += ms; }, sleep: (ms) => { c.w += ms; c.b += ms; }, step: (ms) => { c.w += ms; },
+  };
+  return k;
+}
+
+test("H08b: with a boot clock, a wall clock set forward or back is not a wake and costs no lease; a real sleep still is one", async () => {
+  const k = bootClock(); const { dog, log } = make(k);
+  k.advance(1000); await dog.tick();
+  const before = dog.remainingMs();
+  k.step(3_600_000); await dog.tick(); // the clock was corrected by an hour after boot
+  k.step(-7_200_000); await dog.tick(); // and then back
+  assert.deepEqual([dog.productive, dog.remainingMs(), log], [true, before, []], "a wall-clock step changes nothing");
+  k.sleep(3000); await dog.tick();
+  assert.equal(dog.remainingMs(), before - 3000, "a short sleep still uses up that much of the lease");
+  k.sleep(60_000); await dog.tick();
+  assert.deepEqual([dog.reason, log], ["wake", ["stop:wake"]]);
+});
+
+test("H08b: a coarse boot clock does not wear the lease down tick by tick", async () => {
+  const k = bootClock(true); const { dog } = make(k);
+  for (let i = 0; i < 1000; i++) { k.advance(7); await dog.tick(); }
+  // 7 s on the monotonic clock: 13 s of the 20 s lease are left, give or take one step of the boot clock.
+  assert.ok(Math.abs(dog.remainingMs() - 13_000) <= 10, String(dog.remainingMs()));
+  assert.equal(dog.productive, true);
+});

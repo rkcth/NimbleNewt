@@ -67,6 +67,16 @@ test("a start may carry the lease as a duration and a grace; bad or partial leas
   }
 });
 
+test("H08b: a renewal is asked by ID and answered as a duration or as fenced; bad answers are refused", () => {
+  assert.deepEqual(parseFromChild({ t: "lease.renew", id: 3 }), { t: "lease.renew", id: 3 });
+  assert.deepEqual(parseToChild({ t: "lease.ok", id: 3, leaseMs: 60_000 }), { t: "lease.ok", id: 3, leaseMs: 60_000 });
+  assert.deepEqual(parseToChild({ t: "lease.fenced", id: 3, reason: "moved" }), { t: "lease.fenced", id: 3, reason: "moved" });
+  for (const bad of [{ t: "lease.renew" }, { t: "lease.renew", id: -1 }]) assert.throws(() => parseFromChild(bad), ChannelError);
+  for (const bad of [{ t: "lease.ok", id: 3 }, { t: "lease.ok", id: 3, leaseMs: "60000" }, { t: "lease.ok", id: 3, leaseMs: 3_600_001 }, { t: "lease.ok", id: 3, leaseMs: -5 }, { t: "lease.fenced", id: 3 }, { t: "lease.fenced", id: 3, reason: "x".repeat(501) }]) {
+    assert.throws(() => parseToChild(bad), ChannelError, JSON.stringify(bad).slice(0, 80));
+  }
+});
+
 test("a start may say the controller reviewed the unfinished work of an earlier process (card H12b); a bad or empty reason is refused", () => {
   const ok = parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, recover: { reason: "the controller restarted the sandbox" } } })));
   assert.deepEqual((ok as { start: ChannelStart }).start.recover, { reason: "the controller restarted the sandbox" });

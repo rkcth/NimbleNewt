@@ -1268,7 +1268,7 @@ export class RemoteWorkerService {
   }
 
   /** Extends the attempt's lease. A worker in a partition that cannot send this loses the attempt when the lease ends. */
-  async attemptHeartbeat(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<{ until: string }> {
+  async attemptHeartbeat(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<{ until: string; leaseMs?: number }> {
     const b = await this.#running(host, sessionId, attemptId, placement);
     await this.#heartbeatAllowed(b);
     return this.#deps.dispatch.gateway(b.attemptId).heartbeat();

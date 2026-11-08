@@ -572,13 +572,14 @@ export class DispatcherService {
   }
 
   /** The worker is alive: extends its lease. Refused (`fenced`) once the attempt is no longer the task's current one, so a stale worker learns it has lost. */
-  async heartbeat(attemptId: string): Promise<{ until: string }> {
+  async heartbeat(attemptId: string): Promise<{ until: string; leaseMs: number }> {
     const d = await this.#running(attemptId);
     await this.#assertCurrent(d.body);
     const now = this.#runner.now();
     const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
     await this.#update(attemptId, (b) => ({ ...b, lease: { holder: this.#holder, until }, heartbeats: b.heartbeats + 1, lastHeartbeatAt: now, lastActivityAt: b.parked.length === 0 ? now : (b.lastActivityAt ?? b.startedAt ?? b.claimedAt) }));
-    return { until };
+    // The length goes with the time (card H08b): a worker whose clock is wrong counts the duration on its own clock instead of reading `until` against it.
+    return { until, leaseMs: this.#options.leaseMs };
   }
 
   /** The owner's decisions changed and the worker has put the new context in front of the agent: calls are allowed again under the new version. */
@@ -1656,7 +1657,7 @@ export class DispatcherService {
     const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }),
+      content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }),
     };
     // The dispatch contract goes with the order (card H12a): the task contract as it stands now, and what the allowance holds for this attempt.

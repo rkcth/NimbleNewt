@@ -7,6 +7,7 @@ import { PiAdapter } from "../adapter.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
 import { volatileContext } from "../prompt-layout.js";
+import { processClock } from "./clock.js";
 import { relayFetch } from "./relay-fetch.js";
 
 /**
@@ -32,10 +33,21 @@ export interface WorkerHooks {
     readonly tickMs?: number;
     /** Receives the watchdog so a test can drive it. */
     readonly onWatchdog?: (dog: LeaseWatchdog) => void;
-    /** Ends the process after the grace when it has not wound down. Default: exit code 75. */
+    /** Ends the process after the grace when it has not wound down. Default: the conversation store is closed (bounded, inside the grace) and the process exits with code 75 (`exit`). */
     readonly terminate?: (reason: LossReason) => void;
+    /** How the default termination ends the process. Default `process.exit`. */
+    readonly exit?: (code: number) => void;
+    /** Milliseconds between renewals of the lease (card H08b). Default a third of the lease, at least a second. 0: no timer (the test renews through `onRenew`). */
+    readonly renewMs?: number;
+    /** Receives the function that sends one renewal now, so a test can drive it. */
+    readonly onRenew?: (renewNow: () => void) => void;
   };
 }
+
+/** Of the grace after a loss, the share kept for closing the conversation store before the process exits: at most this, and at most a quarter of the grace. */
+const TERMINATE_FLUSH_MS = 1000;
+/** Renewals sent and not answered that the process remembers (an answer to one it forgot extends nothing). */
+const MAX_RENEWALS = 4;
 
 /** The Pi API implementations the process can speak, loaded when a route names one. */
 const APIS: Readonly<Record<string, () => Promise<{ stream: unknown; streamSimple: unknown }>>> = {
@@ -122,7 +134,14 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   let closed = false;
   let dog: LeaseWatchdog | undefined;
   let stopTicking: (() => void) | undefined;
+  let stopRenewing: (() => void) | undefined;
   let turnOpen = false;
+  /** Renewals in flight: their ID and the monotonic time each was sent at, which is what an answer counts from. */
+  const renewing = new Map<number, number>();
+  let nextRenewal = 0;
+  /** Set while the process asks whether a fenced bridge answer meant the lease is gone: `from` is the first renewal that counts as the answer (one sent after the fenced answer). */
+  let checking: { readonly from: number; readonly done: Promise<void>; readonly open: () => void } | undefined;
+  const endCheck = (): void => { const c = checking; checking = undefined; c?.open(); };
 
   const fault = (message: string, id?: number): void => send({ t: "fault", ...(id === undefined ? {} : { id }), message: message.slice(0, 3900) });
 
@@ -132,33 +151,65 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     relay?.closeAll(`the lease ended (${reason})`);
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: `the lease ended (${reason})` });
     bridgeWaiting.clear();
+    endCheck();
     try { await adapter?.root().abort(); } catch { /* the turn's result below is what is reported */ }
     // A turn that is running reports in its own `finally`-path; with none running the loss is told here. Either way the process is quiet once it has told the host.
     // With none running the loss is told as its own message: an unsolicited `result` has no waiter on the host and would be dropped.
     if (!turnOpen) { send({ t: "lease.lost", reason }); dog?.quiet(); }
   };
 
+  /** Asks the controller, through the host, to extend the lease (card H08b). The send time is kept, so the answer counts from it. Nothing is asked once the lease is gone. */
+  const renewNow = (): void => {
+    if (dog === undefined || !dog.productive || closed) return;
+    if (renewing.size >= MAX_RENEWALS) renewing.delete(renewing.keys().next().value as number);
+    const id = ++nextRenewal;
+    renewing.set(id, dog.sending());
+    send({ t: "lease.renew", id });
+  };
+
+  /**
+   * The process did not wind down inside the grace (a turn that ignores the abort): it is ended. The conversation store is closed first, so what it holds is flushed, but only for the share of the grace kept for it; then the process exits
+   * with code 75 whether or not the close finished.
+   */
+  const terminate = (reason: LossReason, flushMs: number): void => {
+    if (hooks.lease?.terminate !== undefined) return hooks.lease.terminate(reason);
+    const exit = hooks.lease?.exit ?? ((code: number): void => { process.exit(code); });
+    let ended = false;
+    const end = (): void => { if (!ended) { ended = true; clearTimeout(timer); exit(75); } };
+    const timer = setTimeout(end, flushMs);
+    void Promise.resolve().then(() => adapter?.close()).catch(() => undefined).finally(end);
+  };
+
   const begin = async (start: ChannelStart): Promise<void> => {
     started = start;
     if (start.lease !== undefined) {
       // The lease counts from now on this process's own monotonic clock: the controller sent a duration, so a wrong wall clock here changes nothing.
-      dog = new LeaseWatchdog({ ...(hooks.lease?.clock === undefined ? {} : { clock: hooks.lease.clock }), maxLeaseMs: start.lease.leaseMs, graceMs: start.lease.graceMs, onStop: authorityLost, onTerminate: (reason) => { if (hooks.lease?.terminate !== undefined) hooks.lease.terminate(reason); else process.exit(75); } }, start.lease.leaseMs);
+      // The termination comes at the end of the grace the host gave: the watchdog's own grace is shorter by the time kept for closing the store.
+      const flushMs = Math.min(TERMINATE_FLUSH_MS, Math.floor(start.lease.graceMs / 4));
+      dog = new LeaseWatchdog({ clock: hooks.lease?.clock ?? processClock(), maxLeaseMs: start.lease.leaseMs, graceMs: start.lease.graceMs - flushMs, onStop: authorityLost, onTerminate: (reason) => terminate(reason, flushMs) }, start.lease.leaseMs);
       const tickMs = hooks.lease?.tickMs ?? 1000;
       if (tickMs > 0) stopTicking = dog.run(tickMs);
+      const renewMs = hooks.lease?.renewMs ?? Math.max(1000, Math.floor(start.lease.leaseMs / 3));
+      if (renewMs > 0) { const timer = setInterval(renewNow, renewMs); timer.unref?.(); stopRenewing = () => clearInterval(timer); }
       hooks.lease?.onWatchdog?.(dog);
+      hooks.lease?.onRenew?.(renewNow);
     }
     relay = relayFetch(start.relayBase, send);
     // Whatever Pi's SDK uses to reach the model goes through the relay: nothing in the process can reach anything else.
     globalThis.fetch = relay.fetch;
     const models = await (hooks.models ?? ((s) => relayModels(s)))(start, relay.fetch);
     const storage = await (hooks.storage ?? ((dir) => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT)))(start.storeDir);
-    const transport = boundTransport(start.credential, (token, request) => new Promise<BridgeReply>((resolve) => {
+    const transport = boundTransport(start.credential, async (token, request) => {
+      // After a fenced answer no further call leaves until the controller has said whether the lease still holds (or the lease has ended).
+      while (checking !== undefined && dog?.productive === true) await checking.done;
+      return await new Promise<BridgeReply>((resolve) => {
       // Nothing productive starts once the lease is gone, and the reply says why.
       if (dog !== undefined && !dog.productive) return resolve({ ok: false, code: "unavailable", message: `the lease ended (${dog.reason})` });
       const id = ++nextBridge;
       bridgeWaiting.set(id, resolve);
       send({ t: "bridge", id, token, request: { op: request.op, callId: request.callId, ...(request.args === undefined ? {} : { args: request.args as never }) } });
-    }));
+      });
+    });
     const cache = start.cache === undefined ? undefined : { policy: () => ({ ...(start.cache!.key === undefined ? {} : { key: start.cache!.key }), ...(start.cache!.retention === undefined ? {} : { retention: start.cache!.retention }) }) };
     bridge = createBridge(transport);
     const tools = composeTools(bridge, [], start.namespaceId);
@@ -237,7 +288,26 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         if (lostFault(message.id)) return;
         try { await adapter.root().compact(); const tokens = await contextTokens(adapter); send({ t: "compact.ok", id: message.id, ...(tokens === undefined ? {} : { contextTokens: tokens }) }); } catch (error) { fault(`compact failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
-      case "bridge.reply": { const waiting = bridgeWaiting.get(message.id); bridgeWaiting.delete(message.id); waiting?.(message.reply as BridgeReply); return; }
+      case "bridge.reply": {
+        const waiting = bridgeWaiting.get(message.id); bridgeWaiting.delete(message.id);
+        // A fenced answer can mean the attempt was taken away, or only that it is frozen for a while (the bridge says both the same way): the controller is asked at once whether the lease still holds, and its `lease.fenced` stops the work.
+        // Until it answers, no further bridge call leaves the process.
+        if (!message.reply.ok && message.reply.code === "fenced" && dog?.productive === true && checking === undefined) {
+          let open!: () => void;
+          const done = new Promise<void>((resolve) => { open = resolve; });
+          checking = { from: nextRenewal + 1, done, open };
+          renewNow();
+        }
+        waiting?.(message.reply as BridgeReply);
+        return;
+      }
+      case "lease.ok": {
+        const sentAt = renewing.get(message.id); renewing.delete(message.id);
+        if (sentAt !== undefined) dog?.renewed(sentAt, message.leaseMs);
+        if (sentAt !== undefined && checking !== undefined && message.id >= checking.from) endCheck();
+        return;
+      }
+      case "lease.fenced": renewing.clear(); await dog?.lost(); return;
       case "close": closed = true; return;
       default: return;
     }
@@ -259,6 +329,8 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     if (error instanceof ChannelError) fault(error.message);
   } finally {
     stopTicking?.();
+    stopRenewing?.();
+    endCheck();
     relay?.closeAll("the channel closed");
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: "the channel closed" });
     bridgeWaiting.clear();

@@ -207,10 +207,11 @@ export class RemoteAttempt implements ToolGateway {
 
   #path(action: string): string { return `/worker/attempts/${this.attemptId}/${action}`; }
   async #post(action: string, body: Record<string, Json>, key?: string): Promise<unknown> {
-    try {
-      return (await this.client.send("POST", this.#path(action), { body: { placement: this.placement, ...body }, session: true, ...(key === undefined ? {} : { key }) })).body;
-    } catch (error) {
-      // The controller says the attempt is no longer this worker's: productive work stops at once, whatever the lease says.
+    return (await this.#send("POST", this.#path(action), { body: { placement: this.placement, ...body }, session: true, ...(key === undefined ? {} : { key }) })).body;
+  }
+  /** Every request about the attempt goes through here (card H08b): a fenced answer to any of them (a call, a control poll, a checkpoint, a publish, a file) tells the watchdog, so productive work stops at once, whatever the lease says. */
+  async #send(...args: Parameters<RemoteWorkerClient["send"]>): ReturnType<RemoteWorkerClient["send"]> {
+    try { return await this.client.send(...args); } catch (error) {
       if (error instanceof WorkerRequestError && error.fenced) await this.watchdog?.lost();
       throw error;
     }
@@ -223,12 +224,14 @@ export class RemoteAttempt implements ToolGateway {
   async begin(request: ToolCallRequest): ReturnType<ToolGateway["begin"]> { await this.watchdog?.assertProductive(); return await this.#post("begin", { request: request as unknown as Json }) as never; }
   async report(operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> { return await this.#post("report", { operationId, outcome: outcome as unknown as Json }) as never; }
   async usage(usage: TurnUsage): Promise<void> { await this.#post("usage", { usage: usage as unknown as Json }); }
-  async heartbeat(): Promise<{ readonly until: string }> {
+  async heartbeat(): Promise<{ readonly until: string; readonly leaseMs?: number }> {
     const sentAt = this.watchdog?.sending();
-    const answer = await this.#post("heartbeat", {}) as { readonly until: string };
-    // The lease counts from the moment the renewal was sent, so a reply that took long does not stretch it. The controller's `until` is read against this machine's clock; skew only shortens or lengthens by the skew, and the cap in the watchdog bounds it.
-    if (sentAt !== undefined) this.watchdog?.renewed(sentAt, Math.max(0, Date.parse(answer.until) - Date.now()));
-    return answer;
+    const answer = await this.#post("heartbeat", {}) as { readonly until: string; readonly leaseMs?: unknown };
+    // The lease counts from the moment the renewal was sent, so a reply that took long does not stretch it. It is the duration the controller says (card H08b), so a wrong clock on this machine changes nothing; only a controller that
+    // does not say it has its `until` read against this machine's clock (skew then shortens or lengthens it, and the cap in the watchdog bounds it).
+    const leaseMs = typeof answer.leaseMs === "number" && Number.isFinite(answer.leaseMs) && answer.leaseMs >= 0 ? answer.leaseMs : undefined;
+    if (sentAt !== undefined) this.watchdog?.renewed(sentAt, leaseMs ?? Math.max(0, Date.parse(answer.until) - Date.now()));
+    return { until: answer.until, ...(leaseMs === undefined ? {} : { leaseMs }) };
   }
   async acknowledgeDecisions(): Promise<void> { await this.#post("acknowledge", {}); }
 
@@ -391,20 +394,20 @@ export class RemoteAttempt implements ToolGateway {
 
   /** Sends a checkpoint; `sequence` must rise with each one. */
   async putCheckpoint(sequence: number, checkpoint: Json, key?: string): Promise<{ sequence: number; artifactId: string; digest: string }> {
-    return (await this.client.send("PUT", this.#path("checkpoint"), { body: { placement: this.placement, sequence, checkpoint }, session: true, ...(key === undefined ? {} : { key }) })).body as never;
+    return (await this.#send("PUT", this.#path("checkpoint"), { body: { placement: this.placement, sequence, checkpoint }, session: true, ...(key === undefined ? {} : { key }) })).body as never;
   }
 
   async pollControl(after = 0): Promise<SequencedControl[]> {
-    return ((await this.client.send("GET", `${this.#path("control")}?placement=${this.placement}&after=${after}`, { session: true })).body as { messages: SequencedControl[] }).messages;
+    return ((await this.#send("GET", `${this.#path("control")}?placement=${this.placement}&after=${after}`, { session: true })).body as { messages: SequencedControl[] }).messages;
   }
 
   async artifacts(): Promise<ArtifactListing[]> {
-    return ((await this.client.send("GET", `${this.#path("artifacts")}?placement=${this.placement}`, { session: true })).body as { artifacts: ArtifactListing[] }).artifacts;
+    return ((await this.#send("GET", `${this.#path("artifacts")}?placement=${this.placement}`, { session: true })).body as { artifacts: ArtifactListing[] }).artifacts;
   }
 
   /** One file, checked here as well: its bytes must hash to the digest the controller names. */
   async fetchFile(artifactId: string, path: string): Promise<Uint8Array> {
-    const r = await this.client.send("GET", `${this.#path(`artifacts/${artifactId}/file`)}?placement=${this.placement}&path=${encodeURIComponent(path)}`, { session: true });
+    const r = await this.#send("GET", `${this.#path(`artifacts/${artifactId}/file`)}?placement=${this.placement}&path=${encodeURIComponent(path)}`, { session: true });
     const said = r.headers[DIGEST_HEADER];
     const actual = createHash("sha256").update(r.raw).digest("hex");
     if (said !== actual) throw new WorkerRequestError(r.status, "integrity", `${path} does not match the digest the controller gave; it is not used`);
@@ -412,7 +415,7 @@ export class RemoteAttempt implements ToolGateway {
   }
 
   async publish(name: string, files: readonly { path: string; content: Uint8Array }[], key?: string): Promise<{ artifactId: string }> {
-    const r = await this.client.send("POST", this.#path("artifacts"), { body: { placement: this.placement, name, files: files.map((f) => ({ path: f.path, content: Buffer.from(f.content).toString("base64") })) }, session: true, ...(key === undefined ? {} : { key }) });
+    const r = await this.#send("POST", this.#path("artifacts"), { body: { placement: this.placement, name, files: files.map((f) => ({ path: f.path, content: Buffer.from(f.content).toString("base64") })) }, session: true, ...(key === undefined ? {} : { key }) });
     return r.body as never;
   }
 }

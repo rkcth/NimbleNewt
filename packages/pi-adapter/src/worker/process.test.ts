@@ -350,3 +350,133 @@ test("H08b3: after the loss no model call, compact, tell or checkpoint leaves th
   h.send({ t: "close" });
   await h.done;
 });
+
+/** The lease hooks of a test that drives renewals itself (card H08b). */
+function driven(k: ReturnType<typeof fakeClock>, extra: NonNullable<WorkerHooks["lease"]> = {}) {
+  const got: { dog?: LeaseWatchdog; renew?: () => void } = {};
+  // Without its own `exit` the test must not end the test process: termination does nothing then.
+  const lease: NonNullable<WorkerHooks["lease"]> = { clock: k, tickMs: 0, renewMs: 0, onWatchdog: (d: LeaseWatchdog) => { got.dog = d; }, onRenew: (r: () => void) => { got.renew = r; }, ...(extra.exit === undefined ? { terminate: () => undefined } : {}), ...extra };
+  // The process's own timers do not hold the event loop (standard input does in a real process); the test holds it while it waits.
+  const hold = setInterval(() => undefined, 1000);
+  return { got, lease, release: () => clearInterval(hold) };
+}
+
+test("H08b: a renewal counts from its send on the process's own clock; the lease is the duration the controller meant whatever the wall clock says; a replayed or unknown answer extends nothing", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage("done")]);
+  const k = fakeClock(); k.sleep(-400 * 24 * 3600_000); // this machine's wall clock is more than a year behind
+  const { got, lease, release } = driven(k);
+  const h = host({ ...hooks, lease });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  assert.equal(got.dog!.remainingMs(), 20_000, "the lease the controller meant, counted from the start");
+  k.advance(15_000);
+  got.renew!();
+  const ask = await h.next("lease.renew");
+  k.advance(4000); // the answer took 4 s
+  h.send({ t: "lease.ok", id: ask.id, leaseMs: 20_000 });
+  h.send({ t: "lease.ok", id: 999, leaseMs: 20_000 });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(got.dog!.remainingMs(), 16_000, "15 s + 20 s from the send, not from the answer");
+  h.send({ t: "lease.ok", id: ask.id, leaseMs: 20_000 }); // the same answer again
+  await new Promise((r) => setImmediate(r));
+  assert.equal(got.dog!.remainingMs(), 16_000, "a replayed answer does not stretch it");
+  k.advance(15_000); await got.dog!.tick();
+  assert.equal(got.dog!.productive, true, "renewed: past the first lease and still working");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  assert.equal((await h.next("result")).status, "completed");
+  k.advance(2000); await got.dog!.tick();
+  assert.equal(got.dog!.reason, "silent", "no further renewal: it ends when the renewed lease does");
+  assert.equal((await h.next("lease.lost")).reason, "silent");
+  h.send({ t: "close" });
+  await h.done;
+  release();
+});
+
+test("H08b: the renewal timer asks on its own; a lease.fenced answer stops the work at once (explicit), and nothing is asked after the loss", async () => {
+  const { hooks } = scripted();
+  const k = fakeClock();
+  const { got, lease, release } = driven(k, { renewMs: 5 });
+  const h = host({ ...hooks, lease });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  const ask = await h.next("lease.renew");
+  h.send({ t: "lease.fenced", id: ask.id, reason: "the attempt is not the active attempt of its task" });
+  assert.equal((await h.next("lease.lost")).reason, "explicit");
+  assert.equal(got.dog!.reason, "explicit");
+  const asked = h.seen.filter((m) => m.t === "lease.renew").length;
+  await new Promise((r) => setTimeout(r, 40));
+  got.renew!();
+  assert.equal(h.seen.filter((m) => m.t === "lease.renew").length, asked, "no renewal is asked once the lease is gone");
+  h.send({ t: "close" });
+  await h.done;
+  release();
+});
+
+test("H08b: a fenced bridge answer makes the process ask whether the lease still holds; a frozen attempt (lease.ok) goes on, a moved one (lease.fenced) stops and no further call leaves", async () => {
+  for (const answer of ["ok", "fenced"] as const) {
+    const { offline, hooks } = scripted();
+    offline.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("nimblenewt__task-get", {}, { id: "c1" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("nimblenewt__task-get", {}, { id: "c2" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("finished"),
+    ]);
+    const k = fakeClock();
+    const { got, lease, release } = driven(k);
+    const h = host({ ...hooks, lease });
+    h.send({ t: "start", v: 1, start: leased });
+    await h.next("ready");
+    h.send({ t: "run", requestId: "req-1", content: "work" });
+    const bridge = await h.next("bridge");
+    assert.equal(h.seen.some((m) => m.t === "lease.renew"), false);
+    h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: false, code: "fenced", message: "the attempt is frozen: integration" } });
+    const ask = await h.next("lease.renew");
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(h.seen.filter((m) => m.t === "bridge").length, 1, "no further call leaves while the controller is asked");
+    if (answer === "ok") {
+      h.send({ t: "lease.ok", id: ask.id, leaseMs: 20_000 });
+      const second = await h.next("bridge", h.seen.indexOf(bridge) + 1);
+      h.send({ t: "bridge.reply", id: second.id, reply: { ok: true, result: {} } });
+      assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "finished" });
+      assert.equal(got.dog!.productive, true);
+    } else {
+      h.send({ t: "lease.fenced", id: ask.id, reason: "the attempt has been replaced" });
+      const result = await h.next("result");
+      assert.match(result.error ?? "", /^lease lost \(explicit\)/);
+      assert.equal(h.seen.filter((m) => m.t === "bridge").length, 1, "no call left the process after the fenced answer");
+    }
+    h.send({ t: "close" });
+    await h.done;
+    release();
+  }
+});
+
+test("H08b: a turn that ignores the abort is ended inside the grace: closing the store gets at most a quarter of it, then the process exits with 75", async () => {
+  const { offline, hooks } = scripted();
+  // A model call that never ends and does not listen to the abort.
+  let unhang!: () => void;
+  offline.faux.setResponses([() => new Promise((resolve) => { unhang = () => resolve(fauxAssistantMessage("late")); })]);
+  const k = fakeClock(); const exits: number[] = [];
+  const { got, lease, release } = driven(k, { exit: (code: number) => { exits.push(code); } });
+  const h = host({ ...hooks, lease });
+  h.send({ t: "start", v: 1, start: leased }); // grace 5 s: 1 s of it is kept for closing the store
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  await new Promise((r) => setTimeout(r, 20));
+  k.advance(21_000); void got.dog!.tick(); // the stop waits for an abort the turn never honours
+  assert.equal(got.dog!.reason, "silent");
+  k.advance(3900); await got.dog!.tick();
+  assert.deepEqual(exits, [], "still inside the grace");
+  k.advance(200); await got.dog!.tick();
+  // The close of the store gets at most a quarter of the grace (1 s here) of real time; the store cannot close while the turn hangs, so the exit comes when that runs out.
+  const asked = Date.now();
+  while (exits.length === 0 && Date.now() - asked < 3000) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(Date.now() - asked < 1500, `the exit came ${Date.now() - asked} ms after the termination`);
+  await got.dog!.tick();
+  assert.deepEqual(exits, [75], "ended once, inside the 5 s grace");
+  // (The test process goes on: the model call is let go so the conversation can wind down.)
+  unhang();
+  h.end();
+  await h.done;
+  release();
+});

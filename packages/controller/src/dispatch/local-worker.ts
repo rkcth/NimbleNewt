@@ -53,8 +53,14 @@ type Mutable<T extends readonly unknown[]> = T[number][];
 export type BoundCall = (request: ToolCallRequest, executor: ToolExecutor) => Promise<ToolResult>;
 export interface RuntimeFactory {
   /** Opens the runtime for an attempt. `from` is a checkpoint to continue from (a restart, a resumed attempt); `call` is the one way a tool reaches the world. */
-  open(order: WorkOrder, call: BoundCall, from: JsonObject | undefined): Promise<AttemptRuntime>;
+  open(order: WorkOrder, call: BoundCall, from: JsonObject | undefined, lease?: AttemptLease): Promise<AttemptRuntime>;
 }
+
+/**
+ * The attempt's lease for the runtime (card H08b): the duration the dispatcher holds the attempt without a heartbeat, and the renewal, which is the attempt's own heartbeat through its gateway. A renewal throws a `fenced` DomainError when the
+ * attempt is no longer the task's current one (the runtime stops it); any other error means the controller could not be asked (before the turn has its gateway, too), and the lease runs on.
+ */
+export interface AttemptLease { readonly leaseMs: number; renew(): Promise<{ readonly leaseMs: number }> }
 
 export interface LocalWorkerOptions {
   readonly hostId: string;
@@ -253,7 +259,16 @@ export class LocalWorker implements WorkerHost {
       }
       return result;
     };
-    try { runtime = await options.runtimes.open(order, call, from); } catch (error) { await sandbox.close().catch(() => undefined); throw error; }
+    // The lease the dispatcher meant goes to the runtime as a duration (card H08b); its renewals are the attempt's heartbeats.
+    const lease: AttemptLease | undefined = order.leaseMs === undefined ? undefined : {
+      leaseMs: order.leaseMs,
+      renew: async () => {
+        if (gateway === undefined) throw new Error("the turn has not started; the lease cannot be renewed yet");
+        const beat = await gateway.heartbeat();
+        return { leaseMs: beat.leaseMs ?? Math.max(0, Date.parse(beat.until) - Date.now()) };
+      },
+    };
+    try { runtime = await options.runtimes.open(order, call, from, lease); } catch (error) { await sandbox.close().catch(() => undefined); throw error; }
 
     // The first call is admitted or refused before anything is sent (C07b). A refused one is made smaller once, if the runtime can, and asked again.
     let round = 0;
@@ -369,7 +384,7 @@ export class LocalWorker implements WorkerHost {
             if (stopped) { await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
             // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
             reported = undefined;
-            runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
+            runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom, lease);
             if (stopped) { await runtime.close().catch(() => undefined); await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
             // The new process takes the whole stored conversation into its next call: it is admitted again (and compacted once if it must be), and a refusal leaves the attempt frozen (the dispatcher keeps it so).
             const again = await admitFirst(runtime, "");

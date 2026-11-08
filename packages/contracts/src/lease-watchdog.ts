@@ -1,5 +1,9 @@
-/** Clocks the watchdog reads. `mono` never goes back and does not count time asleep; `wall` does count it, so the difference between them shows a suspend. */
-export interface WatchdogClock { mono(): number; wall(): number }
+/**
+ * Clocks the watchdog reads. `mono` never goes back and does not count time asleep; `wall` does count it, so the difference between them shows a suspend. `boot`, when the platform has one, is time since boot that DOES count time asleep and is
+ * never stepped (Linux `CLOCK_BOOTTIME`): with it a suspend is told from `boot` and `mono` alone, so a wall clock that is set or corrected is not mistaken for a wake (card H08b). Without it the wall clock is used, and a forward step of the wall
+ * clock larger than the jump limit reads as a wake.
+ */
+export interface WatchdogClock { mono(): number; wall(): number; boot?(): number }
 export const systemClock: WatchdogClock = { mono: () => Math.floor(performance.now()), wall: () => Date.now() };
 
 export type LossReason = "explicit" | "silent" | "supervisor" | "wake";
@@ -42,6 +46,9 @@ export class LeaseWatchdog {
   #lastMono: number;
   #lastWall: number;
   #lastPulse: number;
+  /** With a `boot` clock: its reading and `mono`'s when the watchdog started, and how much time asleep has already been taken off the lease. */
+  readonly #bootStart: { readonly boot: number; readonly mono: number } | undefined;
+  #sleptCounted = 0;
   #lost: LossReason | undefined;
   #stoppedAt: number | undefined;
   #quiet = false;
@@ -57,6 +64,7 @@ export class LeaseWatchdog {
     this.#lastMono = now;
     this.#lastWall = this.#clock.wall();
     this.#lastPulse = now;
+    this.#bootStart = this.#clock.boot === undefined ? undefined : { boot: this.#clock.boot(), mono: now };
   }
 
   /** The time to put on a renewal request before it is sent; give it back to `renewed`. */
@@ -94,7 +102,13 @@ export class LeaseWatchdog {
   async tick(): Promise<void> {
     const mono = this.#clock.mono();
     const wall = this.#clock.wall();
-    const gap = wall - this.#lastWall - (mono - this.#lastMono);
+    let gap: number;
+    if (this.#bootStart !== undefined) {
+      // Time asleep since the start, as the never-stepped boot clock tells it; only what was not counted before is new. Counted as a running total, so the boot clock's coarser steps cannot add up to a sleep that never happened.
+      const slept = this.#clock.boot!() - this.#bootStart.boot - (mono - this.#bootStart.mono);
+      gap = slept - this.#sleptCounted;
+      if (gap > 0) this.#sleptCounted = slept;
+    } else gap = wall - this.#lastWall - (mono - this.#lastMono);
     const jumped = gap > this.#o.sleepJumpMs;
     // The monotonic clock may not run while the machine sleeps: a shorter sleep than the jump limit still uses up that much of the lease.
     if (!jumped && gap > 0) this.#deadline -= gap;

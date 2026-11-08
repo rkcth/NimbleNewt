@@ -100,3 +100,44 @@ test("H08b3: a lease.lost from the process is observed by the host with no turn 
   assert.equal(process.leaseLost, "wake", "the first reason stands");
   f.exit();
 });
+
+test("H08b: the host answers a renewal with the controller's duration or as fenced, sends nothing when the controller cannot be asked, and ends a process that outlives the grace after a loss", async () => {
+  const f = fake();
+  const answers: (() => Promise<{ leaseMs: number } | { fenced: string }>)[] = [async () => ({ leaseMs: 60_000.7 }), async () => { throw new Error("the controller is restarting"); }, async () => ({ fenced: "the attempt has been replaced" })];
+  const process = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, renew: () => answers.shift()!() });
+  const starting = process.start({ ...start, lease: { leaseMs: 60_000, graceMs: 50 } }, 5000);
+  f.send({ t: "ready", v: 1 });
+  await starting;
+  for (const id of [1, 2, 3]) f.send({ t: "lease.renew", id });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(f.written.filter((m) => m.t.startsWith("lease.")), [{ t: "lease.ok", id: 1, leaseMs: 60_000 }, { t: "lease.fenced", id: 3, reason: "the attempt has been replaced" }]);
+  // The grace timer does not hold the host's event loop (the controller does); the test holds it while it waits.
+  const hold = setInterval(() => undefined, 1000);
+  const ended = await process.exited;
+  clearInterval(hold);
+  assert.equal(ended.killed, true, "the process did not end itself within the grace, so the host ended it");
+});
+
+test("H08b: a process that says its lease ended and then exits on its own is not killed; a host with no renewal answers nothing", async () => {
+  const f = fake();
+  const process = await launch(f);
+  const starting = process.start({ ...start, lease: { leaseMs: 60_000, graceMs: 30 } }, 5000);
+  f.send({ t: "ready", v: 1 });
+  await starting;
+  f.send({ t: "lease.lost", reason: "silent" });
+  f.exit({ exitCode: 75 });
+  const ended = await process.exited;
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual([ended.killed, ended.exitCode], [false, 75]);
+  const g = fake();
+  const other = await launch(g);
+  const s2 = other.start(start, 5000);
+  g.send({ t: "ready", v: 1 });
+  await s2;
+  g.send({ t: "lease.lost", reason: "silent" });
+  g.send({ t: "lease.renew", id: 1 });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(g.written.some((m) => m.t.startsWith("lease.")), false, "a host with no renewal answers nothing");
+  g.exit();
+  assert.equal((await other.exited).killed, false, "no lease in the start: nothing is scheduled");
+});

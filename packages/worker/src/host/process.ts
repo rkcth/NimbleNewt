@@ -15,6 +15,11 @@ export interface ProcessHandlers {
   bridge(token: string, request: { readonly op: string; readonly callId: string; readonly args?: { readonly [key: string]: unknown } }): Promise<BridgeReplyMessage>;
   /** Makes one model call for the process. It may refuse by throwing; the message goes to the process as the failure of its call. */
   relay(request: RelayRequest): Promise<RelayResponse>;
+  /**
+   * Renews the attempt's lease for the process (card H08b): the controller's answer as a duration, or `fenced` when the attempt is no longer the process's. A throw is "could not be asked": the process gets no answer and its lease runs on (and may end).
+   * Absent: renewals are not answered.
+   */
+  renew?(): Promise<{ readonly leaseMs: number } | { readonly fenced: string }>;
 }
 
 export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000 } as const;
@@ -41,6 +46,9 @@ export class WorkerProcess {
   #exit: RunResult | undefined;
   #leaseLost: string | undefined;
   readonly #leaseWaiters: ((reason: string) => void)[] = [];
+  /** The grace the start gave the process after a loss; the host ends the process itself when it has not gone by then. */
+  #graceMs: number | undefined;
+  #graceTimer: ReturnType<typeof setTimeout> | undefined;
 
   private constructor(handlers: ProcessHandlers) { this.#handlers = handlers; }
 
@@ -66,6 +74,7 @@ export class WorkerProcess {
   #end(why: Error): void {
     if (this.#endedWith !== undefined) return;
     this.#endedWith = why;
+    if (this.#graceTimer !== undefined) clearTimeout(this.#graceTimer);
     for (const w of this.#readyWaiters.splice(0)) w.reject(why);
     this.#resultWaiter?.reject(why);
     this.#resultWaiter = undefined;
@@ -106,7 +115,8 @@ export class WorkerProcess {
         for (const w of this.#readyWaiters.splice(0)) w.resolve();
         return;
       case "result": { const w = this.#resultWaiter; this.#resultWaiter = undefined; w?.resolve(m); return; }
-      case "lease.lost": if (this.#leaseLost === undefined) { this.#leaseLost = m.reason; for (const w of this.#leaseWaiters.splice(0)) w(m.reason); } return;
+      case "lease.lost": if (this.#leaseLost === undefined) { this.#leaseLost = m.reason; for (const w of this.#leaseWaiters.splice(0)) w(m.reason); } this.#containAfterGrace(`its lease ended (${m.reason.slice(0, 40)})`); return;
+      case "lease.renew": void this.#renew(m.id); return;
       case "checkpoint.ok": case "tell.ok": case "compact.ok": { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.resolve(m); return; }
       case "fault": {
         if (m.id !== undefined) { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.reject(new Error(m.message)); return; }
@@ -120,6 +130,23 @@ export class WorkerProcess {
       case "fetch": void this.#fetch(m); return;
       case "fetch.abort": this.#fetches.get(m.id)?.abort(); return;
     }
+  }
+
+  /** The process lost its authority: if it has not ended when the grace is over, the host ends it (the process's own termination is the first guard; this one holds when its event loop is stuck). */
+  #containAfterGrace(why: string): void {
+    if (this.#graceMs === undefined || this.#graceTimer !== undefined || this.#endedWith !== undefined) return;
+    this.#graceTimer = setTimeout(() => this.kill(`the worker process did not end within the grace after ${why}`), this.#graceMs);
+    this.#graceTimer.unref?.();
+  }
+
+  async #renew(id: number): Promise<void> {
+    if (this.#handlers.renew === undefined) return;
+    let answer: { readonly leaseMs: number } | { readonly fenced: string };
+    try { answer = await this.#handlers.renew(); } catch { return; }
+    if ("fenced" in answer) {
+      await this.#send({ t: "lease.fenced", id, reason: answer.fenced.slice(0, 500) });
+      this.#containAfterGrace("the controller fenced the attempt");
+    } else await this.#send({ t: "lease.ok", id, leaseMs: Math.max(0, Math.min(3_600_000, Math.floor(answer.leaseMs))) });
   }
 
   /** A process that keeps asking past its limits is broken or hostile. */
@@ -162,6 +189,7 @@ export class WorkerProcess {
   /** Starts the conversation and waits until the process says it is ready. */
   async start(start: ChannelStart, timeoutMs: number = PROCESS_LIMITS.readyMs): Promise<void> {
     if (this.#endedWith !== undefined) throw this.#endedWith;
+    this.#graceMs = start.lease?.graceMs;
     const ready = new Promise<void>((resolve, reject) => { this.#readyWaiters.push({ resolve, reject }); });
     ready.catch(() => undefined);
     const timer = setTimeout(() => this.kill(`the worker process was not ready after ${Math.round(timeoutMs / 1000)} seconds`), timeoutMs);

@@ -59,6 +59,8 @@ export interface WorkOrder {
   readonly requestId: string;
   /** The attempt is over at this time whatever the worker does. Absent: no time limit was set. */
   readonly expiresAt?: string;
+  /** The attempt's lease as a duration in ms (card H08b): how long the controller holds it without a heartbeat. A worker counts it on its own monotonic clock, never against the controller's `until`. */
+  readonly leaseMs?: number;
   /** Set when the attempt resumes earlier work: the conversation checkpoint to continue from. */
   readonly resumeFrom?: JsonObject;
   /** Set when the attempt resumes after calls waited for an approval: what to tell the agent (which calls were approved, denied or ran out). */
@@ -174,7 +176,7 @@ export interface ToolGateway {
   /** The model usage of a turn, so spending is recorded by the controller's accounting and not reported by the agent. */
   usage(usage: TurnUsage, requestKey?: string): Promise<void>;
   /** The worker is alive: extends the attempt's lease. Refused (`fenced`) once the attempt is no longer the task's current one. */
-  heartbeat(): Promise<{ readonly until: string }>;
+  heartbeat(): Promise<{ readonly until: string; readonly leaseMs?: number }>;
   /** The worker has put the owner's current decisions in front of the agent: calls refused for a changed decision revision are allowed again. */
   acknowledgeDecisions(): Promise<void>;
 }

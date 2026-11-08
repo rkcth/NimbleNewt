@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { JsonObject } from "../storage/types.js";
-import { LocalWorker, catalogFacts, type AttemptRuntime, type BoundCall, type RuntimeFactory, type SandboxPort } from "./local-worker.js";
+import { LocalWorker, catalogFacts, type AttemptLease, type AttemptRuntime, type BoundCall, type RuntimeFactory, type SandboxPort } from "./local-worker.js";
 import { operationKind, type ToolOperationBody } from "./model.js";
 import type { RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
 import { buildWorld, workGrants, type DispatchWorld } from "./testing/world.js";
@@ -13,7 +13,7 @@ after(stopServer);
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: ["python@3.12", "pkg:numpy@2.1"], workspaces: [] };
 
 for (const backend of backends) {
-  const setup = async (o: { sandbox?: SandboxPort; runtime?: (order: WorkOrder, call: BoundCall, from: JsonObject | undefined, log: string[]) => AttemptRuntime; schedule?: (beat: () => Promise<void>) => () => void } = {}) => {
+  const setup = async (o: { sandbox?: SandboxPort; runtime?: (order: WorkOrder, call: BoundCall, from: JsonObject | undefined, log: string[], lease?: AttemptLease) => AttemptRuntime; schedule?: (beat: () => Promise<void>) => () => void } = {}) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     await w.principals.enroll(w.owner, { commandId: "eh", kind: "host", name: "local", grants: [] });
@@ -22,12 +22,12 @@ for (const backend of backends) {
     const log: string[] = [];
     const sandbox: SandboxPort = o.sandbox ?? { open: async (recipe: RecipeSummary) => { log.push(`sandbox open ${recipe.revision}`); return { revision: recipe.revision, close: async () => { log.push(`sandbox close ${recipe.revision}`); } }; } };
     const runtimes: RuntimeFactory = {
-      open: async (order, call, from) => {
+      open: async (order, call, from, lease) => {
         log.push(`runtime open${from === undefined ? "" : ` from ${JSON.stringify(from)}`}`);
         return (o.runtime ?? ((_o, c) => ({
           run: async () => { const r = await c({ callId: "c1", tool: { name: "read-file", version: "1" }, args: { path: "a" } }, { kind: "local", run: async () => ({ text: "contents" }) }); return { status: "completed", text: r.state }; },
           checkpoint: async () => ({ saved: true }), close: async () => { log.push("runtime close"); },
-        })))(order, call, from, log);
+        })))(order, call, from, log, lease);
       },
     };
     const local = new LocalWorker({ hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "local-2.0.0", sandbox, runtimes, capabilities: () => CAPS, ...(o.schedule === undefined ? {} : { schedule: o.schedule }) });
@@ -106,6 +106,33 @@ for (const backend of backends) {
       assert.equal(report.started.length, 0);
       assert.equal((await w.assignments.getAttempt(attemptId!))!.state, "failed");
       assert.match((await d.get(w.owner, attemptId!))!.outcome!.summary, /no confinement/);
+    } finally { await store.close(); }
+  });
+
+  test(`${backend.name}: H08b: the runtime gets the dispatcher's lease as a duration with a renewal that is the attempt's heartbeat; before the turn it cannot renew, and once the attempt is over a renewal is fenced`, async () => {
+    const leases: AttemptLease[] = [];
+    const turn: { release?: () => void; renewed?: { leaseMs: number }; early?: string } = {};
+    const { store, w, d } = await setup({
+      runtime: (_o, _c, _f, _l, lease) => {
+        if (lease !== undefined) leases.push(lease);
+        void lease?.renew().then(() => { turn.early = "renewed"; }, (e: { code?: string }) => { turn.early = e.code ?? "not yet"; });
+        return { run: async () => { turn.renewed = await lease!.renew(); return await new Promise((resolve) => { turn.release = () => resolve({ status: "completed", text: "x" }); }); }, checkpoint: async () => ({}), close: async () => undefined };
+      },
+    });
+    try {
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { attemptId } = await w.task("t", ann);
+      await d.tick();
+      for (let i = 0; i < 50 && turn.release === undefined; i++) await new Promise((r) => setTimeout(r, 5));
+      assert.equal(leases.length, 1);
+      assert.equal(leases[0]!.leaseMs, 60_000, "the dispatcher's lease, as a duration");
+      assert.equal(turn.early, "not yet", "before the turn has its gateway a renewal fails without saying fenced (the lease runs on)");
+      assert.deepEqual(turn.renewed, { leaseMs: 60_000 });
+      const beats = (await d.get(w.owner, attemptId!))!.heartbeats;
+      assert.ok(beats >= 1, "the renewal was a heartbeat of the attempt");
+      turn.release!();
+      await d.idle();
+      await refuses("fenced", () => leases[0]!.renew());
     } finally { await store.close(); }
   });
 

@@ -116,6 +116,35 @@ for (const backend of backends) {
     await assert.rejects(mine.begin(READ("c2")), /lease lost/);
   });
 
+  suite("H08b: a renewal is the duration the controller meant, not a time read against the worker's clock; a fenced control poll, checkpoint, publish or file listing stops the attempt", async (c) => {
+    const r1 = await c.host("r1");
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    assert.deepEqual((await c.tick()).started, [attemptId]);
+    const offer = (await r1.client.offers())[0]!;
+    assert.equal(offer.order.leaseMs, 60_000, "the order carries the lease as a duration");
+    const renewals: number[] = [];
+    const dog = { assertProductive: async () => undefined, sending: () => 7, renewed: (_s: number, leaseMs: number) => { renewals.push(leaseMs); }, lost: async () => undefined };
+    const mine = r1.client.attempt(attemptId!, offer.placement, dog);
+    await mine.accept();
+    await mine.honorContract(offer.order, FULL_ABILITIES, c.clock.now());
+    // The controller's clock (the test's) is not this machine's real one: the lease is still the controller's 60 s.
+    const beat = await mine.heartbeat();
+    assert.deepEqual([beat.leaseMs, renewals], [60_000, [60_000]]);
+    const stale = (n: number) => { const told: string[] = []; return { told, attempt: r1.client.attempt(attemptId!, offer.placement + n, { ...dog, lost: async () => { told.push("lost"); } }) }; };
+    const cases: [string, (a: ReturnType<typeof stale>["attempt"]) => Promise<unknown>][] = [
+      ["control poll", (a) => a.pollControl(0)],
+      ["checkpoint", (a) => a.putCheckpoint(1, { x: 1 })],
+      ["publish", (a) => a.publish("late", [{ path: "late.txt", content: new TextEncoder().encode("late") }])],
+      ["artifacts", (a) => a.artifacts()],
+    ];
+    for (const [what, act] of cases) {
+      const s = stale(1);
+      await wireRefuses("fenced", () => act(s.attempt), 409);
+      assert.deepEqual(s.told, ["lost"], `a fenced ${what} tells the watchdog`);
+    }
+  });
+
   suite("a remote worker cannot take work it was not given: not another host's offer, not a higher placement number, not an attempt before it accepts, not an admission of its own", async (c) => {
     const r1 = await c.host("r1");
     const r2 = await c.host("r2");

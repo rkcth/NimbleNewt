@@ -66,7 +66,8 @@ export interface ChannelStart {
   readonly relayBase: string;
   readonly context?: ChannelContext;
   /**
-   * The lease the controller meant for this attempt, as a duration (card H08b): the process counts it from the moment it reads the start, on its own monotonic clock (a wall-clock step of more than 5 seconds is read as a wake and counts as losing the lease). Without it the process runs no watchdog.
+   * The lease the controller meant for this attempt, as a duration (card H08b): the process counts it from the moment it reads the start, on its own monotonic clock, renews it with `lease.renew` and stops on `lease.fenced`. A suspend of more than 5 seconds counts as losing the lease; on Linux it is told from the never-stepped boot clock, elsewhere from the wall clock (where a
+   * forward step of the wall clock still reads as a wake). Without it the process runs no watchdog.
    * `graceMs` is how long after work stops the process ends itself if it has not wound down.
    */
   readonly lease?: { readonly leaseMs: number; readonly graceMs: number };
@@ -90,7 +91,14 @@ export type ToChild =
   /** A piece of the model's reply body, base64. */
   | { readonly t: "fetch.chunk"; readonly id: number; readonly data: string }
   | { readonly t: "fetch.end"; readonly id: number }
-  | { readonly t: "fetch.error"; readonly id: number; readonly message: string };
+  | { readonly t: "fetch.error"; readonly id: number; readonly message: string }
+  /**
+   * The answer to the process's `lease.renew` (card H08b): the controller extended the attempt's lease and says for how long, as a duration (never a time on the controller's clock). The process counts it from the moment it SENT the request, on its
+   * own monotonic clock, so a slow or replayed answer never stretches the lease.
+   */
+  | { readonly t: "lease.ok"; readonly id: number; readonly leaseMs: number }
+  /** The controller refused the renewal because the attempt is no longer this process's (moved, replaced, ended): productive work stops at once. */
+  | { readonly t: "lease.fenced"; readonly id: number; readonly reason: string };
 
 /** Process to host. */
 export type FromChild =
@@ -106,6 +114,8 @@ export type FromChild =
   | { readonly t: "compact.ok"; readonly id: number; readonly contextTokens?: number }
   /** The lease ended (card H08b3): told on its own so the host sees it whether or not a turn is open (an unsolicited `result` has no waiter). `reason` is a `LossReason`. */
   | { readonly t: "lease.lost"; readonly reason: string }
+  /** Asks the controller to extend the attempt's lease (card H08b); answered `lease.ok` or `lease.fenced` with the same ID, or not at all (the controller could not be asked: the lease runs on and may end). */
+  | { readonly t: "lease.renew"; readonly id: number }
   /** The process could not do what it was asked (`id` names the request when there is one). */
   | { readonly t: "fault"; readonly id?: number; readonly message: string };
 
@@ -201,6 +211,7 @@ export function parseFromChild(value: unknown): FromChild {
       return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }) };
     }
     case "lease.lost": return { t: "lease.lost", reason: str(value, "reason", 40) };
+    case "lease.renew": return { t: "lease.renew", id: int(value, "id") };
     case "tell.ok": return { t: "tell.ok", id: int(value, "id") };
     case "compact.ok": { const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens"); return { t: "compact.ok", id: int(value, "id"), ...(contextTokens === undefined ? {} : { contextTokens }) }; }
     case "fault": return { t: "fault", ...(value["id"] === undefined ? {} : { id: int(value, "id") }), message: str(value, "message", 4000) };
@@ -223,6 +234,8 @@ export function parseToChild(value: unknown): ToChild {
     case "fetch.chunk": return { t: "fetch.chunk", id: int(value, "id"), data: base64(value, "data") };
     case "fetch.end": return { t: "fetch.end", id: int(value, "id") };
     case "fetch.error": return { t: "fetch.error", id: int(value, "id"), message: str(value, "message", 4000) };
+    case "lease.ok": return { t: "lease.ok", id: int(value, "id"), leaseMs: bounded(value, "leaseMs", 0, 3_600_000) ?? fail("leaseMs: required") };
+    case "lease.fenced": return { t: "lease.fenced", id: int(value, "id"), reason: str(value, "reason", 500) };
     default: return fail(`unknown message ${String(value["t"]).slice(0, 40)}`);
   }
 }

@@ -86,6 +86,12 @@ export interface HostRuntime {
   activeModelCalls?(): number;
   close(): Promise<void>;
 }
+/**
+ * The attempt's lease as the controller hands it to the runtime (card H08b): its length, as a duration, and the renewal (the controller's heartbeat for the attempt). The renewal throws an error whose `code` is `fenced` when the attempt is no longer
+ * this worker's; any other throw means the controller could not be asked.
+ */
+export interface HostLease { readonly leaseMs: number; renew(): Promise<{ readonly leaseMs: number }> }
+
 export interface HostSandboxSession { readonly revision: string; close(): Promise<void> }
 
 /** Where the worker process's program and everything it loads live on this machine, mounted read-only into the sandbox. */
@@ -220,6 +226,8 @@ export interface LocalHostOptions<Call> {
   readonly heldForReview?: (order: HostOrder) => Promise<boolean> | boolean;
   /** Told when the host left the hold on interrupted work in force because it is not reviewed (so the owner can be told); a throw is ignored. */
   readonly onHeld?: (order: HostOrder, why: string) => void;
+  /** How long a process that lost its lease may take to wind down before it is ended (card H08b), in ms. Default 10,000. Used only when the controller hands the runtime a lease. */
+  readonly leaseGraceMs?: number;
   /** The address the process uses for model calls (default `http://relay.invalid`). */
   readonly relayBase?: string;
   readonly clock?: () => number;
@@ -230,12 +238,13 @@ const UNKNOWN_SYSTEM_PROMPT_CHARS = 8000;
 const RELAY_BASE = "http://relay.invalid";
 const DEFAULT_REFRESH = "The owner's decisions changed. Read the decisions that apply to this task again before you act on anything you had planned.";
 const MAX_RUN_MS = 24 * 60 * 60 * 1000;
+const LEASE_GRACE_MS = 10_000;
 
 interface Reserved { readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; readonly limits: ResourceLimits | undefined; process?: WorkerProcess; closed: boolean }
 
 export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   readonly sandbox: { open(recipe: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> };
-  readonly runtimes: { open(order: HostOrder, call: Call, from: JsonObj | undefined): Promise<HostRuntime> };
+  readonly runtimes: { open(order: HostOrder, call: Call, from: JsonObj | undefined, lease?: HostLease): Promise<HostRuntime> };
   /** True when the owner's limits, best-effort setting and launch record are all connected (`limits`, `bestEffort`, `onLaunch` given); pass it to the `LocalWorker` so the controller can tell. */
   readonly ownerPolicy: boolean;
 } {
@@ -286,7 +295,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   };
 
   const runtimes = {
-    async open(order: HostOrder, call: Call, from: JsonObj | undefined): Promise<HostRuntime> {
+    async open(order: HostOrder, call: Call, from: JsonObj | undefined, lease?: HostLease): Promise<HostRuntime> {
       const entry = reserved.get(order.attemptId);
       if (entry === undefined || entry.closed) throw new Error("the attempt has no sandbox open");
       const model = await options.model(order);
@@ -326,6 +335,14 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         }, {
           bridge: (token, request) => options.bridge(order, call, token, request),
           relay: (request) => options.relay(order, request),
+          ...(lease === undefined ? {} : {
+            renew: async () => {
+              try { return { leaseMs: (await lease.renew()).leaseMs }; } catch (error) {
+                if ((error as { code?: unknown } | undefined)?.code === "fenced") return { fenced: String((error as Error).message ?? "the attempt is fenced").slice(0, 500) };
+                throw error;
+              }
+            },
+          }),
         });
       } catch (error) {
         const failed = (error as { limitFailures?: NonNullable<LaunchEnforcement["failed"]> }).limitFailures;
@@ -344,6 +361,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
           storeDir: hostPaths ? join(entry.workspace.home, "pi") : `${GUEST.home}/pi`, model, ...(recovery === undefined ? {} : { recover: recovery }), relayBase: options.relayBase ?? RELAY_BASE,
+          // The lease goes as the duration the controller meant (card H08b): the process counts it on its own monotonic clock, so a wrong clock in or beside the sandbox changes nothing.
+          ...(lease === undefined ? {} : { lease: { leaseMs: Math.max(1000, Math.min(3_600_000, Math.floor(lease.leaseMs))), graceMs: options.leaseGraceMs ?? LEASE_GRACE_MS } }),
           ...(options.context?.(order) === undefined ? {} : { context: options.context(order)! }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
