@@ -58,7 +58,8 @@ test("a long hand-off through the running controller: the newest decision, failu
     const artifacts = Array.from({ length: 150 }, (_, i) => ref("art", i));
     const decisions = [early, ...Array.from({ length: 188 }, (_, i) => ref("dsk", 1000 + i)), failure];
     const effects = Array.from({ length: 200 }, (_, i) => ({ effectId: ref("eff", i), state: i === 199 ? "unknown" : "pending" }));
-    const captured = await call(host, "continuation.capture", {
+    // Captured as the owner: a host captures only for an attempt it runs or is pinned to (card L04c), and this test starts no attempt.
+    const captured = await call(boot.token, "continuation.capture", {
       taskId: task, identity: "conv-1", agent: `agent:${a}`, boundary: { kind: "turn-complete" }, checkpoint: { format: 2, conversationId: 7, at: 41, digest: DIGEST, runtime: { name: "pi-durable", version: "1.3.0" } }, durable: { verified: true },
       continuation: { artifacts, decisions, pendingEffects: effects, budget: { spent: 1, remaining: 9, unit: "k-tokens" }, nextStep: `look up ${failure} first, then rerun fixture 7` },
       manifest: { summaryLineage: [], sourceRanges: [{ source: "history", from: 1, to: 41 }], compression: { state: "none", compactions: 0 }, branches: [], messageCursor: 41, routingRevision: 1, environmentRevision: 1, adapter: { name: "pi-durable", version: "1.3.0" } },
