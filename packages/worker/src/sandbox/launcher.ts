@@ -120,6 +120,18 @@ export interface SandboxRun {
 export const stripTrailingSeparator = (path: string): string => path.replace(/[\\/]$/, "");
 const SUPERVISOR_ROOT = stripTrailingSeparator(fileURLToPath(new URL("../../", import.meta.url)));
 const EXIT_DRAIN_MS = 2000;
+
+/** Whether some process holds this process ID now (a signal 0 reaches it, or exists but may not be signalled). */
+const idTaken = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
+
+/**
+ * Whether the launcher may kill the process group named by a run's launched process (review of L02d). Before Node has seen that process exit, always: it is the group's leader and holds the ID. After the exit (Node has
+ * reaped it), only while no process holds the ID: a group whose members still run keeps its ID from reuse, so if the ID is taken the run's group is empty and a group of that ID belongs to another program.
+ * `taken` is injectable for tests.
+ */
+export function groupKillSafe(pid: number, exited: boolean, taken: (pid: number) => boolean = idTaken): boolean {
+  return !exited || !taken(pid);
+}
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_STDIN_BYTES = 1024 * 1024;
@@ -256,7 +268,10 @@ export class SandboxLauncher {
     let ended = false;
     const finalKill = (): void => {
       // The process group first (it holds the launcher's own children), then the child itself; a sandbox with a private process list ends with its first process.
-      if (child.pid !== undefined) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ } }
+      // Once Node has seen the launched process exit (the drain while a survivor holds the output pipes), its ID is free again: the group is killed only while no process holds that ID (review of L02d). While a member of
+      // the run's group is alive the system cannot give the ID to a new process (POSIX keeps a process group's ID from reuse), so the group kill still reaches it; an ID that is taken means the old group is empty and
+      // a group with that ID now is someone else's.
+      if (child.pid !== undefined && groupKillSafe(child.pid, child.exitCode !== null || child.signalCode !== null)) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ } }
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
     };
     // Without a private process list, every descendant seen while the run goes is remembered with its start time, so one whose parent has since exited (and was handed to launchd) is still
