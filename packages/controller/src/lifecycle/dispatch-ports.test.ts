@@ -236,6 +236,26 @@ test("the checkpoint step waits for a worker still coming up no longer than the 
   await assert.rejects(ports.checkpoint(task, { by: staff, mode: "stop", deadlineAt: new Date(Date.now() + 2000).toISOString() }), /the store is down/, "any other failure still fails a Stop's checkpoint");
 });
 
+test("a Stop does not wait for a checkpoint of an attempt that never started (it waits for a place and has nothing to save); a Suspend and a started attempt still need one (card H10)", async () => {
+  const quiesced: string[] = [];
+  const bodies: Record<string, unknown> = { "att-wait": { taskId: "task-x", state: "waiting" }, "att-ran": { taskId: "task-x", state: "waiting", startedAt: "2026-11-08T10:00:00.000Z" } };
+  const dispatcher = {
+    liveAttemptsOf: async () => Object.keys(bodies), get: async (_by: Principal, id: string) => bodies[id] as never, operations: async () => [] as never, release: async () => undefined, stop: async () => undefined,
+    // No checkpoint comes back from either (the waiting one has no worker; the other lost its).
+    quiesce: async (_by: Principal, id: string) => { quiesced.push(id); return {}; },
+  };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }));
+  const task = { kind: "task", id: "task-x" } as const;
+  const deadlineAt = new Date(Date.now() + 2000).toISOString();
+  assert.equal((await ports.checkpoint(task, { by: staff, mode: "stop", deadlineAt })).durable, false, "an attempt that ran (and is waiting again) still needs its checkpoint");
+  assert.deepEqual(quiesced, ["att-ran"], "the never-started one was not asked");
+  delete bodies["att-ran"];
+  quiesced.length = 0;
+  assert.deepEqual(await ports.checkpoint(task, { by: staff, mode: "stop", deadlineAt }), { checkpointId: "task:task-x", durable: true, artifactsDurable: true });
+  assert.deepEqual(quiesced, []);
+  assert.equal((await ports.checkpoint(task, { by: staff, mode: "suspend", deadlineAt })).durable, false, "a Suspend is unchanged");
+});
+
 test("terminate asks a task's jobs and its swarm children's jobs to stop (not a tracked remote one), Force Stop escalates one already asked, a job the asker may not control is unresolved, and the children's attempts are stopped and listed (card L02d)", async () => {
   const stopped: string[] = [];
   const dispatcher = {

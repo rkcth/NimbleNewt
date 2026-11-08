@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { AdmissionService } from "../admission/service.js";
+import { BudgetService } from "../budgets/budgets.js";
 import type { HostLocalWork, WorkerHost } from "../dispatch/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, ScriptedWorker, workGrants } from "../dispatch/testing/world.js";
@@ -59,6 +60,10 @@ async function world(d: string, held: { work: () => HostLocalWork; asked: string
     const a = (await c.services.assignments.getAssignment(id))!;
     const attempt = (await c.services.assignments.admitAttempt({ commandId: `ad${n}`, actor: "inbox", taskId: id, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: agent }, harness: "pi" })).id;
     if (parent !== undefined) {
+      // A spawned child runs only on an allowance its parent delegated (card H10).
+      const budgets = BudgetService.withEpoch(c.storage, c.epoch);
+      if ((await budgets.report(owner, parent)) === undefined) await budgets.open(owner, { commandId: `b-${parent}`, taskId: parent, currency: "USD", computeMs: 36_000_000 });
+      await budgets.delegate(owner, { commandId: `bd-${id}`, parentTaskId: parent, childTaskId: id, computeMs: 3_600_000 });
       const ref = { kind: "swarm-link", id };
       await new CommandRunner(c.storage, c.epoch, {}).command("swarm.test-link", { commandId: `link-${n}`, actor: "system" }, async () => ({ payload: { id }, build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { parentTaskId: parent, projectId: project, createdBy: owner.id, createdAt: new Date().toISOString() } }], detail: { id } }) }));
     }
