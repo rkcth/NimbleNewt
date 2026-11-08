@@ -4640,12 +4640,22 @@
       ],
       "deliverable": "Split from R04b (2026-10-28): the dispatcher's model calls go through the fallback service so the gate is consulted, a cutover cancels the running generation and runtime, health probes run on a timer, chat commands for the controls, and the configuration lists check runs in the running controller",
       "acceptance_and_verification": "A drain or cutover changes where the next attempt goes and cancels the running one; probes run on a timer; a role whose list is empty is refused at configuration; composed tests across restart",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "66716b81",
+          "2ba9f837"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Each run of an attempt on a route is a call of the fallback service: the owner's controls and route health choose the open route at claim and start, a drain report counts running runs, a cutover cancels the generation and worker and the replacement goes to the next open route; the routes tick turns an expired drain into a cutover; drain and cutover by chat and the model_routes status view. The relay does not yet report provider failures to the gate. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "R05",

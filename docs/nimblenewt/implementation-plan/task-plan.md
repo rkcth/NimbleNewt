@@ -1655,6 +1655,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R04c — Bind model calls, probes and cancellation to drain and cutover
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `66716b81`, `2ba9f837`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Each run of an attempt on a route is a call of the fallback service: the owner's controls and route health choose the open route at claim and start, a drain report counts running runs, a cutover cancels the generation and worker and the replacement goes to the next open route; the routes tick turns an expired drain into a cutover; drain and cutover by chat and the model_routes status view. The relay does not yet report provider failures to the gate. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** R04, R04b, H12k.
 - **Deliverable:** Split from R04b (2026-10-28): the dispatcher's model calls go through the fallback service so the gate is consulted, a cutover cancels the running generation and runtime, health probes run on a timer, chat commands for the controls, and the configuration lists check runs in the running controller.
 - **Acceptance and verification:** A drain or cutover changes where the next attempt goes and cancels the running one; probes run on a timer; a role whose list is empty is refused at configuration; composed tests across restart.

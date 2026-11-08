@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **233 of 341 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **234 of 341 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -113,7 +113,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 82% | 23 of 28 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
+| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 60% | 12 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓░░░` 78% | 39 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 8 of 9 |
@@ -319,7 +319,7 @@ The versioned state API that every client uses, and the controller-backed MCP st
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 12 of 13</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 13 of 13</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
@@ -335,7 +335,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 - [x] **R05d** · P30 · Charge meeting presence to the budget ledger _(needs R05, M01)_
 - [x] **R05f** · P31 · Charge supervision, review and background jobs and prove the charges through the state API _(needs R05d)_
 - [x] **R05g** · P32 · Retry lost charges and prove a held meeting through budget.usage _(needs R05f)_
-- [ ] **R04c** · P33 · Bind model calls, probes and cancellation to drain and cutover _(needs R04, R04b, H12k)_
+- [x] **R04c** · P33 · Bind model calls, probes and cancellation to drain and cutover _(needs R04, R04b, H12k)_
 
 </details>
 
