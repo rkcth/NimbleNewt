@@ -216,6 +216,12 @@ for (const backend of backends) {
     const first = mean(r.hops.slice(0, 10).map((h) => size(h.hop)));
     const lastTen = mean(r.hops.slice(-10).map((h) => size(h.hop)));
     assert.ok(lastTen <= first * 1.05, `first 10 average ${Math.round(first)} tokens, last 10 average ${Math.round(lastTen)}: the first call grows with the number of hand-offs`);
+    // The same without the stored conversation: the hops' design front-loads it (the restarts of the first ten resume theirs, those of the last ten start fresh), which would hide a prompt that grows.
+    // Today nothing carried across hand-offs reaches the prompt (C07m), so neither comparison can fail on a defect of the code under test; they guard the prompt once C07m adds the hand-off to it.
+    const prompt = (hop: number): number => Math.max(...sentIn(r, hop).map((s) => s.tokens - s.stored));
+    const firstPrompt = mean(r.hops.slice(0, 10).map((h) => prompt(h.hop)));
+    const lastPrompt = mean(r.hops.slice(-10).map((h) => prompt(h.hop)));
+    assert.ok(lastPrompt <= firstPrompt * 1.05, `without the stored conversation: first 10 average ${Math.round(firstPrompt)} tokens, last 10 average ${Math.round(lastPrompt)}`);
   });
 
   test(`${backend.name}: 50 hand-offs: a stored conversation is continued only within the resume share of its route, and a fresh start says why`, async () => {

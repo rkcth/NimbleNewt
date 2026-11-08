@@ -1932,7 +1932,8 @@ for (const backend of backends) {
     assert.equal(c.worker.starts[3]!.resumeFrom !== undefined, true);
   });
 
-  suite("a turn that ends the moment its worker is stopped (as the local worker's does) does not end the attempt a shutdown leaves waiting: it resumes from its checkpoint (card C07l)", async (c) => {
+  // The worker package's local host answers `failed` (with its cache figures) when its process is closed, the controller's stand-ins `cancelled`: neither ends the attempt or opens a blocker.
+  for (const closedAs of ["cancelled", "failed"] as const) suite(`a turn that ends the moment its worker is stopped (as the local worker's does, ${closedAs}) does not end the attempt a shutdown leaves waiting: it resumes from its checkpoint (card C07l)`, async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, []));
     const { taskId, attemptId } = await c.task("long job", ann);
     let runs = 0;
@@ -1942,11 +1943,15 @@ for (const backend of backends) {
       const stopped = deferred<void>();
       worker.stop = async () => { worker.stopped++; stopped.resolve(); };
       await stopped.promise;
-      return { status: "cancelled", error: "the process was closed" };
+      return { status: closedAs, error: "the process was closed" };
     };
     assert.deepEqual((await c.dispatcher.tick()).started, [attemptId]);
     assert.deepEqual(await c.dispatcher.shutdown(), { closed: 1, errors: [] });
     await c.dispatcher.idle();
+    // The closed turn has answered by now (its stop resolved it); a second shutdown finds nothing running and changes nothing.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(await c.dispatcher.shutdown(), { closed: 0, errors: [] });
+    assert.equal(await c.blockers.openFor("dispatch_blocked", { kind: "task", id: taskId }), undefined, "no blocker was opened for the closed turn");
     const waiting = (await c.dispatcher.get(c.owner, attemptId!))!;
     assert.deepEqual([waiting.state, waiting.resumeNote, waiting.resumeFrom !== undefined], ["waiting", "the controller restarted; carry on from the checkpoint", true]);
     assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "active", "the attempt was not ended by the closed turn");
