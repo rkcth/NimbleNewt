@@ -237,6 +237,18 @@ export function saysMainAutomatic(words: string): boolean {
   return words.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
 }
 
+/**
+ * Whether the owner's own words accept a release in which a platform passed only after earlier failures (card X09b part 2 review): the word `flaky`, or the acceptance of the failures ("I accept the earlier
+ * failures", "acknowledge the flaky pass", "I know it failed first, go ahead"). A negated sentence does not accept anything. The model's own `acknowledgeFlaky: true` is never enough: approving a flaky
+ * release is the owner accepting that a platform had to be retried before it went green.
+ */
+const FLAKY_WORD = /\bflaky\b/i;
+const FLAKY_ACCEPT = /\b(?:accept\w*|acknowledg\w*|approve|agree|confirm|allow|ok(?:ay)?|fine|go ahead|understand\w*|aware|know|knew|seen|read)\b/i;
+const FLAKY_FAILURE = /\b(?:fail|fails|failed|failing|failure\w*)\b/i;
+export function saysAcknowledgeFlaky(words: string): boolean {
+  return words.split(/(?<=[.!?\n])\s+/).some((sentence) => (FLAKY_WORD.test(sentence) || (FLAKY_ACCEPT.test(sentence) && FLAKY_FAILURE.test(sentence))) && !NEGATED.test(sentence));
+}
+
 const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
 const DURATION_UNITS: Readonly<Record<string, number>> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60, h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600, d: 86_400, day: 86_400, days: 86_400 };
 /**

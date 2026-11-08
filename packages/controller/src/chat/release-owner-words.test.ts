@@ -99,9 +99,24 @@ for (const backend of backends) {
       const naiveApplied = await turn("m8", "yes, approve it plainly", [{ kind: "apply_proposal", proposalId: naiveShown[0]!.proposalId, evidence: "approve it", basis: "owner" }]);
       assert.equal(naiveApplied[0]!.status, "refused", JSON.stringify(naiveApplied[0]));
       assert.equal((await gate(cand)).approved, false, "a flaky release is not approved without the owner acknowledging it");
+
+      // ---- the model may not acknowledge the flaky pass on the owner's behalf: acknowledgeFlaky is a word the owner must say themselves (part 2 review, item 1).
+      const quiet = `approve the release candidate ${cand}`;
+      const quietShown = await turn("m7b", quiet, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: quiet, basis: "owner" }]);
+      assert.equal(quietShown[0]!.status, "refused", `a model-set acknowledgeFlaky on a flaky candidate is refused: ${JSON.stringify(quietShown[0])}`);
+      assert.equal(quietShown[0]!.code, "unsupported_value");
+      assert.match(quietShown[0]!.message!, /your own words/i);
+      assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
+
+      // ---- the owner's own word "flaky" is enough: they see the flaky pass in release.gate and say so.
+      const flakyWords = `the gate shows a flaky platform; approve the release candidate ${cand}`;
+      const flakyShown = await turn("m7c", flakyWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: flakyWords, basis: "owner" }]);
+      assert.equal(flakyShown[0]!.status, "proposed", `the owner's own "flaky" is an acknowledgement: ${JSON.stringify(flakyShown[0])}`);
+
       const ackWords = `approve the release candidate ${cand} with acknowledgeFlaky: I have read the gate and accept the earlier failures`;
       const ackShown = await turn("m9", ackWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: ackWords, basis: "owner" }]);
       assert.equal(ackShown[0]!.status, "proposed");
+      assert.match((ackShown[0]!.preview ?? []).join(" "), /linux x64 passed only after 1 earlier failure/, "the preview says which platform failed before it passed");
       const ackConfirm = await turn("m10", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(ackConfirm[0]!.status, "applied", JSON.stringify(ackConfirm[0]));
       assert.equal((await gate(cand)).approved, true);

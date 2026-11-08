@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, saysAcknowledgeFlaky, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -526,6 +526,8 @@ export class ChatService {
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
+      // Accepting a platform that passed only after earlier failures is the owner's own word, never the interpreter's (card X09b part 2 review): `acknowledgeFlaky` is refused unless their message says it.
+      if (intent.op === "release.approve" && intent.args["acknowledgeFlaky"] !== undefined && intent.args["acknowledgeFlaky"] !== false && !saysAcknowledgeFlaky(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "A release that passed only after earlier failures is approved only when your own words accept those failures (for example \"I have read the gate and accept the earlier failures, approve it with acknowledgeFlaky\"). The interpreter's acknowledgeFlaky was not used." }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       // One message answers a waiting meeting decision once: a second answer to the same decision could only fail when confirmed.
@@ -637,6 +639,14 @@ export class ChatService {
       const digest = String(found.result["digest"]);
       args["digest"] = digest;
       fillNotes.push(`Digest of the staged release, filled in from its record: ${digest}${found.result["ok"] === true ? "" : " (its files do not match this digest now; activation will refuse)"}`);
+    }
+    // An approval is shown with what the gate says just now, so a flaky candidate shows the owner which platform failed before it passed (card X09b part 2 review): their yes is bound to what they were told.
+    if (intent.op === "release.approve" && typeof args["candidateId"] === "string") {
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.gate", args: { candidateId: args["candidateId"] } });
+      if (found.ok) {
+        const flaky = (((found.result["gate"] as { cells?: readonly { cell: { os: string; arch: string }; flaky?: boolean; earlierFailures?: readonly { id: string }[] }[] } | undefined)?.cells) ?? []).filter((x) => x.flaky === true);
+        if (flaky.length > 0) fillNotes.push(`release.gate just now: ${flaky.map((x) => `${x.cell.os} ${x.cell.arch} passed only after ${x.earlierFailures?.length ?? 0} earlier failure${(x.earlierFailures?.length ?? 0) === 1 ? "" : "s"} (${(x.earlierFailures ?? []).map((f) => f.id).join(", ")})`).join("; ")}. Approving accepts that these platforms had to be retried before they went green.${args["acknowledgeFlaky"] === undefined || args["acknowledgeFlaky"] === false ? " Without acknowledgeFlaky this approval is refused." : ""}`);
+      }
     }
     // A restore is proposed with the plan the controller computes NOW from the backup's record; the approval token comes from that plan (never from the interpreter's words), so the owner's yes is bound to exactly what is shown.
     if (intent.op === "backup.restore.apply") {
