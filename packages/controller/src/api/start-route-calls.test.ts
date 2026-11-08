@@ -13,6 +13,8 @@ import { GenerationService } from "../generation/index.js";
 import { HostService } from "../hosts/index.js";
 import { PolicyService } from "../policy/index.js";
 import { DifficultyService } from "../routing/index.js";
+import { durationInWords } from "../chat/commands.js";
+import { routeCallsOf } from "./route-calls.js";
 import { startController, type Controller } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -296,5 +298,121 @@ test("the owner drains and cuts over by free-form chat: a drain follows the appr
     text = "What is out of service right now?";
     out = await turn(text, [{ kind: "status", request: { kind: "model_routes" }, evidence: text, basis: "owner" }]);
     assert.match(out.reply.join("\n"), /endpoint gpu2-http is cut over/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("each run's model call is reported once whatever the end: a worker that never starts withdraws it, a completed turn succeeds with its own charge once, a call sent but not recorded as sent is abandoned rather than left running, and an owner's hold on the task is not lifted by a cutover (card R04c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rends-"));
+  const held = holdingWorker();
+  const c = await open(d, held.worker);
+  try {
+    const { owner, project } = await setUp(c);
+    const fb = c.services.fallback;
+    const by = c.dispatch!.principal;
+    const calls = routeCallsOf(fb, c.services.cutover, by);
+    const request = { contextTokens: 1000, needs: ["tools"], data: "local-only" as const, paidAuthorized: false };
+    const tk = (await c.services.projects.createTask({ commandId: "tx", actor: owner.id, projectId: project, title: "Prune hedge" })).id;
+    const begin = async (key: string): Promise<{ callId: string; attempt: number }> => { const got = await calls.begin({ key, taskId: tk, route: "strata/qwen", role: "worker", request }); assert.ok("callId" in got, JSON.stringify(got)); return got; };
+    const inFlight = async (): Promise<number> => (await fb.inFlight(by)).filter((f) => f.taskId === tk).length;
+    // Never started: withdrawn, no charge, not counted; a repeat changes nothing.
+    const a = await begin("k-a");
+    await calls.ended({ ...a, sent: false, outcome: "failed", summary: "x", costMicros: 0 });
+    await calls.ended({ ...a, sent: false, outcome: "failed", summary: "x", costMicros: 0 });
+    assert.equal((await fb.call(by, a.callId))!.attempts[0]!.outcome, "skipped");
+    assert.equal(await inFlight(), 0);
+    // A completed turn: succeeded with what it was charged, once even when reported again.
+    const b = await begin("k-b");
+    await calls.sent(b);
+    await calls.ended({ ...b, sent: true, outcome: "succeeded", summary: "done", costMicros: 7 });
+    await calls.ended({ ...b, sent: true, outcome: "succeeded", summary: "done", costMicros: 7 });
+    assert.deepEqual([(await fb.spend(tk)).costMicros, (await fb.spend(tk)).calls], [7, 1]);
+    // Sent as far as the fallback service knows, but the attempt's record never said so (a crash between the two): abandoned, not left running for ever.
+    const e = await begin("k-e");
+    await calls.sent(e);
+    await calls.ended({ ...e, sent: false, outcome: "failed", summary: "lost", costMicros: 0 });
+    assert.equal((await fb.call(by, e.callId))!.attempts[0]!.outcome, "abandoned");
+    assert.equal(await inFlight(), 0, "nothing is left running on the route");
+    assert.equal((await fb.spend(tk)).failures ?? 0, 0, "an abandoned run is not a failure of the route or the task");
+
+    // An owner's pause of a task whose attempt is cut over: the attempt still ends, and the owner's hold stays.
+    const one = await task(c, owner, project, 1);
+    await c.dispatch!.dispatcher.tick();
+    assert.equal((await c.dispatch!.dispatcher.get(owner, one.attemptId))!.state, "running");
+    const generations = GenerationService.withEpoch(c.storage, c.epoch, { assignments: c.services.assignments } as never);
+    await generations.interrupt(owner, { commandId: "own-hold", taskId: one.taskId, mode: "finish_and_hold", reason: "the owner looks at it first" } as never);
+    const before = (await generations.gate(owner, one.taskId))?.gate.hold;
+    assert.equal(before?.reason, "the owner looks at it first");
+    await c.services.cutover.cutover(owner, { commandId: "cut-own", level: "endpoint", name: "strata-http", reason: "maintenance" } as never);
+    assert.equal((await c.dispatch!.dispatcher.get(owner, one.attemptId))!.state, "finished", "the attempt still ends");
+    assert.equal((await generations.gate(owner, one.taskId))?.gate.hold?.reason, "the owner looks at it first", "the owner's hold is left as it was");
+
+    // A worker that cannot start: the call begun for it is withdrawn (skipped, no charge), so no route is left with a call that never ran.
+    held.worker.failToStart = new Error("no sandbox");
+    const two = await task(c, owner, project, 2);
+    await c.dispatch!.dispatcher.tick();
+    const two2 = (await c.dispatch!.dispatcher.get(owner, two.attemptId))!;
+    assert.ok(two2.modelCall !== undefined, "a call was begun for it");
+    const callTwo = (await fb.call(by, two2.modelCall.callId))!;
+    assert.deepEqual([callTwo.attempts.at(-1)!.outcome, callTwo.attempts.at(-1)!.sentAt, callTwo.charges ?? []], ["skipped", undefined, []], JSON.stringify(callTwo));
+    assert.equal((await fb.inFlight(by)).filter((f) => f.taskId === two.taskId).length, 0);
+    held.worker.failToStart = undefined;
+
+    // A task whose model budget is used up does not start: the attempt waits (no call left behind) until the owner raises it.
+    const three = await task(c, owner, project, 3);
+    await fb.setBudget(owner, { commandId: "bud3", taskId: three.taskId, maxCostMicros: 0 });
+    const waited = await c.dispatch!.dispatcher.tick();
+    assert.ok(waited.skipped.some((s) => s.attemptId === three.attemptId && s.check === "route" && /budget is used up/.test(s.reason)), JSON.stringify(waited.skipped));
+    assert.notEqual((await c.dispatch!.dispatcher.get(owner, three.attemptId))!.state, "running");
+    assert.equal((await fb.inFlight(by)).filter((f) => f.taskId === three.taskId).length, 0);
+    await fb.setBudget(owner, { commandId: "bud3b", taskId: three.taskId, maxCostMicros: null });
+    await c.dispatch!.dispatcher.tick();
+    assert.equal((await c.dispatch!.dispatcher.get(owner, three.attemptId))!.state, "running", "raised: it starts");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a drain's time must be in the owner's own words: a number the model chose is refused, and the owner's own duration in any usual wording is taken (card R04c)", async () => {
+  assert.equal(durationInWords(3600, "Drain it over the next hour."), true);
+  assert.equal(durationInWords(3600, "drain for 60 minutes"), true);
+  assert.equal(durationInWords(1800, "give it half an hour"), true);
+  assert.equal(durationInWords(5400, "1.5 hours please"), true);
+  assert.equal(durationInWords(600, "Drain the strata box, we are swapping its disk."), false);
+  assert.equal(durationInWords(3600, "Drain gpu-3600 now"), false);
+  const d = mkdtempSync(join(tmpdir(), "nn-rdrainw-"));
+  const say: Record<string, unknown[]> = {};
+  const c = await open(d, holdingWorker().worker, { chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) } });
+  try {
+    const { token } = await setUp(c);
+    const call = api(c, token);
+    const text = "Drain the strata-svc service, we are swapping its disk.";
+    say[text] = [{ kind: "command", op: "routing.drain", args: { level: "service", name: "strata-svc", reason: "we are swapping its disk", drainSeconds: 600 }, evidence: text, basis: "owner" }];
+    const out = await c.chat!.submit(token, { messageId: "m1", text });
+    assert.equal(out.outcomes[0]!.status, "refused", JSON.stringify(out.outcomes));
+    assert.equal((await call("routing.controls", {})).result.controls.entries.length, 0, "nothing was drained");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a cutover that lands while the worker is starting: the run does not go on, the worker is let go and a replacement is admitted (card R04c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rstart-"));
+  const held = holdingWorker();
+  const c = await open(d, held.worker);
+  try {
+    const { owner, project } = await setUp(c);
+    const fb = c.services.fallback;
+    const by = c.dispatch!.principal;
+    let release!: () => void;
+    held.worker.startGate = new Promise<void>((r) => { release = r; });
+    const one = await task(c, owner, project, 1);
+    const ticking = c.dispatch!.dispatcher.tick();
+    for (let i = 0; i < 400 && !held.worker.starts.some((o) => o.attemptId === one.attemptId); i++) await new Promise((r) => setTimeout(r, 5));
+    const mc = (await c.dispatch!.dispatcher.get(owner, one.attemptId))!.modelCall!;
+    await fb.abandon(by, { commandId: "cut-while-starting", callId: mc.callId, attempt: mc.attempt, reason: "cutover of endpoint strata-http" });
+    release();
+    await ticking;
+    const ended = (await c.dispatch!.dispatcher.get(owner, one.attemptId))!;
+    assert.equal(ended.state, "finished", JSON.stringify(ended));
+    assert.match(ended.outcome!.summary, /taken back while the worker was starting/);
+    assert.equal((await fb.call(by, mc.callId))!.attempts[0]!.sentAt, undefined, "never marked sent");
+    assert.equal(held.worker.handles.find((h) => h.order.attemptId === one.attemptId)!.stopped, 1, "the worker was let go");
+    assert.notEqual((await c.services.assignments.getAssignment(one.taskId))!.activeAttemptId, one.attemptId, "a replacement was admitted");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

@@ -40,7 +40,12 @@ export function routeCallsOf(fallback: FallbackService, cutover: Pick<CutoverSer
     sent: async (c) => { await fallback.sent(principal, { commandId: `rc-sent:${c.callId}:${c.attempt}`, callId: c.callId, attempt: c.attempt }); },
     ended: async (c) => {
       const base = { callId: c.callId, attempt: c.attempt };
-      if (!c.sent) return once(() => fallback.withdraw(principal, { ...base, commandId: `rc-wd:${c.callId}:${c.attempt}`, reason: "the worker for it never started" }));
+      if (!c.sent) {
+        try { await fallback.withdraw(principal, { ...base, commandId: `rc-wd:${c.callId}:${c.attempt}`, reason: "the worker for it never started" }); return; } catch (error) { if (!isDomainError(error, "invalid_transition")) throw error; }
+        // Refused: the fallback service was told it was sent, but the attempt's record never said so (a crash, or a failed write, between the two). It may have run, so it is abandoned (a possible charge on a paid
+        // route) rather than left running for ever; a call that is already over refuses this as well, which changes nothing.
+        return once(() => fallback.abandon(principal, { ...base, commandId: `rc-wdab:${c.callId}:${c.attempt}`, reason: "the attempt ended; it may have been sent before its worker was recorded as started" }));
+      }
       const usage = { inputTokens: 0, outputTokens: 0, costMicros: c.costMicros };
       if (c.outcome === "succeeded") return once(() => fallback.succeeded(principal, { ...base, commandId: `rc-ok:${c.callId}:${c.attempt}`, usage }));
       if (c.outcome === "failed") return once(() => fallback.failed(principal, { ...base, commandId: `rc-fail:${c.callId}:${c.attempt}`, failure: { message: "the attempt ended as failed; its reason is in the attempt's record" }, usage }));

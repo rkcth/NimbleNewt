@@ -220,6 +220,26 @@ export function saysMainAutomatic(words: string): boolean {
   return words.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
 }
 
+const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
+const DURATION_UNITS: Readonly<Record<string, number>> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60, h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600, d: 86_400, day: 86_400, days: 86_400 };
+/**
+ * Whether the owner's own words state this length of time in seconds (card R04c: a drain's `drainSeconds`): "3600 seconds", "30 minutes", "an hour", "the next hour", "2 hrs", "half an hour", "1.5 hours". A number the model chose is not
+ * the owner's: a drain that runs out too soon cancels running work, so it is refused and the owner is asked to say how long.
+ */
+export function durationInWords(seconds: number, text: string): boolean {
+  if (!Number.isFinite(seconds) || seconds <= 0) return false;
+  // Record IDs and anything shaped like one are not the owner's numbers.
+  const t = text.replace(/[‘’]/g, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ");
+  if (seconds === 1800 && /\bhalf\s+an?\s+hour\b/.test(t)) return true;
+  const units = Object.keys(DURATION_UNITS).sort((x, y) => y.length - x.length).join("|");
+  const re = new RegExp(`(?:^|[^0-9a-z.])(\\d+(?:\\.\\d+)?|${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})[ -]?(${units})\\b`, "g");
+  for (const m of t.matchAll(re)) {
+    const n = /^\d/.test(m[1]!) ? Number(m[1]) : DURATION_NUMBERS[m[1]!]!;
+    if (Math.round(n * DURATION_UNITS[m[2]!]!) === seconds) return true;
+  }
+  return false;
+}
+
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
