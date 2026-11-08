@@ -22,7 +22,7 @@ export interface ProcessHandlers {
   renew?(): Promise<{ readonly leaseMs: number } | { readonly fenced: string }>;
 }
 
-export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000 } as const;
+export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000 } as const;
 
 interface Waiter<T> { readonly resolve: (value: T) => void; readonly reject: (error: Error) => void }
 type Result = Extract<FromChild, { t: "result" }>;
@@ -39,6 +39,8 @@ export class WorkerProcess {
   readonly #asked = new Map<number, Waiter<FromChild>>();
   readonly #fetches = new Map<number, AbortController>();
   #bridges = 0;
+  /** Lease renewals the host is asking the controller about now (card H08b): each is a write at the controller, so a process may not have more than a few waiting. */
+  #renewals = 0;
   #pendingBytes = 0;
   #refused = 0;
   #next = 0;
@@ -141,8 +143,11 @@ export class WorkerProcess {
 
   async #renew(id: number): Promise<void> {
     if (this.#handlers.renew === undefined) return;
+    // More renewals waiting than the process itself remembers is a broken or hostile process: the extra ones are not asked (and get no answer, so they extend nothing).
+    if (this.#renewals >= PROCESS_LIMITS.renewInFlight) return this.#refuse();
     let answer: { readonly leaseMs: number } | { readonly fenced: string };
-    try { answer = await this.#handlers.renew(); } catch { return; }
+    this.#renewals++;
+    try { answer = await this.#handlers.renew(); } catch { return; } finally { this.#renewals--; }
     if ("fenced" in answer) {
       await this.#send({ t: "lease.fenced", id, reason: answer.fenced.slice(0, 500) });
       this.#containAfterGrace("the controller fenced the attempt");

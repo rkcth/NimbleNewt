@@ -142,3 +142,13 @@ test("H08b: a process that says its lease ended and then exits on its own is not
   g.exit();
   assert.equal((await other.exited).killed, false, "no lease in the start: nothing is scheduled");
 });
+
+test("H08b: a process may not keep more renewals waiting at the controller than a few; one that floods them is stopped", async () => {
+  const f = fake();
+  let asked = 0;
+  const never = new Promise<never>(() => undefined);
+  const process = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, renew: () => { asked++; return never; } });
+  for (let i = 1; i <= PROCESS_LIMITS.renewInFlight + PROCESS_LIMITS.refusals + 5; i++) f.send({ t: "lease.renew", id: i });
+  assert.equal(asked, PROCESS_LIMITS.renewInFlight, "only a few renewals reach the controller at once");
+  assert.equal((await process.exited).killed, true);
+});

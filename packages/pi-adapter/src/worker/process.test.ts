@@ -29,12 +29,21 @@ function host(hooks: WorkerHooks) {
     seen, done, discovers,
     send: (m: ToChild): void => { toChild.write(encodeMessage(m)); },
     end: (): void => { toChild.end(); },
-    async next<T extends FromChild["t"]>(t: T, from = 0): Promise<Extract<FromChild, { t: T }>> {
-      for (;;) {
-        const found = seen.slice(from).find((m) => m.t === t);
-        if (found !== undefined) return found as never;
-        await new Promise<void>((resolve) => waiters.push(resolve));
-      }
+    /** The first message of that kind from `from` on; a process that never sends it fails the test after `ms` instead of hanging it. */
+    next<T extends FromChild["t"]>(t: T, from = 0, ms = 45_000): Promise<Extract<FromChild, { t: T }>> {
+      const deadline = Date.now() + ms;
+      const found = (async (): Promise<Extract<FromChild, { t: T }>> => {
+        for (;;) {
+          const m = seen.slice(from).find((x) => x.t === t);
+          if (m !== undefined) return m as never;
+          const left = deadline - Date.now();
+          if (left <= 0) throw new Error(`the process sent no ${t} within ${ms} ms`);
+          await new Promise<void>((resolve) => { const timer = setTimeout(resolve, left); timer.unref(); waiters.push(() => { clearTimeout(timer); resolve(); }); });
+        }
+      })();
+      // A wait that loses a race (`Promise.race`) and later runs out is not an unhandled rejection; an awaited one still fails its test.
+      found.catch(() => undefined);
+      return found;
     },
   };
 }
