@@ -50,3 +50,13 @@ test("locks the sender holds are listed in the package, a failing or empty sourc
   assert.equal((await sources({ locks: async () => [] }).collect({ taskId: "task-1", from, to })).sections["locks"], undefined, "no known hold is not the claim of no locks");
   assert.equal((await sources({ locks: async () => { throw new Error("down"); } }).collect({ taskId: "task-1", from, to })).sections["locks"], undefined);
 });
+
+test("drafts and responsibilities are listed oldest change first, whatever order their hashed IDs come in, so a cut keeps the newest (card C07j review)", async () => {
+  records.clear();
+  const s = (await sources({
+    drafts: async () => [{ id: "dsk-b", title: "new", body: "n", updatedAt: "2026-11-02T00:00:00.000Z" }, { id: "dsk-a", title: "old", body: "o", updatedAt: "2026-11-01T00:00:00.000Z" }],
+    responsibilities: async () => [{ id: "rsp-z", title: "late", desiredCondition: "x", state: "active", updatedAt: "2026-11-03T00:00:00.000Z" }, { id: "rsp-y", title: "early", desiredCondition: "y", state: "active", updatedAt: "2026-10-01T00:00:00.000Z" }],
+  }).collect({ taskId: "task-1", from, to })).sections;
+  assert.equal(s["drafts"], 'dsk-a "old": o\ndsk-b "new": n');
+  assert.deepEqual(s["responsibilities"]!.split("\n").slice(1).map((l) => l.split(" ")[0]), ["rsp-y", "rsp-z"]);
+});

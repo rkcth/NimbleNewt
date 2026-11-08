@@ -11,6 +11,10 @@ interface ContinuationShape {
   readonly nonCheckpointableTools: readonly { readonly name: string; readonly reason: string }[];
 }
 
+/** Oldest change first (a stable sort: items with no time keep their place before those with one, in the source's order). */
+const oldestFirst = <T extends { readonly updatedAt?: string }>(items: readonly T[] | undefined): readonly T[] | undefined =>
+  items?.map((x, i) => ({ x, i })).sort((p, q) => (p.x.updatedAt ?? "").localeCompare(q.x.updatedAt ?? "") || p.i - q.i).map((p) => p.x);
+
 /**
  * What the controller itself knows for a hand-off package (card L03b): the task's title and description as the brief, the contract's acceptance criteria and version, and the evidence the contract
  * requires. The sections only the run knows (next action, unfinished work, completed work, background operations, risks, versions) come from the task's latest complete continuation (card L03g). Sections that need other services (drafts, uncommitted changes, locks) are left out until those are connected; the package then reports
@@ -24,9 +28,9 @@ export function controllerHandoffSources(deps: {
   /** Whether the agent holds the right to work on tasks of the project (card L03d): a task is not handed to an agent that could not act on it. Without it the access is not checked. */
   canWork?(agentId: string, projectId: string): Promise<boolean>;
   /** The sending agent's shared drafts on this task (never private scratch): the recipient could not otherwise read another agent's draft. */
-  drafts?(request: { taskId: string; projectId: string; from: Owner }): Promise<readonly { readonly id: string; readonly title: string; readonly body: string }[]>;
+  drafts?(request: { taskId: string; projectId: string; from: Owner }): Promise<readonly { readonly id: string; readonly title: string; readonly body: string; /** When it last changed: the section lists them oldest first, so a cut keeps the newest (card C07j review). */ readonly updatedAt?: string }[]>;
   /** The responsibilities the sending agent answers for in the task's project, whether or not they touch this task. */
-  responsibilities?(request: { projectId: string; from: Owner }): Promise<readonly { readonly id: string; readonly title: string; readonly desiredCondition: string; readonly state: string }[]>;
+  responsibilities?(request: { projectId: string; from: Owner }): Promise<readonly { readonly id: string; readonly title: string; readonly desiredCondition: string; readonly state: string; /** As for drafts. */ readonly updatedAt?: string }[]>;
   /** What the sending agent holds locked or leased for this task (workspace, branch, integrator lease), when a service keeps such holds. Each line is limited to what `to` may see; a line may also say that part of the answer is missing (a gap, not an absence). */
   locks?(request: { taskId: string; projectId: string; from: Owner; to: Owner }): Promise<readonly string[]>;
   /** Extra sections from services that hold them (continuation, locks, background operations), each already limited to what the recipient may see. */
@@ -67,9 +71,10 @@ export function controllerHandoffSources(deps: {
       const projectId = task?.projectId;
       // Each of these is the sender's own and is given to the recipient by this hand-off, which the caller was already allowed to ask for; a failing source leaves its section missing rather than failing the package.
       if (projectId !== undefined) {
-        const drafts = await deps.drafts?.({ taskId, projectId, from }).catch(() => undefined);
+        // Record IDs are hashes, so a source's ID order says nothing of age: both lists are put oldest first, as every section is, for a cut keeps the last entries (card C07j review).
+        const drafts = await deps.drafts?.({ taskId, projectId, from }).then(oldestFirst).catch(() => undefined);
         if (drafts !== undefined && drafts.length > 0) sections["drafts"] = drafts.map((d) => `${d.id} "${d.title}": ${d.body.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
-        const owned = await deps.responsibilities?.({ projectId, from }).catch(() => undefined);
+        const owned = await deps.responsibilities?.({ projectId, from }).then(oldestFirst).catch(() => undefined);
         if (owned !== undefined && owned.length > 0) sections["responsibilities"] = `${from.id} answers for these in the project; they stay with ${from.id} unless moved with the hand-off (complete it with reassignResponsibilities listing the IDs to move; the owner or anyone who may assign responsibilities decides), and the recipient should know of them:\n${owned.map((r) => `${r.id} "${r.title}" (${r.state}): ${r.desiredCondition.replace(/\s+/g, " ").slice(0, 200)}`).join("\n")}`;
         const held = await deps.locks?.({ taskId, projectId, from, to }).catch(() => undefined);
         if (held !== undefined && held.length > 0) sections["locks"] = held.join("\n");

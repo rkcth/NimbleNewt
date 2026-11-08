@@ -41,7 +41,21 @@ export const neutralise = (line: string): string => (looksLikeMarker(line) ? `(a
  */
 function looksLikeMarker(line: string): boolean {
   const seen = line.replace(/\p{Cf}/gu, "").normalize("NFKC");
-  return /\[\s*cut\s*:/i.test(seen) || /archive\W{0,3}hnd-/i.test(seen) || /\d+\s+of\s+\d+\s+entries/i.test(seen);
+  return opensLikeMarker(seen) || /\[\s*cut\s*:/i.test(seen) || /archive\W{0,3}hnd-/i.test(seen) || /\d+\s+of\s+\d+\s+entries/i.test(seen);
+}
+
+/** What a reader does not see at the start of a line: spaces, combining marks, controls and the blank letters (Hangul fillers, the blank Braille pattern). */
+const UNSEEN_LEAD = /^[\s\p{Z}\p{M}\p{Cc}ᅟᅠㅤﾠ⠀]+/u;
+/**
+ * The marker's opening is reserved (card C07j review, round 3): a source line whose first visible character is a square or other opening bracket (any `Ps` character but the round and curly ones, and the
+ * bracket pieces that draw one) is quoted, whatever letters follow. Look-alike letters can spell `cut` and its wording in endless ways, but none of them makes a quoted line start with a bracket, so the
+ * only line of a section a reader sees opening like the marker is the controller's.
+ */
+function opensLikeMarker(seen: string): boolean {
+  const first = seen.replace(UNSEEN_LEAD, "").codePointAt(0);
+  if (first === undefined) return false;
+  const c = String.fromCodePoint(first);
+  return (c !== "(" && c !== "{" && /\p{Ps}/u.test(c)) || /[⎡-⎣⎧-⎩⌜⌞]/u.test(c);
 }
 
 /** Whether an entry holds one of the owner's marks (case does not matter). */
@@ -49,6 +63,13 @@ const markedBy = (marks: readonly string[]) => {
   const lower = marks.map((m) => m.toLowerCase()).filter((m) => m.length > 0);
   return (entry: string): boolean => { const e = entry.toLowerCase(); return lower.some((m) => e.includes(m)); };
 };
+
+export interface CutOptions {
+  /** The section's first line is its heading (a brief's title, what a responsibilities list means): kept after the newest entry and before the marked ones, when it fits whole. */
+  readonly heading?: boolean;
+  /** The entries as the source wrote them, one per line of `text`: marks are looked for in these (a line `neutralise` quoted has its quotes and backslashes escaped). */
+  readonly matchOn?: readonly string[];
+}
 
 export interface SectionCut {
   /** The section as the recipient is given it: within `limit`. */
@@ -58,10 +79,10 @@ export interface SectionCut {
 }
 
 /**
- * Cuts `text` to at most `limit` characters. The newest entry is kept first (whole when it fits; otherwise room is held for its start), then the entries the owner marked (newest first, as many as fit),
+ * Cuts `text` to at most `limit` characters. The newest entry is kept first (whole when it fits; otherwise room is held for its start), then the heading line when `options.heading` is set, then the entries the owner marked (newest first, as many as fit),
  * then the most recent entries, newest first, until one does not fit, which is shortened into the room left (from its start) when enough of it fits. The kept entries stay in their order, below the marker.
  */
-export function cutSection(text: string, limit: number, marks: readonly string[], archiveId: string, /** Set when the archive holds only the first this many characters of the section. */ archivedChars?: number): SectionCut {
+export function cutSection(text: string, limit: number, marks: readonly string[], archiveId: string, /** Set when the archive holds only the first this many characters of the section. */ archivedChars?: number, options: CutOptions = {}): SectionCut {
   if (text.length <= limit) return { text };
   const entries = text.split("\n");
   const total = entries.length;
@@ -76,9 +97,11 @@ export function cutSection(text: string, limit: number, marks: readonly string[]
   const newest = entries[total - 1]!;
   if (newest.length <= room) { used = newest.length; chosen.set(total - 1, newest); }
   const reserve = chosen.has(total - 1) ? 0 : MIN_SHORT + SHORTENED.length + 1;
+  if (options.heading === true && total > 1 && used + cost(entries[0]!) + reserve <= room) { used += cost(entries[0]!); chosen.set(0, entries[0]!); }
+  const matchOn = options.matchOn !== undefined && options.matchOn.length === total ? options.matchOn : entries;
   for (let i = total - 1; i >= 0; i--) {
     const e = entries[i]!;
-    if (!chosen.has(i) && marked(e) && used + cost(e) + reserve <= room) { used += cost(e); chosen.set(i, e); }
+    if (!chosen.has(i) && marked(matchOn[i]!) && used + cost(e) + reserve <= room) { used += cost(e); chosen.set(i, e); }
   }
   let shortened = false;
   for (let i = total - 1; i >= 0; i--) {

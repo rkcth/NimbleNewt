@@ -745,14 +745,16 @@ export class StatusService {
       if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
       throw error;
     }
-    if (h === undefined) return { observedAt: this.#runner.now(), lines: [line("No hand-off is going on for this task.", cite("task", taskId))] };
+    // The owner's marks matter before a hand-off starts (they apply to the next package), so they are shown with or without one (card C07j review).
+    const marks = await this.#deps.handoffs.marks?.(by, { taskId }).catch(() => undefined);
+    const marksLine = marks !== undefined && marks.marks.length > 0 ? [line(`When a section is cut, entries holding one of the owner's marks are kept first: ${marks.marks.map((m) => quotedLine(shown(m, 200))).join(", ")}.`, cite("task", taskId))] : [];
+    if (h === undefined) return { observedAt: this.#runner.now(), lines: [line("No hand-off is going on for this task.", cite("task", taskId)), ...marksLine] };
     const lines: Line[] = [line(`Hand-off from ${shown(h.from.id)} to ${shown(h.to.id)}, ${h.mode}: ${h.phase}. Asked by ${shown(h.requestedBy)} at ${h.requestedAt}: ${shown(h.reason)}`, cite("handoff", h.id, h.revision), cite("task", taskId))];
     if (h.returnAt !== undefined) lines.push(line(`It is temporary: the task goes back to ${shown(h.from.id)} at ${h.returnAt}, if whoever asked still holds the right to control it then.`, cite("handoff", h.id)));
     if (h.package !== undefined) lines.push(line(h.package.ready ? "The package is complete." : `The package is missing: ${h.package.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
     // Card C07j: a section cut to fit says so here too, with where its whole text is kept.
     for (const cut of h.package?.cuts ?? []) lines.push(line(`The ${shown(cut.section, 40)} section was cut to fit: ${cut.left} of ${cut.total} entries left out or shortened (the owner's marked ones and the newest are kept). ${cut.archiveTruncated === true ? "The first 1,000,000 characters of it are" : "Its whole text is"} kept in archive ${shown(cut.archiveId, 40)} (state API query handoff.archive.read).`, cite("handoff", h.id)));
-    const marks = await this.#deps.handoffs.marks?.(by, { taskId }).catch(() => undefined);
-    if (marks !== undefined && marks.marks.length > 0) lines.push(line(`When a section is cut, entries holding one of the owner's marks are kept first: ${marks.marks.map((m) => quotedLine(shown(m, 200))).join(", ")}.`, cite("task", taskId)));
+    lines.push(...marksLine);
     if (h.acceptedGaps !== undefined) lines.push(line(`It was handed over with gaps accepted: ${h.acceptedGaps.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
     if (h.blocked !== undefined) lines.push(line(`It is held up: ${shown(h.blocked.reason)} You can choose: ${h.blocked.choices.join(", ")}.`, cite("handoff", h.id)));
     if (h.failure !== undefined) lines.push(line(`It failed: ${shown(h.failure)}`, cite("handoff", h.id)));

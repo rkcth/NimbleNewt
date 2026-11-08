@@ -40,6 +40,9 @@ test("a hand-off section over the limit is cut with a marker naming its archive,
     assert.deepEqual(marked.result.item.marks, ["keep-me"]);
     assert.deepEqual((await call(boot.token, "handoff.marks.get", { taskId: task })).result.item.marks, ["keep-me"]);
     assert.equal((await call(boot.token, "handoff.marks.change", { taskId: task, add: ["keep-me"] }, "m1")).result.item.replayed, true);
+    // Marks apply to the next package, so the status the chat answers with shows them before any hand-off starts (card C07j review, round 3).
+    const before = await call(boot.token, "status.ask", { request: { kind: "handoff", taskId: task } });
+    assert.deepEqual(before.result.item.lines.map((l: { text: string }) => l.text), ["No hand-off is going on for this task.", "When a section is cut, entries holding one of the owner's marks are kept first: \"keep-me\"."]);
 
     const prepared = await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "A is going on leave" }, "h1");
     assert.ok(prepared.ok, JSON.stringify(prepared));
@@ -49,6 +52,7 @@ test("a hand-off section over the limit is cut with a marker naming its archive,
     const m = /^\[cut: (\d+) of (\d+) entries, archive (hnd-[a-z2-7]{20})\]/.exec(brief);
     assert.ok(m !== null, brief.slice(0, 200));
     assert.equal(Number(m[2]), 101, "the title and the 100 lines");
+    assert.equal(brief.split("\n")[1], "weed the beds", "the brief's title heads it after the marker, though it is its oldest line");
     assert.ok(brief.includes(lines[4]!), "the owner's marked line is kept");
     assert.ok(brief.includes(lines[99]!), "the newest line is kept");
     assert.doesNotMatch(brief, /sk-live/);

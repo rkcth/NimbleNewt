@@ -404,6 +404,20 @@ for (const backend of backends) {
     assert.equal(await c.handoffs.archive(c.owner, { archiveId: h.id }), undefined);
   });
 
+  suite("a cut responsibilities list keeps its heading line, and a mark with quotes finds an old entry that was quoted for opening with a bracket (card C07j review, round 3)", async (c) => {
+    const items = Array.from({ length: 200 }, (_, i) => `rsp-${String(i).padStart(4, "0")} "watch ${i}" (active): keep it green`);
+    items[3] = '[rsp-0003] "nightly import" (active): runs "UTF-8 only"';
+    const heading = "a answers for these in the project; complete it with reassignResponsibilities to move them:";
+    c.src.sections = { ...base, responsibilities: [heading, ...items].join("\n") };
+    await c.handoffs.mark(c.owner, { commandId: cid("m"), taskId: c.task, add: ['runs "utf-8 only"'] });
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    const shown = h.package!.sections["responsibilities"]!.split("\n");
+    assert.ok(MARKER.test(shown[0]!), shown[0]);
+    assert.equal(shown[1], heading, "the heading stays");
+    assert.match(shown[2]!, /^\(an entry quoted, not a cut marker\) "\[rsp-0003\]/, "the marked entry is kept, quoted");
+    assert.equal(shown.at(-1), items[199], "the newest stays");
+  });
+
   suite("a long section is archived in parts that each end on a whole character and join to the original; a very long one says how much is kept (card C07j)", async (c) => {
     // The first part's natural end falls between the halves of a surrogate pair: the pair goes to the next part.
     const head = `${"a".repeat(39_999)}\u{1F600}`;

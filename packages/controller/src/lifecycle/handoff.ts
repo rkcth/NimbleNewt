@@ -114,6 +114,8 @@ const MARKS = "handoff-marks";
 const ARCHIVE_ID = /^hnd-[a-z2-7]{20}$/;
 /** The sender's own sections, which `screen` withholds from those who merely control the task; their archives are withheld the same way. */
 const PRIVATE_SECTIONS: readonly string[] = ["drafts", "responsibilities"];
+/** Sections whose first line is a heading rather than the oldest entry: a cut keeps it (card C07j review). */
+const HEADED_SECTIONS: readonly string[] = ["brief", "responsibilities"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
   const out = text(value, field, { min: 1, max: HANDOFF_LIMITS.reason, multiline: true });
@@ -612,7 +614,8 @@ export class HandoffService {
       if (shown.length <= HANDOFF_LIMITS.section) { sections[name] = shown; continue; }
       marks ??= await this.#marks(b.taskId);
       const archived = await this.#archive(handoffId, b, name, original);
-      const cut = cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId, archived.truncated ? archived.chars : undefined);
+      // A brief's title and the line saying what the responsibilities are and how to move them head their sections and stay with them; marks are looked for in the lines as the source wrote them.
+      const cut = cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId, archived.truncated ? archived.chars : undefined, { heading: HEADED_SECTIONS.includes(name), matchOn: original.split("\n") });
       sections[name] = cut.text;
       cuts.push({ section: name, archiveId: archived.archiveId, left: cut.cut?.left ?? 0, total: cut.cut?.total ?? 0, chars: original.length, ...(archived.truncated ? { archiveTruncated: true } : {}) });
     }
