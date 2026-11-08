@@ -219,9 +219,11 @@ test("a model stream is relayed as it arrives, not buffered whole: the first pie
     return new Response(new ReadableStream({ async start(c) { c.enqueue(encoder.encode("data: first\n\n")); await rest; c.enqueue(encoder.encode("data: second\n\n")); c.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
   };
   const { relay } = setup({ respond: held });
-  const attempt = relay.forAttempt({ route: "llama/local" });
-  // The first call of an attempt is read for the provider's count, a later one is passed on plainly: both stream.
-  for (const n of [1, 2]) {
+  // Plain, and as the composer builds it: the first call read for the provider's count (C07b), every call told to the monitor (V01b) and recorded against its generation (L05b). Every path streams.
+  const plain = relay.forAttempt({ route: "llama/local" });
+  const watched = relay.forAttempt({ route: "llama/local", onFirstUsage: () => undefined, monitor: { started: () => ({ firstOutput: () => undefined, progress: () => undefined, finished: () => undefined }) },
+    stream: { started: async () => ({ events: async () => ({}), ended: async () => undefined }) } });
+  for (const [n, attempt] of [[1, plain], [2, plain], [3, watched], [4, watched]] as const) {
     const response = await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
     const pieces = response.body![Symbol.asyncIterator]();
     let timer: NodeJS.Timeout | undefined;

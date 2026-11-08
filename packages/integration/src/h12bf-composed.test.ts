@@ -273,8 +273,9 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     if (linuxOnly !== undefined) return t.skip(linuxOnly);
     const real = await launcher();
     if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
-    const g1 = gate(), g2 = gate(), g3 = gate();
-    const answer = await model([{ hold: g1.promise, text: "never sent" }, { hold: g2.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { hold: g3.promise, text: "never sent" }, { text: "all done after two restarts" }]);
+    const g1 = gate(), g2 = gate(), g3 = gate(), g4 = gate();
+    // The last call is held too, until the narrowed process has been looked at: answered at once, the turn could end and the process exit before the check saw it.
+    const answer = await model([{ hold: g1.promise, text: "never sent" }, { hold: g2.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { hold: g3.promise, text: "never sent" }, { hold: g4.promise, text: "all done after two restarts" }]);
     const x = await rig(real, answer);
     try {
       const { attemptId } = await x.task(1, "Order seeds");
@@ -323,6 +324,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.notEqual(revisions[0], revisions[1], "the widened launch recorded another recipe revision");
       assert.notEqual(revisions[1], revisions[2], "so did the narrowed one");
 
+      g4.open();
       await dispatcher.idle();
       const record = (await dispatcher.get(x.c.dispatch!.principal, attemptId))!;
       assert.equal(record.state, "finished");
