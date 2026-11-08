@@ -11,3 +11,4 @@ export { windowsSandboxBackend, AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION,
 export type { WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession } from "./windows-host.js";
 export { windowsRealHost } from "./windows-real.js";
 export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";
+export { jobLauncher, linuxOrphans, type JobEnd, type JobLauncherOptions, type JobRun } from "./job.js";
