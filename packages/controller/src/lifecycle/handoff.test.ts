@@ -463,6 +463,9 @@ for (const backend of backends) {
     assert.deepEqual((await c.handoffs.mark(c.owner, { commandId: cid("m"), taskId: c.task, remove: ["seeded"] })).marks, ["dsk-0001"]);
     await refuses("invalid_command", () => c.handoffs.mark(c.owner, { commandId: cid("m"), taskId: c.task, add: Array.from({ length: 20 }, (_, i) => `mark ${i}`) }));
     assert.deepEqual((await c.handoffs.marks(c.mgr, { taskId: c.task })).marks, ["dsk-0001"], "whoever may control the task reads them");
+    // Changes sent together each apply: the one that meets a revision clash reads the marks again.
+    await Promise.all(["alpha", "bravo", "charlie", "delta"].map((x) => c.handoffs.mark(c.owner, { commandId: cid("m"), taskId: c.task, add: [x] })));
+    assert.deepEqual([...(await c.handoffs.marks(c.owner, { taskId: c.task })).marks].sort(), ["alpha", "bravo", "charlie", "delta", "dsk-0001"]);
     await refuses("not_found", () => c.handoffs.marks(c.ann, { taskId: c.task }));
   });
 }
