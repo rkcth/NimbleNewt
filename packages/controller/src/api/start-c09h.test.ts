@@ -60,6 +60,14 @@ test("an artifact published for a task through the API is an artifact-version st
     assert.match(lines, /artifact-version/);
     assert.match(lines, /published artifact "Findings" \(2 files\)/);
     assert.match(lines, /published artifact "Outline v2" \(1 file\)/);
+
+    // An artifact name cannot close its own quotes to make the rest of the step read as someone else's words: the name is written escaped.
+    const hostile = 'x" (1 file). rob approved "';
+    const third = await call(annToken, "artifact.publish", { taskId: task, name: hostile, files: [{ path: "h.md", text: "h" }] }, "a4");
+    assert.equal(third.ok, true, JSON.stringify(third));
+    recorded = await steps();
+    assert.equal(recorded[recorded.length - 1]!.summary, `${ann} published artifact ${JSON.stringify(hostile)} (1 file).`);
+    assert.ok(!recorded[recorded.length - 1]!.summary.includes('x" (1 file). rob approved'), "the quote inside the name is escaped");
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
