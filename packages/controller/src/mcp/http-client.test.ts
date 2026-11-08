@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createServer as createHttpsServer, type Server } from "node:https";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import { after, test } from "node:test";
 import { Server as SdkServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -12,7 +12,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService } from "../security/index.js";
 import { selfSigned } from "../transport/testing/selfsigned.js";
-import { McpService, RemoteMcpClient, RemoteMcpConnector, type McpHttpOptions } from "./index.js";
+import { McpService, RemoteMcpClient, RemoteMcpConnector, type McpHttpOptions, type RemoteTarget } from "./index.js";
 
 // Card H12k: the MCP transport speaks streamable HTTP to the address the connector checked, never to the name. The servers below listen on loopback; the `dial` seam records the address the transport asked for
 // (a public one) and reaches the loopback server instead, with TLS still checked against the server's name.
@@ -117,6 +117,22 @@ for (const json of [false, true]) {
   });
 }
 
+test("a server named by an IPv6 address: the Host header brackets it once and the certificate is checked against the address itself", async () => {
+  const seen: string[] = [];
+  const plain = createServer((req, res) => { seen.push(String(req.headers.host)); res.writeHead(500); res.end(); });
+  await new Promise<void>((ok) => plain.listen(0, "127.0.0.1", ok));
+  const s = await tlsServer((_req, res) => { res.writeHead(500); res.end(); });
+  try {
+    // The target as the connector gives it for `https://[2606:4700::1]:8443/mcp` (the name keeps the URL's brackets; the address has none).
+    const target: RemoteTarget = { serverId: "s", registryName: "v6", host: "[2606:4700::1]", address: "2606:4700::1", port: 8443, secure: false, path: "/mcp", protocolRevision: "2025-06-18" };
+    const via = (t: RemoteTarget) => ({ connect: async <T>(_id: string, use: (x: RemoteTarget) => Promise<T>): Promise<T> => use(t) });
+    await refuses(/HTTP 500/, () => new RemoteMcpClient(via(target), { dial: () => netConnect({ host: "127.0.0.1", port: (plain.address() as { port: number }).port }) }).callTool("s", "x"));
+    assert.deepEqual(seen, ["[2606:4700::1]:8443"]);
+    // The test certificate names mcp.example.com and 127.0.0.1, so it is refused, and for the address (not for a bracketed "name").
+    await refuses(/(Host|IP): 2606:4700::1[.]? is not in the cert's/, () => new RemoteMcpClient(via({ ...target, secure: true }), { ca: s.ca, dial: () => netConnect({ host: "127.0.0.1", port: s.port }) }).callTool("s", "x"));
+  } finally { plain.close(); s.server.close(); }
+});
+
 test("the transport refuses what it must not follow or accept: a redirect, an oversized answer, another protocol revision, a certificate for another name; it passes on a JSON-RPC error as the server's words", async () => {
   const r = await rig();
   let mode = "redirect";
@@ -124,6 +140,9 @@ test("the transport refuses what it must not follow or accept: a redirect, an ov
   const s = await tlsServer((_req, res, body) => {
     const m = body as { id?: number; method?: string } | undefined;
     if (mode === "redirect") { res.writeHead(307, { location: "https://10.0.0.5/v1" }); res.end(); return; }
+    if (mode === "kept" && m?.method === "notifications/initialized") { res.writeHead(500); res.end(); return; }
+    if (mode === "kept" && m === undefined) { res.writeHead(200); res.end(); return; }
+    if (mode === "kept" && m?.method === "initialize") { reply(res, 200, { jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "x", version: "1" } } }, { "mcp-session-id": "kept-1" }); return; }
     if (m?.method === "notifications/initialized") { res.writeHead(202); res.end(); return; }
     if (m?.method === "initialize") { reply(res, 200, { jsonrpc: "2.0", id: m.id, result: { protocolVersion: mode === "old" ? "2024-11-05" : "2025-06-18", capabilities: {}, serverInfo: { name: "x", version: "1" } } }); return; }
     if (mode === "huge") { reply(res, 200, { jsonrpc: "2.0", id: m?.id, result: { content: [{ type: "text", text: "x".repeat(70_000) }] } }); return; }
@@ -150,6 +169,10 @@ test("the transport refuses what it must not follow or accept: a redirect, an ov
       return true;
     });
     assert.ok(dialed.every((d) => d === `${PUBLIC}:443`));
+    // A session the server opened is ended even when setting it up fails after initialize (here the initialized notification is refused).
+    mode = "kept";
+    await refuses(/answered the initialized notification with HTTP 500/, () => client.callTool(server, "search"));
+    assert.deepEqual(s.seen.slice(-3).map((x) => x.method === "POST" ? x.body?.method : `${x.method} ${x.session ?? ""}`), ["initialize", "notifications/initialized", "DELETE kept-1"], "the session is ended on the failed set-up");
     // The transport's own headers cannot be replaced by the caller.
     await refuses(/may not send the header host/, () => new RemoteMcpClient(r.connector, { ca: s.ca, dial: dialTo(s.port, []), headers: () => ({ host: "internal.example" }) }).callTool(server, "search"));
     await refuses(/must be an MCP request method other than initialize/, () => client.request(server, "initialize"));

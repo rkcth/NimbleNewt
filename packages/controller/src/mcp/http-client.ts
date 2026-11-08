@@ -98,7 +98,9 @@ class McpHttpSession {
     }
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
     const defaultPort = t.secure ? 443 : 80;
-    headers["host"] = `${t.host.includes(":") ? `[${t.host}]` : t.host}${t.port === defaultPort ? "" : `:${t.port}`}`;
+    // An IPv6 address given as the server's name arrives in its URL form, with brackets: the bare address is the name (for TLS), and the Host header brackets it once.
+    const name = t.host.replace(/^\[(.*)\]$/, "$1");
+    headers["host"] = `${name.includes(":") ? `[${name}]` : name}${t.port === defaultPort ? "" : `:${t.port}`}`;
     headers["accept"] = "application/json, text/event-stream";
     if (payload !== undefined) { headers["content-type"] = "application/json"; headers["content-length"] = String(payload.length); }
     if (this.#session !== undefined) headers["mcp-session-id"] = this.#session;
@@ -109,7 +111,7 @@ class McpHttpSession {
       const plain = this.#options.dial?.({ address: t.address, port: t.port }) ?? netConnect({ host: t.address, port: t.port });
       if (!t.secure) return plain;
       // The certificate is checked against the name, never against the address (an address literal is checked as itself and sent no server name).
-      return tlsConnect({ socket: plain, host: t.host, ...(isIP(t.host) === 0 ? { servername: t.host } : {}), ALPNProtocols: ["http/1.1"], ...(this.#options.ca === undefined ? {} : { ca: this.#options.ca as string[] }) });
+      return tlsConnect({ socket: plain, host: name, ...(isIP(name) === 0 ? { servername: name } : {}), ALPNProtocols: ["http/1.1"], ...(this.#options.ca === undefined ? {} : { ca: this.#options.ca as string[] }) });
     };
     return new Promise<Answer>((resolve, reject) => {
       let settled = false;
@@ -184,8 +186,8 @@ export class RemoteMcpClient {
     if (typeof method !== "string" || !/^[A-Za-z][A-Za-z0-9/_.-]{0,99}$/.test(method) || method === "initialize" || method.startsWith("notifications/")) throw new DomainError("invalid_command", "method: must be an MCP request method other than initialize", { field: "method" });
     return this.#connector.connect(serverId, async (target) => {
       const session = new McpHttpSession(target, this.#options);
-      await session.open();
-      try { return await session.request(method, params); } finally { await session.close(); }
+      // A session the server opened is ended on every path, a failed set-up after initialize included.
+      try { await session.open(); return await session.request(method, params); } finally { await session.close(); }
     });
   }
 
