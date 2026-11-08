@@ -603,7 +603,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // The view (card C07g) goes in the first prompt of the attempt on the new route: its kept pieces and the references of what was cut.
         return moved.rebuilt ? { ok: true, view: { text: moved.view, measured: moved.measured } } : { ok: false, reason: `${moved.reason ?? "the context does not fit the new route"} (moved from ${c.previousRoute} to ${c.route}; ${remedies})` };
       },
-      routeKept: async (k) => { await context.routeKept(principal, { taskId: k.taskId }); },
+      routeKept: async (k) => { await context.routeKept(principal, { taskId: k.taskId, route: k.route }); },
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...((i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning) === undefined ? {} : { safeLongRunning: (i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning)! }), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });

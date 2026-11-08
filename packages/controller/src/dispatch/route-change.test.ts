@@ -69,7 +69,7 @@ for (const backend of backends) {
       let current = "cloud/big";
       const w = await buildWorld(store.storage, { route: async () => choice(current) });
       const calls: string[] = []; const kept: string[] = [];
-      const dispatcher = w.restart({ routeChange: async (c) => { calls.push(`${c.previousRoute}>${c.route}`); return { ok: true }; }, routeKept: async (k) => { kept.push(k.taskId); } }, {});
+      const dispatcher = w.restart({ routeChange: async (c) => { calls.push(`${c.previousRoute}>${c.route}`); return { ok: true }; }, routeKept: async (k) => { kept.push(`${k.taskId}@${k.route}`); } }, {});
       const ann = await w.agent("ann", workGrants(w.project, []));
       const made = await w.task("Prune roses", ann);
       const again = async (): Promise<void> => {
@@ -92,7 +92,7 @@ for (const backend of backends) {
       // Back on the route it ran on: the stale-refusal hook is called (once for the attempt), the change hook is not.
       current = "local/small";
       await again(); await w.heartbeatHost(); await dispatcher.tick(); await dispatcher.idle(); await dispatcher.tick(); await dispatcher.idle();
-      assert.deepEqual(kept, [made.taskId]);
+      assert.deepEqual(kept, [`${made.taskId}@local/small`], "told the route it is kept on");
       assert.equal(calls.length, 2);
     } finally { await store.close(); }
   });

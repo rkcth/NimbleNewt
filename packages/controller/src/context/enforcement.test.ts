@@ -303,6 +303,19 @@ for (const backend of backends) {
     assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t2 }))?.id, big.blockerId);
   });
 
+  suite("a refusal for the route the task is on is not stale: a later attempt on that same route keeps it; one on another route closes it (card C07g review)", async ({ enf, owner, blockers, t }) => {
+    // The worker refused the first call on tiny/one after the task was placed on it (the view rebuilt on its measured figure did not fit).
+    const refused = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 4_096, items: manyItems() });
+    assert.ok(refused.blockerId);
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t, route: "tiny/one" }), {}, "the next attempt on tiny/one does not close it");
+    assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t }))?.id, refused.blockerId);
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-2", window: 65_536, call: small })).admit, false, "nothing is admitted while it is open");
+    // Back on the route it really ran on: stale, closed.
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t, route: "cloud/big" }), { closed: refused.blockerId });
+    assert.equal(await blockers.openFor("context_overflow", { kind: "task", id: t }), undefined);
+    await assert.rejects(enf.routeKept(owner, { taskId: t, route: "" }), /route/);
+  });
+
   suite("the route's fixed part is written beside the admission and never fails it: concurrent first calls on a new route all pass (finding 2)", async ({ enf, owner, t, t2 }) => {
     const route = contextRouteKey("local/new");
     const results = await Promise.all([t, t2, t, t2].map((task, i) => enf.admit(owner, { taskId: task, attemptId: `att-${i}`, window: 65_536, route, call: { systemPromptChars: 12_000 + i * 1_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } })));

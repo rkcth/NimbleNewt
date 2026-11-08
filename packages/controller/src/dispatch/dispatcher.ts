@@ -176,7 +176,7 @@ export interface DispatcherDeps {
    */
   readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
   /** The task is on the same route it last ran on: a refusal that an earlier move to another route left behind is closed (card C07f). */
-  readonly routeKept?: (kept: { readonly taskId: string }) => Promise<void>;
+  readonly routeKept?: (kept: { readonly taskId: string; /** The route the task is on (a refusal made for this same route is not stale). */ readonly route: string }) => Promise<void>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
   /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
   readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
@@ -1283,7 +1283,7 @@ export class DispatcherService {
     if (this.#deps.routeChange !== undefined) {
       const previous = ((await this.#runner.get(PLACED_KIND, taskId))?.body as unknown as { route?: string } | undefined)?.route;
       if (previous !== undefined && previous === chosen.route) {
-        if (this.#deps.routeKept !== undefined && this.#routeOk.get(attemptId) !== "kept") { try { await this.#deps.routeKept({ taskId }); this.#remember(attemptId, "kept"); } catch (error) { this.#options.onError?.(error); } }
+        if (this.#deps.routeKept !== undefined && this.#routeOk.get(attemptId) !== "kept") { try { await this.#deps.routeKept({ taskId, route: chosen.route }); this.#remember(attemptId, "kept"); } catch (error) { this.#options.onError?.(error); } }
       } else if (previous !== undefined) {
         // The cache also carries the decisions record and the owner's route settings, so a new decision or goal, or a toggled check or floor, is asked again.
         const decisionsRev = (await this.#runner.get("decision-context", task.projectId))?.revision ?? 0;

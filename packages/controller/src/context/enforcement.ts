@@ -372,7 +372,7 @@ export class ContextEnforcementService {
         const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId);
         await this.#dispatch(principal, taskId);
         const reason = `the route's context window of ${window} tokens is not one the context budgets can be made for (${error.message})`;
-        const blockerId = await this.#openRouteBlock(principal, taskId, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to route ${route}: ${reason}. Set the route's contextTokens to its real window, or choose another route; then resolve this blocker.`);
+        const blockerId = await this.#openRouteBlock(principal, taskId, route, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to route ${route}: ${reason}. Set the route's contextTokens to its real window, or choose another route; then resolve this blocker.`);
         const startup: StartupResult = { pieces: [], tokens: 0, cuts: [], archive: [], blocked: { reason, needTokens: 0, haveTokens: 0 } };
         return { rebuilt: false, startup, reason, blockerId, id: derivedId("adm", `${taskId}\0${attemptId}\0route\0badwindow\0${route}\0${window}`), replayed: false, measured: false, view: "" };
       }
@@ -456,7 +456,7 @@ export class ContextEnforcementService {
       payload: { taskId, attemptId, round: r, window: w, route, fixedTokens: command.fixedTokens, basis: command.fixedBasis ?? null, items: sha256(JSON.stringify(command.items)) },
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { rebuilt: review.kind === "rebuilt" } }),
     }));
-    const blockerId = review.kind === "blocked" ? await this.#openRouteBlock(principal, taskId, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to the ${w}-token route ${route}: ${review.reason}. Choose a route with a larger window (raise the route's contextTokens), reduce the task contract, supersede decisions that are no longer needed, or reassign the task; then resolve this blocker.`) : undefined;
+    const blockerId = review.kind === "blocked" ? await this.#openRouteBlock(principal, taskId, route, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to the ${w}-token route ${route}: ${review.reason}. Choose a route with a larger window (raise the route's contextTokens), reduce the task contract, supersede decisions that are no longer needed, or reassign the task; then resolve this blocker.`) : undefined;
     // The context fits this route now: a refusal this mechanism opened for an earlier move (to this route before its window was raised, or to another one) is stale and is closed, so the first call is not held for it.
     if (review.kind === "rebuilt") await this.#closeRouteBlock(principal, taskId, `The task's context now fits route ${route} (${w} tokens); the route change this blocker was about is settled.`);
     return { rebuilt: review.kind === "rebuilt", startup: review.startup, ...(review.kind === "blocked" ? { reason: review.reason } : {}), ...(warning === undefined ? {} : { warning }), ...(blockerId === undefined ? {} : { blockerId }), id, replayed: run.replayed };
@@ -466,28 +466,32 @@ export class ContextEnforcementService {
    * The task is back on the route it ran on (a route that flapped): a `context_overflow` blocker a route change opened is stale and is closed, so that admission is not held for a move that is no longer wanted. Any other context blocker stays.
    * Returns the blocker closed, if any.
    */
-  async routeKept(principal: Principal, command: { taskId: string }): Promise<{ closed?: string }> {
-    onlyKnown(command, ["taskId"]);
+  async routeKept(principal: Principal, command: { taskId: string; route?: string }): Promise<{ closed?: string }> {
+    onlyKnown(command, ["taskId", "route"]);
     const taskId = checkTaskId(command.taskId);
+    if (command.route !== undefined && (typeof command.route !== "string" || command.route.length < 1 || command.route.length > 500)) invalid("route", "must be a route name of 1 to 500 characters");
     await this.#dispatch(principal, taskId);
-    const closed = await this.#closeRouteBlock(principal, taskId, "The task is back on the route it ran on; the route change this blocker was about is no longer wanted.");
+    // A refusal for the very route the task is on is not stale (card C07g review): the worker refused the first call on this route after the task was placed on it, and a later attempt on the same route must not close it.
+    const closed = await this.#closeRouteBlock(principal, taskId, "The task is back on the route it ran on; the route change this blocker was about is no longer wanted.", command.route === undefined ? undefined : contextRouteKey(command.route));
     return closed === undefined ? {} : { closed };
   }
 
   /** The record of the blocker a route change opened (one per task): the structured mark that tells it from any other `context_overflow` blocker. */
   static #routeBlockRef = (taskId: string): AggregateRef => ({ kind: "ctx-route-block", id: derivedId("ctx", `${taskId}\0routeblock`) });
   /** Opens the task's `context_overflow` blocker for a refused move and marks it as this mechanism's; one that was already open (an admission refusal, or this one on an earlier tick) is returned and left as it is. */
-  async #openRouteBlock(principal: Principal, taskId: string, summary: string): Promise<string> {
+  async #openRouteBlock(principal: Principal, taskId: string, route: string, summary: string): Promise<string> {
     const id = await this.#block(principal, taskId, summary);
     // Marked by what the blocker is, read after it was opened or found, not by a look taken before: a blocker an admission refusal opened meanwhile is not this mechanism's, and one this mechanism opened on an earlier tick whose mark was lost is marked now.
     const blocker = await this.#blockers.getBlocker(id);
     const ref = ContextEnforcementService.#routeBlockRef(taskId);
-    if (blocker !== undefined && blocker.summary.startsWith(ROUTE_BLOCK) && ((await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string } | undefined)?.blockerId !== id) {
-      await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}`, actor: principal.id }, async () => ({
-        payload: { taskId, blockerId: id },
+    // The mark names the route the refusal was for (card C07g review), so that being on that same route does not count as having moved back.
+    const marked = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string; route?: string } | undefined;
+    if (blocker !== undefined && blocker.summary.startsWith(ROUTE_BLOCK) && (marked?.blockerId !== id || marked.route !== route)) {
+      await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}-${sha256(route).slice(0, 12)}`, actor: principal.id }, async () => ({
+        payload: { taskId, blockerId: id, route },
         build: async () => {
           const old = await this.#runner.get(ref.kind, ref.id);
-          const body = { taskId, blockerId: id } as unknown as JsonObject;
+          const body = { taskId, blockerId: id, route } as unknown as JsonObject;
           return { ref, creates: old === undefined, changes: [old === undefined ? { type: "create" as const, ref, body } : { type: "update" as const, ref, expectedRevision: old.revision, body }], detail: {} };
         },
       }));
@@ -498,12 +502,13 @@ export class ContextEnforcementService {
    * Closes the open `context_overflow` blocker of the task if (and only if) a route change opened it, by the mark written with it; an admission refusal or any other context blocker stays.
    * A blocker opened before the mark existed (no mark record for the task) is recognised by the start of its text, once.
    */
-  async #closeRouteBlock(principal: Principal, taskId: string, resolution: string): Promise<string | undefined> {
+  async #closeRouteBlock(principal: Principal, taskId: string, resolution: string, /** The route the task is kept on: a refusal marked for this same route stays. */ keptOn?: string): Promise<string | undefined> {
     const open = await this.#blockers.openFor("context_overflow", { kind: "task", id: taskId });
     if (open === undefined) return undefined;
     const ref = ContextEnforcementService.#routeBlockRef(taskId);
-    const mark = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string } | undefined;
+    const mark = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string; route?: string } | undefined;
     if (mark === undefined ? !open.summary.startsWith(ROUTE_BLOCK) : mark.blockerId !== open.id) return undefined;
+    if (keptOn !== undefined && mark?.route === keptOn) return undefined;
     try { await this.#blockers.resolveBlocker({ commandId: `ctx-rtk-${open.id}`, actor: principal.id, blockerId: open.id, expectedRevision: open.revision, resolution }); } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "invalid_command"))) throw error; }
     return open.id;
   }
