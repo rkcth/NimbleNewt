@@ -58,7 +58,7 @@ describe("job launcher over the sandbox launcher (card T07b)", () => {
   ifUsable("a stop through the real launcher ends the whole process tree, children included, and a failed exit and a time limit are told apart", async () => {
     const marker = `nn-job-child-${process.pid}-${Date.now()}`;
     const out: string[] = [];
-    const proc = await jobLauncher({ launcher, interpreters, base, requireEnforced: false }).start(job(`const c=require("child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)","${marker}"],{stdio:"ignore",detached:true});c.unref();process.stdout.write("child "+c.pid+"\\n");setInterval(()=>{},1000);`), (t) => out.push(t));
+    const proc = await jobLauncher({ launcher, interpreters, base, requireEnforced: false }).start(job(`const c=require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)","${marker}"],{stdio:"ignore",detached:true});c.unref();process.stdout.write("child "+c.pid+"\\n");setInterval(()=>{},1000);`), (t) => out.push(t));
     for (let i = 0; i < 100 && holding(marker).length === 0; i++) await sleep(50);
     assert.ok(holding(marker).length > 0, "positive control: the grandchild is seen while the job runs");
     proc.stop(false);

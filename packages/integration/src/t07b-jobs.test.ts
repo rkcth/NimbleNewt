@@ -77,7 +77,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
   const ws = new LocalWorkspaces({ root: join(directory, "work"), git, shared: () => shared, busy: () => local?.busyAttempts() ?? [], landing: () => ({ branch: "main", requirePermit: false }) });
   const marker = `nn-t07b-${process.pid}-${Date.now()}`;
   // The job: reads its input, starts a grandchild that would run for ever (named by the marker and its target), writes a credential-shaped line and a tick every 200 ms, and never ends by itself.
-  const source = `let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);const c=require("child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)","${marker}-"+i.target],{stdio:"ignore",detached:true});c.unref();process.stdout.write("started "+i.target+"\\n");process.stdout.write("Authorization: Bea"+"rer "+"${TOKEN.slice(0, 20)}"+"${TOKEN.slice(20)}\\n");setInterval(()=>process.stdout.write("tick\\n"),200);});`;
+  const source = `let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);const c=require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)","${marker}-"+i.target],{stdio:"ignore",detached:true});c.unref();process.stdout.write("started "+i.target+"\\n");process.stdout.write("Authorization: Bea"+"rer "+"${TOKEN.slice(0, 20)}"+"${TOKEN.slice(20)}\\n");setInterval(()=>process.stdout.write("tick\\n"),200);});`;
   let tool = "";
   let jobOne = "";
   const steps: (Step | (() => Step))[] = [
