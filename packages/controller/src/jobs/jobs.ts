@@ -113,6 +113,16 @@ export interface JobOptions extends RunnerOptions {
    * host's charge must be keyed by `commandId` (`job-use:<job>`). A failure here is for the host to handle: it does not undo the ending.
    */
   readonly onUsage?: (usage: { readonly commandId: string; readonly taskId: string; readonly jobId: string; readonly background: boolean; readonly computeMs: number }) => Promise<void>;
+  /**
+   * Card T07b: the principal ID of the controller's own job host (`service:dispatcher`, whose credential lives only in the controller's memory). It runs the jobs agents start through the bridge on this machine, so it records
+   * their progress and ends, confirms their stops and makes the restart decisions at start-up, for any task. Absent: no service principal may.
+   */
+  readonly host?: string;
+  /**
+   * Card T07b: told after a stop was asked for (a Stop, a Force Stop, or a `cancel` decision after a restart), also when the request is repeated, so the process that runs the job is ended. The host's stop must be idempotent and
+   * must not throw into the request: it confirms the stop (or that it was not obeyed) itself, through `confirmCancel`.
+   */
+  readonly onCancel?: (jobId: string, force: boolean) => void;
 }
 
 export interface AdmitJob extends NoActor {
@@ -184,6 +194,8 @@ export class JobService {
   readonly #background: BackgroundRecorder | undefined;
   readonly #onUsage: JobOptions["onUsage"];
   readonly #longRunningGate: JobOptions["longRunningGate"];
+  readonly #host: string | undefined;
+  readonly #onCancel: JobOptions["onCancel"];
 
   private constructor(runner: CommandRunner, pauses: PauseService | undefined, options: JobOptions) {
     this.#runner = runner;
@@ -192,6 +204,8 @@ export class JobService {
     this.#background = options.background;
     this.#onUsage = options.onUsage;
     this.#longRunningGate = options.longRunningGate;
+    this.#host = options.host;
+    this.#onCancel = options.onCancel;
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { pauses?: PauseService } = {}, options: JobOptions = {}): JobService {
@@ -313,7 +327,7 @@ export class JobService {
     let operation: CancelOperation = "stop_tool";
     if (command.force !== undefined && typeof command.force !== "boolean") invalid("force", "must be true or false");
     const force = command.force === true;
-    const result = await this.#change("job.cancel", principal, command.commandId, jobId, "control", { reason, force }, (job) => {
+    const result = await this.#change("job.cancel", principal, command.commandId, jobId, "cancel", { reason, force }, (job) => {
       if (job.state === "cancellation_requested" && job.cancel !== undefined && force && job.cancel.force !== true) {
         // Force Stop: the escalation of a stop that was asked for and not obeyed, recorded as its own step.
         operation = job.cancel.operation;
@@ -325,6 +339,7 @@ export class JobService {
       const at = this.#runner.now();
       return { ...this.#move(job, "cancellation_requested", principal.id, at, operation), cancel: { operation, requestedBy: principal.id, requestedAt: at, reason, ...(force ? { force: true } : {}) } };
     });
+    if (result.after?.state === "cancellation_requested") this.#told(jobId, result.after.cancel?.force === true);
     return { id: jobId, operation: result.after?.cancel?.operation ?? operation, replayed: result.replayed };
   }
 
@@ -410,6 +425,7 @@ export class JobService {
       }
     });
     if (decision === "complete") await this.#recordBackground(principal, jobId, command.commandId);
+    if (decision === "cancel" && done.after?.state === "cancellation_requested") this.#told(jobId, false);
     return { id: jobId, state: done.after?.state ?? "admitted", replayed: done.replayed };
   }
 
@@ -489,6 +505,13 @@ export class JobService {
 
   // ---- parts ------------------------------------------------------------------------------------------------------------------
 
+  /** Tells the host that a stop was asked for. Never throws into the request: the stop request is recorded whatever becomes of the process. */
+  #told(jobId: string, force: boolean): void {
+    if (this.#onCancel === undefined) return;
+    try { this.#onCancel(jobId, force); } catch { /* the host confirms or reports the stop itself */ }
+  }
+  #isHost(p: Principal): boolean { return this.#host !== undefined && p.kind === "service" && p.id === this.#host; }
+
   async #scan(keep: (job: JobBody) => boolean, afterId: string | undefined, limit: number): Promise<{ jobs: View<JobBody>[]; next?: string }> {
     const jobs: View<JobBody>[] = [];
     let after = afterId;
@@ -512,13 +535,13 @@ export class JobService {
   }
 
   #mayWrite(p: Principal, task: TaskBody, taskId: string): boolean {
-    return p.kind === "owner" || (inTaskScope(p, task.projectId) && allows(p, "job.write", task.projectId, { resource: { kind: "task", id: taskId } }));
+    return p.kind === "owner" || this.#isHost(p) || (inTaskScope(p, task.projectId) && allows(p, "job.write", task.projectId, { resource: { kind: "task", id: taskId } }));
   }
   #mayControl(p: Principal, task: TaskBody, taskId: string): boolean {
-    return p.kind === "owner" || (inTaskScope(p, task.projectId) && allows(p, "job.control", task.projectId, { resource: { kind: "task", id: taskId } }));
+    return p.kind === "owner" || this.#isHost(p) || (inTaskScope(p, task.projectId) && allows(p, "job.control", task.projectId, { resource: { kind: "task", id: taskId } }));
   }
   #mayRead(p: Principal, projectId: string, taskId: string): boolean {
-    if (p.kind === "owner") return true;
+    if (p.kind === "owner" || this.#isHost(p)) return true;
     if (!inTaskScope(p, projectId)) return false;
     const resource = { resource: { kind: "task", id: taskId } } as const;
     return allows(p, "job.read", projectId, resource) || allows(p, "job.write", projectId, resource) || allows(p, "job.control", projectId, resource);
@@ -616,7 +639,7 @@ export class JobService {
   }
 
   /** Reads the job, authorizes the caller, applies `change` to its body and commits it (with any extra changes) in one command; a concurrent writer meets a revision check and the command is read and decided again. */
-  async #change(name: string, principal: Principal, commandId: unknown, jobId: string, level: "write" | "control", payload: JsonObject, change: (job: JobBody) => JobBody, extra?: (job: JobBody, at: string) => readonly Change[], pre?: (job: JobBody) => Promise<void>) {
+  async #change(name: string, principal: Principal, commandId: unknown, jobId: string, level: "write" | "control" | "cancel", payload: JsonObject, change: (job: JobBody) => JobBody, extra?: (job: JobBody, at: string) => readonly Change[], pre?: (job: JobBody) => Promise<void>) {
     let after: JobBody | undefined;
     const result = await this.#command(name, principal, commandId, { jobId, ...payload }, async () => {
       const ref: AggregateRef = { kind: "job", id: jobId };
@@ -624,7 +647,9 @@ export class JobService {
       if (found === undefined) throw new DomainError("not_found", `job ${jobId} does not exist`);
       const job = found.body as unknown as JobBody;
       const task = await this.#task(job.taskId);
-      if (level === "write" ? !this.#mayWrite(principal, task, job.taskId) : !this.#mayControl(principal, task, job.taskId)) throw new DomainError("forbidden", `${principal.id} may not ${level === "write" ? "record" : "control"} that job`);
+      // A stop (`cancel`) needs the right to control jobs, or is asked by a task credential of the job's own task that may record jobs there (card T07b: an agent stops the jobs it started; a credential of another task never can).
+      const allowed = level === "write" ? this.#mayWrite(principal, task, job.taskId) : this.#mayControl(principal, task, job.taskId) || (level === "cancel" && principal.taskScope?.taskId === job.taskId && this.#mayWrite(principal, task, job.taskId));
+      if (!allowed) throw new DomainError("forbidden", `${principal.id} may not ${level === "write" ? "record" : "control"} that job`);
       await pre?.(job);
       const next = change(job);
       after = next;

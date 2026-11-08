@@ -42,14 +42,14 @@ export interface ScriptRunnerOptions {
 
 export interface ScriptResult { readonly text: string }
 
-const GUEST_INTERPRETER = "/opt/interpreter";
+export const GUEST_INTERPRETER = "/opt/interpreter";
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
 
 /**
  * Removes a run's directory. The script owns what it created and can have taken away its own permissions (a directory with mode 0555 cannot be emptied), so a failed removal is retried after the
  * permissions of the directories in the tree are restored. A directory that still cannot be removed is reported, never thrown: a cleanup problem must not replace the run's real outcome.
  */
-async function removeTree(directory: string, onLeftover: ScriptRunnerOptions["onLeftover"]): Promise<void> {
+export async function removeTree(directory: string, onLeftover: ScriptRunnerOptions["onLeftover"]): Promise<void> {
   const mend = (path: string): void => {
     let stats;
     try { stats = lstatSync(path); } catch { return; }
@@ -64,7 +64,7 @@ async function removeTree(directory: string, onLeftover: ScriptRunnerOptions["on
 }
 
 /** The entry point must stay inside the script's own directory: relative, normalised, no "..", written with "/". */
-function entryPoint(argv: readonly string[]): string {
+export function entryPoint(argv: readonly string[]): string {
   const entry = argv.length === 1 ? argv[0] : undefined;
   // The manifest writes the entry point with "/" on every system (the same bytes mean the same file everywhere); a backslash or a drive letter is not a path of the manifest.
   if (typeof entry !== "string" || entry.length === 0 || entry.includes("\0") || entry.includes("\\") || /^[A-Za-z]:/.test(entry) || posix.isAbsolute(entry) || isAbsolute(entry) || posix.normalize(entry) !== entry || entry === "." || entry.endsWith("/") || entry.split("/").includes("..") || entry.startsWith("-")) {

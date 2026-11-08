@@ -477,6 +477,69 @@ Arguments:
 
 Result: `{ scope, ready, paused, unsettled: [{ kind, ref, state }], truncated }`.
 
+#### `job.get`
+
+One job (cards T07, T07b): a long-running operation tracked on its own, such as a tool an agent started through the bridge. Its state (admitted, dispatched, running, completed, failed, cancellation_requested, cancelled, outcome_unknown), kind, resumability, the end of its output (redacted), exit, orphans the stop could not end, its stop request, history and reconciliations. A task credential reads only its own task's jobs.
+
+Arguments:
+
+- `jobId`: the job (job-...)
+
+Result: `{ item }` or not found.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.list`
+
+The jobs of one task, in ID order, a page at a time.
+
+Arguments:
+
+- `taskId`: the task
+- `after` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100
+
+Result: `{ items, next? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.live`
+
+Every job that has not ended (admitted, dispatched, running, being stopped or outcome-unknown) that the caller may read, tracked exceptions left out: what a restart decides and what the owner or a supervisor may stop. Not for a task credential.
+
+Arguments:
+
+- `after` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100
+
+Result: `{ items, next? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.unresolved`
+
+The outcome-unknown jobs of a task: what a dependent action must wait for until each is reconciled with evidence.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ items }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.reconciliations`
+
+The reconciliation records that settled an outcome-unknown job: from which state, to which, on what evidence, by whom and when.
+
+Arguments:
+
+- `jobId`: the job
+
+Result: `{ items }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `model-budget.get`
 
 Owner only: a task's model limits and what it has used so far (cost, tokens, calls, failed attempts).
@@ -1110,7 +1173,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set: `{ kind: "retention" }`), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set: `{ kind: "retention" }`), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `jobs` (owner only: the long-running jobs that have not ended, each with its state, task, kind and since when, which are outcome-unknown and wait for a reconciliation, and which a stop could not end: `{ kind: "jobs", limit? }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2675,6 +2738,51 @@ Arguments:
 - none
 
 Result: `{ advanced, failed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.cancel`
+
+Stops a job (Stop), or with `force` asks at once or escalates a stop that was not obeyed (Force Stop, a separate recorded step). The kind decides the operation (a model request is cancelled, a tool is stopped, a remote job or MCP operation is stopped remotely); a job the controller runs ends with its whole process tree, and what could not be ended is recorded on the job as orphans. Needs job.control; a task credential stops only its own task's jobs, with job.write there.
+
+Arguments:
+
+- `jobId`: the job
+- `reason`: why, in words
+- `force` (optional): true for Force Stop
+
+Result: `{ id, operation, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.decide`
+
+The decision on a live job after a restart (card T07): `complete` it from evidence (needs `exit`), `cancel` it (the stop is then confirmed by its host), `restart` it from its tool checkpoint (only a tool that left one), or keep it as a tracked `exception` under a named `tracker`. An outcome-unknown job is settled by job.reconcile instead. The owner or a supervisor with job.control.
+
+Arguments:
+
+- `jobId`: the job
+- `decision`: `complete`, `cancel`, `restart` or `exception`
+- `reason`: why, in words
+- `exit` (optional): `{ code?, signal?, reason? }` for complete
+- `tracker` (optional): who tracks an exception
+
+Result: `{ id, state, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `job.reconcile`
+
+Settles an outcome-unknown job with the evidence found, in a record of its own: it becomes completed, failed or cancelled. Nothing is invented; the evidence is required. The owner or a supervisor with job.control.
+
+Arguments:
+
+- `jobId`: the job
+- `to`: `completed`, `failed` or `cancelled`
+- `evidence`: what shows how it ended
+- `exit` (optional): `{ code?, signal?, reason? }`
+
+Result: `{ id, reconciliationId, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

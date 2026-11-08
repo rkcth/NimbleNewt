@@ -18,6 +18,7 @@ import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { CallBody } from "../mcp/mcp.js";
 import type { CutoverService } from "../routing/cutover.js";
+import type { JobService } from "../jobs/jobs.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
 import type { ActivityService, ExplanationBody } from "../activity/activity.js";
@@ -225,6 +226,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
   retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
+  jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
@@ -270,6 +272,7 @@ export type StatusRequest =
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "reconnect"; readonly limit?: number }
@@ -289,6 +292,8 @@ export interface StatusDeps {
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
   readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates">;
+  /** The live jobs (card T07b). Absent: the view is not offered. */
+  readonly jobs?: Pick<JobService, "live">;
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
   readonly assignments: AssignmentService;
@@ -450,6 +455,7 @@ export class StatusService {
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
+      case "jobs": { onlyKnown(request, ["kind", "limit"]); return this.jobLines(by, request.limit); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
@@ -559,6 +565,23 @@ export class StatusService {
     for (const h of down.slice(0, 20)) lines.push(line(`${shown(h.scope, 10)} ${shown(h.name, 64)} is down since ${shown(h.since, 30)} (${shown(h.lastClass, 20)})${h.needsOwner ? "; it needs you to restore it" : ""}.`, h.scope === "model" ? c : cite("route-health", `${h.scope}-${h.name}`)));
     if (down.length > 20 || health.truncated) lines.push(line("More targets are down than are shown.", c));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The jobs that have not ended (card T07b), oldest first: state, label (quoted), task, kind and since when; outcome-unknown ones say they wait for a reconciliation (`job.reconcile`), a stop that was not obeyed and the orphans a
+   * stop could not end are named. The output of a job is never shown here (it is the program's text; `job.get` reads it). Owner only.
+   */
+  async jobLines(by: Principal, limit = 20): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.jobs === undefined || by.kind !== "owner") return undefined;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid("limit", "must be a whole number from 1 to 100");
+    const got = await this.#deps.jobs.live(by, { limit });
+    if (got.jobs.length === 0) return { observedAt: this.#runner.now(), lines: [line("No job is running or waiting: every job has ended or is a tracked exception.", cite("jobs", "live"))] };
+    const unknown = got.jobs.filter((j) => j.state === "outcome_unknown").length;
+    return { observedAt: this.#runner.now(), lines: [
+      line(`${got.jobs.length}${got.next === undefined ? "" : " or more"} job(s) have not ended${unknown === 0 ? "" : `; ${unknown} of them are outcome-unknown and wait for you to reconcile them (job.reconcile, with the evidence)`}:`, cite("jobs", "live")),
+      ...got.jobs.map((j) => line(`${j.id} ${JSON.stringify(shown(j.label, 80))} (${j.kind}) of task ${j.taskId}: ${j.state.replaceAll("_", " ")} since ${shown(j.history.at(-1)?.at ?? j.admittedAt, 30)}${j.state === "outcome_unknown" && j.unknown !== undefined ? ` (${shown(j.unknown.reason, 160)})` : ""}${j.cancel?.uncooperative === true ? "; the stop was not obeyed, Force Stop is offered" : ""}${j.orphans.length > 0 ? `; the stop could not end ${j.orphans.length} process(es): ${j.orphans.slice(0, 3).map((o) => shown(o, 60)).join(", ")}` : ""}.`, cite("job", j.id), cite("task", j.taskId))),
+      ...(got.next === undefined ? [] : [line("More jobs have not ended than are shown (ask with a larger limit).", cite("jobs", "live"))]),
+    ] };
   }
 
   /** The retention values in force and which of them the owner set. Owner only. */
