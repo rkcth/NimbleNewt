@@ -758,6 +758,9 @@ for (const backend of backends) {
     assert.equal((await r.decisions.context(r.ann, { projectId: r.a, taskId: r.t1 }))!.decisions.length, 2);
     assert.equal((await r.decisions.context(r.ben, { projectId: r.a, taskId: r.t2 }))!.decisions.length, 1);
     assert.equal(await r.decisions.context(r.eve, { projectId: r.a, taskId: r.t1 }), undefined);
+    // The controller's own read (card C07g) is the same record for the task, and nothing for a task named under another project.
+    assert.deepEqual(await r.decisions.controllerContext({ projectId: r.a, taskId: r.t1 }), await r.decisions.context(r.ann, { projectId: r.a, taskId: r.t1 }));
+    assert.equal(await r.decisions.controllerContext({ projectId: r.b, taskId: r.t1 }), undefined);
     // A superseded decision is not in the context; it is still readable, marked.
     await r.recorded({ topic: "database", statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
     const after = startupItems((await r.decisions.context(r.w.owner, { projectId: r.a }))!);
