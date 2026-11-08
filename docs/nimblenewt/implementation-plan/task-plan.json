@@ -3144,7 +3144,8 @@
           "10c22657",
           "d4a82fab",
           "fdf214a3",
-          "543015f1"
+          "543015f1",
+          "782435ab"
         ],
         "ci_runs": [],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
