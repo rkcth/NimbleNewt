@@ -665,6 +665,18 @@ export class PauseService implements PauseGuard, PauseLookup {
     return b === undefined ? undefined : { intent: b.intent, ...(b.requestId === undefined ? {} : { requestId: b.requestId }) };
   }
 
+  /**
+   * The pause request holding the scope now when it is one a service made itself (card L04c review 4): a pause made under one of the named operations (and by the named actor, when one is given). Undefined when the
+   * scope is not paused or is held by any other pause. Request IDs follow the gate's request count, so the answer names that very request and no later one; no viewer check, like `gateState`.
+   */
+  async ownPause(scope: PauseScope, operations: readonly { readonly operationId: string; readonly actor?: string }[]): Promise<string | undefined> {
+    const gate = await this.gateState(scope);
+    if (gate?.intent !== "pause" || gate.requestId === undefined) return undefined;
+    const request = (await this.#runner.get("pause-request", gate.requestId))?.body as unknown as PauseRequestBody | undefined;
+    if (request === undefined || request.action !== "pause") return undefined;
+    return operations.some((o) => o.operationId === request.operationId && (o.actor === undefined || o.actor === request.actor)) ? gate.requestId : undefined;
+  }
+
   async gate(viewer: Principal, scope: PauseScope): Promise<View<PauseGateBody> | undefined> {
     const s = checkScope(scope);
     if (!(await this.#may(viewer, s, "read"))) return undefined;

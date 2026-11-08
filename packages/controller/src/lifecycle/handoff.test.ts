@@ -56,7 +56,7 @@ class Sources implements HandoffSources {
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; mgr: Principal; ann: Principal; task: string; a: { kind: string; id: string }; b: { kind: string; id: string }; rt: Runtime; src: Sources; stops: StopService; pauses: PauseService;
-    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; resp: ResponsibilityHandover; told: { handoffId: string; reassigned?: unknown }[]; crash: { lift: number }; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
+    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; resp: ResponsibilityHandover; told: { handoffId: string; reassigned?: unknown }[]; crash: { lift: number; afterStop?: number }; hook: { beforeStop?: (() => Promise<void>) | undefined }; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -86,17 +86,22 @@ for (const backend of backends) {
         const told: { handoffId: string; reassigned?: unknown }[] = [];
         const resp: ResponsibilityHandover = { check: async () => undefined, apply: async (_by, r) => ({ moved: [...r.ids], failed: [] }) };
         // The hand-off's lift of its own hold can be made to die before it is written, as a crash right after the hand-off ended would.
-        const crash = { lift: 0 };
+        const crash: { lift: number; afterStop?: number } = { lift: 0 };
+        // Something that happens just before a hand-off asks for its suspension (once).
+        const hook: { beforeStop?: (() => Promise<void>) | undefined } = {};
         const mk = (asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService => {
           const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
           const lift = pauses.resumeOwnHold.bind(pauses);
           pauses.resumeOwnHold = async (...x) => { if (crash.lift > 0) { crash.lift--; throw new Error("process died before the lift"); } return lift(...x); };
           const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
+          const request = stops.request.bind(stops);
+          // A crash right after the suspension was asked for, before the hand-off recorded it, can be made too.
+          stops.request = async (...x) => { const h = hook.beforeStop; hook.beforeStop = undefined; await h?.(); const r = await request(...x); if ((crash.afterStop ?? 0) > 0) { crash.afterStop!--; throw new Error("process died after the suspension"); } return r; };
           return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src, responsibilities: { check: (...x) => resp.check(...x), apply: (...x) => resp.apply(...x) }, onTransferred: async (_by: Principal, e: { handoffId: string; reassigned?: unknown }) => { told.push(e); }, ...(asker === undefined ? {} : { asker }), ...(given === undefined ? {} : { onReturnGivenUp: async (_by: Principal, e: { handoffId: string; taskId: string; reason: string }) => { given.push(e); } }) }, options);
         };
         const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
         const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
-        await body({ owner, mgr, ann, task, a, b, rt, src, stops, pauses, handoffs: mk(), assignments: real, failTransfer, resp, told, crash, reopen: mk });
+        await body({ owner, mgr, ann, task, a, b, rt, src, stops, pauses, handoffs: mk(), assignments: real, failTransfer, resp, told, crash, hook, reopen: mk });
       } finally { await world.close(); }
     });
   const scopeOf = (task: string) => ({ kind: "task", id: task }) as const;
@@ -431,5 +436,107 @@ for (const backend of backends) {
     assert.equal(swept.advanced.length, 1);
     assert.ok(!swept.advanced.includes(stuck.id));
     assert.equal(await paused(c), false);
+  });
+
+  suite("a pause the owner set just before the hand-off's suspension is the owner's: the hand-off holds the task with it but never lifts it (card L04c review 4)", async (c) => {
+    c.hook.beforeStop = async () => { await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "the owner's own hold" }); };
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(h.phase, "ready");
+    assert.equal(h.holdRequestId, undefined, "the pause holding the task is not the hand-off's");
+    const done = await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id });
+    assert.equal(done.phase, "transferred");
+    assert.equal(await paused(c), true, "the owner's pause stands after the hand-off");
+    assert.deepEqual(await c.reopen().sweep(c.owner), { advanced: [], failed: [] });
+    assert.equal(await paused(c), true);
+  });
+
+  suite("a takeover whose force-stop pause the owner replaced while the package was collected lifts nothing: the owner's pause stands (card L04c review 4)", async (c) => {
+    const collect = c.src.collect.bind(c.src);
+    let once = true;
+    c.src.collect = async () => {
+      if (once) { once = false; await c.pauses.resume(c.owner, { commandId: cid("r"), scope: scopeOf(c.task), reason: "a look" }); await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "the owner's own hold" }); }
+      return collect();
+    };
+    const t = await c.handoffs.takeover(c.owner, { commandId: cid("tk"), taskId: c.task, to: c.b, reason: "A is unreachable" });
+    assert.equal(t.phase, "transferred");
+    assert.equal(await paused(c), true, "the owner's pause stands");
+    assert.deepEqual(await c.reopen().sweep(c.owner), { advanced: [], failed: [] });
+    assert.equal(await paused(c), true);
+  });
+
+  suite("a crash between the suspension and its record: the hand-off still knows its own hold, lifts it when it ends, and never a pause the owner set after it (card L04c review 4)", async (c) => {
+    // Cancelled after the crash: its own suspension's pause is lifted.
+    c.crash.afterStop = 1;
+    const id1 = cid("h");
+    await assert.rejects(c.handoffs.prepare(c.mgr, { commandId: id1, taskId: c.task, to: c.b, reason: "move it" }), /process died/);
+    assert.equal(await paused(c), true);
+    const h1 = (await c.handoffs.forTask(c.owner, c.task))!;
+    await c.handoffs.cancel(c.mgr, { handoffId: h1.id });
+    assert.equal(await paused(c), false, "the hand-off's own hold is lifted");
+    // The same crash, then the owner lifts that hold and pauses again: the owner's pause stands when the hand-off ends.
+    c.crash.afterStop = 1;
+    await assert.rejects(c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" }), /process died/);
+    const h2 = (await c.handoffs.forTask(c.owner, c.task))!;
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: scopeOf(c.task), reason: "resume by hand" });
+    await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "the owner's own hold" });
+    await c.handoffs.cancel(c.mgr, { handoffId: h2.id });
+    assert.equal(await paused(c), true, "a pause set after the hand-off's is never lifted by it");
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: scopeOf(c.task), reason: "resume by hand" });
+    // The same crash, then the request is sent again: the hand-off goes on, names its hold and lifts it once it completes.
+    c.crash.afterStop = 1;
+    const id3 = cid("h");
+    await assert.rejects(c.handoffs.prepare(c.mgr, { commandId: id3, taskId: c.task, to: c.b, reason: "move it" }), /process died/);
+    const h3 = await c.handoffs.prepare(c.mgr, { commandId: id3, taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(h3.phase, "ready");
+    assert.ok(h3.holdRequestId !== undefined, "the repeat names the hand-off's own hold");
+    assert.equal((await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h3.id })).phase, "transferred");
+    assert.equal(await paused(c), false);
+  });
+
+  suite("a pause someone else made under the same command ID as the hand-off's suspension is not the hand-off's (card L04c review 4)", async (c) => {
+    const id = cid("h");
+    c.hook.beforeStop = async () => { await c.pauses.pause(c.owner, { commandId: `${id}-suspend-pause`, scope: scopeOf(c.task), reason: "the owner's own hold" }); };
+    const h = await c.handoffs.prepare(c.mgr, { commandId: id, taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(h.holdRequestId, undefined);
+    assert.equal((await c.handoffs.cancel(c.mgr, { handoffId: h.id })).phase, "cancelled");
+    assert.equal(await paused(c), true, "the owner's pause stands");
+  });
+
+  suite("a takeover lifts its own force-stop pause when the task has moved, and a sweep lifts it after a crash at the lift; a crash before its suspension was recorded is lifted by the sweep too (card L04c review 4)", async (c) => {
+    const t = await c.handoffs.takeover(c.owner, { commandId: cid("tk"), taskId: c.task, to: c.b, reason: "A is unreachable" });
+    assert.equal(t.phase, "transferred");
+    assert.ok(t.holdRequestId !== undefined, "the force stop's pause is the takeover's hold");
+    assert.equal(await paused(c), false, "the takeover lifts its own hold");
+    c.crash.lift = 1;
+    await assert.rejects(c.handoffs.takeover(c.owner, { commandId: cid("tk"), taskId: c.task, to: c.a, reason: "B is unreachable" }), /process died/);
+    assert.equal(await paused(c), true);
+    assert.equal((await c.reopen().sweep(c.owner)).advanced.length, 1);
+    assert.equal(await paused(c), false, "the sweep lifts the takeover's hold");
+    // A prepared hand-off whose suspension was never recorded (crash), ended by a cancel whose lift died too: the sweep still knows its hold and lifts it.
+    c.crash.afterStop = 1;
+    await assert.rejects(c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" }), /process died/);
+    const h = (await c.handoffs.forTask(c.owner, c.task))!;
+    assert.equal(h.holdRequestId, undefined);
+    c.crash.lift = 1;
+    await assert.rejects(c.handoffs.cancel(c.mgr, { handoffId: h.id }), /process died/);
+    assert.equal(await paused(c), true);
+    assert.deepEqual(await c.reopen().sweep(c.owner), { advanced: [h.id], failed: [] });
+    assert.equal(await paused(c), false);
+  });
+
+  suite("a hand-off that ended with its hold not yet let go does not leave that hold under the next hand-off of the task: a sweep never lifts the pause the next one relies on (card L04c review 4)", async (c) => {
+    const first = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    c.crash.lift = 1;
+    await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: first.id }), /process died/);
+    assert.equal(await paused(c), true);
+    // The next hand-off starts before any sweep: it holds the task with a pause of its own.
+    const next = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.a, reason: "back again" });
+    assert.equal(next.phase, "ready");
+    assert.equal(next.heldBefore, false, "the ended hand-off's hold was let go first, so the next one's hold is its own");
+    assert.ok((await c.handoffs.get(c.owner, first.id))?.released !== undefined);
+    await c.reopen().sweep(c.owner);
+    assert.equal(await paused(c), true, "the sweep does not lift the hold the ready hand-off relies on");
+    assert.equal((await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: next.id })).phase, "transferred");
+    assert.equal(await paused(c), false, "the next hand-off lifts its own hold when it ends");
   });
 }
