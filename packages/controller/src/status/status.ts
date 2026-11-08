@@ -29,7 +29,7 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
-import { CAP_NAMES } from "../admission/policy.js";
+import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
 import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js";
@@ -412,18 +412,36 @@ const CAPS_DAMAGED = "the caps record you stored is damaged - nothing new is adm
 const SWARM_DAMAGED = "the stored swarm limits are damaged - no child task can be spawned until they are repaired with swarm.limits.change";
 /** A stored figure the controller can work from: a number that is neither missing, nor NaN, nor an infinity. */
 const isFigure = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+/**
+ * Whether one stored quota figure is what `capacity.quotas.change` could have stored: a whole number inside the bound the admission service enforces (`LIMIT_BOUNDS`, the table `checkLimits` reads).
+ * `quotas()` hands the record over unchecked, so a `productive` of `-1` or `1.5` reaches the view as it is, prints as the owner's own figure, and leaves admission admitting nothing. A name the table
+ * does not hold is not a quota at all and is checked as a figure only - `checkLimits` itself cannot be called here, because it wants all seven figures and the quotas carry four of them.
+ */
+const quotaFigure = (name: string, v: unknown): boolean => {
+  const bound = LIMIT_BOUNDS[name as keyof Limits];
+  return bound !== undefined && typeof v === "number" && Number.isSafeInteger(v) && v >= bound[0] && v <= bound[1];
+};
+/** What a stored quota figure has to be, in the owner's words - the same words `capacity.quotas.change` refuses a bad figure with (`must be a whole number from 1 to 64`). */
+const quotaBoundWords = (name: string): string => {
+  const bound = LIMIT_BOUNDS[name as keyof Limits];
+  return bound === undefined ? "a figure the controller can work from" : `a whole number from ${bound[0]} to ${bound[1]}`;
+};
 /** A stored record read as a field map; undefined for anything that is not one (missing, null, an array, text, a number). */
 const asRecord = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 /**
  * Why the host and global quotas cannot be shown, in one clause; undefined when every figure in them reads. `AdmissionService.quotas()` hands back what the admission record holds without checking it, so a
- * record no command could store reaches the view as it is: a figure that is missing or is not a number, hosts that is not a record of declared CPUs and memory. Admission works from that same record, and a
- * bound it cannot read is simply not applied (a record whose `queue` was missing let a queue of any length build up instead of refusing), so the group is refused in one line rather than shown wrongly.
+ * record no command could store reaches the view as it is: a figure that is missing or is not a number, a quota outside the bound the owner's own command enforces, hosts that is not a record of declared
+ * CPUs and memory. Admission works from that same record, and a bound it cannot read is simply not applied (a record whose `queue` was missing let a queue of any length build up instead of refusing, and a
+ * `productive` of nought starts no work at all), so the group is refused in one line rather than shown wrongly.
  */
 function quotaProblem(q: { readonly limits: unknown; readonly defaults: unknown; readonly hosts: unknown; readonly running: unknown; readonly waiting: unknown }): string | undefined {
   const limits = asRecord(q.limits);
   if (limits === undefined || Object.keys(limits).length === 0) return "the limits are not a record of figures";
   const bad = Object.keys(limits).filter((n) => !isFigure(limits[n]));
   if (bad.length > 0) return `${bad.join(", ")} ${bad.length === 1 ? "is" : "are"} not a figure the controller can work from`;
+  // A figure may read as a number and still be one no command could store (`productive: -1`, `queue: 0`, `perHost: 1.5`): admission works from it, so the group cannot be shown as the owner's own setting.
+  const out = Object.keys(limits).filter((n) => !quotaFigure(n, limits[n]));
+  if (out.length > 0) return `${out.slice(0, 3).map((n) => `${n} is not ${quotaBoundWords(n)}`).join(", ")}${out.length > 3 ? ` (and ${out.length - 3} more)` : ""}`;
   if (asRecord(q.defaults) === undefined) return "the defaults are not a record of figures";
   const hosts = asRecord(q.hosts);
   if (hosts === undefined) return "the declared hosts are not a record of CPUs and memory";

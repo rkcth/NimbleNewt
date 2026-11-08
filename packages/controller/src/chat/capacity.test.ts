@@ -230,6 +230,52 @@ for (const backend of backends) {
     assert.match(mended, /^queue \(.*\): 100 \(the default\); 0 waiting now$/m, "and the queue reads again");
   });
 
+  suite("a stored quota figure outside the bound the service enforces is damaged, not a figure the owner set", async (w, s) => {
+    const ADM = { kind: "admission-state", id: "admission" };
+    // `quotaProblem` used to take any finite number as the owner's own figure, so every one of these printed as `(you set it)`. None of them can be stored by `capacity.quotas.change` - asserted for each
+    // below, through the command itself - so a record holding one came from somewhere else, and the bounds the command enforces (`LIMIT_BOUNDS`, the same table `checkLimits` reads) are the only ones worth showing.
+    const outOfBounds: readonly (readonly [string, number, string])[] = [
+      ["productive", -1, "1 to 64"], ["productive", 0, "1 to 64"], ["productive", 1.5, "1 to 64"], ["productive", 65, "1 to 64"],
+      ["perHost", 0, "1 to 16"], ["perHost", 17, "1 to 16"], ["control", 0, "1 to 16"], ["control", 17, "1 to 16"],
+      ["queue", 0, "1 to 500"], ["queue", 501, "1 to 500"],
+    ];
+    for (const [name, value, bound] of outOfBounds) {
+      const limits: Record<string, unknown> = { productive: 4, perHost: 2, control: 2, queue: 100, depth: 3, children: 4, patience: 5 };
+      limits[name] = value;
+      await damage(s.storage, s.epoch, ADM, { limits, capacity: {}, running: [], queue: [], withdrawn: [] }, `bound-${name}-${String(value)}`);
+      const body = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+      assert.ok(
+        body.includes(`Host and global quotas: the stored admission record is damaged (${name} is not a whole number from ${bound}): nothing in this group is shown, and what admission admits from it is not what these figures would allow (it needs repair; capacity.quotas.change cannot mend every damaged shape).`),
+        `${name}: ${String(value)} is outside the bound the command enforces, so the group is refused with that said: ${body}`,
+      );
+      assert.ok(!body.split("\n").some((l) => l.startsWith(`${name} (`)), `the out-of-range figure is never printed as the owner's: ${body}`);
+      assert.ok(!body.includes("(you set it)"), `nothing in the group is marked as set: ${body}`);
+      await assert.rejects(
+        () => s.quotas.changeQuotas(s.owner, { commandId: cid(`bound-${name}-${String(value)}`), set: { [name]: value } }),
+        (error: unknown) => error instanceof DomainError && error.code === "invalid_command" && error.message === `set.${name}: must be a whole number from ${bound}`,
+        `no command could have stored ${name}: ${String(value)}`,
+      );
+    }
+  });
+
+  suite("a stored figure outside the bound is not inert either: admission works from it, which is why the group is refused whole", async (w, s) => {
+    const ADM = { kind: "admission-state", id: "admission" };
+    await w.principals.enroll(w.owner, { commandId: cid("h"), kind: "host", name: "pc", grants: [] });
+    const record = (over: Record<string, unknown>): Record<string, unknown> => ({ limits: { productive: 4, perHost: 2, control: 2, queue: 100, depth: 3, children: 4, patience: 5, ...over }, capacity: { "host:pc": { cpus: 8, memoryMb: 16_384 } }, running: [], queue: [], withdrawn: [] });
+    // `productive: 0` - what is already running is untouched and inquiries still run, but productive work is queued and never starts: a place under a total of nought can never free up.
+    await damage(s.storage, s.epoch, ADM, record({ productive: 0, perHost: 1 }), "inert-prod");
+    assert.equal((await s.quotas.request({ commandId: cid("prod-0"), actor: "host:pc", class: "productive", host: "host:pc", cpus: 1, memoryMb: 512 })).state, "waiting", "the stored total of nought admits no productive work");
+    assert.equal((await s.quotas.request({ commandId: cid("ask-0"), actor: "host:pc", class: "inquiry", cpus: 1, memoryMb: 512 })).state, "running", "the control lane is a different figure, and it is untouched");
+    // `queue: 0` - the two reserved control places fill up, and after them a request that cannot start at once is refused outright instead of waiting.
+    await damage(s.storage, s.epoch, ADM, record({ queue: 0 }), "inert-queue");
+    for (const i of [1, 2]) await s.quotas.request({ commandId: cid(`fill-${i}`), actor: "host:pc", class: "inquiry", cpus: 1, memoryMb: 512 });
+    await assert.rejects(
+      () => s.quotas.request({ commandId: cid("third"), actor: "host:pc", class: "inquiry", cpus: 1, memoryMb: 512 }),
+      (error: unknown) => error instanceof DomainError && error.code === "unavailable" && error.message === "the queue is full (0 waiting); try again later",
+      "a stored queue of nought refuses everything that has to wait, where the sound record let it wait",
+    );
+  });
+
   suite("a record with more declared hosts than the view lists shows the first ones in order and counts the rest, inside the lines the chat shows", async (w, s) => {
     // More hosts than the owner's own command could ever store: `capacity.quotas.change` takes at most 50 hosts in one change (probed) and refuses a record that would hold more than 200, so a record this
     // large can only arrive by another route and is written whole here. What is under test is the view's own bound and its order, not the command's.
