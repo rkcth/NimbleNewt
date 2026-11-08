@@ -36,7 +36,7 @@ import { InboxService } from "../domain/inbox.js";
 import { GenerationService, streamTapFor, type StreamSettingsService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import { HostService } from "../hosts/index.js";
-import { McpService, RemoteMcpConnector } from "../mcp/index.js";
+import { McpService, RemoteMcpClient, RemoteMcpConnector, type McpHttpOptions } from "../mcp/index.js";
 import type { NameResolver } from "../dispatch/network.js";
 import type { RetrievalService } from "../context/index.js";
 import type { AgentService } from "../agents/index.js";
@@ -122,7 +122,7 @@ export interface DispatchStartOptions {
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
     /** What one agent on this host may use (cpus, memoryMb, diskMb, processes), checked at start and handed to `build` as `limits` for the host's `workspace` to carry (`AttemptWorkspace.limits`). Absent: none applied. */
     readonly limits?: LocalWorkerLimits;
-    readonly build: (services: { readonly guards: RuntimeGuards; /** The landing policy for a task, from the owner's settings (`workspace.landing.branch`, `.requirePermit`, `.protectedPaths`), read fresh at each call (card H12s). Pass it as the `landing` option of `LocalWorkspaces`. It throws when the settings cannot be read, which the host treats as no policy (the landing is refused). */ readonly landingPolicy: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicyFigures>; /** The limits for an agent launched now (start-up figures with the owner's setting over them), read fresh at each call; `undefined` when none apply. There is deliberately no static copy of the start-up figures here, so a host cannot read stale ones. It throws when the setting cannot be read, and the host must then refuse the launch (fail visibly), never run the agent unlimited. */ readonly currentLimits: () => Promise<LocalWorkerLimits | undefined>; /** Whether the owner allowed best effort: a launch whose limits this OS cannot enforce in full may go ahead (default: refused). Read at each launch; throws when unreadable, and the host must then refuse the launch. */ readonly bestEffortAllowed: () => Promise<boolean>; /** Keeps what a launch came to (limits asked for, how each was enforced, started or refused). Pass the host's `onLaunch` this; if it throws the host ends the process. */ readonly recordLaunch: (record: LaunchRecord) => Promise<void>; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The landing policy for a task, from the owner's settings (`workspace.landing.branch`, `.requirePermit`, `.protectedPaths`), read fresh at each call (card H12s). Pass it as the `landing` option of `LocalWorkspaces`. It throws when the settings cannot be read, which the host treats as no policy (the landing is refused). */ readonly landingPolicy: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicyFigures>; /** The limits for an agent launched now (start-up figures with the owner's setting over them), read fresh at each call; `undefined` when none apply. There is deliberately no static copy of the start-up figures here, so a host cannot read stale ones. It throws when the setting cannot be read, and the host must then refuse the launch (fail visibly), never run the agent unlimited. */ readonly currentLimits: () => Promise<LocalWorkerLimits | undefined>; /** Whether the owner allowed best effort: a launch whose limits this OS cannot enforce in full may go ahead (default: refused). Read at each launch; throws when unreadable, and the host must then refuse the launch. */ readonly bestEffortAllowed: () => Promise<boolean>; /** Keeps what a launch came to (limits asked for, how each was enforced, started or refused). Pass the host's `onLaunch` this; if it throws the host ends the process. */ readonly recordLaunch: (record: LaunchRecord) => Promise<void>; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> }; /** Present when `dispatch.mcp` was given (card H12k): the only way the host reaches a remote MCP server, the same connector and client as the handle's `mcp`. */ readonly mcp?: { readonly connector: RemoteMcpConnector; readonly client: RemoteMcpClient } }) => WorkerHost | Promise<WorkerHost>;
     /** Run agents without the owner's limits, best-effort setting and launch record (the host built by `build` does not connect them). Absent: such a host is refused at start. */
     readonly acceptUnenforcedLimits?: boolean;
     /** Where this host keeps the agents' own conversation stores, and where each one goes back on a restore (card K01h). Given: backups include them and restores put them back, with no separate `backup.piState`. Absent (and no `backup.piState`): Pi state is not in backups, and the backup status says so. */
@@ -146,7 +146,13 @@ export interface DispatchStartOptions {
    */
   readonly nudge?: (nudge: { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string; readonly startsAt: string; readonly urgent: boolean }) => Promise<void>;
   /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
-  readonly mcp?: { readonly resolve: NameResolver; /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */ readonly gate?: () => Promise<void> };
+  readonly mcp?: {
+    readonly resolve: NameResolver;
+    /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */
+    readonly gate?: () => Promise<void>;
+    /** The MCP transport's settings (card H12k): time and size bounds, a private CA, the server's credential header. The socket always goes to the checked address. */
+    readonly transport?: McpHttpOptions;
+  };
 }
 
 export interface DispatchHandle {
@@ -184,8 +190,8 @@ export interface DispatchHandle {
   readonly chargeUse: (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }) => Promise<void>;
   /** What an attempt's freeze says and lifting it, for the workspace service's recovery (card H12l), telling a running agent something and stopping an attempt (card H12m). */
   readonly attemptControl: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void>; tell(attemptId: string, text: string): Promise<boolean>; stop(attemptId: string, reason: string): Promise<void> };
-  /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
-  readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector };
+  /** The MCP service and the only way the host reaches a remote server (cards T03, H12g): the connector, and the client that speaks MCP over it to the checked address (card H12k); present when `mcp` was given. */
+  readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector; readonly client: RemoteMcpClient };
 }
 
 export interface ComposeInput {
@@ -390,6 +396,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   };
   // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
   const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, { ...ro, ...(i.contextRouteSettings === undefined ? {} : { routeSettings: i.contextRouteSettings }), ...(i.onError === undefined ? {} : { onError: i.onError }) });
+  // Remote MCP servers (cards T03, H12g, H12k): built before the local host so the host is given the same connector and client the handle carries.
+  const mcpParts = (() => {
+    const o = i.options.mcp;
+    if (o === undefined) return undefined;
+    const service = McpService.withEpoch(storage, epoch, { ...ro, ...(o.gate === undefined ? {} : { gate: o.gate }) });
+    const connector = new RemoteMcpConnector({ mcp: service, resolve: o.resolve, principal });
+    return { service, connector, client: new RemoteMcpClient(connector, o.transport ?? {}) };
+  })();
   if (i.options.local !== undefined) {
     const limits = checkLocalWorkerLimits(i.options.local.limits);
     const guards = controllerGuards({
@@ -483,7 +497,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }
       return found.relay;
     };
-    const built = await i.options.local.build({ guards, landingPolicy: async (call) => i.landingPolicy === undefined ? {} : i.landingPolicy(call), currentLimits: async () => i.workerLimits === undefined ? limits : i.workerLimits(), bestEffortAllowed: async () => i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed(), recordLaunch: async (record) => { await i.workerPolicy?.recordLaunch(record); }, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) });
+    const built = await i.options.local.build({ guards, landingPolicy: async (call) => i.landingPolicy === undefined ? {} : i.landingPolicy(call), currentLimits: async () => i.workerLimits === undefined ? limits : i.workerLimits(), bestEffortAllowed: async () => i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed(), recordLaunch: async (record) => { await i.workerPolicy?.recordLaunch(record); }, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }), ...(mcpParts === undefined ? {} : { mcp: { connector: mcpParts.connector, client: mcpParts.client } }) });
     // The controller hands the host builder the owner's limits, best-effort setting and launch record. A host that does not say it connected them would run every agent unlimited whatever the owner set, so it is refused here, at start,
     // unless the operator states that it applies no owner limits (`acceptUnenforcedLimits`).
     if (built.ownerPolicy !== true && i.options.local.acceptUnenforcedLimits !== true) {
@@ -577,7 +591,6 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.hold === undefined ? {} : { hold: i.hold }),
       onDisabled: async (why) => { await tell(why); },
     });
-    const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
     // Started last, so a failure above leaves no driver ticking a dispatcher whose host is being closed.
     await i.beforeLoops?.();
     if (i.options.manual !== true) driver.start();
@@ -597,7 +610,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       readRouteArchive: (by, taskId, digest) => context.routeArchive(by, { taskId, digest }),
       principal,
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
-      ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
+      ...(mcpParts === undefined ? {} : { mcp: mcpParts }),
     };
   } catch (error) {
     await transport?.close().catch(() => undefined);

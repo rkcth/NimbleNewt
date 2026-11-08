@@ -7,7 +7,7 @@ Written 2026-10-30 against the repository as it stands. NimbleNewt is under deve
 - There is **no installer, no command-line launcher and no first-run wizard yet**. The controller is a library function, `startController` (packages/controller/src/api/start.ts). Today a person starts it from a small script (step 1 below, tested). The guided setup through chat is card **U14**.
 - The one door to everything is the **state API** (`controller.api.handle(token, request)`, see [api-v1](api-v1.md)). It is in-process today: there is no HTTP route for it. The HTTP listener (`conversationTransport`, card U02b) carries conversations only.
 - The web UI (U07, U08, U09) is not built. Chat exists as a service (U03 and friends) and needs a model behind it, which needs a model route, which is itself part of setup. So **the first steps cannot be done by chat**; they are done from the script, and once a model route and chat are wired, the rest is changeable by chat.
-- The **local worker host is not composed into the controller yet** (card **H12k**). Until it is, an agent can be created, given rights and assigned a task, but no attempt runs on this machine's own worker. Remote hosts and the dispatcher exist (H07, H12, H12c).
+- The **local worker host is composed at start-up only from code** (card **H12k**): the start script must pass `dispatch.local.build`, which makes the host from the worker package's parts with the services the controller hands it (model relay, guards, context checks, the owner's limits, the MCP client); `packages/integration/src/h12k-composed-host.test.ts` shows the whole composition. Without it, an agent can be created, given rights and assigned a task, but no attempt runs on this machine's own worker. A ready-made builder and the product workspace composition are cards U14 and H12t. Remote hosts and the dispatcher exist (H07, H12, H12c).
 - `setup.readiness` (owner-only, read-only, built with U14's first piece) tells you at any point what is configured and what is missing. Use it after each step.
 
 ## What you must decide (checklist, with defaults)
@@ -126,7 +126,7 @@ await controller.services.routing.setTable(owner, { commandId: "setup-routing-1"
 
 - Enrol a host: `controller.services.principals.enroll(owner, { commandId, kind: "host", name: "laptop", grants: [] })` and issue it a credential with `issueCredential(owner, "host:laptop")`. The worker on that machine uses the credential to **announce** its capabilities and send heartbeats (`HostService`); `setup.readiness` counts a host only once it has announced.
 - Limits for local agents (`workers.limits.set`) and where local-only data may go (`placement.set`; the strict profile allows only hosts you list) are owner settings you can leave at their defaults.
-- **Not built:** composing the local worker host into the controller (**H12k**), so that a host on this machine starts without hand-built code, and the Windows sandbox (**A03b**). The sandbox for Linux (bubblewrap) and macOS (Seatbelt) exists (A03). Remote hosts are covered by H07 and the worker transport.
+- **Not built:** a local worker host that starts without hand-built code (the composition itself is H12k, built; a ready-made builder is U14, the product workspace composition H12t), and the Windows sandbox (**A03b**). The sandbox for Linux (bubblewrap) and macOS (Seatbelt) exists (A03). Remote hosts are covered by H07 and the worker transport.
 
 ### Step 7. Notifications
 
@@ -163,7 +163,7 @@ await ask("task.transition", { taskId: t.result.id, expectedRevision: t.result.r
 await ask("task.assign", { taskId: t.result.id, owner: { kind: "agent", id: a.result.id } }, "setup-task-3");
 ```
 
-`task.assign` is accepted at once; the work starts only when the agent's host admits an attempt (see `assignment.get` and `activity.get`). With no local worker host composed (H12k) the task stays assigned and waiting: that is expected today, not an error you made.
+`task.assign` is accepted at once; the work starts only when the agent's host admits an attempt (see `assignment.get` and `activity.get`). If the start script passes no `dispatch.local.build` (H12k), no local worker host runs and the task stays assigned and waiting: that is expected, not an error you made.
 
 ### Step 11. Check, and what to do when something is missing
 
@@ -178,7 +178,7 @@ Run `ask("setup.readiness")` again. Every required item should be `done` and `re
 | A guided first-run conversation and a per-project question for version control host and CI | U14 | steps 4 to 10 by hand |
 | Provider and route editing as an operation or chat step | U14, U08 | `routing.setTable` from code |
 | Credentials issued for hosts and agents through an operation | U14 | `PrincipalService.issueCredential` from code |
-| Composed local worker host on this machine | H12k | none: tasks wait |
+| A local worker host on this machine without hand-built code | U14, H12t | `dispatch.local.build` in the start script (see `h12k-composed-host.test.ts`) |
 | Web chat and settings views | U07, U08, U09 | HTTP conversation routes |
 | Notification levels, Needs you view | U11b | the inbox |
 | Landing gated on required checks for the exact tree | P09 | checks recorded only |

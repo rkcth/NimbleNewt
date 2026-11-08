@@ -204,7 +204,7 @@ export class McpService {
    * Where a remote server is reached, for the host that connects to it (card H12g). Asked for at each connection, never cached by the caller: a server the owner revoked gives nothing, so no new connection is made for it.
    * Only staff (the owner, a host, a service) may ask; the credential reference is not part of the answer.
    */
-  async remoteEndpoint(by: Principal, serverId: string): Promise<{ readonly url: string; readonly name: string }> {
+  async remoteEndpoint(by: Principal, serverId: string): Promise<{ readonly url: string; readonly name: string; /** The MCP revision the connection is pinned to (card H12k: the transport initializes at it and refuses another). */ readonly protocolRevision: string }> {
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not look up where an MCP server is reached`);
     await this.#gate();
     const id = clean(serverId, "serverId", SERVER_ID, "is not an MCP server ID");
@@ -212,7 +212,7 @@ export class McpService {
     if (server === undefined) throw new DomainError("not_found", "no such MCP server");
     if (server.state !== "approved") throw new DomainError("forbidden", `MCP server ${server.name} is ${server.state}; no new connection is made`);
     if (server.mode !== "remote" || server.remote === undefined) throw new DomainError("invalid_command", `MCP server ${server.name} is not a remote server`, { field: "serverId" });
-    return { url: server.remote.url, name: server.name };
+    return { url: server.remote.url, name: server.name, protocolRevision: server.protocolRevision };
   }
 
   /** Whether a server is approved and not revoked, for a caller that starts a long-running operation on it (card T07). */
