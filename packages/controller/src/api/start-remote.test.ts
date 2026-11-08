@@ -131,7 +131,7 @@ test("a host that cannot meet the attempt's requirements is not given it: the re
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
-test("a failure after the listener opened (while the driver or the MCP service is built) leaves nothing listening and nothing ticking, and the local host is closed once (card H02c)", async () => {
+test("a failure after the listener opened (while the driver is built) leaves nothing listening and nothing ticking, and the local host is closed once; one while the MCP service is built (before the host and the listener, card H12k) opens nothing (card H02c)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-remote-"));
   const net = await import("node:net");
   const freePort = async (): Promise<number> => { const s = net.createServer(); await new Promise<void>((ok) => s.listen(0, "127.0.0.1", ok)); const p = (s.address() as { port: number }).port; await new Promise<void>((ok) => s.close(() => ok())); return p; };
@@ -163,12 +163,13 @@ test("a failure after the listener opened (while the driver or the MCP service i
       try {
         assert.equal(c.dispatch, undefined, n);
         assert.match(c.dispatchProblem ?? "", /injected failure/, n);
-        assert.deepEqual(openAt, [true], `${n}: the listener was open when the step failed`);
+        // The MCP service is built before the local host (which is handed its client) and before the listener, so its failure finds nothing open and nothing built.
+        assert.deepEqual(openAt, [n === "driver"], `${n}: the listener was ${n === "driver" ? "" : "not yet "}open when the step failed`);
         assert.equal(await refused(port), true, `${n}: the listener that was opened is closed`);
         assert.equal(timer.armed, false, `${n}: nothing is ticking`);
         assert.deepEqual(timer.delays, [], `${n}: no timer was ever asked for`);
       } finally { await c.close(); }
     }
-    assert.equal(closed, 2, "the local host was closed once for each failed start");
+    assert.equal(closed, 1, "the local host built before the driver failed was closed once; none was built before the MCP service failed");
   } finally { restore(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
