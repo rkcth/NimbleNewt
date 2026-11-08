@@ -157,6 +157,11 @@ export class SwarmService {
       if (!reclaimed) { pending.push(childId); continue; }
       const fresh = (await this.#deps.projects.getTask(childId))!;
       if (!FINAL.has(fresh.state)) await this.#deps.projects.transitionTask({ commandId: `swt-${command.commandId}-${childId}`, actor: by.id, taskId: childId, expectedRevision: fresh.revision, to: "cancelled" } as never);
+      // A spawn may hand the allowance over after it was looked at above and see the child still live before it is cancelled here; then neither side would take it back. Looking again after
+      // the cancel closes that gap: a hand-over before the cancel is seen here, one after it is seen by the spawn (taking back twice returns nothing the second time).
+      if (!hasAllowance && (await this.#runner.get(BUDGET_LINK, childId)) !== undefined) {
+        await this.#deps.budgets.reclaim(by, { commandId: `swr2-${command.commandId}-${childId}`, taskId: childId }).catch((error: unknown) => { if (!(error instanceof DomainError && ["forbidden", "not_found"].includes(error.code))) throw error; });
+      }
       settled.push(childId);
     }
     if (pending.length === 0) await this.#mark(parentId, false, by.id);

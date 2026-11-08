@@ -22,7 +22,7 @@ const ports: StopPorts = { inventory: async () => [], cleanup: async () => ({ re
 const latch = (): { wait: Promise<void>; open: () => void } => { let open!: () => void; const wait = new Promise<void>((r) => { open = r; }); return { wait, open }; };
 
 for (const backend of backends) {
-  type Hooks = { beforeDelegate?: () => Promise<void>; beforeAdvance?: () => Promise<void>; stuck?: () => boolean };
+  type Hooks = { beforeDelegate?: () => Promise<void>; beforeAdvance?: () => Promise<void>; beforeTransition?: () => Promise<void>; stuck?: () => boolean };
   const world = async (hooks: Hooks = {}) => {
     const w = await backend.open();
     const projects = await ProjectService.open(w.storage, { holder: "c1", ...options });
@@ -41,7 +41,8 @@ for (const backend of backends) {
     const slowStops = new Proxy(stops, { get: (t, k) => (k === "advance" ? async (...a: Parameters<StopService["advance"]>) => { await hooks.beforeAdvance?.(); if (hooks.stuck?.() === true) return { outcome: undefined } as never; return t.advance(...a); } : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
     const settings = SwarmLimitsService.withEpoch(w.storage, projects.epoch, options);
     const contracts = ContractService.withEpoch(w.storage, projects.epoch, options);
-    const swarm = SwarmService.withEpoch(w.storage, projects.epoch, { projects, contracts, budgets: held, stops: slowStops, settings }, options);
+    const slowProjects = new Proxy(projects, { get: (t, k) => (k === "transitionTask" ? async (...a: Parameters<ProjectService["transitionTask"]>) => { await hooks.beforeTransition?.(); return t.transitionTask(...a); } : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+    const swarm = SwarmService.withEpoch(w.storage, projects.epoch, { projects: slowProjects, contracts, budgets: held, stops: slowStops, settings }, options);
     let n = 0;
     const spawn = (parentTaskId = root, extra: Record<string, unknown> = {}) => swarm.spawn(rob, { commandId: `sp${n++}`, parentTaskId, title: `Child ${n}`, ...WANT, costMicros: 1000, computeMs: 100, ...extra } as never);
     const finish = async (id: string) => { const t = (await projects.getTask(id))!; await projects.transitionTask({ commandId: `fin-${id}`, actor: rob.id, taskId: id, expectedRevision: t.revision, to: "cancelled" } as never); };
@@ -167,6 +168,34 @@ for (const backend of backends) {
       assert.deepEqual((await x.budgets.report(x.rob, x.root))!.delegatedToChildren, { costMicros: 0, computeMs: 0 }, "everything handed down came back");
       // Once nothing is pending the parent may spawn again.
       await x.spawn();
+    } finally { await x.w.close(); }
+  });
+
+  suite("a spawn that hands its allowance over after the cancel looked for it, and sees its child still live, does not keep that allowance from the parent", async () => {
+    const spawnHold = latch();
+    const spawnReached = latch();
+    const cancelHold = latch();
+    const cancelReached = latch();
+    let holdSpawn = false;
+    let holdCancel = false;
+    const x = await world({
+      beforeDelegate: async () => { if (holdSpawn) { holdSpawn = false; spawnReached.open(); await spawnHold.wait; } },
+      beforeTransition: async () => { if (holdCancel) { holdCancel = false; cancelReached.open(); await cancelHold.wait; } },
+    });
+    try {
+      holdSpawn = true;
+      const late = x.spawn();
+      await spawnReached.wait; // claimed, no allowance yet
+      holdCancel = true;
+      const cancelling = x.swarm.cancel(x.rob, { commandId: "c1", parentTaskId: x.root, reason: "plans changed" });
+      await cancelReached.wait; // the cancel found no allowance and is about to cancel the child
+      spawnHold.open();
+      const made = await late; // the spawn hands the allowance over, links, and still sees its child live
+      cancelHold.open();
+      const result = await cancelling;
+      assert.deepEqual([result.settled, result.pending], [[made.taskId], []]);
+      assert.equal((await x.projects.getTask(made.taskId))!.state, "cancelled");
+      assert.deepEqual((await x.budgets.report(x.rob, x.root))!.delegatedToChildren, { costMicros: 0, computeMs: 0 }, "the allowance handed over late came back");
     } finally { await x.w.close(); }
   });
 
