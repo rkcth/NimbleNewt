@@ -65,7 +65,8 @@ for (const backend of backends) {
     const ended: string[] = [];
     let closeFails = false;
     let refuse = "";
-    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary, order: WorkOrder) => ({ revision: recipe.revision, close: async () => { if (closeFails) throw new Error("the worker process did not end"); }, end: async () => { ended.push(order.attemptId); if (order.attemptId === refuse) throw new Error("kill refused"); } }) };
+    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary, order: WorkOrder) => ({ revision: recipe.revision, close: async () => { if (closeFails) throw new Error("the worker process did not end"); }, end: async () => { ended.push(order.attemptId); inFlight++; most = Math.max(most, inFlight); await new Promise((r) => setTimeout(r, 20)); inFlight--; if (order.attemptId === refuse) throw new Error("kill refused"); } }) };
+    let inFlight = 0, most = 0;
     const { store, w, d } = await setup({ sandbox });
     try {
       const ann = await w.agent("ann", workGrants(w.project, ["read-file"]));
@@ -87,6 +88,7 @@ for (const backend of backends) {
       ended.length = 0;
       await assert.rejects(d.endLocalWorkOf(w.owner, [attemptId!, other!, third!]), /kill refused/);
       assert.deepEqual(ended.sort(), [attemptId!, other!, third!].sort());
+      assert.equal(most, 3, "the sandboxes are told at once, not each after the previous one's wait (review 3)");
       // The third attempt's sandbox could not be closed: the dispatcher did not confirm its worker stopped.
       assert.equal(((await d.get(w.owner, third!)) as unknown as { workerStopped?: boolean }).workerStopped, false);
       assert.notEqual(((await d.get(w.owner, attemptId!)) as unknown as { workerStopped?: boolean }).workerStopped, false);

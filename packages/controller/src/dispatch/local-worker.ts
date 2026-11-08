@@ -218,12 +218,9 @@ export class LocalWorker implements WorkerHost {
    */
   async endLocalWork(attemptIds: readonly string[]): Promise<void> {
     const failures: string[] = [];
-    for (const attemptId of attemptIds.slice(0, 500)) {
-      for (const session of this.#sessions.get(attemptId)?.sessions ?? []) {
-        if (session.end === undefined) continue;
-        try { await session.end(); } catch (error) { failures.push(String((error as Error)?.message ?? error).slice(0, 200)); }
-      }
-    }
+    // All at once (review 3 of L02d): each session waits a moment for what it killed to go, so one after the other the Force Stop would wait that moment for every session of every attempt.
+    const sessions = attemptIds.slice(0, 500).flatMap((attemptId) => this.#sessions.get(attemptId)?.sessions ?? []).filter((s) => s.end !== undefined);
+    for (const r of await Promise.allSettled(sessions.map((s) => s.end!()))) if (r.status === "rejected") failures.push(String((r.reason as Error)?.message ?? r.reason).slice(0, 200));
     if (failures.length > 0) throw new Error(`the sandbox could not end everything: ${failures.join("; ").slice(0, 500)}`);
   }
 
