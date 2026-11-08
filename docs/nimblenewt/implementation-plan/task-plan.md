@@ -1519,6 +1519,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12k — Compose the local worker host in the controller
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `58fbebff`, `160c6ca7`, `cd659a2a`, `916f624e`, `720b241e`, `4c84d827`, `65ac33b8`, `fa449d1f`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** startController composes the local worker host from the operator's build with the relay, message, pause and context guards, the owner's limits and the remote MCP connector and client; the MCP transport speaks streamable HTTP only to the checked address with TLS checked against the name. A ready-made builder is U14 and the product workspace composition H12t; agent-side remote MCP tools are follow-up work. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** H12b, H12c, H12d, H12f, H12g.
 - **Deliverable:** Controller start-up builds the local worker host with the model relay, the message and pause guards, the context checks, the quiesce coordinator and the remote MCP connector, and an MCP transport that connects to the checked address.
 - **Acceptance and verification:** An end-to-end test starts a controller, runs an attempt through the real relay, guards and bridge, quiesces it around an integration, and connects to a remote MCP server only at a checked public address (owner decision 2026-10-26).
