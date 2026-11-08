@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, readdir } from "node:fs/promises";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { basename, isAbsolute, join, normalize, relative, resolve } from "node:path";
@@ -184,6 +185,28 @@ export async function fileSnapshot(path: string): Promise<SnapshotEntry[]> {
 }
 
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** The most the repository source reads of one of git's own files: a loose ref, the `.git` file or `commondir`, and `packed-refs`. */
+const GIT_FILE_BYTES = { ref: 1024, pointer: 4096, packed: 8 * 1024 * 1024 } as const;
+/**
+ * A small regular file of the repository, or undefined when it is not one: a symbolic link is not followed, a pipe or a device is not read (a pipe would wait for ever and a device never end,
+ * holding the event-source loop), and nothing larger than `max` bytes is read into memory.
+ */
+async function readSmall(path: string, max: number): Promise<string | undefined> {
+  let handle;
+  try { handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "EMLINK" || code === "ENXIO" || code === "EISDIR") return undefined;
+    throw error;
+  }
+  try {
+    const s = await handle.stat();
+    if (!s.isFile() || s.size > max) return undefined;
+    const buffer = Buffer.alloc(max + 1);
+    let length = 0;
+    for (let n; length <= max && (n = (await handle.read(buffer, length, max + 1 - length, length)).bytesRead) > 0;) length += n;
+    return length > max ? undefined : buffer.subarray(0, length).toString("utf8");
+  } finally { await handle.close(); }
+}
 /** The branches and tags of a git repository at `path` (a working copy, a linked worktree or a bare repository), read from its files: no git program is run. Each is named by its ref and versioned by its commit. */
 export async function repositoryRefs(path: string): Promise<SnapshotEntry[]> {
   const exists = async (p: string): Promise<"file" | "dir" | undefined> => { try { const s = await lstat(p); return s.isDirectory() ? "dir" : s.isFile() ? "file" : undefined; } catch { return undefined; } };
@@ -192,16 +215,23 @@ export async function repositoryRefs(path: string): Promise<SnapshotEntry[]> {
   const kind = await exists(dotGit);
   if (kind === "dir") gitDir = dotGit;
   else if (kind === "file") {
-    const line = (await readFile(dotGit, "utf8")).trim();
-    if (!line.startsWith("gitdir:")) throw new Error(`${dotGit} does not name a git directory`);
+    const line = (await readSmall(dotGit, GIT_FILE_BYTES.pointer))?.trim();
+    if (line === undefined || !line.startsWith("gitdir:")) throw new Error(`${dotGit} does not name a git directory`);
     gitDir = resolve(path, line.slice("gitdir:".length).trim());
   } else if (await exists(join(path, "HEAD")) === "file" && await exists(join(path, "refs")) === "dir") gitDir = path;
   else throw new Error(`${path} is not a git repository`);
   // A linked worktree keeps its branches in the common directory.
-  const common = await exists(join(gitDir, "commondir")) === "file" ? resolve(gitDir, (await readFile(join(gitDir, "commondir"), "utf8")).trim()) : gitDir;
+  let common = gitDir;
+  if (await exists(join(gitDir, "commondir")) === "file") {
+    const named = (await readSmall(join(gitDir, "commondir"), GIT_FILE_BYTES.pointer))?.trim();
+    if (named === undefined || named === "") throw new Error(`${join(gitDir, "commondir")} does not name a git directory`);
+    common = resolve(gitDir, named);
+  }
   const refs = new Map<string, string>();
   try {
-    for (const raw of (await readFile(join(common, "packed-refs"), "utf8")).split("\n")) {
+    const packed = await readSmall(join(common, "packed-refs"), GIT_FILE_BYTES.packed);
+    if (packed === undefined) throw new Error(`${join(common, "packed-refs")} is not a regular file of at most ${GIT_FILE_BYTES.packed} bytes; this repository cannot be watched`);
+    for (const raw of packed.split("\n")) {
       const line = raw.trim();
       if (line === "" || line.startsWith("#") || line.startsWith("^")) continue;
       const [sha, name] = line.split(" ");
@@ -216,8 +246,8 @@ export async function repositoryRefs(path: string): Promise<SnapshotEntry[]> {
       const k = await exists(full);
       if (k === "dir") await walk(full, `${prefix}${name}/`);
       else if (k === "file") {
-        const sha = (await readFile(full, "utf8")).trim();
-        if (SHA.test(sha)) refs.set(`${prefix}${name}`, sha); // a symbolic ref (`ref: ...`) is not a commit and is left out
+        const sha = (await readSmall(full, GIT_FILE_BYTES.ref))?.trim();
+        if (sha !== undefined && SHA.test(sha)) refs.set(`${prefix}${name}`, sha); // a symbolic ref (`ref: ...`), or anything that is not a small file, is not a commit and is left out
       }
       if (refs.size > DEFINED_SOURCE_LIMITS.entries) throw new Error(`more than ${DEFINED_SOURCE_LIMITS.entries} branches and tags; this repository cannot be watched`);
     }

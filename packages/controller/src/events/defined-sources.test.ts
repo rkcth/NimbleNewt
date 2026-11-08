@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, mkdirSync, mkdtempSync, openSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -58,6 +58,12 @@ test("a folder snapshot lists the files under it by their path inside it, skips 
     assert.notEqual((await fileSnapshot(join(d, "w")))[0]!.version, first[0]!.version, "a new modification time is a new version");
     assert.deepEqual((await fileSnapshot(join(d, "w", "a.txt"))).map((e) => e.name), ["a.txt"], "a single file is one entry");
     assert.deepEqual(await fileSnapshot(join(d, "missing")), []);
+    // At most 1000 files: one more and the folder is refused (watch a smaller one), not listed in part.
+    const many = join(d, "many"); mkdirSync(many);
+    for (let i = 0; i < 1000; i++) writeFileSync(join(many, `f${i}`), "");
+    assert.equal((await fileSnapshot(many)).length, 1000);
+    writeFileSync(join(many, "one-more"), "");
+    await assert.rejects(() => fileSnapshot(many), /more than 1000 files under the watched folder/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -85,6 +91,30 @@ test("a repository's branches and tags are read from its files for a working cop
     git(d, "clone", "-q", "--bare", repo, join(d, "bare.git"));
     assert.deepEqual((await read(join(d, "bare.git"))).map(([n]) => n).filter((n) => n.startsWith("refs/heads/")).sort(), ["refs/heads/feature/x", "refs/heads/main", "refs/heads/wt-branch"]);
     await assert.rejects(() => repositoryRefs(join(d, "wt", "..", "nothing")), /not a git repository/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a hostile repository cannot hold or flood the source: a pipe, a link or an oversized file among git's own files is refused or left out, never read (card H13f review)", async (t) => {
+  if (process.platform === "win32") { t.skip("named pipes made with mkfifo are POSIX"); return; }
+  const d = mkdtempSync(join(tmpdir(), "nn-defsrc-hostile-"));
+  try {
+    const repo = join(d, "repo"); const git = join(repo, ".git");
+    mkdirSync(join(git, "refs", "heads"), { recursive: true });
+    writeFileSync(join(git, "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(git, "refs", "heads", "main"), `${"a".repeat(40)}\n`);
+    // A loose ref far larger than a commit name is left out (it is not read whole).
+    writeFileSync(join(git, "refs", "heads", "huge"), `${"b".repeat(40)}\n${" ".repeat(100_000)}`);
+    assert.deepEqual((await repositoryRefs(repo)).map((e) => e.name), ["refs/heads/main"]);
+    // packed-refs as a pipe: reading it would wait for ever and hold every event source; it is refused at once.
+    execFileSync("mkfifo", [join(git, "packed-refs")]);
+    const outcome = await Promise.race([repositoryRefs(repo).then(() => "returned", (e: Error) => `refused: ${e.message}`), new Promise<string>((r) => setTimeout(() => r("hung"), 5000).unref())]);
+    // A reader left waiting on the pipe is let go (so a failure here fails, not hangs).
+    if (outcome === "hung") closeSync(openSync(join(git, "packed-refs"), fsConstants.O_WRONLY | fsConstants.O_NONBLOCK));
+    assert.match(outcome, /^refused: .*packed-refs is not a regular file/);
+    rmSync(join(git, "packed-refs"));
+    // packed-refs as a link to something else (a device that never ends, here) is not followed.
+    symlinkSync("/dev/zero", join(git, "packed-refs"));
+    await assert.rejects(() => repositoryRefs(repo), /packed-refs is not a regular file/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

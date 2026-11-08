@@ -184,6 +184,10 @@ test("in chat the owner defines a source and watches it by plain words; the path
     const cased = `Watch ${d} for Order seeds.`;
     const upper = await turn("m1b", cased, [cmd("events.sources.define", { sourceId: "seed-orders", type: "file", path: d.toUpperCase(), taskTitle: "Order seeds" }, cased)]);
     assert.equal(upper[0]!.status, "refused", JSON.stringify(upper));
+    // Nor an address that differs from the owner's only in letter case (another path on the server).
+    const site = "Tell whoever does Order seeds when http://127.0.0.1:9/Health fails.";
+    const casedUrl = await turn("m1c", site, [cmd("events.sources.define", { sourceId: "seed-api", type: "service", url: "http://127.0.0.1:9/health", taskTitle: "Order seeds" }, site)]);
+    assert.equal(casedUrl[0]!.status, "refused", JSON.stringify(casedUrl));
     // The owner's own path: shown first, then applied on the owner's word.
     const text = `Watch ${d} for changes and tell whoever does Order seeds.`;
     const shown = await turn("m2", text, [cmd("events.sources.define", { sourceId: "seed-orders", type: "file", path: d, taskTitle: "Order seeds" }, `Watch ${d} for changes`), cmd("watch.create", { taskTitle: "Order seeds" }, "tell whoever does Order seeds")]);
