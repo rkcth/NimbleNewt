@@ -5338,7 +5338,10 @@ plain lines.
   turned off keeps saying which figure would turn it back on. A host that has declared nothing is named as such, because
   work needing a host is then refused. A figure that means the whole thing is off says so in words rather than as a bare
   nought: `depth ...: 0 (you set it): no child task may be spawned at all` and `liveChildren ...: 0 (you set it): no new
-  child task may be spawned now`, the same two things `SwarmService` refuses a spawn with.
+  child task may be spawned now`, the same two things `SwarmService` refuses a spawn with. The quotas header names whose revision it
+  shows - `the admission record is at revision N, which every request and release also raises` - because the number is the revision of
+  the whole admission record, not the version of a setting (a test walks it 0 -> 1 with a request and 1 -> 2 with its release while every
+  quota line stays the installation's own).
 - **Damaged or absent is one line, never a throw, and says what the damage stops**: a group whose service is not composed in
   says `this controller does not offer them`, and a damaged record is told with the consequence its readers really produce,
   checked against them rather than worded generally:
@@ -5355,20 +5358,38 @@ plain lines.
   - *quotas* - `AdmissionService.quotas()` hands back the admission record without checking it, so damage reaches the view as it
     is: `{ capacity: null }` used to throw `TypeError: Cannot convert undefined or null to object` out of the view and lose the
     whole answer, a record whose `limits` lack `queue` printed `queue: undefined (you set it)`, and a host entry that is not a
-    record printed `undefined CPU(s), undefined MB declared`. Every figure is now checked to be a finite number and every record
-    to be a record (`quotaProblem`) before it is shown; anything else - or a read that fails outright, such as a `running` that is
-    not a list - is one line naming what cannot be read and `capacity.quotas.change`. Such a record is not inert: admission works
-    from the same figures and applies no bound it cannot read (a record with no `queue` let a queue of any length build up where a
-    sound one refused with "the queue is full"), which is why the group is refused whole rather than shown.
+    record printed `undefined CPU(s), undefined MB declared`. Every figure is checked before it is shown (`quotaProblem`): every
+    record a record, every count a finite number, and every quota a whole number inside `LIMIT_BOUNDS` - the table `checkLimits`
+    and `capacity.quotas.change` enforce - because a stored `productive: -1`, `0` or `1.5`, `control: 0` or `queue: 0` is no figure
+    the owner could have stored (the command refuses the same value - `set.productive: must be a whole number from 1 to 64`, the words
+    `checkLimits` uses for the whole record too) yet used to print as `(you set it)`. Anything else - or a read that fails outright, such as
+    a `running` that is not a list or a per-host count that is not a figure - is one line naming what cannot be read. Such records
+    are not inert: admission works from the same figures and applies no bound it cannot read (a record with no `queue` let a queue of
+    any length build up where a sound one refused; a stored `productive: 0` leaves productive work waiting for ever while inquiries
+    still run; a stored `queue: 0` refuses anything that has to wait with `the queue is full (0 waiting); try again later`) - all
+    three asserted through `AdmissionService` itself. The line says the record needs repair and that `capacity.quotas.change` cannot
+    mend every damaged shape, rather than telling the owner to repair it with that command: the command merges `set` into the stored
+    limits and checks the whole record with `checkLimits`, so it needs `depth`, `children` and `patience` - figures no quota command
+    can set - to be there (probed, and both halves are tested: a record with no limits is refused `limits.depth: must be a whole number
+    from 0 to 8` even with all four quotas set, while one whose limits are whole but that lacks `queue` is mended by the same call).
+    The caps and swarm lines may keep naming their command because those two really do always mend: `capacity.limits.change` and
+    `swarm.limits.change` read their records leniently (`readCapEntries`/`readEntries`), keep the sound entries and refuse only until every
+    damaged name is named in the change (`set, unset or disable it in this change to repair it`).
   The other two groups are still read in all of these cases. `forbidden`/`unavailable` say the group cannot be read here; anything
   else about the read itself is thrown, as every neighbouring view does - but nothing the records hold throws out of this view.
 - **Text from outside is quoted**: host IDs go through `quoted()`, so a host ID holding a double quote, a newline, U+2028, U+202E
   and `[cut: ` stays on one line inside one quotation (the newline and U+2028 are folded, the quote escaped, the override written
-  as `\u202e`). Numbers are shown as themselves. The revision of each record read goes into the cite, and the three cite kinds are
+  as `\u202e`). Numbers are shown as themselves. Every lookup by a name read out of a record is an own-property one (`Object.hasOwn`:
+  the per-host running counts, the quota `defaults`, the `N running now` words, `CAPACITY_WORDS` and `LIMIT_BOUNDS`), because those
+  records are plain objects - a host declared as `constructor` used to print `function Object() { [native code] } productive
+  attempt(s) running on it`, and now counts nought, with a per-host count that is not a figure called damaged. The revision of each
+  record read goes into the cite, and the three cite kinds are
   `capacity-limits-settings/main`, `admission-state/admission` and `swarm-limits-settings/main`.
 - **Bounds**: the caps (3) and swarm (3) names are all shown, the quotas (4) likewise, and at most 10 declared hosts are listed
   (`CAPACITY_HOSTS`), in host-ID order, with one line counting the rest - `capacity.quotas.change` takes at most 50 hosts in one change (probed)
-  and refuses a record that would hold more than 200 (`at most 200 hosts are tracked`) - so a full answer is at most 25 lines. There is no
+  and refuses a record that would hold more than 200 (`at most 200 hosts are tracked`) - so a full answer is at most 25 lines. The order is
+  the view's own (`capacityLines` sorts the entries): the store hands object keys back in code-point order, so a record written through it is
+  never unsorted and only a `quotas` port can show the view one. There is no
   line-count cut of the view's own: the answer is bounded by its own shape (see the ASSUMPTION below), and the chat cuts any status answer to
   `CHAT_LIMITS.statusLines` (30) and counts what it left out in `moreLines` whatever the view writes.
 - **Wiring** (`packages/controller/src/api/start.ts`): the status service's `capacity` deps reach `capacityLimits`, `capacityAdmission`
@@ -5386,10 +5407,19 @@ plain lines.
   damaged; a swarm record damaged to `{ depth: "deep" }` names the damaged name as damaged, marks the sound ones as not in force and says no
   child task can be spawned (with `SwarmLimitsService.effective()`, the call every spawn makes, asserted to throw `integrity`); `depth` and
   `liveChildren` set to 0 say no child task may be spawned at all / no new child task may be spawned now; a record damaged in two names says
-  so for both; five hundred declared hosts come back as ten host lines from `host:h000` in order plus the line counting the other 490, the
-  whole answer inside thirty lines; and an admission record damaged four ways (`{ capacity: null }`, `limits` without `queue`, a host entry
+  so for both; five hundred declared hosts come back as ten host lines starting at `host:h000` plus the line counting the other 490, the
+  whole answer inside thirty lines - and since the store keeps JSON object keys in code-point order (`storage/json.ts`, asserted in the test:
+  the record reads back sorted however it was written), a second case hands the same five hundred hosts to a `quotas` port in reverse, so it is
+  the view's own sort that puts them in order; and an admission record damaged four ways (`{ capacity: null }`, `limits` without `queue`, a host entry
   that is text, `running: null`) costs the quotas group its one line each - the view answering, not throwing - with the caps and swarm groups
-  still read, and the group whole again once the record reads. A view built without the caps service says that in one line with the other two
+  still read, and the group whole again once the record reads. The damaged quotas line promises no repair the owner's own command cannot make,
+  and both halves are proved through `changeQuotas`: a record with no limits is refused `limits.depth: must be a whole number from 0 to 8` even
+  with all four quotas set, while one whose limits are whole but that lacks `queue` is mended by the same call. Ten out-of-range quota figures
+  (`productive` -1, 0, 1.5, 65; `perHost` 0, 17; `control` 0, 17; `queue` 0, 501) and a `queue` of text are called damaged with the bound named
+  in the line, and the command is asserted to refuse storing each of them; `productive: 0` and `queue: 0` are shown through `AdmissionService`
+  itself to start no productive work and to refuse everything that has to wait. A host declared as `constructor` or `toString` counts nought
+  rather than the function `Object.prototype` holds, and a per-host count that is text makes the group damaged. The revision in the quotas header
+  is followed 0 -> 1 -> 2 across a request and its release while every quota line stays the installation's own. A view built without the caps service says that in one line with the other two
   groups present. A test outside the backend loop ties the kind to the chat: `capacity` is
   in `STATUS_KINDS` with no keys, the system prompt the `ModelInterpreter` sends lists `capacity()` with its `about` text, and the `status.ask`
   operation's own summary names the kind. `packages/controller/src/api/start-capacity-view.test.ts` runs the composed
@@ -5401,23 +5431,31 @@ plain lines.
   can store them: `capacity.limits.change`, `capacity.quotas.change` and `swarm.limits.change` each check their figures, and `capacity.quotas.change`
   takes at most 50 hosts in one change (probed) and refuses a record that would hold more than 200. A record holding `value: "many"`, `depth: "deep"`,
   hosts that is not a record, `running: null` or 500 hosts can only come from an older installation, a restored record or something other than the
-  owner's own command - which is exactly what the view has to survive.
+  owner's own command - which is exactly what the view has to survive. So are the ten out-of-range quota figures the bounds case writes: each
+  one is checked from the other side too, by `capacity.quotas.change` refusing to store it.
 - **Runs** (`NIMBLENEWT_REQUIRE_SANDBOX=1`, this worktree, `npx tsc --build` from `packages/controller` first): `dist/chat/capacity.test.js`
-  37 tests, 37 pass, 0 fail (9 cases x 4 backends + the kind test); `dist/api/start-capacity-view.test.js` 1 pass; the two together 38 pass;
-  `dist/status/*.test.js dist/chat/*.test.js dist/api/*.test.js` 1404 tests, 1404 pass, 0 fail (about 5 minutes, embedded PostgreSQL included);
+  61 tests, 61 pass, 0 fail (15 cases x 4 backends + the kind test); `dist/api/start-capacity-view.test.js` 1 pass; the two together 62 pass;
+  `dist/status/*.test.js dist/chat/*.test.js dist/api/*.test.js` 1428 tests, 1428 pass, 0 fail (about 2 1/2 minutes, embedded PostgreSQL included);
   `dist/swarm/*.test.js dist/admission/*.test.js` 200 pass, 0 fail. From the root: `node --test scripts/plan.test.mjs` 6 pass, `npm run roadmap:check`
-  ok, `npm run check:deps` ok, `npm run api:docs:write` changes nothing (the operation text already named the kind).
+  ok (`roadmap ok`), `npm run check:deps` ok (`package boundaries ok`), `npm run api:docs:write` changes nothing (the operation text already named the kind).
 - **Mutation checks** (each applied to compiled `dist/status/status.js`, run, restored and rebuilt with `npx tsc --build --force`): `CAPACITY_HOSTS`
   10 -> 600 and 10 -> 200 are both killed by the five-hundred-host case (`ten of the five hundred declared hosts are listed, not 500` / `not 200`),
   which is what the removed line cut could never catch; taking `capacity` out of `STATUS_KINDS` is killed by the kind test (`capacity is one of the
-  status kinds`). Every corrected line was also seen to fail before its fix: the caps wording (both files), the swarm wording and the nought figures,
-  and the admission-record case (which failed with the `TypeError` out of `Object.entries(q.hosts)`).
+  status kinds`); taking `.sort(([a], [b]) => ...)` out of the host list is killed by the reverse-order `quotas` port alone (`host:h499` first) and
+  by nothing else, which is how the gap in the five-hundred-host case was found; `quotaFigure` reduced to `isFigure` (any finite number) and reduced
+  again to dropping `Number.isSafeInteger` are each killed by the out-of-range case; and so are `runningOn` back to `perHost[id] ?? 0` and the
+  per-host count check removed, both by the `Object.prototype` host case. Every corrected line was also seen to fail before its fix: the caps wording (both files), the swarm wording and the nought figures,
+  and the admission-record case (which failed with the `TypeError` out of `Object.entries(q.hosts)`); of the corrections in this pass, the repair
+  wording, the bounds, the nought count for a host named `constructor` and the header wording each failed first, while the two behaviour proofs
+  (admission on a stored `productive: 0` / `queue: 0`) and the sort case were written against code that already did them and checked by mutation.
 - ASSUMPTION: `capacity` is offered only when the `capacity` deps are composed in at all (like `retention`, `event_sources` and `jobs`);
   with none of the three services the answer is `undefined` rather than three "not offered" lines, because an installation without them is not
   offering the controls either.
-- ASSUMPTION: a hostile host ID cannot reach the view through the operations (`changeQuotas` and `setCapacity` check `host:...` first), so the
-  quoting test feeds one through the same `StatusService` with a `quotas` port that returns it. That is what a record written by anything other
-  than the owner's own command, or an older record, can hold; the view's own code is the real one in that test.
+- ASSUMPTION: a hostile host ID cannot reach the view through the operations (`changeQuotas` and `setCapacity` check `host:...` first - they want
+  `host:` and a lower-case name, so even a host named `constructor` could not be declared by the owner), so the quoting test feeds one through the
+  same `StatusService` with a `quotas` port that returns it, as do the two shapes the service itself cannot produce (a per-host running count that
+  is text, and five hundred hosts handed over in reverse order, since the store sorts the keys of any record written through it). That is what a record written by anything other
+  than the owner's own command, or an older record, can hold; the view's own code is the real one in those tests.
 - ASSUMPTION: `integrity` and `forbidden`/`unavailable` are told as one line each and anything else about the read is thrown (the neighbouring
   views rethrow what is not one of their known codes, and a storage failure that would make the API fail should not read as an empty setting here).
   Each group's `integrity` line says what that group's record being unreadable stops, because the three gate different things and borrowing one
