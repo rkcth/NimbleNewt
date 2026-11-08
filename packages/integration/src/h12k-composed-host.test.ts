@@ -139,11 +139,10 @@ test("the composed local host runs an attempt through the real relay, guards and
                 return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
               },
               model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
-              namespaceId: () => "abcdef0123456789",
-              // The controller's own tool bridge (ToolExecutionService), bound to the attempt's gateway.
+              // The agent's own namespace and the controller's own tool bridge (ToolExecutionService), both as the composer hands them to the host builder (card T06b).
+              namespaceId: (order) => services.namespaceId(order as never),
               bridge: async (order, call, token, request) => {
-                const gateway = { attemptId: order.attemptId, call } as Pick<ToolGateway, "attemptId" | "call">;
-                const run = () => c!.tools!.handle(token, gateway, request as never) as never;
+                const run = () => services.bridge!(order as never, call, token, request) as never;
                 if (request.op !== "desk.write" || ++bridged !== 2) return run();
                 bridgeHeld.open();
                 await bridgeGo.promise;
