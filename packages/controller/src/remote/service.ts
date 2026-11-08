@@ -181,7 +181,8 @@ function checkAsk(call: WorkspaceCall): WorkspaceAsk {
 function checkAnswer(value: unknown): RemoteWorkspaceAnswer {
   if (value === null || typeof value !== "object" || Array.isArray(value)) invalid("outcome", "must be an object");
   const o = value as Record<string, unknown>;
-  for (const key of Object.keys(o)) if (!["ok", "summary", "detail", "reason"].includes(key)) invalid("outcome", `${key} is not a field of an answer`);
+  for (const key of Object.keys(o)) if (!["ok", "summary", "detail", "reason", "failed"].includes(key)) invalid("outcome", `${key} is not a field of an answer`);
+  if (o["failed"] !== undefined && (o["failed"] !== true || o["ok"] !== false)) invalid("failed", "is only true, on an answer that did not succeed");
   if (o["ok"] === true) {
     if (o["reason"] !== undefined) invalid("outcome", "an answer that succeeded has no reason");
     if (typeof o["summary"] !== "string" || o["summary"].length > 1000) invalid("summary", "must be text of at most 1000 characters");
@@ -197,7 +198,7 @@ function checkAnswer(value: unknown): RemoteWorkspaceAnswer {
   if (o["ok"] !== false) invalid("ok", "must be true or false");
   if (o["summary"] !== undefined || o["detail"] !== undefined) invalid("outcome", "a refusal has only a reason");
   if (typeof o["reason"] !== "string" || o["reason"].length < 1 || o["reason"].length > 1000) invalid("reason", "must be text of 1 to 1000 characters");
-  return { ok: false, reason: o["reason"] as string };
+  return { ok: false, reason: o["reason"] as string, ...(o["failed"] === true ? { failed: true as const } : {}) };
 }
 
 /** The promise's result, or an `unavailable` refusal when it takes longer than `ms` (its late result is ignored). */

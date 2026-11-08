@@ -112,4 +112,5 @@ export interface WorkspaceAsk {
   readonly expiresAt?: string;
 }
 /** What the host answers: the same typed outcomes a local host gives (done, or a refusal with its reason). */
-export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };
+/** `failed`: the host's port threw, so the work may be half done (the controller records it as failed, as it does a local host's throw), not a refusal that changed nothing. */
+export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string; readonly failed?: true };

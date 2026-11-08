@@ -124,7 +124,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // Changing a task's checkout on the host that holds it (card H12m): carrying its work into the shared workspace, landing it, refreshing it to the shared head, quarantining it (its attempt is stopped) or committing
   // reviewed work. Each changes files or stops an agent, so it is shown first in every profile (provisional); the operation is a fixed choice, the reason must be the owner's own words.
-  "workspace.request": { verb: "Change a task's checkout on the host that holds it (operation: integration carries the agent's work into the shared workspace, landing lands its committed work on the landing branch, refresh moves it to the shared workspace's current head, quarantine moves it aside for the owner and stops its attempt, release commits reviewed work; reason: why, in the owner's words)", mode: "propose" },
+  // Kept short: the proposal line the owner confirms is this verb followed by the operation, the task and the reason, and it is cut at CHAT_LIMITS.line.
+  "workspace.request": { verb: "Change a task's checkout on its host (operation: integration shares its work, landing lands its commits, refresh moves it to the shared head, quarantine moves it aside for the owner and stops its attempt, release is refused for now; reason: the owner's words)", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },
   "integration.default.set": { verb: "Change how new projects land finished work", mode: "propose" },

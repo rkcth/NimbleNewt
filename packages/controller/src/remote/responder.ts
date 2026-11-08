@@ -45,8 +45,8 @@ export class WorkspaceResponder {
     if (this.#withdrawn.has(ask.requestId)) { this.#running.delete(ask.requestId); return; }
     if (ask.expiresAt !== undefined && this.#now() >= Date.parse(ask.expiresAt)) { this.#running.delete(ask.requestId); return; }
     try { answer = await this.#port.run({ ...ask, quietAttempts: [...ask.quietAttempts] }); } catch (error) {
-      // The work may be half done: this is told as a refusal that says so, and the port's journal refuses to run the request again.
-      answer = { ok: false, reason: `the host could not finish the request and may have done part of it: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+      // The work may be half done: this is told as a failure (`failed`, recorded as such by the controller, never as a clean refusal), and the port's journal refuses to run the request again.
+      answer = { ok: false, reason: `the host could not finish the request and may have done part of it: ${String((error as Error)?.message ?? error).slice(0, 300)}`, failed: true };
     }
     await this.#send(ask.requestId, answer);
     this.#running.delete(ask.requestId);

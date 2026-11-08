@@ -159,6 +159,12 @@ test("a host that cannot do an operation, or does not hold the task's checkout, 
     }
     assert.equal((await w.host.run(null as never)).ok, false);
     assert.deepEqual((await readdir(join(w.dir))).filter((n) => n === "etc"), [], "a hostile request ID writes nowhere");
+    // An operation this host does not know is refused before anything is looked up or journaled (never carried to the end of the work, where only a quarantine is left).
+    w.located.length = 0;
+    const unknown = { ...call("refresh"), operation: "constructor" } as never;
+    assert.match(reasonOf(await w.host.run(unknown)), /is not one this host knows/);
+    assert.deepEqual(w.located, []);
+    assert.equal(existsSync(join(w.dir, "journal", `${(unknown as HostWorkspaceCall).requestId}.json`)), false);
   } finally { await w.done(); }
 });
 

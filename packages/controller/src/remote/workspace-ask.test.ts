@@ -3,6 +3,7 @@ import { after } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { WorkspaceCall } from "../workspace-ops/index.js";
 import { PROTOCOL_HEADER, SESSION_HEADER } from "./protocol.js";
+import { RemoteWorkerHost } from "./host.js";
 import { WorkspaceResponder } from "./responder.js";
 import { remoteSuite, refuses, wireRefuses } from "./testing/suite.js";
 import { rawRequest } from "./testing/world.js";
@@ -153,5 +154,32 @@ for (const backend of backends) {
     responder.handle([{ ...first, quietAttempts: [] }, { ...second, quietAttempts: [], expiresAt: new Date(0).toISOString() }]);
     await responder.idle();
     assert.deepEqual(ran, [first.requestId], "the expired one never reached the port");
+  });
+
+  suite("a host whose port threw answers `failed` (the work may be half done) and the remote host handle throws it, as a local host's throw, so it is never recorded as a clean refusal; `failed` is only true on a refusal (independent check of H12m)", async (c) => {
+    const r1 = await c.host("r1");
+    const responder = new WorkspaceResponder({ client: r1.client, port: { run: async () => { throw new Error("the disk filled half way"); } } });
+    const handle = new RemoteWorkerHost("host:r1", c.remote, c.dispatcherPrincipal, { resources: { cpus: 1, memoryMb: 1 }, requirements: () => ({}) as never, workspaceWaitMs: 5000 });
+    const x = call({ operation: "quarantine" });
+    const outcome = handle.workspace.run(x).then((a) => a, (e: Error) => e);
+    for (let i = 0; i < 100 && (await r1.client.workspaceRequests()).length === 0; i++) await new Promise((ok) => setTimeout(ok, 10));
+    responder.handle(await r1.client.workspaceRequests());
+    const got = await outcome;
+    assert.ok(got instanceof Error, JSON.stringify(got));
+    assert.match(got.message, /may have done part of it: the disk filled half way/);
+    // The plain answer still carries the mark, and a refusal stays a refusal.
+    assert.deepEqual(await c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", x, { waitMs: 100 }), { ok: false, reason: "the host could not finish the request and may have done part of it: the disk filled half way", failed: true });
+    const y = call();
+    const plain = handle.workspace.run(y);
+    for (let i = 0; i < 100 && (await r1.client.workspaceRequests()).length === 0; i++) await new Promise((ok) => setTimeout(ok, 10));
+    await r1.client.answerWorkspace(y.requestId, { ok: false, reason: "not here" });
+    assert.deepEqual(await plain, { ok: false, reason: "not here" });
+    const z = call();
+    const pending = c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", z, { waitMs: 3000 }).catch(() => undefined);
+    for (let i = 0; i < 100 && (await r1.client.workspaceRequests()).length === 0; i++) await new Promise((ok) => setTimeout(ok, 10));
+    await wireRefuses("invalid_command", () => r1.client.answerWorkspace(z.requestId, { ok: true, summary: "x", failed: true } as never), 400);
+    await wireRefuses("invalid_command", () => r1.client.answerWorkspace(z.requestId, { ok: false, reason: "x", failed: false } as never), 400);
+    await r1.client.answerWorkspace(z.requestId, { ok: false, reason: "no" });
+    await pending;
   });
 }

@@ -39,7 +39,12 @@ export class RemoteWorkerHost implements WorkerHost {
   constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, private readonly options: RemoteWorkerHostOptions) {
     this.resources = options.resources;
     this.ownerPolicy = options.ownerPolicy !== undefined;
-    this.workspace = { run: (call) => this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }) };
+    // A host whose port threw (the work may be half done) says so with `failed`: that is thrown here, as a local host's throw is, so the workspace service records `failed`, not a clean refusal.
+    this.workspace = { run: async (call) => {
+      const answer = await this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 });
+      if (answer.ok === false && answer.failed === true) throw new DomainError("unavailable", answer.reason);
+      return answer.ok ? answer : { ok: false, reason: answer.reason };
+    } };
   }
 
   /**

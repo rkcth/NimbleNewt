@@ -33,6 +33,8 @@ for (const backend of backends) {
       script[text] = [cmd("workspace.request", { operation: "quarantine", taskId: t, reason: "it touched odd files" }, text)];
       const r = await chat.submit(w.ownerToken, { messageId: cid("m"), text });
       assert.equal(r.outcomes[0]!.status, "proposed", JSON.stringify(r.outcomes[0]));
+      // What the owner confirms names the operation, the task and the reason (the line is cut at its limit, so the verb must leave room for them).
+      assert.match(String(r.outcomes[0]!.preview), /operation=quarantine, taskId="weed", reason=it touched odd files/, JSON.stringify(r.outcomes[0]!.preview));
       assert.deepEqual(asked, [], "nothing is asked of the host until the owner confirms");
       const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("a"), proposalId: r.outcomes[0]!.proposalId! });
       assert.equal(applied.applied, true, JSON.stringify(applied));
