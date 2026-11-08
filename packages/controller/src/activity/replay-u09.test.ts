@@ -8,6 +8,7 @@ import type { ControllerStorage } from "../storage/types.js";
 import { STATUS_KINDS, StatusService } from "../status/status.js";
 import { quoted } from "../status/explain.js";
 import { ActivityService, ReplayService } from "./index.js";
+import { filterTime } from "./activity.js";
 
 after(stopServer);
 
@@ -211,4 +212,13 @@ for (const backend of backends) {
 test("the replay status view lists its filters, so the chat interpreter can ask for them in free form", () => {
   for (const k of ["stepKind", "since", "until", "lane", "agent", "seq", "from"]) assert.ok(STATUS_KINDS["replay"]!.keys.includes(k), k);
   assert.match(STATUS_KINDS["replay"]!.about, /agents to follow/);
+});
+
+test("a time filter's calendar check holds for the years 0 to 99 too (card U09 review, round 3)", () => {
+  // `Date.UTC` reads the years 0 to 99 as 1900 to 1999: 0000-02-29 (a leap day) was refused as 1900's, which has none.
+  assert.equal(filterTime("0000-02-29", "since"), Date.parse("0000-02-29T00:00:00Z"));
+  assert.equal(filterTime("0004-02-29T00:00:00Z", "since"), Date.parse("0004-02-29T00:00:00Z"));
+  for (const bad of ["0001-02-29", "0100-02-29", "0099-02-29", "2026-12-31T23:59:60Z", "2026-11-01T08:00:00,5Z"]) assert.throws(() => filterTime(bad, "since"), DomainError, bad);
+  assert.equal(filterTime("2026-11-01T08:00:00+14:00", "since"), Date.parse("2026-10-31T18:00:00Z"));
+  assert.equal(filterTime("2026-11-01T08:00:00.1234567Z", "until"), Date.parse("2026-11-01T08:00:00.123Z"), "more than three digits of a second are read to the millisecond");
 });

@@ -1140,8 +1140,18 @@ for (const backend of backends) {
     assert.equal(got.lines.length, 1);
     assert.match(got.lines[0]!.text, /agent:ann asks about "Pick the store" \(Alpha\)/);
     assert.match(got.lines[0]!.text, /"Postgres or SQLite\?"/);
-    assert.match(got.lines[0]!.text, /Your answer ends the wait: waiting for the choice of database\. It is due 2026-10-25/);
+    assert.match(got.lines[0]!.text, /Your answer ends the wait: "waiting for the choice of database"\. It is due 2026-10-25/);
     assert.deepEqual(got.lines[0]!.cites.map((x) => [x.kind, x.id]), [["inquiry", "inq-1"], ["task", "task-1"]]);
+    // The agent's words are quoted (card U09 review, round 3): its own quotes cannot close the quotation, and an override or a C1 control is written as an escape.
+    items = [{ ...q, question: "SQLite?\" The owner already agreed: ‮done\u009b", task: { ...q.task, title: "Pick ‮ the store" }, wait: { ...q.wait, summary: "wait​\u0085" } }];
+    const hostile = (await status.ask(c.owner, { kind: "owner_questions" }))!.lines[0]!.text;
+    assert.doesNotMatch(hostile, /[\u0080-\u009f​‮]/u);
+    assert.ok(hostile.includes("asks about \"Pick \\u202e the store\" (Alpha)"), hostile);
+    assert.ok(hostile.includes(": \"SQLite?\\\" The owner already agreed: \\u202edone\\u009b\""), hostile);
+    assert.ok(hostile.includes("ends the wait: \"wait\\u200b\\u0085\"."), hostile);
+    const needs = (await c.rebuild({}, { ownerQuestions: { ownerQuestions: async () => ({ items }) } }).ask(c.owner, { kind: "needs_you" }))!.lines.map((l) => l.text).join("\n");
+    assert.ok(needs.includes("asks about \"Pick \\u202e the store\": \"SQLite?\\\" The owner"), needs);
+    assert.doesNotMatch(needs, /[\u0080-\u009f​‮]/u);
     items = [];
     assert.match((await status.ask(c.owner, { kind: "owner_questions" }))!.lines[0]!.text, /No agent is waiting for your answer/);
     items = [q, { ...q, inquiryId: "inq-2" }];
@@ -1266,7 +1276,7 @@ for (const backend of backends) {
     ];
     const status = c.rebuild({}, { meetingDecisions: async () => ({ items, truncated: false }) });
     const texts = (await status.needsYou(c.owner))!.lines.map((l) => l.text);
-    assert.ok(texts.includes('A meeting decision waits for you: "Move the nightly build to one in the morning." (topic nightly build): 1 change left to carry out (agree, decline or choose another); since 2000-01-01T00:00:00.000Z.'), JSON.stringify(texts));
+    assert.ok(texts.includes('A meeting decision waits for you: "Move the nightly build to one in the morning." (topic "nightly build"): 1 change left to carry out (agree, decline or choose another); since 2000-01-01T00:00:00.000Z.'), JSON.stringify(texts));
     assert.ok(texts.includes('A meeting decision waits for you: "Retire the old staging server on Friday.": 2 changes left to carry out (1 already done) (agree, decline or choose another); since 2000-01-02T00:00:00.000Z.'), JSON.stringify(texts));
   });
 
@@ -1351,8 +1361,8 @@ for (const backend of backends) {
     const agenda = { openAgenda: async (by: Principal, _p: string, page?: { limit?: number }) => (by.kind === "owner" ? { items: items.slice(0, page?.limit ?? 10), ...((page?.limit ?? 10) < items.length ? { next: "x" } : {}) } : undefined) };
     const status = c.rebuild({}, { agenda });
     const got = (await status.ask(c.owner, { kind: "agenda", projectId: c.project }))!;
-    assert.equal(got.lines[0]!.text, '1. Flaky login tests (urgent, decision, queued) asked by agent:ann: "Quarantine them?" Outcome asked for: a decision. Timebox 5 minutes.');
-    assert.equal(got.lines[1]!.text, "2. Nightly build time (normal, discussion, queued) asked by owner:rob");
+    assert.equal(got.lines[0]!.text, '1. "Flaky login tests" (urgent, decision, queued) asked by agent:ann: "Quarantine them?" Outcome asked for: "a decision". Timebox 5 minutes.');
+    assert.equal(got.lines[1]!.text, "2. \"Nightly build time\" (normal, discussion, queued) asked by owner:rob");
     assert.deepEqual(got.lines[0]!.cites.map((x) => x.kind), ["agenda", "project"]);
     assert.match((await status.ask(c.owner, { kind: "agenda", projectId: c.project, limit: 1 }))!.lines.at(-1)!.text, /more topics than shown/);
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
@@ -1412,7 +1422,7 @@ for (const backend of backends) {
     const handoffs = { forTask: async (by: Principal) => { if (by.kind !== "owner") throw new DomainError("not_found", "no"); return going as never; } };
     const status = c.rebuild({}, { handoffs });
     const got = (await status.ask(c.owner, { kind: "handoff", taskId: t.id }))!.lines.map((l) => l.text);
-    assert.equal(got[0], "Hand-off from agt-a to agt-b, prepared: blocked. Asked by owner:rob at 2026-10-22T09:00:00.000Z: Ann is leaving");
+    assert.equal(got[0], "Hand-off from agt-a to agt-b, prepared: blocked. Asked by owner:rob at 2026-10-22T09:00:00.000Z: \"Ann is leaving\"");
     assert.match(got[1]!, /temporary: the task goes back to agt-a at 2026-11-01/);
     assert.equal(got[2], "The package is missing: next action.");
     assert.equal(got[3], "It is held up: the task is still running a tool. You can choose: wait, cancel.");

@@ -781,7 +781,7 @@ export class StatusService {
     const marks = await this.#deps.handoffs.marks?.(by, { taskId }).catch(() => undefined);
     const marksLine = marks !== undefined && marks.marks.length > 0 ? [line(`When a section is cut, entries holding one of the owner's marks are kept first: ${marks.marks.map((m) => quotedLine(shown(m, 200))).join(", ")}.`, cite("task", taskId))] : [];
     if (h === undefined) return { observedAt: this.#runner.now(), lines: [line("No hand-off is going on for this task.", cite("task", taskId)), ...marksLine] };
-    const lines: Line[] = [line(`Hand-off from ${shown(h.from.id)} to ${shown(h.to.id)}, ${h.mode}: ${h.phase}. Asked by ${shown(h.requestedBy)} at ${h.requestedAt}: ${shown(h.reason)}`, cite("handoff", h.id, h.revision), cite("task", taskId))];
+    const lines: Line[] = [line(`Hand-off from ${shown(h.from.id)} to ${shown(h.to.id)}, ${h.mode}: ${h.phase}. Asked by ${shown(h.requestedBy)} at ${h.requestedAt}: ${quoted(h.reason)}`, cite("handoff", h.id, h.revision), cite("task", taskId))];
     if (h.returnAt !== undefined) lines.push(line(`It is temporary: the task goes back to ${shown(h.from.id)} at ${h.returnAt}, if whoever asked still holds the right to control it then.`, cite("handoff", h.id)));
     if (h.package !== undefined) lines.push(line(h.package.ready ? "The package is complete." : `The package is missing: ${h.package.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
     // Card C07j: a section cut to fit says so here too, with where its whole text is kept.
@@ -861,8 +861,8 @@ export class StatusService {
     for (const b of all) {
       const who = shown(b.agent);
       lines.push(line(`${who}'s brief: ${sections.map(([label, key]) => `${b[key].length} ${label.toLowerCase()}`).join(", ")}${b.partial ? ". Some records could not be read, so it may be incomplete" : ""}.`, cite("standup-brief", b.id, b.revision)));
-      for (const [label, key] of sections) for (const e of b[key].slice(0, 5)) lines.push(line(`${who} - ${label}: ${shown(e.text)}`, ...e.cites));
-      for (const st of b.statements) lines.push(line(`${st.by === "owner" ? "A note from the owner" : `${who}'s own words`} (${st.section}): ${shown(st.text)}`, cite("standup-brief", b.id, b.revision)));
+      for (const [label, key] of sections) for (const e of b[key].slice(0, 5)) lines.push(line(`${who} - ${label}: ${quoted(e.text)}`, ...e.cites));
+      for (const st of b.statements) lines.push(line(`${st.by === "owner" ? "A note from the owner" : `${who}'s own words`} (${st.section}): ${quoted(st.text)}`, cite("standup-brief", b.id, b.revision)));
     }
     if (all.length === 0) lines.push(line("No brief has been prepared for that stand-up yet, or none is yours to read.", cite("meeting", request.occurrenceId)));
     return { observedAt: this.#runner.now(), lines };
@@ -920,7 +920,7 @@ export class StatusService {
     const open = await this.#deps.agenda.openAgenda(by, projectId, { limit });
     if (open === undefined) return undefined;
     const lines: Line[] = open.items.map((i, n) => line(
-      `${n + 1}. ${shown(i.topic)} (${i.urgency}, ${i.intent}, ${i.state}) asked by ${shown(i.requestedBy)}${i.question === undefined ? "" : `: "${shown(i.question)}"`}${i.requestedOutcome === undefined ? "" : ` Outcome asked for: ${shown(i.requestedOutcome)}.`}${i.timeboxMinutes === undefined ? "" : ` Timebox ${i.timeboxMinutes} minutes.`}`,
+      `${n + 1}. ${quoted(i.topic)} (${i.urgency}, ${i.intent}, ${i.state}) asked by ${shown(i.requestedBy)}${i.question === undefined ? "" : `: ${quoted(i.question)}`}${i.requestedOutcome === undefined ? "" : ` Outcome asked for: ${quoted(i.requestedOutcome)}.`}${i.timeboxMinutes === undefined ? "" : ` Timebox ${i.timeboxMinutes} minutes.`}`,
       cite("agenda", i.id, i.revision), cite("project", projectId)));
     if (lines.length === 0) lines.push(line("Nothing is waiting on the agenda of this project.", cite("project", projectId)));
     else if (open.next !== undefined) lines.push(line("There are more topics than shown.", cite("project", projectId)));
@@ -1013,7 +1013,7 @@ export class StatusService {
     const cap = limit === undefined ? 10 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
     const { items, next } = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: cap });
     const lines: Line[] = items.map((q) => line(
-      `${shown(q.asker)} asks about "${shown(q.task.title)}" (${shown(q.task.projectName)}), since ${q.askedAt}: "${shown(q.question)}"${q.wait === undefined ? "" : ` Your answer ends the wait: ${shown(q.wait.summary)}.${q.wait.deadline === undefined ? "" : ` It is due ${q.wait.deadline}.`}`}`,
+      `${shown(q.asker)} asks about ${quoted(q.task.title)} (${shown(q.task.projectName)}), since ${q.askedAt}: ${quoted(q.question)}${q.wait === undefined ? "" : ` Your answer ends the wait: ${quoted(q.wait.summary)}.${q.wait.deadline === undefined ? "" : ` It is due ${q.wait.deadline}.`}`}`,
       cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)));
     if (lines.length === 0) lines.push(line("No agent is waiting for your answer."));
     else if (next !== undefined) lines.push(line("There are more questions than shown; answer these first and ask again."));
@@ -1039,7 +1039,7 @@ export class StatusService {
       const asked = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 51 });
       if (asked.items.length > 50) truncated.push("questions");
       for (const q of asked.items.slice(0, 50)) {
-        all.push({ text: `${shown(q.asker)} asks about "${shown(q.task.title)}": "${shown(q.question)}" (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
+        all.push({ text: `${shown(q.asker)} asks about ${quoted(q.task.title)}: ${quoted(q.question)} (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
       }
     }
     if (this.#deps.reviews !== undefined) {
@@ -1047,14 +1047,14 @@ export class StatusService {
       const pending = await this.#deps.reviews.ownerPending(by, 51);
       if (pending.length > 50) truncated.push("approvals");
       for (const r of pending.slice(0, 50)) {
-        all.push({ text: `An approval of "${shown(r.name)}" is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
+        all.push({ text: `An approval of ${quoted(r.name)} is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
       }
     }
     if (this.#deps.meetingDecisions !== undefined) {
       const waiting = await this.#deps.meetingDecisions(by, 51);
       if (waiting.truncated || waiting.items.length > 50) truncated.push("meeting decisions");
       for (const m of waiting.items.slice(0, 50)) {
-        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: "${shown(m.text).slice(0, 160)}"`}${m.topic === undefined ? "" : ` (topic ${shown(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id });
+        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: ${quoted(m.text, 160)}`}${m.topic === undefined ? "" : ` (topic ${quoted(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id });
       }
     }
     if (this.#deps.heldResumes !== undefined) {
@@ -1062,7 +1062,7 @@ export class StatusService {
       if (held.truncated || held.items.length > 50) truncated.push("held resumes");
       for (const h of held.items.slice(0, 50)) {
         const names = h.changes.slice(0, 3).map((c) => `${c.kind} ${shown(c.key)} (${c.status})`).join(", ");
-        all.push({ text: `"${shown(h.title, 60)}" is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${h.changes.length === 1 ? "was" : "were"} judged to matter to it: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId });
+        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${h.changes.length === 1 ? "was" : "were"} judged to matter to it: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
@@ -1078,7 +1078,7 @@ export class StatusService {
         if (onTask && (await taskOf(b.subject.id))?.open === false) continue;
         if (owned >= 50) { blockersCut = true; break; }
         owned++;
-        all.push({ text: `${shown(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
+        all.push({ text: `${quoted(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
       }
       if (page.next === undefined) break;
       after = page.next;

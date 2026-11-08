@@ -70,14 +70,25 @@ export function plainDuration(ms: number): string {
   return hours % 24 === 0 ? `${days} d` : `${days} d ${hours % 24} h`;
 }
 
-/** Record text shown in an answer: credential-shaped runs cut out, whitespace made plain, and bounded (never splitting a character). */
+/**
+ * Record text shown in an answer: credential-shaped runs cut out, whitespace made plain, and bounded (never splitting a character). Controls (C0, DEL, C1) and invisible format characters (`\p{Cf}`:
+ * bidirectional overrides, zero-width characters) are written as `\uXXXX` (card U09 review, round 3): a task title or a name passes the record checks with a bidirectional override or a C1 CSI in it,
+ * which would reorder the line it is shown in or reach a terminal as an escape sequence. `max` bounds the text after escaping; a cut never splits a character or an escape.
+ */
 export function shown(value: string | undefined, max = 200): string {
   const clean = redactText(value ?? "").replace(/\s+/g, " ").trim();
-  if (clean.length <= max) return clean;
-  // Cut without splitting a surrogate pair: half of one is ill-formed text, which a stored or sent answer refuses.
-  const cut = clean.slice(0, max - 3);
-  return `${/[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut}...`;
+  if (clean.length <= max && !SHOWN_ESCAPED.test(clean)) return clean;
+  // Only the head can be shown: every character takes at least one place.
+  const parts = Array.from(clean.slice(0, max + 1), (c) => (SHOWN_ESCAPED.test(c) ? escapeUnits(c) : c));
+  if (clean.length <= max && parts.reduce((n, p) => n + p.length, 0) <= max) return parts.join("");
+  let body = "";
+  for (const p of parts) { if (body.length + p.length > max - 3) break; body += p; }
+  return `${body}...`;
 }
+const escapeUnits = (c: string): string => [...Array(c.length).keys()].map((i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`).join("");
+/** Written as `\uXXXX` in shown text: controls, invisible format characters and half a surrogate pair (whitespace, line separators included, is folded to a space before). */
+// eslint-disable-next-line no-control-regex
+const SHOWN_ESCAPED = /[\u0000-\u001f\u007f-\u009f]|\p{Cf}|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u;
 
 /**
  * Text someone else wrote (an agent's step summary, an explanation, a reference it gave), shown in a status line as a quotation (card U09): credentials removed, whitespace folded to one line, cut so the quotation holds at most `max` characters after escaping (plus its two quotes), then

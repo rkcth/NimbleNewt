@@ -78,7 +78,8 @@ export const filterTime = (value: unknown, field: string): number | undefined =>
   const m = typeof value === "string" && value.length <= 40 ? FILTER_TIME.exec(value) : null;
   if (m === null) return bad();
   const [y, mo, d, h, mi, s, , oh, om] = [m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9]].map((x) => (x === undefined ? 0 : Number(x))) as number[];
-  const day = new Date(Date.UTC(y!, mo! - 1, d!));
+  // `Date.UTC` takes the years 0 to 99 as 1900 to 1999 (so 0000-02-29, a real leap day, read as 1900's, which has none); setting the full year does not.
+  const day = new Date(0); day.setUTCFullYear(y!, mo! - 1, d!);
   if (mo! < 1 || mo! > 12 || day.getUTCDate() !== d || day.getUTCMonth() !== mo! - 1 || h! > 23 || mi! > 59 || s! > 59 || oh! > 23 || om! > 59) return bad();
   const ms = Date.parse(value as string);
   return Number.isNaN(ms) ? bad() : ms;
