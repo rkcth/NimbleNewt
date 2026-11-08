@@ -7,6 +7,7 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "../dispatch/testing/world.js";
 import type { Grant } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
+import { JobService } from "../jobs/index.js";
 import { launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 
@@ -590,7 +591,8 @@ for (const backend of backends) {
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (_t: unknown, raw: unknown) => { touched.push((raw as { op: string }).op); return { v: 1, op: "x", ok: true, result: {} } as never; } },
-      messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true });
+      messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
+      jobs: { admit: async () => { touched.push("job.admit"); return { id: "job-x", replayed: false }; }, get: async () => { touched.push("job.get"); return undefined; }, requestCancel: async () => { touched.push("job.cancel"); return { id: "job-x", operation: "stop_tool", replayed: false }; } }, jobRuns: { room: () => undefined, start: async () => { touched.push("job.run"); }, ended: async () => undefined } });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = c.session(async (s) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
@@ -602,6 +604,9 @@ for (const backend of backends) {
       out["message.send"] = await send("message.send", { to: "agent:ben", class: "informational", purpose: "p", text: "t" }, "w4");
       out["artifact.publish"] = await send("artifact.publish", { name: "n", files: [{ path: "a.md", text: "a" }] }, "w7");
       out["tool.register"] = await send("tool.register", { name: "x", kind: "skill", version: "1.0.0", manifest: JSON.parse(JSON.stringify(manifest({ entryPoint: undefined, interpreter: undefined }))), instructionsRecordId: doc["id"] as string }, "w5");
+      out["job.start"] = await send("job.start", { tool: "toolbox.build", input: {} }, "w8");
+      // Reading a job and stopping one are not refused for a pause (here the job does not exist).
+      out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
       out["task.get"] = await send("task.get", {}, "r2");
       out["discover"] = await send("tool.discover", {}, "r3");
@@ -609,9 +614,153 @@ for (const backend of backends) {
       out["after"] = await send("desk.write", { kind: "note", title: "n", body: "b3", visibility: "shared", status: "accepted" }, "w6");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after"]) good(out[op]!);
-    assert.deepEqual(touched, ["task.get"], "no write reached a service while paused");
+    assert.equal(bad(out["job.status"]!).code, "not_found");
+    assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
+  });
+
+  suite("job-start under a used call ID answers the same job only for the same request, also after a restart that forgot the call IDs; job output, status and labels carry no control or invisible format characters (card T07b review)", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: "job.write", project: c.project }]);
+    await c.task("t", ann);
+    const host = { id: "service:dispatcher", kind: "service", name: "dispatcher", grants: [] } as never;
+    const jobs = JobService.withEpoch(c.storage, c.epoch, { pauses: c.pauses }, { ...c.options, host: "service:dispatcher" });
+    const started: string[] = [];
+    // A service as a fresh controller builds it: same records, no memory of the call IDs used before.
+    const fresh = (): ToolExecutionService => new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true,
+      jobs, jobRuns: { room: () => undefined, start: async (jobId: string) => { started.push(jobId); }, ended: async () => undefined } });
+    let handle = "";
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      c.svc = fresh();
+      const name = await c.install(s, "check", "1.0.0");
+      const args = { tool: name, version: "1.0.0", input: { url: "https://a.test" }, label: "check a" };
+      const first = good(await s.send("job.start", args, "j1"));
+      assert.equal(first["state"], "awaiting-approval");
+      const review = (await c.reviews.get(c.owner, first["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+      handle = good(await s.send("job.start", args, "j1"))["jobId"] as string;
+      assert.match(handle, /^job-/);
+      // The controller restarts: the same request under the same call ID is the same job, started once.
+      c.svc = fresh();
+      assert.equal(good(await s.send("job.start", args, "j1"))["jobId"], handle);
+      // Another request under that call ID is refused after a restart too (different input, tool version left out but input changed, another label, background).
+      for (const [key, other] of [["input", { ...args, input: { url: "https://b.test" } }], ["input-noversion", { tool: name, input: { url: "https://b.test" }, label: "check a" }], ["label", { ...args, label: "check b" }], ["background", { ...args, background: true }]] as const) {
+        c.svc = fresh();
+        out[key] = await s.send("job.start", other as JsonObject, "j1");
+      }
+      // A label with an invisible bidirectional override, a C1 control or a line separator is refused.
+      for (const [i, label] of ["evil‮txt", "a\u0085b", "a b", "a​b"].entries()) out[`label-${i}`] = await s.send("job.start", { ...args, label }, `bad-label-${i}`);
+      // The program writes invisible format characters, C1 controls and separators; it renames a process it leaves behind.
+      await jobs.report(host, { commandId: uid("d"), jobId: handle, state: "dispatched" });
+      await jobs.report(host, { commandId: uid("r"), jobId: handle, state: "running" });
+      await jobs.report(host, { commandId: uid("o"), jobId: handle, output: "ok‮⁦gnp.exe⁩ \u0085next line​﻿ done\n" });
+      out["output"] = await s.send("job.output", { jobId: handle }, "o1");
+      await jobs.finish(host, { commandId: uid("f"), jobId: handle, outcome: "failed", exit: { reason: "it ended ‮badly" }, orphans: ["pid 9 (‮evil)"] });
+      out["status"] = await s.send("job.status", { jobId: handle }, "st1");
+    });
+    await c.tick();
+    assert.deepEqual(started, [handle], "one start for one job");
+    for (const key of ["input", "input-noversion", "label", "background"]) { const b = bad(out[key]!); assert.equal(b.code, "invalid_command", key); assert.match(b.message, /different request/, key); }
+    for (let i = 0; i < 4; i++) assert.equal(bad(out[`label-${i}`]!).code, "invalid_command");
+    const text = JSON.parse(good(out["output"]!)["output"] as string) as string;
+    assert.equal(text, "okgnp.exe nextline done\n");
+    const status = good(out["status"]!);
+    assert.deepEqual([(status["exit"] as JsonObject)["reason"], status["orphans"]], ["it ended badly", ["pid 9 (evil)"]]);
+  });
+
+  for (const mode of ["finish", "cancel"] as const) {
+    suite(`a job of a tool version is one of its running calls until it ends: a revocation with policy ${mode} ${mode === "finish" ? "lists it and lets it run" : "lists it and stops it (a recorded Stop by the job host)"} (card T07b review 3)`, async (c) => {
+      c.revocation.mode = mode;
+      const ann = await c.agentFor("ann", [{ action: "job.write", project: c.project }]);
+      await c.task("t", ann);
+      const host = { id: "service:dispatcher", kind: "service", name: "dispatcher", grants: [] } as never;
+      const jobs = JobService.withEpoch(c.storage, c.epoch, { pauses: c.pauses }, { ...c.options, host: "service:dispatcher" });
+      const ends = new Map<string, () => void>();
+      const svc = new ToolExecutionService({
+        principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+        facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true, revocationPolicy: () => (mode === "finish" ? "finish" : "cancel"),
+        jobs, jobRuns: { room: () => undefined, start: async (jobId: string) => { await jobs.report(host, { commandId: uid("d"), jobId, state: "dispatched" }); await jobs.report(host, { commandId: uid("r"), jobId, state: "running" }); }, ended: (jobId: string) => new Promise<void>((resolve) => { ends.set(jobId, resolve); }) } });
+      let handle = "", name = "";
+      const listed: number[] = [];
+      c.worker.script = c.session(async (s) => {
+        c.svc = svc;
+        name = await c.install(s, "slow", "1.0.0");
+        const args = { tool: name, version: "1.0.0", input: { url: "https://a.test" } };
+        const first = good(await s.send("job.start", args, "j1"));
+        assert.equal(first["state"], "awaiting-approval");
+        const review = (await c.reviews.get(c.owner, first["reviewId"] as string))!;
+        await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+        handle = good(await s.send("job.start", args, "j1"))["jobId"] as string;
+        listed.push(svc.runningTotal(name, "1.0.0"));
+        await c.catalog.revoke(c.owner, { commandId: uid("rv"), name, version: "1.0.0", reason: "bad" });
+        await new Promise((r) => setTimeout(r, 50));
+        // The job's end is recorded: it is no longer a running call of the version.
+        ends.get(handle)!();
+        await new Promise((r) => setTimeout(r, 10));
+        listed.push(svc.runningTotal(name, "1.0.0"));
+      });
+      await c.tick();
+      assert.match(handle, /^job-/);
+      assert.deepEqual(listed, [1, 0], "listed while it runs, forgotten once it has ended");
+      const job = (await jobs.get(c.owner, handle))!;
+      if (mode === "finish") assert.equal(job.state, "running", "a revocation that lets running calls finish leaves the job alone");
+      else assert.deepEqual([job.state, job.cancel?.requestedBy, job.cancel?.reason], ["cancellation_requested", "service:dispatcher", `${name} 1.0.0 was revoked while the job ran`]);
+    });
+  }
+
+  suite("job-start is refused for a version revoked before it, and for one revoked between the owner's approval and the start (nothing is admitted or started); an attempt that has ended can neither start nor stop a job (card T07b review 4)", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: "job.write", project: c.project }]);
+    await c.task("t", ann);
+    const jobs = JobService.withEpoch(c.storage, c.epoch, { pauses: c.pauses }, { ...c.options, host: "service:dispatcher" });
+    const started: string[] = [];
+    const admitted: string[] = [];
+    c.svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true,
+      jobs: { admit: async (...a: Parameters<JobService["admit"]>) => { const j = await jobs.admit(...a); admitted.push(j.id); return j; }, get: (...a: Parameters<JobService["get"]>) => jobs.get(...a), requestCancel: (...a: Parameters<JobService["requestCancel"]>) => jobs.requestCancel(...a) },
+      jobRuns: { room: () => undefined, start: async (jobId: string) => { started.push(jobId); }, ended: async () => undefined } });
+    const out: Record<string, BridgeResponse> = {};
+    let late: { token: string; gateway: BoundGateway } | undefined;
+    let running = "";
+    c.worker.script = c.session(async (s) => {
+      late = { token: s.token, gateway: s.gateway };
+      // Revoked before the start is asked.
+      const gone = await c.install(s, "gone", "1.0.0");
+      await c.catalog.revoke(c.owner, { commandId: uid("rv"), name: gone, version: "1.0.0", reason: "bad" });
+      out["revoked-before"] = await s.send("job.start", { tool: gone, version: "1.0.0", input: { url: "https://a.test" } }, "j-gone");
+      // Approved, then revoked before the agent asks again: the start is refused (a choice about running calls is not about one that has not started).
+      const late1 = await c.install(s, "late", "1.0.0");
+      const args = { tool: late1, version: "1.0.0", input: { url: "https://a.test" } };
+      const first = good(await s.send("job.start", args, "j-late"));
+      assert.equal(first["state"], "awaiting-approval");
+      const review = (await c.reviews.get(c.owner, first["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+      await c.catalog.revoke(c.owner, { commandId: uid("rv"), name: late1, version: "1.0.0", reason: "bad" });
+      out["revoked-after-approval"] = await s.send("job.start", args, "j-late");
+      // One job that does start, for the ended attempt to try to stop.
+      const ok = await c.install(s, "fine", "1.0.0");
+      const okArgs = { tool: ok, version: "1.0.0", input: { url: "https://a.test" } };
+      const asked = good(await s.send("job.start", okArgs, "j-ok"));
+      const okReview = (await c.reviews.get(c.owner, asked["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: okReview.id, expectedRevision: okReview.revision, verdict: "allow", reason: "fine" });
+      running = good(await s.send("job.start", okArgs, "j-ok"))["jobId"] as string;
+    });
+    await c.tick();
+    assert.equal(bad(out["revoked-before"]!).code, "forbidden");
+    assert.match(bad(out["revoked-before"]!).message, /revoked/);
+    const refused = out["revoked-after-approval"]!;
+    // Refused either before the dispatcher's tool path or by the run's own check at the start: in both cases nothing is admitted or started.
+    assert.ok(!refused.ok || (refused.result["state"] !== "confirmed" && refused.result["jobId"] === undefined), JSON.stringify(refused));
+    assert.match(running, /^job-/);
+    assert.deepEqual([admitted, started], [[running], [running]], "only the job of the live version was admitted and started");
+    // The attempt has ended: its credential and gateway start and stop nothing.
+    const afterStart = await c.svc.handle(late!.token, late!.gateway, { op: "job.start", callId: "after-end", args: { tool: "anything", input: {} } });
+    const afterStop = await c.svc.handle(late!.token, late!.gateway, { op: "job.cancel", callId: "after-end-stop", args: { jobId: running } });
+    for (const r of [afterStart, afterStop]) assert.ok(["unauthenticated", "fenced"].includes(bad(r).code), JSON.stringify(r));
+    assert.deepEqual([admitted.length, started.length, (await jobs.get(c.owner, running))!.state], [1, 1, "admitted"]);
   });
 
   suite("registering a tool under a contract that restricts tools is allowed, but running it is still governed by the contract's ceiling", async (c) => {

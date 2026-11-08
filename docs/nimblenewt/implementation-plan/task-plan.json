@@ -7556,12 +7556,35 @@
       ],
       "deliverable": "Split from T07 (2026-10-26): the job records, their states, stop operations, restart decisions and unknown-outcome reconciliation are built as a service; what is not built is the agent's way to use them and the production bindings. The bridge gains job tools (start a job, status, bounded output, cancel) with the call ID as the idempotency key, the sandbox launcher's process-tree stop and orphan report are bound to the stop confirmation, the MCP client uses the job records and the connection check (`McpService.usable`), and the state API reads jobs",
       "acceptance_and_verification": "An agent starts a long-running job through the bridge and gets a durable handle; status, bounded output and cancel work from the handle after a worker or controller restart; a Stop or Force Stop through the real launcher ends the whole process tree and the orphans it could not end appear on the job record; a long-running MCP operation is a job and a revoked server admits no new one; the owner can read jobs, live jobs and unresolved outcomes through the API; every restart decision of T07 is reachable by the owner and a supervisor; when the controller starts, the live jobs are listed and each gets a decision by a stated rule for its class (a tool with a checkpoint is relaunched from it through the dispatcher, a tracked remote job is followed or kept as an exception, anything else is recorded as outcome-unknown or stopped), so no live job is left without one; a Stop and a Force Stop through the real launcher are the two recorded steps of the job service",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e97e4c94",
+          "ad3223a1",
+          "f47a78a3",
+          "faaeb3b6",
+          "4747517a",
+          "27c1878b",
+          "4bea43b1",
+          "2dae4e63",
+          "41370b84",
+          "ba7dfbad",
+          "11478c99",
+          "0fb6b017",
+          "eec142dc",
+          "0dd42396",
+          "fd9ff7a2"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Agents start a catalogue tool as a long-running job through the bridge (job-start, job-status, job-output quoted, job-cancel; the call ID is the idempotency key) and use the handle from any later attempt of the same task and from no other; the controller runs each job in the sandbox through the real launcher (bounded per task, in all and in output), a Stop or Force Stop ends the whole process tree and is confirmed with the orphans that could not be ended, every job left live by the last controller gets a decision by its class at start, MCP operations are jobs admitted only on approved servers, and the owner and a supervisor read, stop, decide and reconcile jobs through the API (owner also by chat and a jobs status view). A review then made a reused call ID answer the same job only for the same request (also after a restart), stripped invisible format characters from job output and status, kept a renamed orphan from blocking the end record, refused decisions and reconciliations from task credentials, and stopped the jobs of a task once it is done or cancelled; a third round stopped a revoked version's jobs with its running calls, confirmed a stop that lands while a job is being dispatched, kept MCP error text from blocking a job's end and held back an unfinished word of output so half a secret is never recorded; a fourth round made the orphan scan kill only a process its ID still names (start time checked) and added tests for revoked versions, ended attempts and secrets split across output writes. Left: relaunching a tool from its checkpoint (nothing reports one), an agent-facing MCP tool, orphan scan outside Linux. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "T08",

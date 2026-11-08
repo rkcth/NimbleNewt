@@ -230,17 +230,17 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
   test("a stored conversation over the startup share is compacted once by the real process and then admitted; one that cannot fit is refused at start with the blocker, and nothing was sent to the model", async (t) => {
     const real = await launcher();
     if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
-    const big = (n: number): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(330));
+    const big = (n: number): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(450));
     const answer = await model([{ text: big(1) }, { text: big(2) }, { text: "continued" }]);
     const x = await rig(real, answer);
-    x.window.value = 32768;
+    x.window.value = 40960;
     try {
       // The relay checks every call against the attempt that is current for its task (L05b fence), so each run is the real admitted attempt of its own task.
       const gatewayOf = (attemptId: string): ToolGateway => ({ attemptId, call: async (): Promise<ToolResult> => { throw new Error("not used"); }, heartbeat: async () => ({ until: new Date(Date.now() + 600_000).toISOString() }), usage: async () => undefined, acknowledgeDecisions: async () => undefined } as unknown as ToolGateway);
       const order = (n: number, id: string, taskId: string, resumeFrom?: object): WorkOrder => ({ attemptId: id, taskId, projectId: x.project, agentId: `agent:${AGENT}`, generation: 1, route: "localp/small", credential: `cred-${n}`, recipe: { revision: "r1", reach: [] }, content: "go on", requestId: `req-${n}`, expiresAt: new Date(Date.now() + 300_000).toISOString(), ...(resumeFrom === undefined ? {} : { resumeFrom }) } as never);
       const sizeOf = (r: { checkpoint?: unknown }): number => (r.checkpoint as { nn?: { contextTokens?: number } }).nn?.contextTokens ?? 0;
       const run = async (n: number, from?: object): Promise<{ id: string; status: string; error?: string; checkpoint?: object }> => { const t = await x.task(n, "Order seeds"); const handle = await x.worker().start(order(n, t.attemptId, t.taskId, from)); const result = await handle.run(gatewayOf(t.attemptId)); await handle.stop(); return { id: t.attemptId, ...result }; };
-      // Two attempts each add a long answer to the conversation stored in the agent's home. Each first call fits (a quarter of the window is 8,192 tokens), so neither is compacted.
+      // Two attempts each add a long answer to the conversation stored in the agent's home. Each first call fits (a quarter of the window is 10,240 tokens), so neither is compacted. The window and the answers are sized (card T07b, when the bridge gained its job tools) so that one answer kept verbatim (a tenth of the window) with the compaction summary and the fixed part fits the startup share.
       const one = await run(1);
       assert.equal(one.status, "completed", one.error);
       const two = await run(2, one.checkpoint);

@@ -209,6 +209,8 @@ export interface StateApiDeps {
   readonly maintenanceHeld?: () => string | undefined;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
+  /** Durable job records and their control (cards T07, T07b). */
+  readonly jobs?: Context["jobs"];
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
   readonly commands?: CommandService;
@@ -331,6 +333,7 @@ export class StateApi {
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.workEnd === undefined ? {} : { workEnd: this.#deps.workEnd }),
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
+        ...(this.#deps.jobs === undefined ? {} : { jobs: this.#deps.jobs }),
         ...(this.#deps.policyForward === undefined ? {} : { policyForward: this.#deps.policyForward }),
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
         ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),

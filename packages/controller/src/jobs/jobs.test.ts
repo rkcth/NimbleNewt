@@ -7,7 +7,9 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { PauseService } from "../lifecycle/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { PauseOptions } from "../lifecycle/index.js";
-import { JOB_LIMITS, JobService, type JobBody, type JobOptions } from "./index.js";
+import { JOB_LIMITS, JobService, LocalJobRuns, decideAtStart, type JobBody, type JobLauncher, type JobOptions, type JobProcessEnd } from "./index.js";
+import type { ScriptLaunch } from "../toolbridge/index.js";
+import { callToolAsJob, type McpJobCall, type RemoteToolResult } from "../mcp/index.js";
 
 after(stopServer);
 
@@ -477,6 +479,436 @@ for (const backend of backends) {
     await refuses("forbidden", () => ask(plain));
     await refuses("forbidden", () => ask(bg, c.t2));
     await refuses("forbidden", () => ask(derivedId("job", "nobody")));
+  });
+
+  // ---- card T07b ------------------------------------------------------------------------------------------------------------------
+
+  const HOST = "service:dispatcher";
+  const hostOf = (): Principal => ({ id: HOST, kind: "service", name: "dispatcher", grants: [] });
+  const scoped = (p: Principal, projectId: string, taskId: string): Principal => ({ ...p, taskScope: { projectId, taskId } });
+
+  suite("the controller's job host records and controls any job; a task credential stops only its own task's jobs, with job.write there; every stop is told to the host once committed (card T07b)", async (c) => {
+    const told: [string, boolean][] = [];
+    const jobs = c.reopen({ host: HOST, onCancel: (id, force) => { told.push([id, force]); throw new Error("a failing host never fails the request"); } });
+    const host = hostOf();
+    // Another service, or one with the host's name but another kind, is nobody.
+    const impostor: Principal = { ...host, kind: "agent" };
+    const other: Principal = { ...host, id: "service:other" };
+    const id = await c.admit(c.t1);
+    for (const p of [impostor, other]) await refuses("forbidden", () => jobs.report(p, { commandId: cid("rp"), jobId: id, state: "dispatched" }));
+    assert.equal(await jobs.get(other, id), undefined);
+    await jobs.report(host, { commandId: cid("rp"), jobId: id, state: "dispatched" });
+    await jobs.report(host, { commandId: cid("rp"), jobId: id, state: "running", output: "step 1\n" });
+    assert.equal((await jobs.get(host, id))?.state, "running");
+    // A credential of task two may not stop task one's job, even holding job.write on the project; one of task one may.
+    await refuses("forbidden", () => jobs.requestCancel(scoped(c.worker, c.project, c.t2), { commandId: cid("cx"), jobId: id, reason: "not mine" }));
+    await refuses("forbidden", () => jobs.requestCancel(scoped(c.reader, c.project, c.t1), { commandId: cid("cx"), jobId: id, reason: "only reads" }));
+    assert.deepEqual(told, [], "a refused stop is not told to the host");
+    const own = scoped(c.worker, c.project, c.t1);
+    await jobs.requestCancel(own, { commandId: "own-stop", jobId: id, reason: "done with it" });
+    await jobs.requestCancel(own, { commandId: "own-stop", jobId: id, reason: "done with it" });
+    await jobs.requestCancel(own, { commandId: cid("cx"), jobId: id, reason: "it ignored me", force: true });
+    assert.deepEqual(told, [[id, false], [id, false], [id, true]], "the stop, its repeat and the Force Stop each reach the host");
+    // Without job.control, a task credential still cannot take restart decisions or reconcile.
+    await refuses("forbidden", () => jobs.decide(own, { commandId: cid("dc"), jobId: id, decision: "exception", reason: "x", tracker: "me" }));
+    await jobs.confirmCancel(host, { commandId: cid("cc"), jobId: id, result: "stopped", orphans: ["pid 9 (sleep 600)"] });
+    assert.deepEqual([(await c.read(id)).state, (await c.read(id)).orphans], ["cancelled", ["pid 9 (sleep 600)"]]);
+    // A decision to cancel is told too.
+    const two = await c.admit(c.t1);
+    await jobs.decide(host, { commandId: cid("dc"), jobId: two, decision: "cancel", reason: "after a restart" });
+    assert.deepEqual(told.at(-1), [two, false]);
+  });
+
+  suite("at start every live job gets a decision by the rule for its class, once, and jobs admitted after the start are left alone (card T07b)", async (c) => {
+    const jobs = c.reopen({ host: HOST });
+    const host = hostOf();
+    const running = await c.admit(c.t1);
+    await jobs.report(host, { commandId: cid("rp"), jobId: running, state: "dispatched", host: "host:here" });
+    const never = await c.admit(c.t1);
+    const stopping = await c.admit(c.t1);
+    await jobs.report(host, { commandId: cid("rp"), jobId: stopping, state: "dispatched", host: "host:here" });
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stopping, reason: "stop" });
+    const remoteTracked = await c.admit(c.t2, { kind: "remote", resumability: "remote_tracked" });
+    await jobs.report(host, { commandId: cid("rp"), jobId: remoteTracked, state: "running" as never }).catch(() => undefined);
+    await jobs.report(host, { commandId: cid("rp"), jobId: remoteTracked, state: "dispatched" });
+    const remoteLoose = await c.admit(c.t2, { kind: "remote" });
+    await jobs.report(host, { commandId: cid("rp"), jobId: remoteLoose, state: "dispatched" });
+    const elsewhere = await c.admit(c.t2);
+    await jobs.report(host, { commandId: cid("rp"), jobId: elsewhere, state: "dispatched", host: "host:far" });
+    const checkpointed = await c.admit(c.t1, { resumability: "tool_checkpoint" });
+    await jobs.report(host, { commandId: cid("rp"), jobId: checkpointed, state: "dispatched", checkpoint: "ckpt-1", host: "host:here" });
+    const unknownAlready = await c.admit(c.t1);
+    await jobs.report(host, { commandId: cid("rp"), jobId: unknownAlready, state: "dispatched" });
+    await jobs.markUnknown(host, { commandId: cid("uk"), jobId: unknownAlready, reason: "lost" });
+    const finished = await c.admit(c.t1);
+    await jobs.report(host, { commandId: cid("rp"), jobId: finished, state: "dispatched" });
+    await jobs.finish(host, { commandId: cid("fn"), jobId: finished, outcome: "completed" });
+    now += 1000;
+    const before = clock();
+    now += 1000;
+    const late = await c.admit(c.t1);
+    const relaunched: string[] = [];
+    const rule = { epoch: 7, before, isLocal: (h: string) => h === "host:here" };
+    const report = await decideAtStart(jobs, host, rule);
+    assert.deepEqual(report.failed, []);
+    const ruleOf = new Map(report.decided.map((d) => [d.jobId, d.rule]));
+    assert.deepEqual([running, never, stopping, remoteTracked, remoteLoose, elsewhere, checkpointed, unknownAlready].map((j) => ruleOf.get(j)), ["outcome_unknown", "stopped", "outcome_unknown", "exception", "outcome_unknown", "exception", "outcome_unknown", "unchanged"]);
+    assert.equal(ruleOf.has(finished), false, "a finished job is not live");
+    assert.equal(ruleOf.has(late), false, "a job admitted after the start is not judged");
+    const states = async (ids: string[]) => Promise.all(ids.map(async (j) => (await c.read(j)).state));
+    assert.deepEqual(await states([running, never, stopping, remoteLoose, checkpointed, late]), ["outcome_unknown", "cancelled", "outcome_unknown", "outcome_unknown", "outcome_unknown", "admitted"]);
+    assert.deepEqual([(await c.read(remoteTracked)).exception?.tracker, (await c.read(elsewhere)).exception?.tracker], ["owner", "host:far"]);
+    assert.match((await c.read(checkpointed)).unknown!.reason, /checkpoint/);
+    // No live job is left without a decision: what is still live is either the late one or waiting for a reconciliation.
+    const left = (await jobs.live(c.owner)).jobs.map((j) => [j.id, j.state]);
+    assert.deepEqual(left.filter(([, s]) => s !== "outcome_unknown").map(([j]) => j), [late]);
+    // Asking again (the same start) repeats nothing; a relauncher is asked for a tool that left a checkpoint.
+    assert.deepEqual((await decideAtStart(jobs, host, rule)).decided.filter((d) => d.rule !== "unchanged"), []);
+    const fresh = await c.admit(c.t1, { resumability: "tool_checkpoint" });
+    await jobs.report(host, { commandId: cid("rp"), jobId: fresh, state: "dispatched", checkpoint: "ckpt-2", host: "host:here" });
+    now += 1000;
+    const again = await decideAtStart(jobs, host, { epoch: 8, before: clock(), isLocal: rule.isLocal, relaunch: async (j) => { relaunched.push(j.id); return true; } });
+    assert.deepEqual(relaunched, [fresh]);
+    assert.equal(again.decided.find((d) => d.jobId === fresh)?.rule, "unchanged");
+    assert.deepEqual([again.decided.find((d) => d.jobId === late)?.rule, (await c.read(late)).state], ["stopped", "cancelled"], "the next start judges what the last one left alone");
+    // A principal without the rights fails each decision, and the run says which.
+    const unseen = await c.admit(c.t1);
+    now += 1000;
+    const refused = await decideAtStart(jobs, c.reader, { epoch: 9, before: clock(), isLocal: () => true });
+    assert.ok(refused.failed.some((f) => f.jobId === unseen), JSON.stringify(refused));
+    assert.equal((await c.read(unseen)).state, "admitted");
+  });
+
+  suite("a long-running MCP operation is a job: admitted only on an approved server, called once, ended with the server's answer, failed when refused before sending and outcome-unknown when no answer came (card T07b)", async (c) => {
+    const approved = new Set([SERVER]);
+    const jobs = c.reopen({ host: HOST, connections: { usable: async (id) => approved.has(id) } });
+    const host = hostOf();
+    const calls: string[] = [];
+    let answer: () => Promise<RemoteToolResult> = async () => ({ content: [{ type: "text", text: `found 3 pages; Authorization: Bearer ${"abcdefghijklmnopqrstuvwxyz0123456789ABCD"}` }], isError: false });
+    const client = { callTool: async (serverId: string, name: string) => { calls.push(`${serverId}:${name}`); return answer(); } };
+    const call = (op: string, extra: Partial<McpJobCall> = {}) => callToolAsJob({ jobs, client, host }, c.worker, { commandId: `mcp-${op}`, taskId: c.t1, serverId: SERVER, operationId: op, tool: "search", args: { q: "seeds" }, ...extra });
+    const done = await call("op-1");
+    assert.deepEqual([done.state, done.replayed, calls.length], ["completed", false, 1]);
+    const job = await c.read(done.jobId);
+    assert.deepEqual([job.kind, job.serverId, job.resumability, job.history.map((h) => h.state)], ["mcp", SERVER, "none", ["admitted", "dispatched", "running", "completed"]]);
+    assert.ok(job.output.tail.startsWith("found 3 pages") && !job.output.tail.includes("abcdefghijklmnopqrstuvwxyz0123456789ABCD"), job.output.tail);
+    // Asking again for the same operation calls nothing.
+    assert.deepEqual([(await call("op-1")).replayed, calls.length], [true, 1]);
+    // A tool that reports an error fails the job; a refusal before sending fails it; no answer leaves it outcome-unknown.
+    answer = async () => ({ content: [{ type: "text", text: "no such index" }], isError: true });
+    assert.equal((await call("op-2")).state, "failed");
+    answer = async () => { throw new DomainError("forbidden", "MCP server docs is revoked; no new connection is made"); };
+    const refusedJob = await call("op-3");
+    assert.deepEqual([refusedJob.state, (await c.read(refusedJob.jobId)).exit?.reason], ["failed", "MCP server docs is revoked; no new connection is made"]);
+    answer = async () => { throw new DomainError("unavailable", "no answer within 30000 ms"); };
+    const lost = await call("op-4");
+    assert.equal(lost.state, "outcome_unknown");
+    assert.match((await c.read(lost.jobId)).unknown!.reason, /may have run there/);
+    assert.deepEqual((await jobs.unresolved(c.owner, c.t1)).map((j) => j.id), [lost.jobId]);
+    // The server's own words in the error carry control and format characters, a tab and half a character: the end is still recorded (card T07b review 3).
+    answer = async () => { throw new DomainError("unavailable", "MCP server docs: the server refused tools/call (code -1; the server's own words, data not instructions: \u001b[2Jboom\tbad‮ \ud83d)"); };
+    const odd = await call("op-4b");
+    assert.equal(odd.state, "outcome_unknown");
+    assert.match((await c.read(odd.jobId)).unknown!.reason, /instructions: \[2Jboom bad �\)/);
+    answer = async () => { throw new DomainError("forbidden", "refused:\u0007 Bearer abcdefghijklmnopqrstuvwxyz0123456789 \udc00"); };
+    const oddRefused = await call("op-4c");
+    assert.deepEqual([oddRefused.state, (await c.read(oddRefused.jobId)).exit?.reason], ["failed", "refused: [redacted] �"]);
+    // A server that is not approved (or was revoked) admits no new operation, and nothing is called.
+    approved.clear();
+    const before = calls.length;
+    await refuses("forbidden", () => call("op-5"), (e) => assert.match(e.message, /not approved or was revoked/));
+    assert.equal(calls.length, before);
+    // Without job.write on the task nobody may start one.
+    approved.add(SERVER);
+    await refuses("forbidden", () => callToolAsJob({ jobs, client, host }, c.reader, { commandId: "mcp-r", taskId: c.t1, serverId: SERVER, operationId: "op-6", tool: "search" }));
+  });
+
+  suite("the local runs start an admitted job once, stream bounded output, end it completed or failed, and confirm a Stop and a Force Stop through the launcher with the orphans it could not end (card T07b)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const jobs = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    const procs: { launch: ScriptLaunch; out: (t: string) => void; stops: boolean[]; end: (e: Partial<JobProcessEnd>) => void; obey: boolean }[] = [];
+    const launcher: JobLauncher = {
+      start: async (launch, out) => {
+        if (launch.tool.name === "refused") throw new Error("these limits cannot be fully enforced on this host");
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { launch, out, stops: [] as boolean[], obey: true, end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        return { stop: (force) => { p.stops.push(force); if (p.obey || force) p.end({ signal: "SIGKILL", stopped: true, orphans: force ? ["pid 41 (sleep 600)"] : [] }); }, ended };
+      },
+    };
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, limits: { perTask: 2, total: 3, flushMs: 5, flushChars: 64, outputBytes: 4096, graceMs: 50 } });
+    const launch = (name = "a_x.build"): ScriptLaunch => ({ program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name, version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} });
+    // Waits by the clock, not by a number of looks (a slow Windows worker thread reads the store much more slowly).
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    const settle = async (id: string, state: string) => { await waitFor(async () => (await c.read(id)).state === state); assert.equal((await c.read(id)).state, state); };
+
+    // Completed: output arrives in pieces, redacted, kept at the end; started once however often it is asked.
+    const ok = await c.admit(c.t1);
+    await Promise.all([runs.start(ok, c.t1, launch()), runs.start(ok, c.t1, launch())]);
+    assert.equal(procs.length, 1, "one process for one job");
+    await runs.start(ok, c.t1, launch());
+    assert.equal(procs.length, 1);
+    await refuses("forbidden", () => runs!.start(ok, c.t2, launch()).then(() => { throw new DomainError("forbidden", "the job is running already"); }));
+    procs[0]!.out("line one\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCD\n");
+    procs[0]!.out("line two\n");
+    procs[0]!.end({ exitCode: 0 });
+    await settle(ok, "completed");
+    const done = await c.read(ok);
+    assert.ok(done.output.tail.includes("line two"), JSON.stringify(done.output));
+    assert.equal(done.output.tail.includes("abcdefghijklmnopqrstuvwxyz0123456789ABCD"), false);
+    assert.deepEqual(done.history.map((h) => h.state), ["admitted", "dispatched", "running", "completed"]);
+    assert.deepEqual(runs.running(), []);
+
+    // Failed: a non-zero exit, a time limit, too much output, a launcher refusal; each with its reason.
+    const failed = async (end: Partial<JobProcessEnd> | "flood" | "refused", reason: RegExp) => {
+      const id = await c.admit(c.t1);
+      await runs!.start(id, c.t1, launch(end === "refused" ? "refused" : undefined));
+      if (end === "flood") { procs.at(-1)!.out("y".repeat(5000)); } else if (end !== "refused") procs.at(-1)!.end(end);
+      await settle(id, "failed");
+      assert.match((await c.read(id)).exit?.reason ?? "", reason);
+    };
+    await failed({ exitCode: 3 }, /exited with code 3/);
+    await failed({ timedOut: true, signal: "SIGKILL" }, /longer than its tool's time limit/);
+    await failed("flood", /wrote more than 4096 bytes/);
+    await failed("refused", /could not be started: these limits/);
+
+    // Stop: the launcher ends the process; the stop is confirmed (cancelled). Force Stop of a process that ignored the Stop: recorded as not obeyed first, then cancelled with the orphans the launcher reported.
+    const polite = await c.admit(c.t1);
+    await runs.start(polite, c.t1, launch());
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: polite, reason: "enough" });
+    await settle(polite, "cancelled");
+    assert.deepEqual(procs.at(-1)!.stops, [false]);
+    const stubborn = await c.admit(c.t1);
+    await runs.start(stubborn, c.t1, launch());
+    procs.at(-1)!.obey = false;
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "enough" });
+    await waitFor(async () => (await c.read(stubborn)).cancel?.uncooperative === true);
+    assert.deepEqual([(await c.read(stubborn)).state, (await c.read(stubborn)).cancel?.uncooperative], ["cancellation_requested", true]);
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "now", force: true });
+    await settle(stubborn, "cancelled");
+    assert.deepEqual([procs.at(-1)!.stops, (await c.read(stubborn)).orphans], [[false, true], ["pid 41 (sleep 600)"]]);
+
+    // Bounded: two per task, three in all; a job beyond them fails with the reason and is never left admitted.
+    const a1 = await c.admit(c.t1), a2 = await c.admit(c.t1), a3 = await c.admit(c.t1), b1 = await c.admit(c.t2), b2 = await c.admit(c.t2);
+    await runs.start(a1, c.t1, launch()); await runs.start(a2, c.t1, launch());
+    assert.match(runs.room(c.t1) ?? "", /this task already has 2 jobs/);
+    await runs.start(a3, c.t1, launch());
+    await settle(a3, "failed");
+    await runs.start(b1, c.t2, launch());
+    assert.match(runs.room(c.t2) ?? "", /already runs 3 jobs/);
+    await runs.start(b2, c.t2, launch());
+    await settle(b2, "failed");
+    // Closing ends what runs and records why.
+    await runs.close();
+    for (const id of [a1, a2, b1]) { await settle(id, "failed"); assert.match((await c.read(id)).exit?.reason ?? "", /controller shut down/); }
+    assert.match(runs.room(c.t1) ?? "", /shutting down/);
+  });
+
+  suite("the local runs stop the jobs of a task that has ended, confirm a stop asked before the process started, and record an end whose orphan names and reason carry control characters (card T07b review)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const jobs = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    const procs: { stops: boolean[]; end: (e: Partial<JobProcessEnd>) => void }[] = [];
+    const launcher: JobLauncher = {
+      start: async () => {
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { stops: [] as boolean[], end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        return { stop: (force) => { p.stops.push(force); p.end({ signal: "SIGKILL", stopped: true }); }, ended };
+      },
+    };
+    const ended = new Set<string>();
+    // A long sweep period: the test sweeps by hand.
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, taskEnded: async (taskId) => ended.has(taskId), limits: { flushMs: 5, graceMs: 50, sweepMs: 3_600_000 } });
+    const launch: ScriptLaunch = { program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name: "a_x.build", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} };
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    const settle = async (id: string, state: string) => { await waitFor(async () => (await c.read(id)).state === state); assert.equal((await c.read(id)).state, state); };
+
+    // The task of one job ends (cancelled, final); the other task goes on. A sweep stops only the job of the ended task, as a recorded Stop by the job host.
+    const mine = await c.admit(c.t2), theirs = await c.admit(c.t1);
+    await runs.start(mine, c.t2, launch); await runs.start(theirs, c.t1, launch);
+    await settle(mine, "running"); await settle(theirs, "running");
+    assert.deepEqual(await runs.sweep(), [], "no task has ended: nothing is stopped");
+    await c.projects.transitionTask({ commandId: cid("end"), actor: c.owner.id, taskId: c.t2, expectedRevision: 2, to: "cancelled" });
+    ended.add(c.t2);
+    assert.deepEqual(await runs.sweep(), [mine]);
+    await settle(mine, "cancelled");
+    assert.deepEqual([procs[0]!.stops, (await c.read(mine)).cancel?.requestedBy, (await c.read(mine)).cancel?.reason], [[false], HOST, "its task has ended (done or cancelled); a job does not run on after its task"]);
+    assert.equal((await c.read(theirs)).state, "running", "a job of a task that goes on runs on");
+    assert.deepEqual(await runs.sweep(), [], "asking again stops nothing more");
+
+    // A stop asked after the admission and before the process was started: nothing started, so the stop is confirmed at once and no process is launched.
+    const early = await c.admit(c.t1);
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: early, reason: "not needed after all" });
+    const launched = procs.length;
+    await runs.start(early, c.t1, launch);
+    await settle(early, "cancelled");
+    assert.equal(procs.length, launched, "nothing was launched for it");
+
+    // The job's program can rename a process it leaves behind (and a launch failure carries text it shaped): control characters never keep the end from being recorded.
+    procs[1]!.end({ exitCode: 2, orphans: ["pid 7 (\u001b[2Jevil\u0007)", "\u0000\u0001"], problem: "the job could not be started: \u001b]0;title\u0007 bad\tthing‮" });
+    await settle(theirs, "failed");
+    const failedJob = await c.read(theirs);
+    assert.deepEqual(failedJob.orphans, ["pid 7 ([2Jevil)", "an unnamed process"]);
+    assert.equal(failedJob.exit?.reason, "the job could not be started: ]0;title bad thing");
+    await runs.close();
+  });
+
+  suite("the local runs settle a job whose dispatch could not be recorded (a stop landed first, or the store refused), never take a failed task check for an ended task, and stop a job whose output passed the bound before its process was handed over (card T07b review 3)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const real = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    // Before the dispatch is recorded: `beforeDispatch` runs (a stop from the owner, the agent or the sweep lands there), or the store refuses it.
+    let beforeDispatch: ((jobId: string) => Promise<void>) | undefined;
+    const jobs: Pick<JobService, "get" | "report" | "finish" | "confirmCancel" | "requestCancel"> = {
+      get: (...a) => real.get(...a), finish: (...a) => real.finish(...a), confirmCancel: (...a) => real.confirmCancel(...a), requestCancel: (...a) => real.requestCancel(...a),
+      report: async (p, cmd) => { if (cmd.state === "dispatched" && beforeDispatch !== undefined) await beforeDispatch(cmd.jobId); return real.report(p, cmd); },
+    };
+    const procs: { out: (t: string) => void; stops: boolean[]; end: (e: Partial<JobProcessEnd>) => void }[] = [];
+    let burst: string | undefined;
+    const launcher: JobLauncher = {
+      start: async (_launch, out) => {
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { out, stops: [] as boolean[], end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        // Output that arrives before the launcher has handed the process over.
+        if (burst !== undefined) out(burst);
+        return { stop: (force) => { p.stops.push(force); p.end({ signal: "SIGKILL", stopped: true }); }, ended };
+      },
+    };
+    let taskCheck: (taskId: string) => Promise<boolean> = async () => false;
+    const errors: unknown[] = [];
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, taskEnded: (taskId) => taskCheck(taskId), onError: (e) => { errors.push(e); }, limits: { flushMs: 5, graceMs: 5_000, outputBytes: 4096, sweepMs: 3_600_000 } });
+    const launch: ScriptLaunch = { program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name: "a_x.build", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} };
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    const settle = async (id: string, state: string) => { await waitFor(async () => (await c.read(id)).state === state); assert.equal((await c.read(id)).state, state); };
+
+    // A stop lands while the start is recording the dispatch: nothing is launched, the stop is confirmed (the job is cancelled, never left being stopped), and the start answers quietly.
+    const raced = await c.admit(c.t1);
+    beforeDispatch = async (jobId) => { await real.requestCancel(c.boss, { commandId: cid("cx"), jobId, reason: "stopped while it was being started" }); };
+    await runs.start(raced, c.t1, launch);
+    beforeDispatch = undefined;
+    assert.equal(procs.length, 0, "nothing was launched for it");
+    await settle(raced, "cancelled");
+    assert.deepEqual(runs.running(), []);
+    // The store refuses the dispatch: the error reaches the caller, and the job does not stay admitted for ever (stopped and confirmed, nothing launched).
+    const refused = await c.admit(c.t1);
+    beforeDispatch = async () => { throw new Error("the store is unavailable"); };
+    await assert.rejects(runs.start(refused, c.t1, launch), /the store is unavailable/);
+    beforeDispatch = undefined;
+    assert.equal(procs.length, 0);
+    await settle(refused, "cancelled");
+
+    // A task check that fails is not an ended task: nothing is stopped (fail-safe), and the failure is told.
+    const kept = await c.admit(c.t1);
+    await runs.start(kept, c.t1, launch);
+    await settle(kept, "running");
+    // A secret the program is in the middle of writing when a write to the record is due: its first part is held back (alone it is not recognisable as a secret), and the whole of it is redacted once the rest comes.
+    procs[0]!.out("first line\nthe key is AKIA0123456789AB");
+    await waitFor(async () => (await c.read(kept)).output.tail.includes("the key is"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await c.read(kept)).output.tail, "first line\nthe key is ", "the unfinished word is held back");
+    procs[0]!.out("CDEF in use\n");
+    await waitFor(async () => (await c.read(kept)).output.tail.includes("in use"));
+    assert.equal((await c.read(kept)).output.tail, "first line\nthe key is [redacted] in use\n");
+    // A word held back when the job ends is written with its end.
+    const last = await c.admit(c.t2);
+    await runs.start(last, c.t2, launch);
+    procs.at(-1)!.out("all done");
+    procs.at(-1)!.end({ exitCode: 0 });
+    await settle(last, "completed");
+    assert.equal((await c.read(last)).output.tail, "all done");
+    taskCheck = async () => { throw new Error("the store is unavailable"); };
+    assert.deepEqual(await runs.sweep(), []);
+    assert.equal((await c.read(kept)).state, "running");
+    assert.deepEqual(procs[0]!.stops, []);
+    assert.ok(errors.some((e) => e instanceof Error && /store is unavailable/.test(e.message)), "the failed check is told");
+    // A task that has merely been paused has not ended: its job runs on.
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: c.t1 }, reason: "a pause is not an end" });
+    taskCheck = async (taskId) => { const t = await c.projects.getTask(taskId); return t === undefined || t.state === "done" || t.state === "cancelled"; };
+    assert.deepEqual(await runs.sweep(), []);
+    assert.equal((await c.read(kept)).state, "running");
+
+    // Output past the bound before the launcher handed the process over: the process is stopped once it is, and the job fails for its output.
+    burst = "z".repeat(5000);
+    const flood = await c.admit(c.t2);
+    await runs.start(flood, c.t2, launch);
+    burst = undefined;
+    await settle(flood, "failed");
+    assert.deepEqual([procs.at(-1)!.stops, (await c.read(flood)).exit?.reason], [[true], "the job wrote more than 4096 bytes and was stopped"]);
+    await runs.close();
+  });
+
+  suite("a task credential never decides or reconciles a job, even its own task's with job.control, and never stops another task's job; the same agent without the task scope may (card T07b review)", async (c) => {
+    const scoped: Principal = { ...c.both, taskScope: { taskId: c.t1, projectId: c.project } };
+    const own = await c.admit(c.t1), others = await c.admit(c.t2), unknown = await c.admit(c.t1);
+    await c.jobs.report(c.worker, { commandId: cid("d"), jobId: unknown, state: "dispatched" });
+    await c.jobs.markUnknown(c.worker, { commandId: cid("u"), jobId: unknown, reason: "the controller restarted" });
+    await refuses("forbidden", () => c.jobs.decide(scoped, { commandId: cid("dx"), jobId: own, decision: "exception", tracker: "owner", reason: "keep it" }), (e) => assert.match(e.message, /task credential may not decide/));
+    await refuses("forbidden", () => c.jobs.reconcile(scoped, { commandId: cid("rc"), jobId: unknown, to: "completed", evidence: "I say it finished" }));
+    await refuses("forbidden", () => c.jobs.requestCancel(scoped, { commandId: cid("cx"), jobId: others, reason: "not mine" }));
+    assert.equal((await c.jobs.requestCancel(scoped, { commandId: cid("cx"), jobId: own, reason: "mine" })).operation, "stop_tool", "its own task's job it may stop");
+    // The same agent, not bound to a task (a supervisor), may.
+    await c.jobs.reconcile(c.both, { commandId: cid("rc"), jobId: unknown, to: "completed", evidence: "the build log shows it finished" });
+    assert.equal((await c.read(unknown)).state, "completed");
+    await c.jobs.requestCancel(c.both, { commandId: cid("cx"), jobId: others, reason: "a supervisor's stop" });
+    assert.equal((await c.read(others)).state, "cancellation_requested");
+  });
+
+  suite("the local runs never record a line of a multi-line private key or a spaced secret written across many writes, and a job stopped in the middle of one writes its held-back end redacted (card T07b review 4)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const jobs = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    const procs: { out: (t: string) => void; end: (e: Partial<JobProcessEnd>) => void }[] = [];
+    const launcher: JobLauncher = {
+      start: async (_launch, out) => {
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { out, end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        return { stop: () => { p.end({ signal: "SIGKILL", stopped: true }); }, ended };
+      },
+    };
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, limits: { flushMs: 5, graceMs: 5_000, sweepMs: 3_600_000 } });
+    const launch: ScriptLaunch = { program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name: "a_x.build", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} };
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    // Pieces of the secrets below, each of which must never be in the record.
+    const fragments = ["MIIEowIBAAKC", "secretlineone", "Zm9vYmFyc2Vj", "cmV0bGluZXR3bw", "hunter2", "abcdefghijklmnop", "qrstuvwxyz0123456789ABCD", "sk-abcdef", "ghijklmnopqrst", "lastpass"];
+    const leaks = (tail: string): string[] => fragments.filter((s) => tail.includes(s));
+    const seen: string[] = [];
+    // Every write the record takes is looked at: no piece of a secret may be there at any moment, not only at the end.
+    const watch = async (id: string): Promise<void> => { const tail = (await c.read(id)).output.tail; seen.push(...leaks(tail).map((s) => `${s} in ${JSON.stringify(tail)}`)); };
+    const id = await c.admit(c.t1);
+    await runs.start(id, c.t1, launch);
+    const pieces = ["build started\n-----BEGIN RSA", " PRIVATE", " KEY-----\nMIIEowIBAAKCAQEA", "secretlineone\nZm9vYmFyc2Vj", "cmV0bGluZXR3bw\n-----END RSA PRIVATE KEY-----\nstep 2\npassword:", " hunter2", "hunter2\nAuthorization: Bearer", " abcdefghijklmnop", "qrstuvwxyz0123456789ABCD\nkey sk-abcdef", "ghijklmnopqrst in use\nstep 3\n-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKC"];
+    const write = async (piece: string): Promise<void> => {
+      procs.at(-1)!.out(piece);
+      // Long enough for the write due after each piece to happen.
+      await new Promise((r) => setTimeout(r, 30));
+      await watch(procs.length === 1 ? id : second);
+    };
+    let second = "";
+    for (const piece of pieces) await write(piece);
+    // Stopped in the middle of the second key: the end is recorded, the key's start never is.
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: id, reason: "enough" });
+    await waitFor(async () => (await c.read(id)).state === "cancelled");
+    await watch(id);
+    const tail = (await c.read(id)).output.tail;
+    for (const visible of ["build started", "step 2", "step 3"]) assert.ok(tail.includes(visible), tail);
+    // A job stopped while its last word (a secret) is held back: the word is written at the end, redacted.
+    second = await c.admit(c.t2);
+    await runs.start(second, c.t2, launch);
+    await write("step 4 password:lastpass99");
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: second, reason: "enough" });
+    await waitFor(async () => (await c.read(second)).state === "cancelled");
+    await watch(second);
+    assert.equal((await c.read(second)).output.tail, "step 4 [redacted]");
+    assert.deepEqual(seen, [], "no part of a secret was in the record at any moment");
+    await runs.close();
   });
 
 }

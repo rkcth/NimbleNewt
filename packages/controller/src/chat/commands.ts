@@ -193,6 +193,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "routing.cutover": { verb: "Cut over from a model route at once (new work stops and the attempts running on it are cancelled and move to the next route)", mode: "propose" },
   "routing.reenable": { verb: "Let a model route be used again", mode: "propose" },
   "routing.failback.set": { verb: "Change how failed model routes come back", mode: "propose" },
+  // Jobs (card T07b): stopping one follows the approval profile like other reversible controls of running work; a restart decision and settling an outcome-unknown job with evidence are shown first in every profile (provisional), since they record how work ended.
+  "job.cancel": { verb: "Stop a long-running job (a tool an agent started, a remote job or an MCP operation) by its job ID from the jobs status; force true is the Force Stop (at once, or when a stop was not obeyed)", mode: "profile" },
+  "job.decide": { verb: "Decide what becomes of a job that was live when the controller restarted: complete (exit needed), cancel, restart from its checkpoint, or keep it as a tracked exception (tracker needed)", mode: "propose" },
+  "job.reconcile": { verb: "Settle an outcome-unknown job as completed, failed or cancelled, with the evidence the owner gives", mode: "propose" },
   // How tasks are matched to model profiles decides what they cost and where they run: the profiles are shown first; a task's own difficulty follows the profile.
   "difficulty.set-profiles": { verb: "Replace the difficulty profiles", mode: "propose", revision: "difficulty-profiles" },
   // Release testing (card X09b). Starting a destructive test on a host is shown first (provisional); cancelling is the safe direction and applies at once (an ended attempt is never a pass). Who besides the owner may start or cancel is a widening
