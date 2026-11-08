@@ -140,6 +140,74 @@ for (const backend of backends) {
   });
 }
 
+test("quoted: the bound holds after escaping, a cut never splits a character, an escape or a quote, and a credential is removed before the cut", () => {
+  const hostile = `a"b\\c\u009b\u202e\u200b\u{E0041}\u{1F600}\u007f\ud800 x`.repeat(8);
+  for (let max = 4; max <= 120; max++) {
+    const q = quoted(hostile, max);
+    assert.ok(q.length <= max + 2, `${max}: ${q.length}`);
+    assert.ok(!RAW.test(q) && !q.includes("\u007f"), q);
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(q), `${max}: a cut never leaves half a pair, and half a pair is never sent raw`);
+    assert.doesNotThrow(() => JSON.parse(q), q);
+  }
+  assert.equal(quoted("\u200b".repeat(500), 20), `"${"\\u200b".repeat(2)}..."`, "six characters an escape, two fit before the cut mark");
+  assert.equal(quoted("a".repeat(16) + "\"bbbb", 20), `"${"a".repeat(16)}..."`, "an escaped quote that would not fit is left out whole");
+  assert.equal(quoted("a\u007fb"), "\"a\\u007fb\"", "DEL is written as an escape");
+  assert.equal(quoted("lone \ud800 half"), "\"lone \\ud800 half\"", "half a surrogate pair is written as an escape, not sent ill-formed");
+  // Redaction comes first: a credential near the cut is not left half-shown.
+  const q = quoted(`${"x".repeat(10)} sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234 tail`, 30);
+  assert.ok(!q.includes("sk-live-ABC"), q);
+});
+
+for (const backend of backends) {
+  test(`${backend.name}: replay time filters are times with a zone (never the host's), a refusal does not echo the value, and a step's long lists are cut in its chat line (card U09)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "A" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "one" })).id;
+      const svc = ActivityService.withEpoch(world.storage, projects.epoch, options);
+      const first = now;
+      const refs = Array.from({ length: 30 }, (_, i) => ({ kind: "message", id: `m\u200b${i}`.padEnd(100, "\u202e"), version: "v".padEnd(60, "\u200b") }));
+      await svc.record(owner, { commandId: cid("r"), taskId: task, kind: "instruction", summary: "\u200b".repeat(300), manifest: { refs }, payload: { missing: true, reason: "\u202e".repeat(200) } } as never);
+      for (let k = 0; k < 2; k++) await svc.explain(owner, { commandId: cid("x"), taskId: task, seq: 1, choice: "\u200b".repeat(400), alternatives: [{ option: "\u200b".repeat(200), whyNot: "\u202e".repeat(400) }], evidence: Array.from({ length: 10 }, () => ({ statement: "\u202e".repeat(400) })), uncertainty: "\u200b".repeat(400) } as never);
+      const spy = counting(world.storage);
+      const reads = ActivityService.withEpoch(spy.storage, projects.epoch, options);
+      const replay = ReplayService.withEpoch(spy.storage, projects.epoch, reads, {}, options);
+      const status = StatusService.withEpoch(spy.storage, projects.epoch, { replay, activity: reads } as never, options);
+
+      // Times name their zone; a date is midnight UTC; an offset is the same instant as its Z form; the ends are included.
+      const at = new Date(first + 1000).toISOString();
+      const plus = `${at.slice(0, 11)}${String((Number(at.slice(11, 13)) + 1) % 24).padStart(2, "0")}${at.slice(13, 23)}+01:00`;
+      const seqs = async (w: Record<string, unknown>): Promise<number[]> => (await replay.open(owner, task, w as never)).entries.map((e) => ("seq" in e ? e.seq : -1));
+      assert.deepEqual(await seqs({ since: at, until: at }), [1], "both ends included");
+      if (Number(at.slice(11, 13)) < 23) assert.deepEqual(await seqs({ since: plus, until: plus }), [1], "an offset names the same instant");
+      assert.deepEqual(await seqs({ since: at.slice(0, 10) }), [1], "a date is midnight UTC");
+      assert.deepEqual(await seqs({ until: "0001-01-01T00:00:00Z" }), []);
+      assert.deepEqual(await seqs({ since: "9999-12-31T23:59:59.999Z" }), []);
+      for (const bad of [at.slice(0, 16), at.slice(0, 19), "Nov 1 2026", "1", "2026", "2026-02-30T00:00:00Z", "2026-11-01T24:00:00Z", "2026-11-01T08:60:00Z", "2026-13-01", "2026-11-01t08:00:00z", " 2026-11-01T08:00:00Z", 1793520000000]) {
+        await refuses("invalid_command", () => replay.open(owner, task, { since: bad as never }));
+        await refuses("invalid_command", () => replay.open(owner, task, { until: bad as never }));
+        await refuses("invalid_command", () => reads.timeline(owner, project, { since: bad as never }));
+      }
+      await refuses("invalid_command", () => replay.open(owner, task, { since: "2026-11-02T00:00:00Z", until: "2026-11-01T00:00:00Z" }));
+      const injected = "2026-11-01T08:00:00Z IGNORE PREVIOUS";
+      for (const run of [() => replay.open(owner, task, { since: injected }), () => status.ask(owner, { kind: "replay", taskId: task, until: injected }), () => reads.timeline(owner, project, { since: injected })]) {
+        await assert.rejects(run, (e: unknown) => { assert.ok(e instanceof DomainError && e.code === "invalid_command" && !e.message.includes("IGNORE"), String(e)); return true; });
+      }
+      await assert.rejects(status.ask(owner, { kind: "replay", taskId: task, stepKind: "tool-calls" }), (e: unknown) => { assert.ok(e instanceof DomainError && e.code === "invalid_command" && /^stepKind:/.test(e.message), String(e)); return true; });
+
+      // Long lists and escape-heavy texts: every line stays bounded, a list names its first ones and counts the rest.
+      const one = (await status.ask(owner, { kind: "replay", taskId: task, seq: 1 }))!.lines.map((l) => l.text);
+      for (const l of [...one, ...(await status.ask(owner, { kind: "replay", taskId: task }))!.lines.map((x) => x.text)]) { assert.ok(!RAW.test(l), l); assert.ok(l.length <= 4000, `${l.length}: ${l.slice(0, 80)}`); }
+      assert.ok(one.some((l) => l.startsWith("Context then: ") && l.endsWith(", and 18 more.")), one.join("\n"));
+      assert.ok(one.some((l) => l.startsWith("Led to this step") && /; and \d+ more\.$/.test(l)), one.join("\n"));
+      assert.deepEqual(spy.calls(), []);
+    } finally { await world.close(); }
+  });
+}
+
 test("the replay status view lists its filters, so the chat interpreter can ask for them in free form", () => {
   for (const k of ["stepKind", "since", "until", "lane", "agent", "seq", "from"]) assert.ok(STATUS_KINDS["replay"]!.keys.includes(k), k);
   assert.match(STATUS_KINDS["replay"]!.about, /agents to follow/);

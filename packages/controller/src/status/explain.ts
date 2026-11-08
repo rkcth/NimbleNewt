@@ -80,13 +80,21 @@ export function shown(value: string | undefined, max = 200): string {
 }
 
 /**
- * Text someone else wrote (an agent's step summary, an explanation, a reference it gave), shown in a status line as a quotation (card U09): credentials removed, whitespace folded to one line, cut to `max`, then
- * JSON-quoted with C0 and C1 controls, the line and paragraph separators and invisible format characters (`\p{Cf}`: bidirectional overrides, zero-width characters) written as `\uXXXX`. The quotes mark where the
+ * Text someone else wrote (an agent's step summary, an explanation, a reference it gave), shown in a status line as a quotation (card U09): credentials removed, whitespace folded to one line, cut so the quotation holds at most `max` characters after escaping (plus its two quotes), then
+ * JSON-quoted with C0 controls, DEL, C1 controls, the line and paragraph separators and invisible format characters (`\p{Cf}`: bidirectional overrides, zero-width characters) written as `\uXXXX`. The quotes mark where the
  * other party's words begin and end, so a summary cannot pass itself off as the controller's own wording (a fake "confirmed", a fake next line) or reach a terminal as an escape sequence.
  */
 export function quoted(value: string | undefined, max = 200): string {
-  return JSON.stringify(shown(value, max)).replace(/[\u0080-\u009f\u2028\u2029]|\p{Cf}/gu, (c) => [...Array(c.length).keys()].map((i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`).join(""));
+  const clean = redactText(value ?? "").replace(/\s+/g, " ").trim();
+  // Escaped one character (code point) at a time, so `max` bounds what is shown after escaping (an escape can be six or twelve times its character) and a cut never splits a character or an escape.
+  const parts = Array.from(clean, (c) => (ESCAPED.test(c) ? [...Array(c.length).keys()].map((i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`).join("") : JSON.stringify(c).slice(1, -1)));
+  if (parts.reduce((n, p) => n + p.length, 0) <= max) return `"${parts.join("")}"`;
+  let body = "";
+  for (const p of parts) { if (body.length + p.length > max - 3) break; body += p; }
+  return `"${body}..."`;
 }
+/** Written as `\uXXXX` in a quotation: DEL and the C1 controls, the line and paragraph separators, invisible format characters (bidirectional overrides, zero-width characters, tags) and half a surrogate pair. */
+const ESCAPED = /^(?:[\u007f-\u009f\u2028\u2029]|\p{Cf}|[\ud800-\udfff])$/u;
 
 /**
  * Who is working on a task, as far as the records show (card U05). The latest sign of life is the newer of the host activity (card H01) and the stall evidence (card V01); either counts only when it is of the

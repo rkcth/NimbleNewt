@@ -66,6 +66,23 @@ const forbiddenWords = ["thinking", "reasoning", "chainOfThought", "thoughts", "
 /** A user-facing statement: text, with credentials removed. Provider thinking is not a statement and is refused by name wherever it could arrive. */
 /** The first `max` characters, never leaving half of a surrogate pair at the end. */
 export const clipText = (value: string, max: number): string => { const cut = value.slice(0, max); return value.length > max && /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
+const FILTER_TIME = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-](\d{2}):(\d{2})))?$/;
+/**
+ * A time filter (`since`, `until`) as milliseconds: an ISO time that names its zone (`2026-11-01T08:00:00Z`, `2026-11-01T09:00+01:00`) or a date (`2026-11-01`, midnight UTC), a real calendar time.
+ * `Date.parse` alone would read a time without a zone, or "Nov 1 2026", in the controller host's own time zone, so the same question would show a different window on another machine; it is refused.
+ * The value is never echoed in the refusal.
+ */
+export const filterTime = (value: unknown, field: string): number | undefined => {
+  if (value === undefined) return undefined;
+  const bad = (): never => invalid(field, "must be a time with its zone, such as 2026-11-01T08:00:00Z, or a date such as 2026-11-01 (midnight UTC)");
+  const m = typeof value === "string" && value.length <= 40 ? FILTER_TIME.exec(value) : null;
+  if (m === null) return bad();
+  const [y, mo, d, h, mi, s, , oh, om] = [m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9]].map((x) => (x === undefined ? 0 : Number(x))) as number[];
+  const day = new Date(Date.UTC(y!, mo! - 1, d!));
+  if (mo! < 1 || mo! > 12 || day.getUTCDate() !== d || day.getUTCMonth() !== mo! - 1 || h! > 23 || mi! > 59 || s! > 59 || oh! > 23 || om! > 59) return bad();
+  const ms = Date.parse(value as string);
+  return Number.isNaN(ms) ? bad() : ms;
+};
 const TIMELINE_PER_TASK = 10;
 const TIMELINE_TASKS = 25;
 const TIMELINE_SCOPE_CHECKS = 500;
@@ -298,8 +315,7 @@ export class ActivityService {
     if (!(by.kind === "owner" || by.kind === "service" || allows(by, "history.read", projectId))) throw new DomainError("not_found", "no such project");
     const limit = Math.min(Math.max(1, filter.limit ?? 30), ACTIVITY_LIMITS.page);
     const agent = filter.agent === undefined ? undefined : text(filter.agent, "agent", { min: 1, max: 120 });
-    const sinceMs = filter.since === undefined ? undefined : Date.parse(text(filter.since, "since", { min: 1, max: 40 }));
-    if (sinceMs !== undefined && Number.isNaN(sinceMs)) invalid("since", "must be a time");
+    const sinceMs = filterTime(filter.since, "since");
     const found: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[] = [];
     const gaps: { taskId: string; seq: number; reason: string }[] = [];
     let truncated = false;

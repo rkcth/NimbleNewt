@@ -23,7 +23,7 @@ import type { CutoverService } from "../routing/cutover.js";
 import type { JobService } from "../jobs/jobs.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
-import type { ActivityService, ExplanationBody } from "../activity/activity.js";
+import { ACTIVITY_KINDS, type ActivityService, type ExplanationBody } from "../activity/activity.js";
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -214,7 +214,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   noticeboard: { keys: ["projectId"], about: "the project's noticeboard" },
   failed_events: { keys: ["projectId", "taskId|taskTitle", "limit"], about: "events whose handling failed" },
   failed_event: { keys: ["handlingId"], about: "one failed event in detail" },
-  timeline: { keys: ["projectId", "agent", "since", "limit"], about: "a project's timeline, or one agent's" },
+  timeline: { keys: ["projectId", "agent", "since", "limit"], about: "a project's timeline, or one agent's (since: a time with its zone such as 2026-11-01T08:00:00Z, or a date meaning midnight UTC)" },
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task; or scopeKind task, agent, team or installation with the scopeId, which must be an ID, not a name)" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
@@ -223,7 +223,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
   agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
   explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
-  replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"], about: "a replay of a task's recorded run, read only: a summary (lines of work and agents to follow) and a window of steps, narrowed to one line (lane), one agent, one kind of step (stepKind) or a time span (since, until); with seq, one step in full with what led to it" },
+  replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"], about: "a replay of a task's recorded run, read only: a summary (lines of work and agents to follow) and a window of steps, narrowed to one line (lane), one agent, one kind of step (stepKind) or a time span (since, until: times with their zone such as 2026-11-01T08:00:00Z, or dates meaning midnight UTC; both ends included); with seq, one step in full with what led to it" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
@@ -365,6 +365,8 @@ export interface StatusOptions extends RunnerOptions {
 }
 
 export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, since: 40 } as const;
+/** How many references or links one replay chat line names before it counts the rest (card U09): a step may cite up to 100, which would make one line many kilobytes once quoted. */
+const REPLAY_LINE_ITEMS = 12;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const HANDLING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const TASK_ID_IN_TEXT = /task-[a-z2-7]{20}/g;
@@ -940,19 +942,23 @@ export class StatusService {
       `(${s.outcome === "not-recorded" ? REPLAY_LABELS.notRecorded : `${s.outcome}${s.outcomeNote === undefined ? "" : `, ${s.outcomeNote}`}`}${s.lane === "main" ? "" : `, branch ${shown(s.lane)}${s.laneNote === undefined ? "" : ` (${s.laneNote})`}`}${s.authority === "superseded" ? `, replaced by step ${(s.supersededBy ?? []).join(", ")}: ${REPLAY_LABELS.superseded}` : ""}${s.content.state === "stored" && (s.content.redactions ?? 0) > 0 ? `, ${s.content.redactions} redaction${s.content.redactions === 1 ? "" : "s"}` : ""}${s.content.state === "missing" ? `, content missing: ${quoted(s.content.reason)}` : ""}${s.corrections > 0 ? `, ${s.corrections} correction${s.corrections === 1 ? "" : "s"}` : ""})`,
     ].join(" ");
     const ref = (kind: string | undefined, id: string | undefined, version: string | undefined): string => `${shown(kind ?? "")} ${quoted(id ?? "", 120)}${version === undefined ? "" : ` @${quoted(version, 80)}`}`;
+    // A step may cite up to 100 references and many pieces of evidence: one chat line names the first ones and counts the rest (activity.replay.step and .led give them all).
+    const listed = (items: readonly string[], sep: string, max = REPLAY_LINE_ITEMS): string => `${items.slice(0, max).join(sep)}${items.length > max ? `${sep}and ${items.length - max} more` : ""}`;
     const counted = (items: readonly { name: string; steps: number }[], max = 10): string => `${items.slice(0, max).map((x) => `${x.name} (${x.steps})`).join(", ")}${items.length > max ? ` and ${items.length - max} more` : ""}`;
     try {
       if (request.seq !== undefined) {
         const d = await replay.step(by, taskId, request.seq);
         const led = await replay.led(by, taskId, request.seq);
         const lines: Line[] = [line(describe(d.step), task)];
-        lines.push(line(d.step.versionsThen.state === "recorded" ? `Context then: ${d.step.versionsThen.refs.length === 0 ? "none listed" : d.step.versionsThen.refs.map((r) => ref(r.kind, r.id, r.version)).join(", ")}${d.step.versionsThen.summaryId === undefined ? "" : `; summary ${quoted(d.step.versionsThen.summaryId, 120)} stood in for earlier history`}.` : `Context then: not recorded (${quoted(d.step.versionsThen.reason)}).`, task));
+        lines.push(line(d.step.versionsThen.state === "recorded" ? `Context then: ${d.step.versionsThen.refs.length === 0 ? "none listed" : listed(d.step.versionsThen.refs.map((r) => ref(r.kind, r.id, r.version)), ", ")}${d.step.versionsThen.summaryId === undefined ? "" : `; summary ${quoted(d.step.versionsThen.summaryId, 120)} stood in for earlier history`}.` : `Context then: not recorded (${quoted(d.step.versionsThen.reason)}).`, task));
         for (const e of d.explanations.contemporaneous.items) lines.push(line(`${REPLAY_LABELS.contemporaneous} ${shown(e.by)} chose ${quoted(e.choice)}. Uncertain: ${quoted(e.uncertainty)}`, task));
         for (const e of d.explanations.retrospective.items) lines.push(line(`${REPLAY_LABELS.retrospective} ${quoted(e.choice, 400)}`, task));
-        lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${ref(l.kind, l.id, l.version)} (${l.relation})` : `${l.relation}: ${quoted(l.note ?? "")}`)).join("; ")}.` : led.note, task));
+        lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${listed(led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${ref(l.kind, l.id, l.version)} (${l.relation})` : `${l.relation}: ${quoted(l.note ?? "")}`)), "; ")}.` : led.note, task));
         if (d.thinking !== undefined) lines.push(line(d.thinking.state === "removed-by-retention" || d.thinking.state === "unavailable" ? d.thinking.label : "The model's thinking is kept collapsed; ask to expand it. It is model output, not an explanation.", task));
         return { observedAt: this.#runner.now(), lines };
       }
+      // The chat names the kind of step `stepKind`; a refusal names it so too.
+      if (request.stepKind !== undefined && !(ACTIVITY_KINDS as readonly unknown[]).includes(request.stepKind)) invalid("stepKind", `must be one of ${ACTIVITY_KINDS.join(", ")}`);
       const v = await replay.open(by, taskId, {
         ...(request.from === undefined ? {} : { from: request.from }), limit: request.limit ?? 10, ...(request.lane === undefined ? {} : { lane: request.lane }), ...(request.agent === undefined ? {} : { actor: request.agent }),
         ...(request.stepKind === undefined ? {} : { kind: request.stepKind }), ...(request.since === undefined ? {} : { since: request.since }), ...(request.until === undefined ? {} : { until: request.until }),

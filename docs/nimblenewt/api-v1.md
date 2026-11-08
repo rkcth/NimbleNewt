@@ -674,7 +674,7 @@ Arguments:
 
 - `projectId`: the project
 - `agent` (optional): only this actor's steps
-- `since` (optional): only steps at or after this time
+- `since` (optional): only steps at or after this time (with its zone, such as 2026-11-01T08:00:00Z, or a date: midnight UTC)
 - `limit` (optional): at most 100
 
 Result: `{ steps: [{ taskId, seq, kind, summary, actor, at }], scanned, truncated }`.
@@ -691,8 +691,8 @@ Arguments:
 - `lane` (optional): only this branch line (`main` for the main line)
 - `actor` (optional): only this actor's steps
 - `kind` (optional): only this kind of step
-- `since` (optional): only steps at or after this time
-- `until` (optional): only steps at or before this time
+- `since` (optional): only steps at or after this time (with its zone, such as 2026-11-01T08:00:00Z, or a date: midnight UTC)
+- `until` (optional): only steps at or before this time (as `since`; not before `since`)
 - `withContent` (optional): true to include stored content you may read
 
 Result: `{ taskId, projectId, summary, entries: [step | { seq, unavailable }], next?, note? }`. `summary.range` says which step numbers were read, out of how many; `next` is the NEXT step to show (pass it as `from`). A step: `{ seq, at, actor, kind, summary, lane, laneStatus (main, controller, verified or unverified; an unverified line has `laneNote`), outcome (proposed, dispatched, confirmed, uncertain or not-recorded), outcomeNote? (for example `reported by agent`: the outcome is the recorder's claim, not checked by the controller), versionsThen, authority (current or superseded), supersedes?, supersededBy?, content (size and redaction count only for a reader who may read the text), corrections, previousInLane?, nextInLane?, links }`.

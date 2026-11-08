@@ -5,7 +5,7 @@ import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { ReadBlock, ThinkingCursor } from "../context/thinking.js";
-import { ACTIVITY_KINDS, type ActivityKind, type ActivityService, type ActivityStepBody, type ExplanationBody, type ManifestRef, type StepOutcome } from "./activity.js";
+import { ACTIVITY_KINDS, filterTime, type ActivityKind, type ActivityService, type ActivityStepBody, type ExplanationBody, type ManifestRef, type StepOutcome } from "./activity.js";
 import { REPLAY_LIMIT_DEFAULTS, type EffectiveReplayLimits } from "./replay-limits.js";
 
 /**
@@ -120,12 +120,6 @@ export interface ReplayDeps {
 type Reads = Pick<ActivityService, "steps" | "payload" | "explanations" | "explanationsPage" | "contentReadable">;
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
-/** A time filter: an ISO time (at most 40 characters), as milliseconds. */
-const time = (value: unknown, field: string): number | undefined => {
-  if (value === undefined) return undefined;
-  const ms = typeof value === "string" && value.length >= 1 && value.length <= 40 ? Date.parse(value) : Number.NaN;
-  return Number.isNaN(ms) ? invalid(field, "must be a time, such as 2026-11-01T08:00:00Z") : ms;
-};
 const isGap = (e: unknown): e is { seq: number; unavailable: string } => typeof e === "object" && e !== null && "unavailable" in e;
 
 interface Scanned { readonly steps: Map<number, ActivityStepBody & { corrections: number }>; readonly gaps: Map<number, string>; readonly first: number; readonly last: number; readonly lastSeq: number; readonly limited: boolean; readonly canText: { readonly sensitive: boolean; readonly ordinary: boolean } }
@@ -151,7 +145,8 @@ export class ReplayService {
     const tid = checkTaskIdValue(taskId);
     const limit = window.limit === undefined ? REPLAY_LIMITS.defaultPage : Number.isSafeInteger(window.limit) && window.limit >= 1 && window.limit <= REPLAY_LIMITS.page ? window.limit : invalid("limit", `must be 1 to ${REPLAY_LIMITS.page}`);
     const from = window.from === undefined ? undefined : Number.isSafeInteger(window.from) && window.from >= 1 ? window.from : invalid("from", "must be a step number, from 1");
-    const sinceMs = time(window.since, "since"); const untilMs = time(window.until, "until");
+    const sinceMs = filterTime(window.since, "since"); const untilMs = filterTime(window.until, "until");
+    if (sinceMs !== undefined && untilMs !== undefined && sinceMs > untilMs) invalid("since", "must not be after until");
     // A kind that no step can have is a mistake to say, not an empty window to show.
     if (window.kind !== undefined && !(ACTIVITY_KINDS as readonly unknown[]).includes(window.kind)) invalid("kind", `must be one of ${ACTIVITY_KINDS.join(", ")}`);
     const filtered = window.lane !== undefined || window.actor !== undefined || window.kind !== undefined || sinceMs !== undefined || untilMs !== undefined;
