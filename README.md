@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **240 of 342 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **241 of 342 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -114,7 +114,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 25 of 28 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 60% | 12 of 20 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 65% | 13 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓░░░` 82% | 41 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 8 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
@@ -341,7 +341,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓░░░░░ 12 of 20</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓░░░░░ 13 of 20</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -355,7 +355,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [x] **U05** · P29 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
 - [x] **U03e** · P30 · Let the owner grant and revoke rights through the state API and the chat _(needs U03, L01b)_
 - [x] **U05b** · P30 · Verify artifacts and inspect failed handlings in the composed status _(needs U05, H06c)_
-- [ ] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
+- [x] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
 - [x] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
 - [x] **U06b** · P33 · Recovery chat controls for routes and providers, and shorthand _(needs U06, R04)_
 - [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_

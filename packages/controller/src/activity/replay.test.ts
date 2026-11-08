@@ -205,11 +205,11 @@ for (const backend of backends) {
       const lines = (await status.replayLines(auditor, { taskId: task, limit: 50 }))!.lines.map((l) => l.text);
       assert.ok(lines.some((l) => /Step 6, .*uncertain.*1 correction/.test(l)), lines.join("\n"));
       assert.ok(lines.some((l) => /Step 10, .*replaced by step 11/.test(l)));
-      assert.ok(lines.some((l) => /Step 13 is no longer available: archived by retention/.test(l)));
+      assert.ok(lines.some((l) => /Step 13 is no longer available: "archived by retention"/.test(l)));
       assert.ok(lines.some((l) => /branch fix-b/.test(l)));
       assert.ok(lines.some((l) => l === REPLAY_LABELS.concurrent));
       const one = (await status.replayLines(auditor, { taskId: task, seq: 4 }))!.lines.map((l) => l.text).join("\n");
-      assert.match(one, /Context then: summary sum-2 @1/);
+      assert.match(one, /Context then: summary "sum-2" @"1"/);
       assert.match(one, /Written at the time/);
       assert.equal(await status.replayLines(stranger, { taskId: task }), undefined);
       assert.equal(spy.writes(), 0);

@@ -5,7 +5,7 @@ import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { ReadBlock, ThinkingCursor } from "../context/thinking.js";
-import type { ActivityKind, ActivityService, ActivityStepBody, ExplanationBody, ManifestRef, StepOutcome } from "./activity.js";
+import { ACTIVITY_KINDS, filterTime, type ActivityKind, type ActivityService, type ActivityStepBody, type ExplanationBody, type ManifestRef, type StepOutcome } from "./activity.js";
 import { REPLAY_LIMIT_DEFAULTS, type EffectiveReplayLimits } from "./replay-limits.js";
 
 /**
@@ -137,11 +137,19 @@ export class ReplayService {
   private constructor(runner: CommandRunner, activity: Reads, deps: ReplayDeps) { this.#runner = runner; this.#activity = activity; this.#deps = deps; }
   static withEpoch(storage: ControllerStorage, epoch: number, activity: Reads, deps: ReplayDeps = {}, options: RunnerOptions = {}): ReplayService { return new ReplayService(new CommandRunner(storage, epoch, options), activity, deps); }
 
-  /** Opens a task's replay: a summary first, then a window of steps from `from` (default: the newest steps the read bound allows). Filters narrow the window, not the summary. Reads only. */
-  async open(by: Principal, taskId: string, window: { from?: number; limit?: number; lane?: string; actor?: string; kind?: string; withContent?: boolean } = {}): Promise<ReplayView> {
+  /**
+   * Opens a task's replay: a summary first, then a window of steps from `from` (default: the newest steps the read bound allows). Filters (one line, one actor, one kind of step, a time span from `since` to `until`,
+   * both included) narrow the window, not the summary; a gap has no known line, actor or time, so it is listed only in an unfiltered window. Reads only.
+   */
+  async open(by: Principal, taskId: string, window: { from?: number; limit?: number; lane?: string; actor?: string; kind?: string; since?: string; until?: string; withContent?: boolean } = {}): Promise<ReplayView> {
     const tid = checkTaskIdValue(taskId);
     const limit = window.limit === undefined ? REPLAY_LIMITS.defaultPage : Number.isSafeInteger(window.limit) && window.limit >= 1 && window.limit <= REPLAY_LIMITS.page ? window.limit : invalid("limit", `must be 1 to ${REPLAY_LIMITS.page}`);
     const from = window.from === undefined ? undefined : Number.isSafeInteger(window.from) && window.from >= 1 ? window.from : invalid("from", "must be a step number, from 1");
+    const sinceMs = filterTime(window.since, "since"); const untilMs = filterTime(window.until, "until");
+    if (sinceMs !== undefined && untilMs !== undefined && sinceMs > untilMs) invalid("since", "must not be after until");
+    // A kind that no step can have is a mistake to say, not an empty window to show.
+    if (window.kind !== undefined && !(ACTIVITY_KINDS as readonly unknown[]).includes(window.kind)) invalid("kind", `must be one of ${ACTIVITY_KINDS.join(", ")}`);
+    const filtered = window.lane !== undefined || window.actor !== undefined || window.kind !== undefined || sinceMs !== undefined || untilMs !== undefined;
     const task = await this.#task(tid);
     const scanned = await this.#scan(by, tid, from === undefined ? {} : { from });
     const model = await this.#model(tid, scanned);
@@ -150,9 +158,10 @@ export class ReplayService {
     for (let seq = Math.max(from ?? scanned.first, scanned.first); seq <= scanned.last; seq++) {
       const gap = scanned.gaps.get(seq);
       const step = scanned.steps.get(seq);
-      const shown = gap !== undefined ? (window.lane === undefined && window.actor === undefined && window.kind === undefined ? { seq, unavailable: gap } : undefined) : step === undefined ? undefined : this.#view(step, model, scanned);
+      const shown = gap !== undefined ? (filtered ? undefined : { seq, unavailable: gap }) : step === undefined ? undefined : this.#view(step, model, scanned);
       if (shown === undefined) continue;
-      if (!isGap(shown) && ((window.lane !== undefined && shown.lane !== window.lane) || (window.actor !== undefined && shown.actor !== window.actor) || (window.kind !== undefined && shown.kind !== window.kind))) continue;
+      if (!isGap(shown) && ((window.lane !== undefined && shown.lane !== window.lane) || (window.actor !== undefined && shown.actor !== window.actor) || (window.kind !== undefined && shown.kind !== window.kind)
+        || (sinceMs !== undefined && Date.parse(shown.at) < sinceMs) || (untilMs !== undefined && Date.parse(shown.at) > untilMs))) continue;
       if (entries.length >= limit) { next = seq; break; }
       entries.push(!isGap(shown) && window.withContent === true ? { ...shown, content: await this.#content(by, tid, shown.content, seq) } : shown);
     }

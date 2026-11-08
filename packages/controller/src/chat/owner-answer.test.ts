@@ -87,7 +87,7 @@ for (const backend of backends) {
       const twice = await ask("What happened on Twice?", "Twice");
       assert.equal(twice.status, "asked");
       assert.equal(twice.options!.length, 2);
-      assert.ok(twice.options!.every((o) => /^task-[a-z2-7]+: Twice \(/.test(o)), twice.options!.join("|"));
+      assert.ok(twice.options!.every((o) => /^task-[a-z2-7]+: "Twice" \(/.test(o)), twice.options!.join("|"));
       // Words that only part of a title fits list the candidates as well (the same for the replay view); no guess is made.
       const partial = await ask("What happened on the login?", "login");
       assert.equal(partial.status, "asked");
