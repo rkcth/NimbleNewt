@@ -13,6 +13,7 @@ import type { ControllerStorage, JsonObject } from "../../storage/types.js";
 import { RemoteWorkerClient, type RemoteWorkerClientOptions } from "../client.js";
 import type { VersionRange } from "../protocol.js";
 import { WorkerTransport, type WorkerTransportOptions } from "../server.js";
+import { adoptable } from "../host.js";
 import { RemoteWorkerService, type PlacementPolicyFor, type RelocationPolicyFor, type Requirements } from "../service.js";
 
 export const REMOTE_CAPS: Capabilities = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: ["garden"] };
@@ -40,6 +41,16 @@ export class RemoteTestHost implements WorkerHost {
     this.starts.push(order);
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.requirements(order), inputs: this.inputs(order) });
     const handle = new RemoteTestHandle(this, this.remote, this.by, order.attemptId, placed.placement);
+    this.handles.push(handle);
+    return handle;
+  }
+  /** As the product host: a handle on the run a new primary takes over (card H09b). */
+  readonly adopted: string[] = [];
+  async adopt(attemptId: string): Promise<WorkerHandle | undefined> {
+    const placement = await adoptable(this.remote, this.by, this.hostId, attemptId);
+    if (placement === undefined) return undefined;
+    this.adopted.push(attemptId);
+    const handle = new RemoteTestHandle(this, this.remote, this.by, attemptId, placement);
     this.handles.push(handle);
     return handle;
   }
@@ -119,7 +130,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const confirmWindow: { ms: number | undefined } = { ms: undefined };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
-    dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id) },
+    dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id), liveAttempts: (by) => holder.dispatcher.liveAttempts(by) },
     reaccept: async () => reaccept.mode,
     patienceMs: async () => patience.ms,
     confirmWindowMs: async () => confirmWindow.ms,

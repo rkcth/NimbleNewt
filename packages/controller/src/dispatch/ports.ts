@@ -120,6 +120,11 @@ export interface WorkerHost {
   /** Ends whatever this host still holds for an attempt that ended while this process had no handle for it (the controller restarted since the worker was placed). Without it a placement that outlived its controller would hold the agent's store for ever. Nothing held: nothing happens. */
   release?(attemptId: string, reason: string, signal?: AbortSignal): Promise<void>;
   /**
+   * A new primary takes over an attempt another controller started on this host (card H09b): a handle on the run the host still holds (one that has already sent its result answers with it at once), or `undefined` when
+   * the host holds no live run of it any more (ended, moved, or only offered: an offer dies with the controller that made it). A host that does not have it (a local host: its runs die with their controller) is never asked.
+   */
+  adopt?(attemptId: string): Promise<WorkerHandle | undefined>;
+  /**
    * Why this host would refuse the attempt (policy, capabilities, connection), asked before a place is requested so that the dispatcher can pass over a host that would refuse and pick the next one. Empty: it would take it. A host
    * that does not say leaves it out and is judged only when the worker starts (card H07e).
    */

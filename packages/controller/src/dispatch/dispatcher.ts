@@ -257,6 +257,8 @@ export interface TickReport {
   readonly blocked: readonly { readonly taskId: string; readonly attemptId: string; readonly check: DispatchCheck; readonly blockerId: string }[];
   readonly lost: readonly string[];
   readonly readmitted: readonly string[];
+  /** Running attempts another primary started that this dispatcher took over in this tick (card H09b); one it could not take over because its host no longer runs it is in `lost`. */
+  readonly adopted?: readonly string[];
   readonly reprioritized: number;
   readonly approvals: readonly { readonly attemptId: string; readonly operationId: string; readonly verdict: "approved" | "denied" | "expired" }[];
   readonly loops: readonly { readonly name: string; readonly ok: boolean; readonly error?: string }[];
@@ -285,6 +287,9 @@ export type RecipeChange =
   | { readonly kind: "grants" }
   | { readonly kind: "narrow"; readonly recipe: RecipeSummary }
   | { readonly kind: "widen"; readonly recipe: RecipeSummary; readonly tell: string };
+
+/** What a takeover of a running attempt came to (card H09b). */
+type Adoption = { readonly outcome: "own" | "adopted" | "none" } | { readonly outcome: "ended"; readonly readmitted?: string };
 
 interface Live { readonly handle: WorkerHandle; readonly host: WorkerHost; readonly turn: Promise<void> }
 
@@ -399,8 +404,25 @@ export class DispatcherService {
     const approvals: { attemptId: string; operationId: string; verdict: "approved" | "denied" | "expired" }[] = [];
     const failures: { taskId: string; attemptId: string; error: string }[] = [];
     const live = await this.#liveIds();
+    // 0. Running attempts another primary started (card H09b): taken over with a handle on the host's run, or ended when the host no longer runs them. One taken over now is not judged by its lease in this tick:
+    // the takeover gave it a fresh one, and a result its worker already sent is being taken.
+    const adopted: string[] = [];
+    for (const id of live) {
+      if (this.#live.has(id)) continue;
+      try {
+        const d = await this.#load(id);
+        if (d === undefined || d.body.state !== "running" || d.body.primaryEpoch === this.#runner.epoch) continue;
+        const taken = await this.#adopt(id);
+        if (taken.outcome === "adopted") adopted.push(id);
+        else if (taken.outcome === "ended") { lost.push(id); if (taken.readmitted !== undefined) readmitted.push(taken.readmitted); }
+      } catch (error) {
+        if (isDomainError(error, "stale_epoch")) throw error;
+        failures.push({ taskId: "", attemptId: id, error: errorText(error) });
+      }
+    }
     // 1. Leases and time. A worker that stopped beating, or an attempt past its expiry, is over; its calls are settled through the ledger first.
     for (const id of live) {
+      if (adopted.includes(id)) continue;
       // One attempt that cannot be ended or checked (a ledger that is down, a record that cannot be read) is told in the report and tried again next tick; it never stops the others from being looked at.
       let taskId = "";
       try {
@@ -478,7 +500,7 @@ export class DispatcherService {
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? redactText(error.message).slice(0, 200) : "failed" });
       }
     }
-    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };
+    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, adopted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };
   }
 
   /**
@@ -537,7 +559,11 @@ export class DispatcherService {
 
   /** Ends the workers this process holds, with no write to the store (a fenced controller does not own the attempts any more; the new one finds them in the live list and their leases). */
   async dropWorkers(): Promise<void> {
-    await Promise.allSettled([...this.#live.values()].map((l) => l.handle.stop()));
+    const dropped = [...this.#live.entries()];
+    await Promise.allSettled(dropped.map(([, l]) => l.handle.stop()));
+    // The turns are let go as well: a remote worker's turn waits for a result that only the controller now holding the attempt receives (its stop could not be written here), so `idle()` must not wait for it.
+    // A turn that ends later finds its handle gone and changes nothing.
+    for (const [id, l] of dropped) if (this.#live.get(id) === l) this.#live.delete(id);
   }
 
   /** Resolves when every turn this dispatcher started has ended. */
@@ -599,9 +625,14 @@ export class DispatcherService {
   async heartbeat(attemptId: string): Promise<{ until: string; leaseMs: number }> {
     const d = await this.#running(attemptId);
     await this.#assertCurrent(d.body);
+    // A new primary renews only what it started or took over (card H09b): until it has adopted the attempt, the heartbeat is refused as a passing condition (the worker asks again), and the lease the earlier controller gave runs on.
+    this.#assertOwnEpoch(d.body);
     const now = this.#runner.now();
     const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
-    await this.#update(attemptId, (b) => ({ ...b, lease: { holder: this.#holder, until }, heartbeats: b.heartbeats + 1, lastHeartbeatAt: now, lastActivityAt: b.parked.length === 0 ? now : (b.lastActivityAt ?? b.startedAt ?? b.claimedAt) }));
+    await this.#update(attemptId, (b) => {
+      this.#assertOwnEpoch(b);
+      return { ...b, lease: { holder: this.#holder, until }, heartbeats: b.heartbeats + 1, lastHeartbeatAt: now, lastActivityAt: b.parked.length === 0 ? now : (b.lastActivityAt ?? b.startedAt ?? b.claimedAt) };
+    });
     // The length goes with the time (card H08b): a worker whose clock is wrong counts the duration on its own clock instead of reading `until` against it.
     return { until, leaseMs: this.#options.leaseMs };
   }
@@ -968,6 +999,51 @@ export class DispatcherService {
     const next = add ? [...new Set([...ids, attemptId])] : ids.filter((i) => i !== attemptId);
     const body = { ids: next } as unknown as JsonObject;
     return found === undefined ? [{ type: "create", ref: LIVE, body }] : [{ type: "update", ref: LIVE, expectedRevision: found.revision, body }];
+  }
+
+  /** Card H09b: a running attempt is renewed only by the primary that started it or took it over. */
+  #assertOwnEpoch(d: DispatchBody): void {
+    if (d.primaryEpoch !== this.#runner.epoch) throw new DomainError("unavailable", `attempt ${d.attemptId} was started under another controller and this controller has not taken it over yet; send the heartbeat again in a moment`, { field: "attemptId" });
+  }
+
+  /** Adoptions in progress in this process, so the tick and anything else asking at the same moment take an attempt over once. */
+  readonly #adopting = new Map<string, Promise<Adoption>>();
+
+  /**
+   * A new primary takes over a running attempt that another controller started or adopted (card H09b). The host that runs it is asked for a handle on the run it still holds: with one, the record is stamped with this
+   * controller's epoch (from then on its heartbeats count), the worker is given one lease from the takeover to be heard from, and this dispatcher waits for its result as for one it started (a result the worker sent while no
+   * controller was there is taken at once). A host that no longer runs it (the placement ended, moved, or was only offered: an offer dies with the controller that made it) means nobody does: the attempt ends as lost, so a
+   * replacement is admitted within the attempts allowed (and held back while a call of unknown outcome is open, card H09). A run on a host that cannot be taken over (a local worker, which died with its controller) is
+   * left alone: nothing can renew it here, so its lease ends it.
+   */
+  async #adopt(attemptId: string): Promise<Adoption> {
+    const running = this.#adopting.get(attemptId);
+    if (running !== undefined) return running;
+    const work = (async (): Promise<Adoption> => {
+      const d = await this.#load(attemptId);
+      if (d === undefined || d.body.state !== "running") return { outcome: "none" };
+      if (d.body.primaryEpoch === this.#runner.epoch) return { outcome: "own" };
+      const host = this.#deps.workers.find((w) => w.hostId === d.body.hostId);
+      if (host?.adopt === undefined) return { outcome: "none" };
+      const handle = await host.adopt(attemptId);
+      if (handle === undefined) {
+        const ended = await this.#end(attemptId, "abandoned", `the controller that ran the attempt is gone and ${d.body.hostId} no longer runs it; it is taken as lost`, { readmit: true, lost: true });
+        return { outcome: "ended", ...(ended.readmitted === undefined ? {} : { readmitted: ended.readmitted }) };
+      }
+      const now = this.#runner.now();
+      const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
+      await this.#update(attemptId, (x) => {
+        if (x.state !== "running" || x.hostId !== d.body.hostId) throw new DomainError("unavailable", `attempt ${attemptId} changed while it was taken over`);
+        return x.primaryEpoch === this.#runner.epoch ? x : { ...x, primaryEpoch: this.#runner.epoch, adoptedAt: now, lease: { holder: this.#holder, until } };
+      });
+      if (!this.#live.has(attemptId)) {
+        const turn = this.#run(attemptId, handle);
+        this.#live.set(attemptId, { handle, host, turn });
+      }
+      return { outcome: "adopted" };
+    })();
+    this.#adopting.set(attemptId, work);
+    try { return await work; } finally { this.#adopting.delete(attemptId); }
   }
 
   async #assertCurrent(d: DispatchBody): Promise<void> {
@@ -1734,7 +1810,8 @@ export class DispatcherService {
         // A frozen attempt may make no call, so it is not started (its worker would only come up beside whatever froze it, such as a landing on its checkout). An ending freeze is a stop: the start goes on and the stop ends it.
         if (x.frozen !== undefined && x.frozen.ending !== true) { frozen = true; throw new DomainError("unavailable", `attempt ${b.attemptId} is frozen (${x.frozen.reason})`); }
         const { resumeNote: _n, resumeFrom: _f, pinnedHost: _p, ...rest } = x; void _n; void _f; void _p;
-        return { ...rest, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until } };
+        const { adoptedAt: _ad, ...fresh } = rest; void _ad;
+        return { ...fresh, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until }, primaryEpoch: this.#runner.epoch };
       }, async () => this.#placedChange(b.taskId, host.hostId, b.route));
     } catch (error) {
       if (frozen) return { kind: "waiting" };

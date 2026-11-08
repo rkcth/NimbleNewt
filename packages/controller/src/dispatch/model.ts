@@ -71,6 +71,9 @@ export interface DispatchBody {
   readonly credentialId?: string;
   /** The worker's lease: it must be extended by a heartbeat before `until`, or the attempt is taken as lost. */
   readonly lease?: { readonly holder: string; readonly until: string };
+  /** The primary epoch of the controller that started the running attempt or took it over (card H09b). Only that controller renews its lease: a new primary adopts the attempt (or ends it) before a heartbeat counts. Absent on records from before this field: no controller has taken them over. */
+  readonly primaryEpoch?: number;
+  readonly adoptedAt?: string;
   readonly heartbeats: number;
   readonly lastHeartbeatAt?: string;
   /** The last time the worker was DOING something (a heartbeat while no call waited for an approval); a heartbeat is a lease timer, so one sent while every call was parked does not move it. Absent on attempts from before this field: the heartbeat stands for it. */

@@ -82,6 +82,8 @@ export type SequencedControl = ControlMessage & { readonly seq: number };
 export interface SessionInfo {
   readonly sessionId: string;
   readonly sessionEpoch: number;
+  /** The primary epoch of the controller that opened the session (card H09b): a worker that sees it change after a reconnect is talking to a new primary, and lists what it holds in the recovery handshake. Absent from an older controller. */
+  readonly primaryEpoch?: number;
   readonly protocol: number;
   readonly controller: VersionRange;
 }

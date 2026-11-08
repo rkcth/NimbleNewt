@@ -24,6 +24,14 @@ export class WorkerRequestError extends Error {
   get waitingForOwner(): boolean { return this.status === 503 && this.code === "unavailable" && this.message.includes(WAITING_FOR_OWNER); }
 }
 
+/** The controller's answer to the recovery handshake (card H09b): a verdict per listed attempt, and the attempts it has accepted on this host that were not listed. */
+export interface ReconcileAnswer {
+  readonly sessionId: string;
+  readonly mode: "auto" | "owner";
+  readonly verdicts: readonly { readonly attemptId: string; readonly placement: number; readonly verdict: "stop" | "hold" | "reaccept" | "pending" | "unknown"; readonly reason: string }[];
+  readonly missing?: readonly { readonly attemptId: string; readonly placement: number }[];
+}
+
 export interface RemoteWorkerClientOptions {
   /** The controller's worker address (`https://...`). */
   readonly url: string;
@@ -81,7 +89,7 @@ export class RemoteWorkerClient {
   }
 
   /** The recovery handshake after a reconnect (card H09b): lists the attempts this worker still holds and learns, per attempt, whether to stop, hold, accept again or wait. Nothing resumes by itself. */
-  async reconcile(held: readonly { readonly attemptId: string; readonly placement: number }[], key: string = randomUUID()): Promise<{ sessionId: string; mode: "auto" | "owner"; verdicts: { attemptId: string; placement: number; verdict: "stop" | "hold" | "reaccept" | "pending" | "unknown"; reason: string }[] }> {
+  async reconcile(held: readonly { readonly attemptId: string; readonly placement: number }[], key: string = randomUUID()): Promise<ReconcileAnswer> {
     return (await this.#send("POST", "/worker/session/reconcile", { body: { held: held as unknown as Json }, key, session: true })).body as never;
   }
 

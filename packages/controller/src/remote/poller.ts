@@ -1,6 +1,6 @@
 import type { Capabilities } from "../hosts/index.js";
 import { REMOTE_LIMITS, type Offer, type WorkspaceAsk } from "./protocol.js";
-import { WorkerRequestError, type RemoteWorkerClient } from "./client.js";
+import { WorkerRequestError, type ReconcileAnswer, type RemoteWorkerClient } from "./client.js";
 
 /**
  * How a worker host asks for work (card H07): one poller per host, never one per agent or attempt. It connects, then holds one long poll for offers at a time; the controller answers the moment an offer is made, so an
@@ -9,7 +9,7 @@ import { WorkerRequestError, type RemoteWorkerClient } from "./client.js";
  * of in a burst. A refused protocol or a revoked credential is not retried quickly: it waits the longest backoff and says so. The sleep and the random source are injected, so the schedule is testable.
  */
 export interface PollerOptions {
-  readonly client: Pick<RemoteWorkerClient, "connect" | "heartbeat" | "offers" | "session" | "forgetSession"> & Partial<Pick<RemoteWorkerClient, "workspaceRequests" | "workspaceList">>;
+  readonly client: Pick<RemoteWorkerClient, "connect" | "heartbeat" | "offers" | "session" | "forgetSession"> & Partial<Pick<RemoteWorkerClient, "workspaceRequests" | "workspaceList" | "reconcile">>;
   readonly capabilities: Capabilities;
   /** Called with offers, in order. The poller polls again only after it returns; an offer not accepted is offered again by the controller. */
   readonly onOffers: (offers: readonly Offer[]) => Promise<void>;
@@ -18,6 +18,12 @@ export interface PollerOptions {
    * poller would stop beating while an integration runs. Needs a client that has `workspaceRequests`.
    */
   readonly onWorkspace?: (requests: readonly WorkspaceAsk[], withdrawn: readonly string[]) => void;
+  /**
+   * The attempts this host still holds (card H09b). Given, every new session starts with the recovery handshake: the list (at most `REMOTE_LIMITS.held`, the first ones) goes to the controller before anything else, and its
+   * answer goes to `onReconciled`, which acts on each verdict (stop, hold, accept again, wait for the owner). A handshake that fails is tried again before the next poll. Needs a client that has `reconcile`.
+   */
+  readonly held?: () => readonly { readonly attemptId: string; readonly placement: number }[];
+  readonly onReconciled?: (answer: ReconcileAnswer) => Promise<void> | void;
   /** The poll hold, in ms (default 20 000; at most the controller's limit). */
   readonly waitMs?: number;
   /** The gap between heartbeats, in ms (default 15 000). */
@@ -36,7 +42,7 @@ export interface PollerOptions {
   /** The clock for the heartbeat interval (default `Date.now`). */
   readonly now?: () => number;
   /** Told about every failure and how long the poller will wait. */
-  readonly onTrouble?: (event: { readonly error: unknown; readonly retryInMs: number; readonly kind: "connect" | "poll" | "heartbeat" | "offers" | "waiting-for-owner" | "workspace" }) => void;
+  readonly onTrouble?: (event: { readonly error: unknown; readonly retryInMs: number; readonly kind: "connect" | "poll" | "heartbeat" | "offers" | "waiting-for-owner" | "workspace" | "reconcile" }) => void;
 }
 
 const timerSleep = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
@@ -53,6 +59,8 @@ export class HostPoller {
   readonly #now: () => number;
   #failures = 0;
   #sequence = 0;
+  /** The session the recovery handshake still has to be made for (card H09b). */
+  #reconcileFor: string | undefined;
 
   constructor(options: PollerOptions) {
     const waitMs = options.waitMs ?? 20_000;
@@ -77,8 +85,17 @@ export class HostPoller {
       const started = this.#now();
       try {
         if (this.#o.client.session === undefined) {
-          await this.#o.client.connect(this.#o.capabilities as never);
+          const session = await this.#o.client.connect(this.#o.capabilities as never);
           beat = Number.NEGATIVE_INFINITY;
+          if (this.#o.held !== undefined && this.#o.client.reconcile !== undefined) this.#reconcileFor = session.sessionId;
+        }
+        // The handshake comes first in a new session: nothing the worker holds is taken up again before the controller has answered for it.
+        if (this.#reconcileFor !== undefined && this.#reconcileFor === this.#o.client.session?.sessionId && !signal.aborted) {
+          try {
+            const answer = await this.#o.client.reconcile!(this.#o.held!().slice(0, REMOTE_LIMITS.held));
+            await this.#o.onReconciled?.(answer);
+            this.#reconcileFor = undefined;
+          } catch (error) { await this.#trouble(error, "reconcile", signal); continue; }
         }
         if (this.#now() - beat >= this.#o.heartbeatMs) { await this.#o.client.heartbeat(++this.#sequence); beat = this.#now(); }
         // A hold longer than the time to the next heartbeat would let the heartbeat go late.
@@ -99,7 +116,7 @@ export class HostPoller {
     }
   }
 
-  async #trouble(error: unknown, kind: "connect" | "poll" | "heartbeat" | "offers" | "workspace", signal: AbortSignal): Promise<void> {
+  async #trouble(error: unknown, kind: "connect" | "poll" | "heartbeat" | "offers" | "workspace" | "reconcile", signal: AbortSignal): Promise<void> {
     if (signal.aborted) return;
     // An attempt that waits for the owner's decision is not a failure: the session stays, the failure count does not grow, and the poller asks again after a calm wait.
     if (error instanceof WorkerRequestError && error.waitingForOwner) {

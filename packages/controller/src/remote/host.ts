@@ -69,6 +69,12 @@ export class RemoteWorkerHost implements WorkerHost {
 
   async release(attemptId: string, reason: string): Promise<void> { await this.remote.end(this.by, attemptId, reason); }
 
+  /** A new primary takes over the run of an attempt on this host (card H09b): a handle on the placement the worker accepted (or already completed), or nothing when no live run is there. */
+  async adopt(attemptId: string): Promise<WorkerHandle | undefined> {
+    const placement = await adoptable(this.remote, this.by, this.hostId, attemptId);
+    return placement === undefined ? undefined : new RemoteWorkerHandle(this.remote, this.by, attemptId, placement, this.options);
+  }
+
   /** The order with the owner's limits and best-effort setting in its contract, sealed again. */
   async #carry(order: WorkOrder): Promise<WorkOrder> {
     const policy = this.options.ownerPolicy;
@@ -84,6 +90,15 @@ export class RemoteWorkerHost implements WorkerHost {
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.options.requirements(order), inputs: this.options.inputs?.(order) ?? [] });
     return new RemoteWorkerHandle(this.remote, this.by, order.attemptId, placed.placement, this.options);
   }
+}
+
+/**
+ * The placement number a new primary can take over on this host (card H09b): the run the worker accepted, or one that already completed (its result is taken at once). An offer that was never accepted is not: its order,
+ * and the credential in it, lived only in the memory of the controller that made it. Ended, moving or another host's: nothing.
+ */
+export async function adoptable(remote: Pick<RemoteWorkerService, "placement">, by: Principal, hostId: string, attemptId: string): Promise<number | undefined> {
+  const p = await remote.placement(by, attemptId);
+  return p !== undefined && p.hostId === hostId && (p.state === "accepted" || (p.state === "completed" && p.result !== undefined)) ? p.placement : undefined;
 }
 
 export class RemoteWorkerHandle implements WorkerHandle {

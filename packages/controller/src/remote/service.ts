@@ -44,6 +44,8 @@ export interface SessionBody {
   /** The current session's ID and epoch (0 and "" when the host has only ever been refused). Messages from an earlier session are fenced. */
   readonly sessionId: string;
   readonly sessionEpoch: number;
+  /** The primary epoch of the controller the session was opened with (card H09b). Another controller that has taken over the store does not accept the session: the worker connects again and the recovery handshake decides on what it holds. */
+  readonly primaryEpoch?: number;
   /** The credential the session was opened with: a rotation or a new enrolment ends the session. */
   readonly credentialId?: string;
   readonly protocol?: number;
@@ -216,7 +218,7 @@ export interface RemoteDeps {
   readonly principal: Principal;
   readonly hosts: Pick<HostService, "announce" | "heartbeat" | "status">;
   readonly artifacts: Pick<ArtifactService, "publish" | "get" | "readFile" | "assertResumable">;
-  readonly dispatch: Pick<DispatcherService, "gateway" | "get" | "relocate" | "quiesce" | "release">;
+  readonly dispatch: Pick<DispatcherService, "gateway" | "get" | "relocate" | "quiesce" | "release"> & Partial<Pick<DispatcherService, "liveAttempts">>;
   /** The policy for moving an attempt; the default is conservative (see `RelocationPolicy`). Always the controller's, never the caller's. */
   readonly relocationPolicy?: RelocationPolicyFor;
   /** Where an attempt may be placed in the first place (data location, repository access, who may hold the credential). Absent: only what a host can do decides. */
@@ -254,7 +256,13 @@ export interface RemoteOptions extends RunnerOptions {
 
 export interface ReconcileVerdict { readonly attemptId: string; readonly placement: number; readonly verdict: "stop" | "hold" | "reaccept" | "pending" | "unknown"; readonly reason: string }
 export interface PendingReaccept { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly sessionId: string; readonly at: string }
-export interface ReconcileReport { readonly sessionId: string; readonly mode: "auto" | "owner"; readonly verdicts: readonly ReconcileVerdict[] }
+export interface ReconcileReport {
+  readonly sessionId: string;
+  readonly mode: "auto" | "owner";
+  readonly verdicts: readonly ReconcileVerdict[];
+  /** Attempts the controller has accepted on this host that the worker did not list (card H09b), at most `REMOTE_LIMITS.held`: nobody runs them as far as the worker knows, so their lease ends them (nothing is resumed for them). Not worked out when the list is full (the worker may hold more than it can list). */
+  readonly missing: readonly { readonly attemptId: string; readonly placement: number }[];
+}
 export interface Placed { readonly placement: number; readonly state: PlacementState }
 export interface RelocationResult {
   readonly attemptId: string;
@@ -364,7 +372,7 @@ export class RemoteWorkerService {
         const before = current?.body as unknown as SessionBody | undefined;
         const epoch = (current?.revision ?? 0) + 1;
         const body: SessionBody = {
-          hostId: host.id, sessionId: `ses-${epoch}`, sessionEpoch: epoch, ...(host.credentialId === undefined ? {} : { credentialId: host.credentialId }), protocol: chosen.version, workerVersion, connectedAt: this.#runner.now(), refusals: before?.refusals ?? 0,
+          hostId: host.id, sessionId: `ses-${epoch}`, sessionEpoch: epoch, primaryEpoch: this.#runner.epoch, ...(host.credentialId === undefined ? {} : { credentialId: host.credentialId }), protocol: chosen.version, workerVersion, connectedAt: this.#runner.now(), refusals: before?.refusals ?? 0,
         };
         const change: Change = current === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: body as unknown as JsonObject };
         return { ref, creates: current === undefined, changes: [change], detail: { host: host.id, sessionEpoch: epoch, protocol: chosen.version } };
@@ -373,7 +381,7 @@ export class RemoteWorkerService {
     this.#index(host.id, command.capabilities);
     // An offers poll of the earlier session ends now; it is answered as fenced.
     this.#endPoll(host.id);
-    return { sessionId: `ses-${result.revision}`, sessionEpoch: result.revision, protocol: chosen.version, controller: this.#protocol };
+    return { sessionId: `ses-${result.revision}`, sessionEpoch: result.revision, primaryEpoch: this.#runner.epoch, protocol: chosen.version, controller: this.#protocol };
   }
 
   #index(hostId: string, caps: { readonly os?: unknown; readonly arch?: unknown } | undefined): void {
@@ -523,13 +531,15 @@ export class RemoteWorkerService {
     if (body === undefined || body.sessionEpoch < 1 || typeof sessionId !== "string" || body.sessionId !== sessionId || body.credentialId !== host.credentialId) {
       throw new DomainError("fenced", "this is not the host's current session; connect again", { field: "session" });
     }
+    // A session opened with an earlier primary is not taken over with the store (card H09b): the worker connects again, and what it holds is taken up again only by this controller's decision (the handshake, then accept).
+    if (body.primaryEpoch !== this.#runner.epoch) throw new DomainError("fenced", "the session was opened with another controller, which is no longer the primary; connect again", { field: "session" });
     return body;
   }
 
   /** What the worker's current session is (and so which protocol version every message of it must name). */
   async sessionInfo(host: Principal, sessionId: unknown): Promise<SessionInfo> {
     const body = await this.#session(host, sessionId);
-    return { sessionId: body.sessionId, sessionEpoch: body.sessionEpoch, protocol: body.protocol!, controller: this.#protocol };
+    return { sessionId: body.sessionId, sessionEpoch: body.sessionEpoch, primaryEpoch: this.#runner.epoch, protocol: body.protocol!, controller: this.#protocol };
   }
 
   /** The worker is alive. Counted by the host service (controller clock, increasing sequence). */
@@ -1021,7 +1031,8 @@ export class RemoteWorkerService {
     for (const h of held) verdicts.push(await this.#verdict(host, session, mode, patience, h.attemptId, h.placement));
     const counts: Record<string, number> = {};
     for (const v of verdicts) counts[v.verdict] = (counts[v.verdict] ?? 0) + 1;
-    const body = { hostId: host.id, sessionId: session.sessionId, mode, counts, heldDigest: sha256(key), unknown: verdicts.filter((v) => v.verdict === "unknown").map((v) => v.attemptId) };
+    const missing = held.length >= REMOTE_LIMITS.held ? [] : await this.#missing(host.id, new Set(held.map((h) => h.attemptId)));
+    const body = { hostId: host.id, sessionId: session.sessionId, mode, counts, heldDigest: sha256(key), unknown: verdicts.filter((v) => v.verdict === "unknown").map((v) => v.attemptId), missing: missing.map((m) => m.attemptId) };
     const before = (await this.#runner.get(RECONCILE_KIND, host.id))?.body as unknown as (typeof body & { at: string }) | undefined;
     // The same list from the same session with the same outcome is not written again.
     const unchanged = before !== undefined && canonicalJson({ ...before, at: "" } as unknown as JsonObject) === canonicalJson({ ...body, at: "" } as unknown as JsonObject);
@@ -1035,10 +1046,24 @@ export class RemoteWorkerService {
         return { ref, creates: current === undefined, changes: [change], detail: { host: host.id, held: held.length, ...counts } };
       },
     }));
-    const report: ReconcileReport = { sessionId: session.sessionId, mode, verdicts };
+    const report: ReconcileReport = { sessionId: session.sessionId, mode, verdicts, missing };
     if (this.#reconciled.size >= 512) for (const [k, v] of this.#reconciled) if (nowMs - v.at >= RECONCILE_MIN_GAP_MS || this.#reconciled.size >= 1024) this.#reconciled.delete(k);
     this.#reconciled.set(`${host.id}|${session.sessionId}`, { at: nowMs, key, report });
     return report;
+  }
+
+  /** The attempts the dispatcher runs on this host whose placement the worker accepted and did not list (card H09b), bounded. Read from the dispatcher's live list, so it costs at most one read per live attempt. */
+  async #missing(hostId: string, listed: ReadonlySet<string>): Promise<{ attemptId: string; placement: number }[]> {
+    const live = (await this.#deps.dispatch.liveAttempts?.(this.#deps.principal)) ?? [];
+    const out: { attemptId: string; placement: number }[] = [];
+    for (const a of live) {
+      if (a.state !== "running" || listed.has(a.attemptId)) continue;
+      const b = (await this.#runner.get(PLACEMENT_KIND, a.attemptId))?.body as unknown as PlacementBody | undefined;
+      if (b === undefined || b.hostId !== hostId || b.state !== "accepted" || (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now())) continue;
+      out.push({ attemptId: a.attemptId, placement: b.placement });
+      if (out.length >= REMOTE_LIMITS.held) break;
+    }
+    return out.sort((x, y) => (x.attemptId < y.attemptId ? -1 : 1));
   }
 
   async #verdict(host: Principal, session: SessionBody, mode: "auto" | "owner", patience: number | undefined, attemptId: string, placement: number): Promise<ReconcileVerdict> {
