@@ -112,6 +112,8 @@ const ARCHIVE = "handoff-archive";
 /** The owner's marks for a task: entries holding one of them are kept when a section of its hand-off is cut. */
 const MARKS = "handoff-marks";
 const ARCHIVE_ID = /^hnd-[a-z2-7]{20}$/;
+/** The sender's own sections, which `screen` withholds from those who merely control the task; their archives are withheld the same way. */
+const PRIVATE_SECTIONS: readonly string[] = ["drafts", "responsibilities"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
   const out = text(value, field, { min: 1, max: HANDOFF_LIMITS.reason, multiline: true });
@@ -398,7 +400,10 @@ export class HandoffService {
     if (pkg === undefined || (pkg.sections["drafts"] === undefined && pkg.sections["responsibilities"] === undefined)) return item;
     if (by.kind === "owner" || by.id === `agent:${item.from.id}` || (item.phase === "transferred" && by.id === `agent:${item.to.id}`)) return item;
     const { drafts: _d, responsibilities: _r, ...rest } = pkg.sections;
-    return { ...item, package: { ...pkg, sections: { ...rest, withheld: "The sender's drafts and responsibilities are shown to the sender, the owner and, after the transfer, the recipient." } } };
+    // A cut of one of them names its archive, which this caller may not read either: it is left out with them.
+    const cuts = pkg.cuts?.filter((c) => !PRIVATE_SECTIONS.includes(c.section));
+    const { cuts: _c, ...others } = pkg;
+    return { ...item, package: { ...others, ...(cuts === undefined || cuts.length === 0 ? {} : { cuts }), sections: { ...rest, withheld: "The sender's drafts and responsibilities are shown to the sender, the owner and, after the transfer, the recipient." } } };
   }
 
   /** The hand-off of a task that is still going (not finished, failed or cancelled), for a caller who may control the task; undefined otherwise. */
@@ -429,18 +434,20 @@ export class HandoffService {
     const head = (await this.#runner.get(ARCHIVE, archiveId))?.body as unknown as { taskId: string; handoffId: string; section: string; digest: string; entries: number; chars: number; part: number; parts: number; text: string; truncated?: boolean } | undefined;
     if (head === undefined || head.part !== 0) return undefined;
     const h = (await this.#runner.get(KIND, head.handoffId))?.body as unknown as TaskHandoffBody | undefined;
-    if (h === undefined || !(await this.#mayReadArchive(by, h))) return undefined;
+    if (h === undefined || !(await this.#mayReadArchive(by, h, head.section))) return undefined;
     if (part >= head.parts) invalid("part", `this archive has ${head.parts} part${head.parts === 1 ? "" : "s"} (0 to ${head.parts - 1})`);
     const text = part === 0 ? head.text : ((await this.#runner.get(ARCHIVE, derivedId("hnd", `archive\0${head.handoffId}\0${head.section}\0${head.digest}\0${part}`)))?.body as unknown as { text?: string } | undefined)?.text;
     if (typeof text !== "string") throw new DomainError("unavailable", `part ${part} of archive ${archiveId} cannot be read`);
     return { archiveId, handoffId: head.handoffId, taskId: head.taskId, section: head.section, entries: head.entries, chars: head.chars, part, parts: head.parts, text, ...(head.truncated === true ? { truncated: true } : {}) };
   }
 
-  async #mayReadArchive(by: Principal, h: TaskHandoffBody): Promise<boolean> {
+  /** The same rule as `screen`: the sender, and the recipient once the task is theirs; whoever may control the task, except for the sender's drafts and responsibilities, which only the owner and those two see. */
+  async #mayReadArchive(by: Principal, h: TaskHandoffBody, section: string): Promise<boolean> {
     if (by.kind === "owner") return true;
-    // The sender and the recipient wrote and are given the package; a credential scoped to a task reads only that task's.
-    const party = by.id === `agent:${h.from.id}` || by.id === `agent:${h.to.id}`;
-    if (party && (by.taskScope === undefined || by.taskScope.taskId === h.taskId)) return true;
+    // A credential scoped to a task reads only that task's.
+    const scoped = by.taskScope === undefined || by.taskScope.taskId === h.taskId;
+    if (scoped && (by.id === `agent:${h.from.id}` || (h.phase === "transferred" && by.id === `agent:${h.to.id}`))) return true;
+    if (PRIVATE_SECTIONS.includes(section)) return false;
     try { await this.#mayControl(by, h.taskId); return true; } catch (error) { if (error instanceof DomainError && error.code === "not_found") return false; throw error; }
   }
 

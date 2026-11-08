@@ -389,8 +389,10 @@ for (const backend of backends) {
     assert.equal(read.chars, read.text.length);
     // Who may read it: whoever may control the task, its sender and recipient; not another agent, nor a credential scoped to another task.
     assert.equal((await c.handoffs.archive(c.mgr, { archiveId: m[3]! }))?.text, read.text);
-    assert.equal((await c.handoffs.archive(as(c, `agent:${c.b.id}`), { archiveId: m[3]! }))?.text, read.text, "the recipient");
     assert.equal((await c.handoffs.archive(as(c, `agent:${c.a.id}`), { archiveId: m[3]! }))?.text, read.text, "the sender");
+    assert.equal(await c.handoffs.archive(as(c, `agent:${c.b.id}`), { archiveId: m[3]! }), undefined, "the recipient, before the task is theirs, sees no more than the package it cannot see yet");
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id });
+    assert.equal((await c.handoffs.archive(as(c, `agent:${c.b.id}`), { archiveId: m[3]! }))?.text, read.text, "the recipient");
     assert.equal((await c.handoffs.archive(as(c, `agent:${c.b.id}`, c.task), { archiveId: m[3]! }))?.text, read.text, "the recipient's credential for this task");
     assert.equal(await c.handoffs.archive(as(c, `agent:${c.b.id}`, "task-aaaaaaaaaaaaaaaaaaaa"), { archiveId: m[3]! }), undefined, "a credential for another task");
     assert.equal(await c.handoffs.archive(c.ann, { archiveId: m[3]! }), undefined, "an agent with no part in it");
@@ -420,6 +422,11 @@ for (const backend of backends) {
     for (const p of parts) assert.doesNotMatch(p, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "every part is whole characters");
     assert.equal(parts.join(""), original);
     assert.match(text, /the whole section is kept/);
+    // The sender's drafts are withheld from one who merely controls the task: the section, its cut and its archive alike.
+    assert.equal(await c.handoffs.archive(c.mgr, { archiveId: m[3]! }), undefined);
+    assert.deepEqual(c.handoffs.screen(c.mgr, h).package?.cuts, undefined);
+    assert.equal(c.handoffs.screen(c.owner, h).package?.cuts?.[0]?.archiveId, m[3]);
+    assert.equal((await c.handoffs.archive(as(c, `agent:${c.a.id}`), { archiveId: m[3]! }))?.parts, first.parts, "the sender reads its own drafts");
 
     // Longer than an archive holds: the marker and the package say how much is kept, never silently.
     const huge = Array.from({ length: 30_000 }, (_, i) => `line ${i} ${"c".repeat(40)}`).join("\n");

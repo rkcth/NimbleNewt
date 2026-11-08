@@ -13,6 +13,7 @@ import type { HandlingBody, WatchService } from "../events/handling.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
+import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
@@ -313,7 +314,7 @@ export interface StatusDeps {
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
   readonly stops?: Pick<StopService, "cleanupSpend">;
-  readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
+  readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined>; /** The owner's marks for the task's hand-offs (card C07j), shown beside a hand-off going on. */ marks?(by: Principal, query: { taskId: string }): Promise<{ readonly marks: readonly string[] }> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer. Absent: they are not listed. */
@@ -748,6 +749,10 @@ export class StatusService {
     const lines: Line[] = [line(`Hand-off from ${shown(h.from.id)} to ${shown(h.to.id)}, ${h.mode}: ${h.phase}. Asked by ${shown(h.requestedBy)} at ${h.requestedAt}: ${shown(h.reason)}`, cite("handoff", h.id, h.revision), cite("task", taskId))];
     if (h.returnAt !== undefined) lines.push(line(`It is temporary: the task goes back to ${shown(h.from.id)} at ${h.returnAt}, if whoever asked still holds the right to control it then.`, cite("handoff", h.id)));
     if (h.package !== undefined) lines.push(line(h.package.ready ? "The package is complete." : `The package is missing: ${h.package.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
+    // Card C07j: a section cut to fit says so here too, with where its whole text is kept.
+    for (const cut of h.package?.cuts ?? []) lines.push(line(`The ${shown(cut.section, 40)} section was cut to fit: ${cut.left} of ${cut.total} entries left out or shortened (the owner's marked ones and the newest are kept). ${cut.archiveTruncated === true ? "The first 1,000,000 characters of it are" : "Its whole text is"} kept in archive ${shown(cut.archiveId, 40)} (state API query handoff.archive.read).`, cite("handoff", h.id)));
+    const marks = await this.#deps.handoffs.marks?.(by, { taskId }).catch(() => undefined);
+    if (marks !== undefined && marks.marks.length > 0) lines.push(line(`When a section is cut, entries holding one of the owner's marks are kept first: ${marks.marks.map((m) => quotedLine(shown(m, 200))).join(", ")}.`, cite("task", taskId)));
     if (h.acceptedGaps !== undefined) lines.push(line(`It was handed over with gaps accepted: ${h.acceptedGaps.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
     if (h.blocked !== undefined) lines.push(line(`It is held up: ${shown(h.blocked.reason)} You can choose: ${h.blocked.choices.join(", ")}.`, cite("handoff", h.id)));
     if (h.failure !== undefined) lines.push(line(`It failed: ${shown(h.failure)}`, cite("handoff", h.id)));

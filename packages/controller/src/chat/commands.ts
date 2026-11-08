@@ -160,6 +160,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "handoff.complete": { verb: "Complete hand-off of task", mode: "profile", needsProject: true },
   "handoff.cancel": { verb: "Cancel hand-off of task", mode: "apply", needsProject: true },
   "handoff.takeover": { verb: "Take task over by force", mode: "propose", needsProject: true },
+  // What a hand-off package keeps when a section is cut to fit (card C07j): the owner's marks only choose which entries stay in view (the rest stays in the archive), so the change applies at once and is undone by saying so.
+  "handoff.marks.change": { verb: "Keep entries in the hand-off packages of task when a section is cut (add), or stop (remove)", mode: "apply", needsProject: true },
   // Limits on what a task may use of model calls (card V02): they cap spending and retries, and raising one spends more, so the change is always shown first.
   "model-budget.set": { verb: "Limit model use of task", mode: "propose", needsProject: true },
   // Watching a task's events (card H13f): matching events wake the task's owner, which spends work, so an explicit order follows the profile.
