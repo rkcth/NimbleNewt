@@ -143,6 +143,18 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.svc.reclaim(c.cat, { commandId: cid("rc"), taskId: c.grandkid }));
   });
 
+  suite("a child of a parent limited in a dimension must be given some of it, since a limit of 0 states none (card H10)", async (c) => {
+    await open(c, 100, 1000);
+    await refuses("invalid_command", () => give(c, c.kid1, 50, 0), (e) => assert.match(e.message, /^computeMs: the parent's compute time is limited/));
+    await refuses("invalid_command", () => c.svc.delegate(c.owner, { commandId: cid("d"), parentTaskId: c.root, childTaskId: c.kid1, computeMs: 10 }), (e) => assert.match(e.message, /^costMicros: the parent's cost is limited/));
+    assert.equal((await c.svc.report(c.owner, c.kid1)), undefined, "nothing was delegated");
+    await give(c, c.kid1, 50, 10);
+    // A parent that is not limited in compute may hand on none of it (the child is as unlimited there as its parent).
+    await c.svc.open(c.owner, { commandId: cid("o"), taskId: c.kid2, currency: "USD", costMicros: 100 });
+    await c.svc.delegate(c.owner, { commandId: cid("d"), parentTaskId: c.kid2, childTaskId: c.grandkid, costMicros: 10 });
+    assert.equal((await rep(c, c.grandkid)).limit.computeMs, 0);
+  });
+
   suite("an agreed raise is carried out by the controller's own identity for exactly the task and amounts it names, with who allowed it recorded; nobody else may use that path (card M02e)", async (c) => {
     await open(c);
     const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
@@ -204,7 +216,8 @@ for (const backend of backends) {
   });
 
   suite("a child's uncertain hold shows in the subtree totals of every ancestor", async (c) => {
-    await open(c);
+    // Money only (compute not limited): a child of a parent limited in a dimension must be given some of it (card H10).
+    await open(c, 100, 0);
     await give(c, c.kid1, 50, 0, c.owner, c.root, "agent:ann");
     await give(c, c.grandkid, 20, 0, c.ann, c.kid1);
     const held = await c.reserve(c.grandkid, 15);
@@ -247,7 +260,7 @@ for (const backend of backends) {
   });
 
   suite("a child's overrun is passed up so the parent's available figure shows what was really consumed", async (c) => {
-    await open(c);
+    await open(c, 100, 0);
     await give(c, c.kid1, 40, 0, c.owner, c.root, "agent:ann");
     const r1 = await c.reserve(c.kid1, 40);
     await c.svc.settle(c.host, { commandId: cid("s"), reservationId: r1.id, costMicros: 55 });

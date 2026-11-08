@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { AdmissionService } from "../admission/service.js";
+import { BudgetService } from "../budgets/budgets.js";
 import { ScriptedInterpreter } from "../chat/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
@@ -86,6 +87,10 @@ test("capacity caps through the composed controller: off by default; per-project
     // Fan-in: the children of one parent report to the parent's agent; two at a time.
     const parent = await newTask(AGENTS[4]!);
     const kids = [await newTask(AGENTS[5]!), await newTask(AGENTS[6]!), await newTask(AGENTS[7]!)];
+    // A spawned child runs only on an allowance its parent delegated (card H10).
+    const budgets = BudgetService.withEpoch(c.storage, c.epoch);
+    await budgets.open(rob, { commandId: "b-parent", taskId: parent.taskId, currency: "USD", computeMs: 36_000_000 });
+    for (const k of kids) await budgets.delegate(rob, { commandId: `b-${k.taskId}`, parentTaskId: parent.taskId, childTaskId: k.taskId, computeMs: 3_600_000 });
     for (const k of kids) {
       const ref = { kind: "swarm-link", id: k.taskId };
       await c.storage.applyOperation({ operationId: `lnk-${k.taskId}`, epoch: c.epoch, actor: rob.id, correlationId: "lnk", at: new Date().toISOString(), changes: [{ type: "create", ref, body: { parentTaskId: parent.taskId, projectId: project, createdBy: rob.id, createdAt: new Date().toISOString() } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);

@@ -3,10 +3,11 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, text } from "../domain/model.js";
 import { CommandRunner, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
 import { CAPS_REF, capsOf } from "./caps.js";
-import type { PrincipalBody } from "../security/principals.js";
+import { scopedCommandId } from "../security/credentials.js";
+import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import {
-  EMPTY_STATE, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, waitReason, capWaitReason, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
+  DEFAULT_LIMITS, EMPTY_STATE, LIMIT_BOUNDS, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, waitReason, capWaitReason, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
 } from "./policy.js";
 
 const STATE: AggregateRef = { kind: "admission-state", id: "admission" };
@@ -15,6 +16,24 @@ const REQUEST_ID = /^req-[a-z2-7]{20}$/;
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,119}$/;
 const HOST_ID = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+
+/** The admission limits the owner sets as host and global quotas (card H10). The spawn limits of attempts (`depth`, `children`) and `patience` stay the start-up figures. */
+export const QUOTA_NAMES = ["productive", "perHost", "control", "queue"] as const;
+export type QuotaName = (typeof QUOTA_NAMES)[number];
+export type QuotaFigures = { readonly [K in QuotaName]: number };
+const pickQuotas = (l: Limits): QuotaFigures => ({ productive: l.productive, perHost: l.perHost, control: l.control, queue: l.queue });
+
+/** A host's declared CPUs and memory, checked. */
+function checkCapacity(value: unknown, field: string): Capacity {
+  const c = value as Record<string, unknown> | undefined;
+  if (c === undefined || c === null || typeof c !== "object" || Array.isArray(c)) invalid(field, "must be an object with cpus and memoryMb");
+  for (const key of Object.keys(c!)) if (key !== "cpus" && key !== "memoryMb") invalid(`${field}.${key}`, "is not a capacity field");
+  const cpus = c!["cpus"];
+  const memoryMb = c!["memoryMb"];
+  if (typeof cpus !== "number" || !Number.isFinite(cpus) || cpus <= 0 || cpus > 1024) invalid(`${field}.cpus`, "must be a number above 0 and at most 1024");
+  if (!Number.isSafeInteger(memoryMb) || (memoryMb as number) < 1 || (memoryMb as number) > 4_194_304) invalid(`${field}.memoryMb`, "must be a whole number of megabytes from 1 to 4194304");
+  return { cpus: cpus as number, memoryMb: memoryMb as number };
+}
 
 export interface RequestAdmission extends CommandMeta {
   readonly class: RequestClass;
@@ -150,13 +169,7 @@ export class AdmissionService {
     await this.#retrying(() => this.#runner.command("admission.capacity", command, async () => {
       onlyKnown(command, ["commandId", "actor", "host", "capacity"]);
       const host = typeof command.host === "string" && HOST_ID.test(command.host) ? command.host : invalid("host", "is not a host ID");
-      const c = command.capacity as unknown as Record<string, unknown> | undefined;
-      if (c === undefined || c === null || typeof c !== "object") invalid("capacity", "must be an object with cpus and memoryMb");
-      for (const key of Object.keys(c!)) if (key !== "cpus" && key !== "memoryMb") invalid(`capacity.${key}`, "is not a capacity field");
-      const cpus = c!["cpus"];
-      const memoryMb = c!["memoryMb"];
-      if (typeof cpus !== "number" || !Number.isFinite(cpus) || cpus <= 0 || cpus > 1024) invalid("capacity.cpus", "must be a number above 0 and at most 1024");
-      if (!Number.isSafeInteger(memoryMb) || (memoryMb as number) < 1 || (memoryMb as number) > 4_194_304) invalid("capacity.memoryMb", "must be a whole number of megabytes from 1 to 4194304");
+      const { cpus, memoryMb } = checkCapacity(command.capacity, "capacity");
       return {
         payload: { host, cpus: cpus as number, memoryMb: memoryMb as number },
         build: async () => {
@@ -172,6 +185,62 @@ export class AdmissionService {
         },
       };
     }));
+  }
+
+  /**
+   * The host and global quotas as the owner sees them (card H10): the limits in force (productive attempts in total and per host, places reserved for inquiries and reviews, the queue),
+   * each host's declared CPUs and memory, and what holds them now. Owner only.
+   */
+  async quotas(by: Principal): Promise<{ readonly revision: number; readonly limits: QuotaFigures; readonly defaults: QuotaFigures; readonly hosts: Readonly<Record<string, Capacity>>; readonly running: { readonly productive: number; readonly control: number; readonly perHost: Readonly<Record<string, number>> }; readonly waiting: number }> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read the capacity quotas`);
+    const { state, revision } = await this.#load();
+    const perHost: Record<string, number> = {};
+    for (const e of state.running) if (laneOf(e.class) === "productive" && e.host !== undefined) perHost[e.host] = (perHost[e.host] ?? 0) + 1;
+    return {
+      revision, limits: pickQuotas(state.limits), defaults: pickQuotas(DEFAULT_LIMITS), hosts: state.capacity,
+      running: { productive: state.running.filter((e) => laneOf(e.class) === "productive").length, control: state.running.filter((e) => laneOf(e.class) === "control").length, perHost },
+      waiting: state.queue.length,
+    };
+  }
+
+  /**
+   * The owner changes the host and global quotas (card H10): `set` names any of `productive` (attempts at once in total), `perHost`, `control` (places only inquiries and reviews may use)
+   * and `queue`; `hosts` declares hosts' CPUs and memory. One guarded step on the admission record, replay-safe by command ID. A lower figure stops nothing that runs: nothing new starts
+   * until the work is under it, and waiting requests a host can no longer hold are withdrawn with the reason. A higher one lets waiting work in at once.
+   */
+  async changeQuotas(by: Principal, command: NoActor & { set?: unknown; hosts?: unknown }): Promise<{ revision: number }> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not change the capacity quotas`);
+    onlyKnown(command, ["commandId", "set", "hosts"]);
+    const set: Partial<Record<QuotaName, number>> = {};
+    if (command.set !== undefined) {
+      if (command.set === null || typeof command.set !== "object" || Array.isArray(command.set)) invalid("set", `must be an object such as { "perHost": 1 } (${QUOTA_NAMES.join(", ")})`);
+      for (const [k, v] of Object.entries(command.set as object)) {
+        if (!(QUOTA_NAMES as readonly string[]).includes(k)) invalid("set", `${k.slice(0, 30)} is not a quota (${QUOTA_NAMES.join(", ")})`);
+        const [lo, hi] = LIMIT_BOUNDS[k as QuotaName];
+        set[k as QuotaName] = typeof v === "number" && Number.isSafeInteger(v) && v >= lo && v <= hi ? v : invalid(`set.${k}`, `must be a whole number from ${lo} to ${hi}`);
+      }
+    }
+    const hosts: Record<string, Capacity> = {};
+    if (command.hosts !== undefined) {
+      if (command.hosts === null || typeof command.hosts !== "object" || Array.isArray(command.hosts)) invalid("hosts", "must be an object such as { \"host:pc\": { \"cpus\": 8, \"memoryMb\": 16384 } }");
+      const entries = Object.entries(command.hosts as object);
+      if (entries.length > 50) invalid("hosts", "declare at most 50 hosts in one change");
+      for (const [h, c] of entries) hosts[HOST_ID.test(h) ? h : invalid("hosts", `${h.slice(0, 50)} is not a host ID`)] = checkCapacity(c, `hosts.${h}`);
+    }
+    if (Object.keys(set).length === 0 && Object.keys(hosts).length === 0) invalid("set", "name at least one quota to set or one host to declare");
+    const result = await this.#retrying(() => this.#runner.command("admission.quotas", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { set: set as unknown as JsonObject, hosts: hosts as unknown as JsonObject },
+      build: async () => {
+        const loaded = await this.#load();
+        const limits = checkLimits({ ...loaded.state.limits, ...set });
+        for (const h of Object.keys(hosts)) await this.#requireActiveHost(h);
+        const capacity = { ...loaded.state.capacity, ...hosts };
+        if (Object.keys(capacity).length > 200) invalid("hosts", "at most 200 hosts are tracked");
+        const prepared = await this.#prepare({ ...loaded.state, limits, capacity });
+        return this.#built(loaded.revision, (await this.#promote(prepared)), { set: set as unknown as JsonObject, hosts: Object.keys(hosts) });
+      },
+    })));
+    return { revision: result.revision };
   }
 
   /**

@@ -295,6 +295,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       let checkpointed = true;
       let artifacts = true;
       for (const id of attempts) {
+        // An attempt that never started (it still waits for a place) has no worker and nothing of its own to save, so a Stop does not wait for a checkpoint of it; its ending withdraws it (card H10: a
+        // swarm child waiting for capacity is cancelled without blocking). A Suspend is unchanged.
+        if (options?.mode === "stop") { const d = await h!.dispatcher.get(h!.principal, id); if (d !== undefined && d.state === "waiting" && d.startedAt === undefined) continue; }
         // A worker still coming up is waited for no longer than the request's deadline allows (card H12q). A Stop's ending stops it and it has nothing of its own to save yet, so a Stop goes on without it;
         // a Suspend cannot checkpoint it, and the refusal blocks the Suspend as before.
         const startingMs = options?.deadlineAt === undefined ? undefined : Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));

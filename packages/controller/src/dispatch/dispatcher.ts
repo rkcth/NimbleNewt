@@ -1340,6 +1340,8 @@ export class DispatcherService {
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {
       const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);
+      // A spawned child spends only what its parent delegated to it (card H10): one with no allowance of its own (its spawn crashed before handing it over) does not run on no budget at all.
+      if (report === undefined && (await this.#runner.get("swarm-link", taskId)) !== undefined) return block("budget", "dispatch_blocked", "this task was spawned by another task and has no allowance of its own; delegate part of the parent's budget to it or cancel it");
       if (report !== undefined && (exhausted(report.limit.costMicros, report.spent.costMicros + report.uncertain.costMicros) || exhausted(report.limit.computeMs, report.spent.computeMs + report.uncertain.computeMs))) {
         return block("budget", "dispatch_blocked", "the task's budget is used up; raise it or change the task");
       }

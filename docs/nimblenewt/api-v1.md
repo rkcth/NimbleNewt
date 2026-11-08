@@ -305,6 +305,30 @@ Result: `{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value?
 
 Completion: finished when accepted (`completed: true`).
 
+#### `capacity.quotas.get`
+
+The host and global quotas (owner only): attempts that may run at once in total (`productive`) and on one host (`perHost`), the places kept for inquiries and reviews only (`control`), the most requests that may wait (`queue`), each host's declared CPUs and memory, the defaults, and what is running and waiting now.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `limits`, `defaults`, `hosts` (host ID to `{ cpus, memoryMb }`), `running` (`productive`, `control`, `perHost`), `waiting`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `swarm.limits.get`
+
+The limits on spawning child tasks (owner only): `depth` (levels of children below a task that was not spawned), `liveChildren` (unfinished children of one parent at once) and `totalChildren` (the fan-in: children of one parent in all, finished ones included; absent when off), the owner's entries, the defaults and what applies now.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `limits` (the owner's entries), `defaults`, `effective` (null when the setting is damaged), `damaged`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `events.sources.get`
 
 Which event sources the controller watches (owner only): every source the host configured and every source the owner defined (`events.sources.define`), with its type and whether the owner left it on, and the list of those turned off.
@@ -2316,6 +2340,33 @@ Arguments:
 - `enable` (optional): cap names to turn on again
 - `disable` (optional): cap names to turn off
 - `unset` (optional): cap names to forget
+- `expectedRevision` (optional): the revision you read (0 when none is set)
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `capacity.quotas.change`
+
+The owner changes the host and global quotas (owner only), leaving the others as they are: `set` names any of `productive` (1 to 64 attempts at once in total), `perHost` (1 to 16 on one host, at most `productive`), `control` (1 to 16 places only inquiries and reviews may use, so stopping, review and questions stay possible when the work is full) and `queue` (1 to 500 waiting requests); `hosts` declares hosts' CPUs and memory (a host must have them before work is placed on it). A lower figure stops nothing that runs: nothing new starts until the work is under it, and waiting requests a host can no longer hold are withdrawn with the reason; a higher one lets waiting work in at once. This is the form the chat uses.
+
+Arguments:
+
+- `set` (optional): for example `{ "productive": 6, "perHost": 3 }`
+- `hosts` (optional): for example `{ "host:pc": { "cpus": 8, "memoryMb": 16384 } }`
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `swarm.limits.change`
+
+The owner changes the limits on spawning child tasks (owner only), leaving the others as they are: `depth` (0 to 8 levels; 0 allows no child task at all), `liveChildren` (0 to 64 unfinished children of one parent at once; 0 allows no new child now) and `totalChildren` (1 to 1000 children of one parent in all, the fan-in; null turns that total off). Defaults: depth 3, liveChildren 4, totalChildren 16. `unset` returns a limit to its default. A lower limit cancels nothing that exists; it only refuses new children. This is the form the chat uses.
+
+Arguments:
+
+- `set` (optional): for example `{ "liveChildren": 2, "totalChildren": 8 }`
+- `unset` (optional): limit names to return to their defaults
 - `expectedRevision` (optional): the revision you read (0 when none is set)
 
 Result: `{ revision }`.
@@ -5463,14 +5514,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `swarm.spawn`
 
-Makes a child task of a task you hold the budget of: it gets the outcome and acceptance criteria you give and part of the parent's allowance (it can spend only that). Refused when the parent has nothing to give, is three levels deep, or already has four live children.
+Makes a child task of a task you hold the budget of: it gets the outcome and acceptance criteria you give and part of the parent's allowance (it can spend only that). Both are required: the parent assigns the outcome and how it is accepted. A parent limited in money or compute time must give some of each it is limited in. Refused when the parent has nothing to give, is finished, is at the owner's depth limit, already has its live children or its fan-in total of children (swarm.limits), or its swarm is being cancelled; nothing is left live after a refusal.
 
 Arguments:
 
 - `parentTaskId`: the parent task
 - `title`: the child's title
-- `expectedResult` (optional): what the child must deliver
-- `acceptanceCriteria` (optional): list of checks
+- `expectedResult`: what the child must deliver
+- `acceptanceCriteria`: list of checks (at least one)
 - `costMicros` (optional): allowance to hand over
 - `computeMs` (optional): compute allowance to hand over
 - `commandId`: required
@@ -5479,7 +5530,7 @@ Result: `{ taskId, replayed }`.
 
 #### `swarm.cancel`
 
-Cancels a task's whole swarm: every child and grandchild is stopped (deepest first), what each did not use goes back to its parent, and the tasks are cancelled. Repeat it to carry on if some are still being stopped.
+Cancels a task's whole swarm: no new child is made under it meanwhile, every child and grandchild is stopped (deepest first) and cancelled, and what each did not use goes back to its parent (also from children that had already finished or been cancelled). Repeat it to carry on if some are still being stopped; the parent may spawn again once nothing is pending.
 
 Arguments:
 
