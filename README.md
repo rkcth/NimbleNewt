@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **230 of 341 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **231 of 341 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -115,7 +115,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 60% | 12 of 20 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓░░░░` 74% | 37 of 50 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓░░░` 76% | 38 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 8 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓░░░` 78% | 25 of 32 |
@@ -368,7 +368,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓░░░░ 37 of 50</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓░░░ 38 of 50</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -401,7 +401,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H12d** · P30 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06, H12l)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [x] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
-- [ ] **H12m** · P30 · Bind the workspace operations to the local host and to remote hosts _(needs H12l, A04, H12b, H02)_
+- [x] **H12m** · P30 · Bind the workspace operations to the local host and to remote hosts _(needs H12l, A04, H12b, H02)_
 - [ ] **H12r** · P30 · Run the worker process under Seatbelt and Windows Sandbox _(needs H12b, A03b)_
 - [x] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
 - [x] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
