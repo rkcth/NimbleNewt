@@ -177,14 +177,14 @@ for (const backend of backends) {
     await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, capacity: null }, "adm-hosts");
     const shown = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
     const body = text(shown);
-    assert.match(body, /^Host and global quotas: the stored admission record is damaged \(the declared hosts are not a record of CPUs and memory\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(repair it with capacity\.quotas\.change\)\.$/m);
+    assert.match(body, /^Host and global quotas: the stored admission record is damaged \(the declared hosts are not a record of CPUs and memory\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(it needs repair; capacity\.quotas\.change cannot mend every damaged shape\)\.$/m);
     assert.match(body, /^Capacity caps \(your setting is at revision 0\)/m, "the caps group is still read");
     assert.match(body, /^Limits on spawning child tasks \(your setting is at revision 0\):$/m, "and so the swarm group");
     assert.ok(shown.every((l) => l.cites.length > 0), "every line still cites a record");
     // A figure that is not a figure: a record whose `queue` is missing reads back as `undefined`, which used to be shown as one of the owner's own figures.
     await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2 }, capacity: {} }, "adm-queue");
     const missing = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
-    assert.match(missing, /^Host and global quotas: the stored admission record is damaged \(queue is not a figure the controller can work from\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(repair it with capacity\.quotas\.change\)\.$/m);
+    assert.match(missing, /^Host and global quotas: the stored admission record is damaged \(queue is not a figure the controller can work from\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(it needs repair; capacity\.quotas\.change cannot mend every damaged shape\)\.$/m);
     assert.ok(!missing.includes("undefined"), `no figure is shown as undefined: ${missing}`);
     assert.ok(!missing.split("\n").some((l) => l.startsWith("queue ")), "the queue line is not shown at all");
     // One declared host whose CPUs and memory are not figures.
@@ -204,6 +204,30 @@ for (const backend of backends) {
     assert.ok(!fixed.includes("damaged"), "nothing is called damaged once the record reads");
     assert.match(fixed, /^productive \(.*\): 6 \(you set it\); 0 running now$/m);
     assert.match(fixed, /^Host "host:pc": 8 CPU\(s\), 16384 MB declared \(you declared it\); 0 productive attempt\(s\) running on it\.$/m);
+  });
+
+  suite("the damaged quotas line promises no repair the owner's own command cannot make, and keeps the one it can", async (w, s) => {
+    const ADM = { kind: "admission-state", id: "admission" };
+    // `changeQuotas` merges the owner's `set` into the stored limits and checks the whole record (`checkLimits`), so it needs `depth`, `children` and `patience` - figures no quota command can set - to be
+    // there. Whether the line can point at the command therefore depends on the shape, which is why it no longer promises the command can do it. Both halves are proved here, through the command itself.
+    const record = (limits: unknown): Record<string, unknown> => ({ limits, capacity: { "host:pc": { cpus: 8, memoryMb: 16_384 } }, running: [], queue: [], withdrawn: [] });
+    // (a) limits that are not a record at all: `quotas()` cannot even read them, and no `set` can mend them, because the figures the command cannot set are missing with them.
+    await damage(s.storage, s.epoch, ADM, record(null), "mend-null");
+    const body = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.match(body, /^Host and global quotas: the stored admission record is damaged \(it cannot be read as figures\): nothing in this group is shown, and what admission admits from it is not what these figures would allow \(it needs repair; capacity\.quotas\.change cannot mend every damaged shape\)\.$/m, "the line calls for repair without promising the command can make it");
+    assert.ok(!/\(repair it with capacity\.quotas\.change\)/.test(body), `the old promise is gone: ${body}`);
+    await assert.rejects(
+      () => s.quotas.changeQuotas(s.owner, { commandId: cid("mend-null"), set: { productive: 4, perHost: 2, control: 2, queue: 100 } }),
+      (error: unknown) => error instanceof DomainError && error.code === "invalid_command" && error.message === "limits.depth: must be a whole number from 0 to 8",
+      "setting all four quotas at once still fails: the record is checked whole, and its spawn figures are not there to be read",
+    );
+    // (b) a record that only lacks `queue`, the other six figures being present: the same command does mend this one, and the group comes back.
+    await damage(s.storage, s.epoch, ADM, record({ productive: 4, perHost: 2, control: 2, depth: 3, children: 4, patience: 5 }), "mend-queue");
+    assert.match(text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines), /^Host and global quotas: the stored admission record is damaged \(queue is not a figure the controller can work from\)/m, "and it is damaged until it is set");
+    await s.quotas.changeQuotas(s.owner, { commandId: cid("mend-queue"), set: { queue: 100 } });
+    const mended = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.ok(!mended.includes("damaged"), `the shape the command can mend is mended: ${mended}`);
+    assert.match(mended, /^queue \(.*\): 100 \(the default\); 0 waiting now$/m, "and the queue reads again");
   });
 
   suite("a record with more declared hosts than the view lists shows the first ones in order and counts the rest, inside the lines the chat shows", async (w, s) => {

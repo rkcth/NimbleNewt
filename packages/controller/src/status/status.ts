@@ -434,8 +434,14 @@ function quotaProblem(q: { readonly limits: unknown; readonly defaults: unknown;
   if (!isFigure(q.waiting)) return "the count of what waits now is not a figure";
   return undefined;
 }
-/** Why the host and global quotas are not shown, in one line: the group is refused whole, because a figure that is not in force would be worse to read than nothing. */
-const quotasDamaged = (what: string): string => `the stored admission record is damaged (${what}): nothing in this group is shown, and what admission admits from it is not what these figures would allow (repair it with capacity.quotas.change)`;
+/**
+ * Why the host and global quotas are not shown, in one line: the group is refused whole, because a figure that is not in force would be worse to read than nothing. It does not tell the owner to run
+ * `capacity.quotas.change`, because that command merges `set` into the stored limits and checks the whole record (`checkLimits`), including `depth`, `children` and `patience`, which no quota command can
+ * set: a record whose limits do not hold all seven figures is refused whatever is set (probed, and asserted in `chat/capacity.test.ts`: `limits.depth: must be a whole number from 0 to 8` for a record
+ * with no limits even when all four quotas are set), while a record whose limits are whole but that lacks `queue` is mended by the very same command. Some shapes it cannot reach at all, so the line
+ * names the need for repair rather than promising the command.
+ */
+const quotasDamaged = (what: string): string => `the stored admission record is damaged (${what}): nothing in this group is shown, and what admission admits from it is not what these figures would allow (it needs repair; capacity.quotas.change cannot mend every damaged shape)`;
 /** Why one group of the capacity view cannot be shown, in one clause; anything but a damaged, refused or missing record is a real failure and is thrown. `damaged` is what that group's record being unreadable does, because the groups gate different things. */
 function capacityProblem(error: unknown, damaged: string): string {
   if (!(error instanceof DomainError)) throw error;
