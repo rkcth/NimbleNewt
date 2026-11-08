@@ -222,7 +222,7 @@ test("the note of what mattered stays within 2000 characters however much its qu
   }
   // A secret in a key is redacted, not cut in half and left matching nothing.
   const secret = `sk-${"a".repeat(40)}`;
-  const one = relevantNote({ delta: { changed: [{ id: "s", kind: "env", key: `${"w".repeat(150)}${secret}`, status: "changed", detail: "x" }] }, verdicts: { s: { relevant: true, rationale: "r" } } }).note!;
+  const one = relevantNote({ delta: { changed: [{ id: "s", kind: "env", key: `${"w".repeat(149)} ${secret}`, status: "changed", detail: "x" }] }, verdicts: { s: { relevant: true, rationale: "r" } } }).note!;
   assert.doesNotMatch(one, /sk-a/);
   // Nothing judged to matter: no note at all.
   assert.deepEqual(relevantNote({ delta: { changed: plain }, verdicts: {} }), {});

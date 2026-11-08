@@ -3124,7 +3124,10 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
       "progress": {
         "commits": [
-          "c059b76c"
+          "c059b76c",
+          "10c22657",
+          "d4a82fab",
+          "fdf214a3"
         ],
         "ci_runs": [],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",

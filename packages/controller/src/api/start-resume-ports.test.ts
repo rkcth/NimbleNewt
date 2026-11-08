@@ -130,7 +130,7 @@ for (const store of stores) {
         assert.ok(Object.values(s.result.item.verdicts as Record<string, { relevant: boolean }>).every((v) => v.relevant === relevant));
         if (relevant) {
           assert.equal((await call(ann, "resume.commit", { checkId: s.result.item.id }, "a1")).error.code, "forbidden", "the agent being resumed cannot commit over changes that matter");
-          assert.equal((await call(hostToken, "resume.commit", { checkId: s.result.item.id }, "h1c")).error.code, "forbidden", "a host cannot commit over changes that matter");
+          assert.equal((await call(hostToken, "resume.commit", { checkId: s.result.item.id }, "h1c")).error.code, "not_found", "a host that runs no attempt of the task does not reach its check (card L04c review)");
           assert.equal((await call(ann, "resume.approve", { taskId: task }, "a2")).error.code, "forbidden");
           // The owner can ask what waits for them and finds the held resume with what changed; an agent does not.
           const needs = await call(boot.token, "status.ask", { request: { kind: "needs_you" } });
@@ -153,7 +153,9 @@ for (const store of stores) {
           // Approving is the owner's decision even when nothing held the check.
           assert.equal((await call(hostToken, "resume.approve", { taskId: task }, "h1a")).error.code, "forbidden");
           assert.equal((await call(ann, "resume.approve", { taskId: task }, "a3")).error.code, "forbidden");
-          assert.equal((await call(hostToken, "resume.commit", { checkId: s.result.item.id }, "h2")).result.item.phase, "done");
+          // A host that runs no attempt of the task does not reach its check (card L04c review); the agent that may work on it commits it.
+          assert.equal((await call(hostToken, "resume.commit", { checkId: s.result.item.id }, "h2")).error.code, "not_found");
+          assert.equal((await call(ann, "resume.commit", { checkId: s.result.item.id }, "a5")).result.item.phase, "done");
         }
       } finally { await c.close(); await db.close(); }
     });
