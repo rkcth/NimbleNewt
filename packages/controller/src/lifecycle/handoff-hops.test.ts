@@ -5,7 +5,7 @@ import { AssignmentService } from "../domain/assignments.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, PauseService, StopService, controllerHandoffSources, type StopPorts } from "./index.js";
+import { CUT_MARKER, HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, PauseService, StopService, controllerHandoffSources, type StopPorts } from "./index.js";
 
 /**
  * Card C07h: a task passed A to B to A about 50 times. At every hop the test records what the next agent is given (the package: its size by section, and what survives in it) using the real hand-off
@@ -71,7 +71,8 @@ const continuation = (hop: number) => ({
   nonCheckpointableTools: [],
 });
 
-interface Hop { readonly hop: number; readonly sizes: Record<string, number>; readonly total: number; readonly sections: Record<string, string> }
+/** What one hop gave the next agent: the package, and (card C07j) what each cut section's marker leads to when read back, beside what the source said before any cut. */
+interface Hop { readonly hop: number; readonly sizes: Record<string, number>; readonly total: number; readonly sections: Record<string, string>; readonly raw: Record<string, string>; readonly archives: Record<string, string> }
 
 for (const backend of backends) {
   const simulate = async (): Promise<Hop[]> => {
@@ -120,7 +121,17 @@ for (const backend of backends) {
         assert.equal(now?.owner?.id, to.id, `hop ${hop}: the task is with the one it was handed to`);
         const sections = { ...(done.package?.sections ?? {}) };
         const sizes = Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, v.length]));
-        hops.push({ hop, sizes, total: Object.values(sizes).reduce((s, x) => s + x, 0), sections });
+        // What the source gives for this hop before any cut (the continuation is the same until the next hop), and every archive a marker names, read back part by part as a reader would.
+        const raw = { ...(await sources.collect({ taskId: task, from: to === b ? a : b, to })).sections };
+        const archives: Record<string, string> = {};
+        for (const text of Object.values(sections)) {
+          const m = CUT_MARKER.exec(text);
+          if (m === null) continue;
+          let whole = ""; let parts = 1;
+          for (let part = 0; part < parts; part++) { const got = await handoffs.archive(mgr, { archiveId: m[3]!, part }); assert.ok(got !== undefined, `hop ${hop}: the archive ${m[3]} a marker names cannot be read`); whole += got.text; parts = got.parts; }
+          archives[m[3]!] = whole;
+        }
+        hops.push({ hop, sizes, total: Object.values(sizes).reduce((s, x) => s + x, 0), sections, raw, archives });
       }
       return hops;
     } finally { await world.close(); }
@@ -131,8 +142,10 @@ for (const backend of backends) {
   const run = (): Promise<Hop[]> => (cached ??= simulate());
   const mean = (xs: readonly number[]): number => xs.reduce((s, x) => s + x, 0) / xs.length;
   const everything = (h: Hop): string => Object.values(h.sections).join("\n");
-  /** An item is kept if its text is there whole in the package. When C07j adds cut markers with archives this must also accept an item named by a marker whose archive reads back. */
-  const kept = (h: Hop, item: string): boolean => everything(h).includes(item);
+  /** An item is kept if its text is there whole in the package, or in the original of a section a marker says was cut, read back through the archive the marker names (card C07j). */
+  const kept = (h: Hop, item: string): boolean => everything(h).includes(item) || Object.values(h.archives).some((x) => x.includes(item));
+  /** Strictly in what the next agent is shown, not only in an archive. */
+  const shown = (h: Hop, item: string): boolean => everything(h).includes(item);
 
   test(`${backend.name}: 50 hand-offs: every package has only the fixed sections, each inside the section limit`, async () => {
     const hops = await run();
@@ -156,21 +169,37 @@ for (const backend of backends) {
     }
   });
 
-  test(`${backend.name}: 50 hand-offs: the most recent diagnosis is in every package`, { todo: "C07j: a hand-off section is cut at its tail with a plain slice, so once decisions pile up the newest ones are the ones lost" }, async () => {
-    for (const h of await run()) { const id = latestDiagnosis(h.hop); assert.ok(kept(h, id), `hop ${h.hop}: the most recent diagnosis (${id}) was cut`); assert.match(desk.get(id) ?? "", new RegExp(`^LATEST-DIAGNOSIS-${h.hop}:`), "the reference does not lead to this hop's diagnosis"); }
+  test(`${backend.name}: 50 hand-offs: the most recent diagnosis is in every package`, async () => {
+    for (const h of await run()) { const id = latestDiagnosis(h.hop); assert.ok(shown(h, id), `hop ${h.hop}: the most recent diagnosis (${id}) was cut`); assert.match(desk.get(id) ?? "", new RegExp(`^LATEST-DIAGNOSIS-${h.hop}:`), "the reference does not lead to this hop's diagnosis"); }
   });
 
-  // Holds today only because the cut keeps the head of a section; the day a section is summarised or cut from the front, this is the check that must still pass.
+  // Since card C07j a cut keeps the newest entries, so the early ones are found through the marker's archive: the check reads it back, as the next agent would.
   test(`${backend.name}: 50 hand-offs: the seeded early decision and early failure are still found after the last hop`, async () => {
     const last = (await run())[HOPS - 1]!;
     assert.ok(kept(last, EARLY_DECISION) && /SEEDED-EARLY-DECISION/.test(desk.get(EARLY_DECISION) ?? ""), "the seeded early decision cannot be found again by its reference");
     assert.ok(kept(last, EARLY_FAILURE) && /SEEDED-EARLY-FAILURE/.test(desk.get(EARLY_FAILURE) ?? ""), "the seeded early failure detail cannot be found again by its reference");
   });
 
-  test(`${backend.name}: 50 hand-offs: a section that was cut says so and names where the original can be read`, { todo: "C07j: lifecycle/handoff.ts:492 cuts a section with a plain slice, no marker and no archive" }, async () => {
-    const cutHops = (await run()).filter((h) => Object.values(h.sizes).some((s) => s >= HANDOFF_LIMITS.section));
+  test(`${backend.name}: 50 hand-offs: a section that was cut says so and names where the original can be read`, async () => {
+    const hops = await run();
+    // Whether a section had to be cut is judged from what the source gave, not from the package (a cut section under its marker is shorter than the limit).
+    const cutHops = hops.filter((h) => Object.values(h.raw).some((s) => s.length > HANDOFF_LIMITS.section));
     assert.ok(cutHops.length > 0, "the simulation never reached the limit, so it proves nothing about cuts");
-    for (const h of cutHops) for (const [name, text] of Object.entries(h.sections)) if (text.length >= HANDOFF_LIMITS.section) assert.match(text, /\[cut: \d+ of \d+ entries, archive \S+\]/, `hop ${h.hop}: ${name} was cut with no marker`);
+    for (const h of hops) {
+      for (const [name, text] of Object.entries(h.sections)) {
+        const raw = h.raw[name] ?? "";
+        if (raw.length <= HANDOFF_LIMITS.section) { assert.equal(text, raw, `hop ${h.hop}: ${name} fits and is given whole`); continue; }
+        const m = /^\[cut: (\d+) of (\d+) entries, archive (\S+)\]/.exec(text);
+        assert.ok(m !== null, `hop ${h.hop}: ${name} was cut with no marker`);
+        const lines = raw.split("\n");
+        assert.equal(Number(m[2]), lines.length, `hop ${h.hop}: the marker counts the entries of the original`);
+        assert.equal(Number(m[1]), lines.length - (text.split("\n").length - 1), `hop ${h.hop}: the marker counts what was left out`);
+        assert.equal(h.archives[m[3]!], raw, `hop ${h.hop}: the archive of ${name} reads back the original whole`);
+        // Every line under the marker is an entry of the original, in its order.
+        let at = 0;
+        for (const line of text.split("\n").slice(1)) { const i = lines.indexOf(line, at); assert.ok(i >= at, `hop ${h.hop}: ${JSON.stringify(line)} is not an entry of the original, in order`); at = i + 1; }
+      }
+    }
   });
 
   test(`${backend.name}: 50 hand-offs: the average package size of the last 10 hops is no more than 5 percent above the first 10`, { todo: "C07k: lifecycle/handoff-sources.ts:48-49 lists every decision and nothing summarises the decisions, so the package grows with every hand-off until it reaches the section limit" }, async () => {

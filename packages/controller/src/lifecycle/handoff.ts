@@ -9,6 +9,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import { cutSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
 import type { PauseScope, PauseService } from "./pause.js";
 import type { StopService } from "./stop.js";
 
@@ -62,7 +63,11 @@ export interface TaskHandoffBody {
   /** A takeover ends the prepared hand-off it replaces; recorded so a restart finishes that too. */
   readonly replaces?: string;
   readonly stopIntentId?: string;
-  readonly package?: { readonly collectedAt: string; readonly sections: Readonly<Record<string, string>>; readonly missing: readonly string[]; readonly ready: boolean };
+  readonly package?: {
+    readonly collectedAt: string; readonly sections: Readonly<Record<string, string>>; readonly missing: readonly string[]; readonly ready: boolean;
+    /** The sections cut to fit (card C07j): each shows a marker naming `archiveId`, where the whole section is kept, readable through `archive`. */
+    readonly cuts?: readonly HandoffCut[];
+  };
   readonly blocked?: { readonly reason: string; readonly choices: readonly ("wait" | "force-takeover" | "cancel")[] } | undefined;
   /** Set when the package was handed over with required sections missing. */
   readonly acceptedGaps?: { readonly by: string; readonly missing: readonly string[]; readonly at: string };
@@ -87,9 +92,26 @@ export interface TaskHandoffBody {
   readonly history: readonly { readonly phase: HandoffPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
-export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30, reassign: 50 } as const;
+/** A section cut to fit: `left` of its `total` entries were left out or shortened; the whole section (`chars` characters) is in the archive `archiveId`. */
+export interface HandoffCut { readonly section: string; readonly archiveId: string; readonly left: number; readonly total: number; readonly chars: number; readonly archiveTruncated?: boolean }
+
+/** A section's original as archived when it was cut (card C07j), one part of it per read. */
+export interface HandoffArchive {
+  readonly archiveId: string; readonly handoffId: string; readonly taskId: string; readonly section: string;
+  /** Entries (lines) and characters of the whole section; `parts` reads cover it, `text` is part `part`. */
+  readonly entries: number; readonly chars: number; readonly part: number; readonly parts: number; readonly text: string;
+  /** Set only when the section was longer than the archive keeps (`HANDOFF_LIMITS.archiveChars`): the parts then hold its first `archiveChars` characters. */
+  readonly truncated?: boolean;
+}
+
+export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30, reassign: 50, marks: 20, mark: 200, archivePart: 40_000, archiveChars: 1_000_000 } as const;
 const KIND = "handoff";
 const ACTIVE = "handoff-active";
+/** The original of a cut section: the first part (with what it is) and, for a long one, further parts. */
+const ARCHIVE = "handoff-archive";
+/** The owner's marks for a task: entries holding one of them are kept when a section of its hand-off is cut. */
+const MARKS = "handoff-marks";
+const ARCHIVE_ID = /^hnd-[a-z2-7]{20}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
   const out = text(value, field, { min: 1, max: HANDOFF_LIMITS.reason, multiline: true });
@@ -276,7 +298,7 @@ export class HandoffService {
         if (b.replaces !== undefined) await this.#update(b.replaces, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "replaced by a forced takeover") }), LIVE);
         // Force Stop is repeatable under this hand-off's own command ID, so a crash anywhere here is finished by the next pass.
         const stopped = await this.#stops.force(by, { commandId: `${id}-force`, scope: { kind: "task", id: b.taskId }, reason: `takeover: ${b.reason}`.slice(0, 500) });
-        const collected = await this.#collect(b.taskId, b.from, b.to);
+        const collected = await this.#collect(id, b);
         await this.#update(id, (x) => ({
           ...x, stopIntentId: stopped.intentId, package: collected, phase: "transferring",
           exception: { by: by.id, reason: x.reason, at: this.#runner.now(), missingCleanup: collected.missing, uncertainEffects: stopped.outcome.unresolved.slice(0, 50) },
@@ -291,7 +313,7 @@ export class HandoffService {
         if (stop.phase === "blocked") { await this.#block(id, by.id, `the suspension is blocked: ${stop.blocked?.reason ?? "preparation did not finish"}`, ["preparing"]); continue; }
         if (stop.phase === "recovery-required") { await this.#block(id, by.id, "the suspension needs recovery; the task state is uncertain", ["preparing"]); continue; }
         if (stop.phase !== "done") return view<TaskHandoffBody>((await this.#get(id)));
-        const collected = await this.#collect(b.taskId, b.from, b.to);
+        const collected = await this.#collect(id, b);
         await this.#update(id, (x) => ({ ...x, phase: "ready", package: collected, history: this.#push(x, "ready", by.id, collected.missing.length === 0 ? "package ready" : `package incomplete: missing ${collected.missing.join(", ")}`) }), ["preparing"]);
         continue;
       }
@@ -395,6 +417,88 @@ export class HandoffService {
     return view<TaskHandoffBody>(found);
   }
 
+  /**
+   * The whole of a section that was cut to fit (card C07j), by the archive its marker names, one part at a time (`part`, from 0; the answer says how many there are). Readable by the owner, by whoever may
+   * control the task, and by the hand-off's sender and recipient (a credential scoped to another task cannot). Anyone else, or an archive that does not exist, reads as undefined.
+   */
+  async archive(by: Principal, query: { archiveId: string; part?: number }): Promise<HandoffArchive | undefined> {
+    onlyKnown(query, ["archiveId", "part"]);
+    const archiveId = typeof query.archiveId === "string" && ARCHIVE_ID.test(query.archiveId) ? query.archiveId : invalid("archiveId", "is not an archive ID (the cut marker names it: hnd- and 20 letters or digits)");
+    const part = query.part ?? 0;
+    if (!Number.isInteger(part) || part < 0) invalid("part", "must be a whole number from 0");
+    const head = (await this.#runner.get(ARCHIVE, archiveId))?.body as unknown as { taskId: string; handoffId: string; section: string; digest: string; entries: number; chars: number; part: number; parts: number; text: string; truncated?: boolean } | undefined;
+    if (head === undefined || head.part !== 0) return undefined;
+    const h = (await this.#runner.get(KIND, head.handoffId))?.body as unknown as TaskHandoffBody | undefined;
+    if (h === undefined || !(await this.#mayReadArchive(by, h))) return undefined;
+    if (part >= head.parts) invalid("part", `this archive has ${head.parts} part${head.parts === 1 ? "" : "s"} (0 to ${head.parts - 1})`);
+    const text = part === 0 ? head.text : ((await this.#runner.get(ARCHIVE, derivedId("hnd", `archive\0${head.handoffId}\0${head.section}\0${head.digest}\0${part}`)))?.body as unknown as { text?: string } | undefined)?.text;
+    if (typeof text !== "string") throw new DomainError("unavailable", `part ${part} of archive ${archiveId} cannot be read`);
+    return { archiveId, handoffId: head.handoffId, taskId: head.taskId, section: head.section, entries: head.entries, chars: head.chars, part, parts: head.parts, text, ...(head.truncated === true ? { truncated: true } : {}) };
+  }
+
+  async #mayReadArchive(by: Principal, h: TaskHandoffBody): Promise<boolean> {
+    if (by.kind === "owner") return true;
+    // The sender and the recipient wrote and are given the package; a credential scoped to a task reads only that task's.
+    const party = by.id === `agent:${h.from.id}` || by.id === `agent:${h.to.id}`;
+    if (party && (by.taskScope === undefined || by.taskScope.taskId === h.taskId)) return true;
+    try { await this.#mayControl(by, h.taskId); return true; } catch (error) { if (error instanceof DomainError && error.code === "not_found") return false; throw error; }
+  }
+
+  /** The owner's marks for a task's hand-offs: an entry holding one of them is kept when a section is cut (card C07j). Readable by whoever may control the task. */
+  async marks(by: Principal, query: { taskId: string }): Promise<{ taskId: string; marks: readonly string[]; revision: number }> {
+    onlyKnown(query, ["taskId"]);
+    const taskId = checkTaskId(query.taskId);
+    await this.#mayControl(by, taskId);
+    const ref = HandoffService.#marksRef(taskId);
+    const found = await this.#runner.get(ref.kind, ref.id);
+    return { taskId, marks: await this.#marks(taskId), revision: found?.revision ?? 0 };
+  }
+
+  /**
+   * The owner marks what a task's hand-offs must keep when a section is cut (card C07j): `add` names words or record IDs (an entry holding one, in any case, is kept before the most recent ones), `remove`
+   * takes marks off by their words. Owner only; at most `HANDOFF_LIMITS.marks` marks of 3 to `HANDOFF_LIMITS.mark` characters each, one line each, no credentials. It applies from the next package collected.
+   */
+  async mark(by: Principal, command: NoActor & { taskId: string; add?: unknown; remove?: unknown }): Promise<{ taskId: string; marks: readonly string[]; revision: number; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "add", "remove"]);
+    if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner marks what a task's hand-offs keep");
+    const taskId = checkTaskId(command.taskId);
+    await this.#pauses.authorizeControl(by, { kind: "task", id: taskId });
+    const list = (value: unknown, field: string): string[] => {
+      if (value === undefined) return [];
+      if (!Array.isArray(value) || value.length > HANDOFF_LIMITS.marks) return invalid(field, `must be a list of at most ${HANDOFF_LIMITS.marks} marks`);
+      return value.map((v, i) => {
+        const t = text(v, `${field}[${i}]`, { min: 3, max: HANDOFF_LIMITS.mark }).trim();
+        if (t.length < 3) invalid(`${field}[${i}]`, "must be at least 3 characters besides spaces");
+        return redactText(t) !== t ? invalid(`${field}[${i}]`, "looks like a credential or key; those are not recorded") : t;
+      });
+    };
+    const add = list(command.add, "add"); const remove = list(command.remove, "remove");
+    if (add.length === 0 && remove.length === 0) invalid("add", "name at least one mark to add or remove");
+    const lower = (x: string): string => x.toLowerCase();
+    const ref = HandoffService.#marksRef(taskId);
+    // Two changes at once meet a revision check; the loser reads the marks again and applies its change to them.
+    const apply = () => this.#runner.command("handoff.mark", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { taskId, add, remove },
+      build: async () => {
+        const old = await this.#runner.get(ref.kind, ref.id);
+        const current = Array.isArray((old?.body as { marks?: unknown } | undefined)?.marks) ? ((old!.body as { marks: string[] }).marks) : [];
+        const unknown = remove.filter((r) => !current.some((m) => lower(m) === lower(r)));
+        if (unknown.length > 0) invalid("remove", `${unknown.map((u) => JSON.stringify(u)).join(", ")} ${unknown.length === 1 ? "is not a mark" : "are not marks"} of this task; its marks are ${current.length === 0 ? "none" : current.map((m) => JSON.stringify(m)).join(", ")}`);
+        const next = current.filter((m) => !remove.some((r) => lower(r) === lower(m)));
+        for (const a of add) if (!next.some((m) => lower(m) === lower(a))) next.push(a);
+        if (next.length > HANDOFF_LIMITS.marks) invalid("add", `a task keeps at most ${HANDOFF_LIMITS.marks} marks; remove some first`);
+        const body = clean({ taskId, marks: next, by: by.id, at: this.#runner.now() });
+        return { ref, creates: old === undefined, changes: [old === undefined ? { type: "create" as const, ref, body } : { type: "update" as const, ref, expectedRevision: old.revision, body }], detail: { taskId, marks: next.length } };
+      },
+    }));
+    let run: Awaited<ReturnType<typeof apply>>;
+    for (let attempt = 1; ; attempt++) {
+      try { run = await apply(); break; } catch (error) { if (!(error instanceof DomainError) || error.code !== "stale_revision" || attempt >= 6) throw error; }
+    }
+    const now = await this.marks(by, { taskId });
+    return { ...now, revision: run.revision, replayed: run.replayed };
+  }
+
   // ---- internals -----------------------------------------------------------------------------------------------------------
 
   async #mayControl(by: Principal, taskId: string): Promise<void> {
@@ -482,17 +586,65 @@ export class HandoffService {
     return { assignment, from: assignment.owner };
   }
 
-  async #collect(taskId: string, from: Owner, to: Owner): Promise<NonNullable<TaskHandoffBody["package"]>> {
+  /**
+   * The package. Only the named sections travel, with credentials removed; anything else a source returned is dropped. A section over the limit is never cut silently (card C07j): its original is archived
+   * first, then it keeps the entries the owner marked and the most recent ones, under a marker naming the archive. A line that reads like a marker is quoted, so the only marker is the controller's.
+   */
+  async #collect(handoffId: string, b: Pick<TaskHandoffBody, "taskId" | "projectId" | "from" | "to">): Promise<NonNullable<TaskHandoffBody["package"]>> {
     let got: Awaited<ReturnType<HandoffSources["collect"]>>;
-    try { got = await this.#sources.collect({ taskId, from, to }); } catch { got = { sections: {} }; }
-    // Only the named sections travel, cut to size and with credentials removed; anything else a source returned is dropped.
+    try { got = await this.#sources.collect({ taskId: b.taskId, from: b.from, to: b.to }); } catch { got = { sections: {} }; }
     const sections: Record<string, string> = {};
+    const cuts: HandoffCut[] = [];
+    let marks: readonly string[] | undefined;
     for (const name of HANDOFF_SECTIONS) {
       const value = got.sections[name];
-      if (typeof value === "string" && value.trim().length > 0) sections[name] = redactText(value).slice(0, HANDOFF_LIMITS.section);
+      if (typeof value !== "string" || value.trim().length === 0) continue;
+      // Redacted whole, before any cut, so a credential is never split into pieces the redaction would not know.
+      const original = wellFormed(redactText(value));
+      const shown = original.split("\n").map(neutralise).join("\n");
+      if (shown.length <= HANDOFF_LIMITS.section) { sections[name] = shown; continue; }
+      marks ??= await this.#marks(b.taskId);
+      const archived = await this.#archive(handoffId, b, name, original);
+      const cut = cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId);
+      sections[name] = cut.text;
+      cuts.push({ section: name, archiveId: archived.archiveId, left: cut.cut?.left ?? 0, total: cut.cut?.total ?? 0, chars: original.length, ...(archived.truncated ? { archiveTruncated: true } : {}) });
     }
     const missing = REQUIRED_SECTIONS.filter((s) => sections[s] === undefined);
-    return { collectedAt: this.#runner.now(), sections, missing, ready: missing.length === 0 };
+    return { collectedAt: this.#runner.now(), sections, missing, ready: missing.length === 0, ...(cuts.length === 0 ? {} : { cuts }) };
+  }
+
+  /**
+   * Keeps the whole of a section before it is cut, in parts that each fit a record, named by the hand-off, the section and its content: collecting the same package again (after a crash) finds the same
+   * archive. Written before the cut package is, so a package never names an archive that does not exist.
+   */
+  async #archive(handoffId: string, b: Pick<TaskHandoffBody, "taskId" | "projectId">, section: string, original: string): Promise<{ archiveId: string; truncated: boolean }> {
+    const digest = createHash("sha256").update(original).digest("hex");
+    const base = `archive\0${handoffId}\0${section}\0${digest}`;
+    const head: AggregateRef = { kind: ARCHIVE, id: derivedId("hnd", base) };
+    const kept = safeSlice(original, HANDOFF_LIMITS.archiveChars);
+    const truncated = kept.length < original.length;
+    if ((await this.#runner.get(head.kind, head.id)) !== undefined) return { archiveId: head.id, truncated };
+    // Each part ends on a whole character (never between the halves of a surrogate pair), so every part is valid text in every store and the parts joined are the original.
+    const parts: string[] = [];
+    for (let at = 0; at < kept.length || parts.length === 0;) { const piece = safeSlice(kept.slice(at, at + HANDOFF_LIMITS.archivePart), HANDOFF_LIMITS.archivePart); parts.push(piece); at += piece.length; }
+    const entries = original.split("\n").length;
+    const changes = parts.map((text, i) => ({
+      type: "create" as const, ref: i === 0 ? head : { kind: ARCHIVE, id: derivedId("hnd", `${base}\0${i}`) },
+      body: clean(i === 0 ? { taskId: b.taskId, ...(b.projectId === undefined ? {} : { projectId: b.projectId }), handoffId, section, digest, entries, chars: original.length, part: 0, parts: parts.length, text, ...(truncated ? { truncated: true } : {}) } : { head: head.id, taskId: b.taskId, part: i, text }),
+    }));
+    await this.#runner.command("handoff.archive", { commandId: `hnd-arc-${head.id.slice(4)}`, actor: "system" }, async () => ({
+      payload: { handoffId, section, digest },
+      build: async () => ({ ref: head, creates: true, changes, detail: { section, parts: parts.length } }),
+    }));
+    return { archiveId: head.id, truncated };
+  }
+
+  static #marksRef = (taskId: string): AggregateRef => ({ kind: MARKS, id: derivedId("hnd", `marks\0${taskId}`) });
+
+  async #marks(taskId: string): Promise<readonly string[]> {
+    const ref = HandoffService.#marksRef(taskId);
+    const found = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { marks?: unknown } | undefined;
+    return Array.isArray(found?.marks) ? found.marks.filter((m): m is string => typeof m === "string") : [];
   }
 
   async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean, replaces?: string, extra: { returnAt?: string; autoComplete?: boolean; returnOf?: string } = {}): Promise<void> {
