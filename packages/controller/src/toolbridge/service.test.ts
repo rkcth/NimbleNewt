@@ -464,7 +464,7 @@ for (const backend of backends) {
     const seen: { state: unknown[]; messages: unknown[] } = { state: [], messages: [] };
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
-      state: { handle: async (token: unknown, raw: unknown) => { seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      state: { handle: async (token: unknown, raw: unknown) => { if ((raw as { args: { title?: string } }).args.title === "refused") return { v: 1, op: "x", ok: false, error: { code: "stale_revision", message: "x" } } as never; seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
       messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
       activity: async (step) => { steps.push(step); } });
     const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
@@ -473,6 +473,7 @@ for (const backend of backends) {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(order.credential, gateway, { op, callId, args });
       out["update"] = await send("task.update", { expectedRevision: 1, title: "New title", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "u1");
       out["update2"] = await send("task.update", { expectedRevision: 1, title: "New title" }, "u1");
+      out["update-refused"] = await send("task.update", { expectedRevision: 9, title: "refused" }, "u9");
       out["transition"] = await send("task.transition", { expectedRevision: 2, to: "done" }, "t1");
       out["get"] = await send("task.get", {}, "g1");
       out["message"] = await send("message.send", { to: "agent:ben", class: "informational", purpose: "fyi", text: "hello", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "m1");
@@ -483,11 +484,17 @@ for (const backend of backends) {
       const again = good(await send("desk.write", { kind: "note", title: "mine", body: "text", visibility: "shared", status: "accepted" }, "w1"));
       out["write-again"] = { ok: true, result: { same: w["id"] === again["id"], replayed: again["replayed"] as boolean } };
       out["read"] = await send("desk.read", { recordId: w["id"] as string }, "r1");
+      // The step is best effort: an activity record that fails never changes the answer of the write.
+      const failing = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async () => { throw new Error("activity down"); } });
+      out["failing"] = await failing.handle(order.credential, gateway, { op: "desk.write", callId: "w9", args: { kind: "note", title: "still", body: "written", visibility: "shared", status: "accepted" } });
+      failing.dispose();
       return { status: "completed", text: "x" };
     };
     await c.tick();
+    assert.equal(typeof good(out["failing"]!)["id"], "string", "a failing activity record does not change the answer");
     assert.equal(bad(out["update"]!).code, "invalid_command", "a task ID from the caller is not accepted");
     good(out["update2"]!); good(out["transition"]!); good(out["get"]!);
+    assert.equal(bad(out["update-refused"]!).code, "stale_revision", "a refusal answered by the API is passed on (and, below, is not a step)");
     assert.equal(bad(out["message"]!).code, "invalid_command");
     good(out["message2"]!);
     assert.equal(bad(out["artifact"]!).code, "invalid_command", "an artifact for a task the caller names is not accepted (the attempt's task is the one)");
