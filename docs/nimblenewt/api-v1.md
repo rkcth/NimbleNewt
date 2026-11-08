@@ -170,6 +170,33 @@ Result: `{ item }`: `revision`, `enabled`, `levels` (the owner's actions for lev
 
 Completion: finished when accepted (`completed: true`).
 
+#### `stall.concerns`
+
+The stall concerns (a task that looks stuck) of one state the caller may read: the owner all; others those of tasks whose assignment they may read or manage, the task's own owner, its supervisor, and the supervisor a concern climbed to while it can see the task. Oldest concern ID first.
+
+Arguments:
+
+- `state` (optional): suspected (the default), confirmed, dismissed or cleared
+- `taskId` (optional): only this task's
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`: each with `id`, `revision`, `taskId`, `projectId`, `kind`, `state`, `detail`, `route`, the holder it climbed to (`escalatedTo`, `escalationLevel`), the recovery steps taken (`recoverySteps`, `recoveryRung`, automatic ones marked `auto`) and any step in progress.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `stall.concern.get`
+
+One stall concern, if the caller may read it (see `stall.concerns`).
+
+Arguments:
+
+- `concernId`: the concern
+
+Result: `{ item }`, as in `stall.concerns`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.settings.get`
 
 How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.
@@ -2101,6 +2128,21 @@ Arguments:
 - `action`: nudge, rebrief, pause, reassign, stop or hand-to-owner
 - `text` (optional): the message, brief or reason (required except for hand-to-owner)
 - `to` (optional): agent:<name>, for reassign only
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `stall.decide`
+
+Answers a suspected stall concern: `confirm` (the task really is stuck) or `dismiss` (it is fine; the concern stays quiet for a while and reopens if the signal is still bad). Allowed for the owner, the supervisor it was routed to, its current holder and holders of `assignment.manage` (never the task's own owner). An answer stops the climb up the supervisor chain and the automatic recovery steps; it does not change the task or its assignment.
+
+Arguments:
+
+- `concernId`: the concern
+- `expectedRevision`: the revision you read
+- `decision`: confirm or dismiss
+- `reason`: why, in words
 
 Result: `{ id, revision, replayed }`.
 

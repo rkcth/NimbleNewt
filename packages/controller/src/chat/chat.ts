@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -520,7 +520,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
@@ -1264,6 +1264,11 @@ export class ChatService {
         // Never set: the operation takes 0.
         const item = await this.#get(token, "difficulty.profiles", {});
         return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("difficulty-profiles") };
+      }
+      case "concern": {
+        // A stuck agent's concern (card V02c): its revision now; a step or an answer of the same message is not predicted (a second one is refused as stale and asked again).
+        const item = typeof args["concernId"] === "string" ? await this.#get(token, "stall.concern.get", { concernId: args["concernId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such concern") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
       case "contract": {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "contract.get", { taskId: args["taskId"] }) : undefined;

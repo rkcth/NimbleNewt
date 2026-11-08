@@ -10,7 +10,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "concern";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -57,6 +57,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "replay.limits.enable": { verb: "Bound how much of a task's record one replay reads", mode: "apply" },
   "replay.limits.disable": { verb: "Remove the bounds on how much of a task's record one replay reads", mode: "apply" },
   "recovery.ladder.disable": { verb: "Stop supervisors taking recovery steps on a stuck agent", mode: "apply" },
+  // The owner's own recovery step on a stuck agent's concern (nudge, re-brief, pause, reassign, stop, hand to the owner) acts on work: shown first in every profile (card V02c). The concern's revision is read for the owner.
+  "recovery.step": { verb: "Take a recovery step on a stuck agent's concern (nudge, rebrief, pause, reassign to an agent, stop, or hand-to-owner)", mode: "propose", revision: "concern" },
+  // Answering a stuck agent's concern (confirm it is stuck, or dismiss it) changes no work and stops its climb and automatic steps: shown first in the strict profile only (card V02c).
+  "stall.decide": { verb: "Answer a stuck agent's concern: confirm it is stuck, or dismiss it", mode: "profile", revision: "concern" },
   "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
   // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
@@ -323,7 +327,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest"]);
+const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest", "concernId"]);
 
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
 export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
@@ -333,6 +337,8 @@ export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 /** Fixed choices and record references of one command only: `response` is one of three choices and `decisionId` is checked against the decisions waiting for the owner (card M02h). */
 export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "decisionId"]);
+/** A recovery step's `action` is one of six fixed rungs (and the step is always shown first); its `text` must still be the owner's own words (card V02c). */
+export const RECOVERY_STEP_EXEMPT: ReadonlySet<string> = new Set(["action"]);
 
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set(), alsoExempt: ReadonlySet<string> = new Set()): string | undefined {
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();

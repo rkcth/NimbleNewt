@@ -349,7 +349,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token), async (c) => {
       // Each climb of the supervisor ladder is told once (owner decision 2026-10-30, supervisor ladder): the id carries the concern, the level and the time it climbed, which are stored, so a retried notice is the same one. A supervisor is told by a notice on the task; the owner, at the top, by a needs-you item.
       const key = createHash("sha256").update(`${c.id}|${c.escalatedAt ?? ""}|${c.escalationLevel ?? 0}`).digest("hex").slice(0, 32);
-      const detail = `A ${c.kind} concern on a task has waited too long for its supervisor to decide: ${c.detail}`.slice(0, 200);
+      // A concern a recovery step handed to the owner says so (and whether the controller's automatic steps did it), not that it waited too long for a supervisor (card V02c).
+      const last = c.escalatedTo === "owner" ? c.recoverySteps?.at(-1) : undefined;
+      const handed = last !== undefined && last.action === "hand-to-owner" && last.skipped !== true && last.at === c.escalatedAt ? last : undefined;
+      const detail = (handed === undefined
+        ? `A ${c.kind} concern on a task has waited too long for its supervisor to decide: ${c.detail}`
+        : handed.auto === true ? `A ${c.kind} concern on a task was handed to you by the automatic recovery steps (${handed.by} did not answer in time): ${c.detail}` : `A ${c.kind} concern on a task was handed to you by ${handed.by}: ${c.detail}`).slice(0, 200);
       if (c.escalatedTo?.startsWith("agent:")) {
         try { await messages.noticeFromController({ commandId: `stall-esc-${key}`, taskId: c.taskId, to: c.escalatedTo, purpose: "A stuck agent's concern was passed up to you", text: `${detail} Concern ${c.id}, level ${c.escalationLevel ?? 1}. Look at it and confirm or dismiss it; if you do not decide in time it goes to your supervisor, and finally to the owner.` }); return; } catch (error) {
           // A supervisor who can no longer be told (it lost sight of the task since) must not hold the concern: the owner is told, and the reason is in the text.

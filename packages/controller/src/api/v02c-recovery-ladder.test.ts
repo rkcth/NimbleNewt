@@ -122,6 +122,76 @@ test("end to end with the real effects: a supervisor's steps nudge, pause and re
   }
 });
 
+test("the owner reaches stuck agents' concerns in free-form chat: lists them, takes a recovery step and answers one, with the revision read for it; supervisors see only theirs (card V02c review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-recovery-chat-"));
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [],
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    dispatch: { timer: new ManualTimer(), manual: true },
+  } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const names = { ann: "agt-aaaaaaaaaaaaaaaaaaaa", boss: "agt-cccccccccccccccccccc", other: "agt-dddddddddddddddddddd" };
+    for (const [k, n] of Object.entries(names)) await c.services.principals.enroll(rob, { commandId: `e-${k}`, kind: "agent", name: n, grants: [] });
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const task = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Build" })).id;
+    await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as", actor: rob.id, taskId: task, owner: { kind: "agent", id: names.ann } });
+    await c.services.grants.grant(rob, { commandId: "g-ann-read", grantee: `agent:${names.ann}`, action: "task.read", project, source: "direct", basis: "test" } as never);
+    await c.services.grants.grant(rob, { commandId: "g-boss-read", grantee: `agent:${names.boss}`, action: "assignment.read", project, source: "direct", basis: "test" } as never);
+    const generation = (await c.services.assignments.getAssignment(task))!.generation;
+    const id = `stl-${task.slice(5)}-${String(generation).padStart(10, "0")}-silent`;
+    const now = new Date().toISOString();
+    const body = { taskId: task, projectId: project, generation, kind: "silent", state: "suspected", detail: "no news", difficulty: "medium", route: { to: { kind: "agent", id: names.boss }, via: "supervisor", reason: "supervisor" }, firstSeenAt: now, lastChangedAt: now, reopened: 0, stalledAgent: names.ann };
+    await c.storage.applyOperation({ operationId: "mk", epoch: c.epoch, actor: "owner:rob", correlationId: "mk", at: now, changes: [{ type: "create", ref: { kind: "stall-concern", id }, body }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message?: string } }>;
+    // Read: the owner sees it; an agent who may read the task's assignment too; an agent with no part in it does not.
+    const listed = await call(boot.token, "stall.concerns", {});
+    assert.deepEqual(listed.result.items.map((x: any) => [x.id, x.state]), [[id, "suspected"]], JSON.stringify(listed));
+    const boss = (await c.services.principals.issueCredential(rob, `agent:${names.boss}`)).token;
+    const other = (await c.services.principals.issueCredential(rob, `agent:${names.other}`)).token;
+    assert.equal((await call(boss, "stall.concerns", { taskId: task })).result.items.length, 1);
+    assert.deepEqual((await call(other, "stall.concerns", {})).result.items, []);
+    assert.equal((await call(other, "stall.concern.get", { concernId: id })).error?.code, "not_found");
+    assert.equal((await call(boot.token, "stall.concerns", { state: "stuck" })).error?.code, "invalid_command");
+    // The owner says it in their own words; the revision is read for them; a step on work is shown first and made on the owner's word.
+    const turn = async (mid: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: mid, text })).outcomes as any[]; };
+    const nudgeText = "give Ann a nudge about that stuck build: How is the build going? Tell me what blocks you.";
+    const shown = await turn("m1", nudgeText, [{ kind: "command", op: "recovery.step", args: { concernId: id, action: "nudge", text: "How is the build going? Tell me what blocks you." }, evidence: nudgeText, basis: "owner" }]);
+    assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    // A rung named by its fixed choice (hand-to-owner) needs no text and is shown first like any step.
+    const handText = "I will take that stuck concern over myself";
+    assert.equal((await turn("m00", handText, [{ kind: "command", op: "recovery.step", args: { concernId: id, action: "hand-to-owner" }, evidence: handText, basis: "owner" }]))[0]!.status, "proposed");
+    // Words the owner never said are not sent in the owner's name.
+    const madeUp = await turn("m0", "nudge Ann", [{ kind: "command", op: "recovery.step", args: { concernId: id, action: "nudge", text: "You are fired." }, evidence: "nudge Ann", basis: "owner" }]);
+    assert.equal(madeUp[0]!.status, "refused", JSON.stringify(madeUp));
+    assert.equal(((await call(boot.token, "stall.concern.get", { concernId: id })).result.item.recoverySteps ?? []).length, 0, "nothing until the owner says so");
+    const applied = await turn("m2", "yes, send it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "send it", basis: "owner" }]);
+    assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
+    const stepped = (await call(boot.token, "stall.concern.get", { concernId: id })).result.item;
+    assert.deepEqual(stepped.recoverySteps.map((x: any) => [x.action, x.by]), [["nudge", rob.id]]);
+    // The owner answers it: dismissed (shown first where the profile asks for it).
+    const dismissText = "Ann is fine, dismiss that stuck-agent concern";
+    let answer = await turn("m3", dismissText, [{ kind: "command", op: "stall.decide", args: { concernId: id, decision: "dismiss", reason: "Ann is fine" }, evidence: dismissText, basis: "owner" }]);
+    if (answer[0]!.status === "proposed") answer = await turn("m4", "yes, dismiss it", [{ kind: "apply_proposal", proposalId: answer[0]!.proposalId, evidence: "dismiss it", basis: "owner" }]);
+    assert.equal(answer[0]!.status, "applied", JSON.stringify(answer));
+    assert.equal((await call(boot.token, "stall.concern.get", { concernId: id })).result.item.state, "dismissed");
+    assert.equal((await call(boot.token, "stall.concerns", { state: "dismissed" })).result.items.length, 1);
+    // The interpreter is told about both, with their arguments.
+    let system = "";
+    const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
+    await m.interpret({ text: "hello", quoted: [], focus: {}, proposals: [] } as never);
+    assert.match(system, /recovery\.step\([^)]*concernId[^)]*action[^)]*\)/);
+    assert.match(system, /stall\.decide\([^)]*concernId[^)]*decision[^)]*\)/);
+    assert.equal(CHAT_OPS["recovery.step"]?.mode, "propose");
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("automatic recovery steps through the composed controller: off by default; the owner switches them on in free-form chat (shown first); the dispatcher's tick, on the controller's clock, takes one rung per interval in the supervisor's name with the real effects, records each, passes reassign and stops at the owner (card V02c)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-recovery-auto-"));
   let clock = Date.parse("2026-11-02T08:00:00.000Z");
@@ -198,6 +268,11 @@ test("automatic recovery steps through the composed controller: off by default; 
     assert.equal(held.escalatedTo, "owner");
     await c.dispatch.dispatcher.tick();
     assert.ok((await concern()).notifiedAt !== undefined, "the owner was told");
+    // Truthfully: the automatic steps handed it over, the supervisor did not answer; it did not "wait too long for its supervisor to decide".
+    const told = (await c.storage.listAggregates("notification-item", { limit: 100 })).map((n) => n.body as unknown as { ref: { kind: string; id: string }; detail?: string; level?: string }).filter((n) => n.ref.kind === "task" && n.ref.id === task);
+    assert.equal(told.length, 1, JSON.stringify(told));
+    assert.match(told[0]!.detail!, new RegExp(`handed to you by the automatic recovery steps \\(agent:${boss} did not answer in time\\)`));
+    assert.doesNotMatch(told[0]!.detail!, /waited too long/);
     // Nothing more: the owner holds it.
     clock += 24 * 3_600_000;
     await c.dispatch.dispatcher.tick();
