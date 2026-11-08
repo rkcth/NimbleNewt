@@ -2188,12 +2188,14 @@
           "2ec1df5",
           "4524973",
           "d6cc1ed",
-          "c0ab06f"
+          "c0ab06f",
+          "543ec4b",
+          "04d9b47"
         ],
         "ci_runs": [],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "A hand-off section over the limit keeps the entries holding the owner's marks and then the newest ones under a first-line marker [cut: N of M entries, archive <id>], never ending inside a surrogate pair, with agent lines that imitate a marker quoted; the redacted original is archived first, in parts, and read back through handoff.archive.read by the owner, the sender, the recipient after the transfer and task controllers (drafts and responsibilities as screen allows). The owner sets marks by chat or handoff.marks.change; the handoff status shows cuts and marks. The 50-hand-off latest-diagnosis and cut-marker checks lost their todo on all four backends. Left: retention of archives and marks, package growth (C07k), first call and resume note (C07l). Green exhaustive run pending (to be added to ci_runs)."
+        "note": "A hand-off section over the limit keeps the entries holding the owner's marks and then the newest ones under a first-line marker [cut: N of M entries, archive <id>], never ending inside a surrogate pair, with agent lines that imitate a marker quoted; the redacted original is archived first, in parts, and read back through handoff.archive.read by the owner, the sender, the recipient after the transfer and task controllers (drafts and responsibilities as screen allows). The owner sets marks by chat or handoff.marks.change; the handoff status shows cuts and marks, and the handoff_archive status reads a cut section by chat; the recipient reads its package after the transfer. The 50-hand-off latest-diagnosis and cut-marker checks lost their todo on all four backends. Left: retention of archives and marks, package growth (C07k), first call and resume note (C07l). Green exhaustive run pending (to be added to ci_runs)."
       }
     },
     {
