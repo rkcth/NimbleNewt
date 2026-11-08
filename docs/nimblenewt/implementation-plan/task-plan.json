@@ -3816,12 +3816,28 @@
       ],
       "deliverable": "Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox, which has no network and talks to the controller over one channel; a narrow relay, its own replaceable component, makes the worker's model calls for it: it reaches only the model endpoints the routing table allows and adds the provider credentials itself (owner decision 2026-10-25)",
       "acceptance_and_verification": "A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux (the same test under Seatbelt and Windows Sandbox, on their CI cells, is card H12r); the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost; from inside the sandbox only the allowed model endpoints can be reached, through the relay, and any other destination fails; no provider key, and nothing but the task credential, is present in the worker process, its environment, its files or its output; the relay can be replaced without changing the worker, and a model stream is relayed as it arrives, not buffered whole; a sandbox-level narrowing and a widening of a running attempt are applied by the real launcher with a really narrower or wider recipe, the conversation context survives both, and the agent is told on a widening (carried from H12); (macOS and Windows split off to H12r on 2026-10-31: the Linux launcher, the worker process, the relay, the limits and the recipe changes are built and proven here; a launcher whose sandbox shows the host's own paths is supported by the host, but its run needs a Mac)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "f7f7de6b",
+          "a5eaabc6",
+          "f7c2593c",
+          "87374921",
+          "cf595b06",
+          "f0cbb882",
+          "a2200470",
+          "f4fa7f32"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The real bubblewrap launcher, the worker process running Pi with no network, the model relay that adds the provider key, the limits and narrow/widen recipe changes are built and proven on Linux; the macOS (Seatbelt) and Windows runs are H12r. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "H12c",
@@ -3962,7 +3978,7 @@
         "A03b"
       ],
       "deliverable": "Split from H12b (2026-10-31): the integration proofs of the worker process on macOS (Seatbelt, host paths) and on Windows (Windows Sandbox), which need those operating systems",
-      "acceptance_and_verification": "The same composed test that runs under bubblewrap (a stored conversation compacted once and admitted, a pause and an interrupt arriving mid-turn, no destination but the relay reachable, no provider key anywhere in the worker, reaping on stop and loss) runs on the macOS and Windows CI cells; the Seatbelt profile lets the worker process read the Node installation and the packages it loads and nothing else; the Windows launcher mounts the Node installation read-only and keeps its supervisor outside guest-writable staging; a recipe change (narrower and wider) is applied with a restart on both; a platform that cannot run the process says so and refuses instead of running unconfined",
+      "acceptance_and_verification": "The same composed test that runs under bubblewrap (a stored conversation compacted once and admitted, a pause and an interrupt arriving mid-turn, no destination but the relay reachable, no provider key anywhere in the worker, reaping on stop and loss) runs on the macOS and Windows CI cells, and so do the H12j process tests (reaping on completion, pause, stop and loss, and the provider-key scan; moved from H12j on 2026-11-08); the Seatbelt profile lets the worker process read the Node installation and the packages it loads and nothing else; the Windows launcher mounts the Node installation read-only and keeps its supervisor outside guest-writable staging; a recipe change (narrower and wider) is applied with a restart on both; a platform that cannot run the process says so and refuses instead of running unconfined",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -4062,12 +4078,27 @@
       ],
       "deliverable": "The runtime calls C07b admit at start and resumeDecision at resume, reports L01 PauseService.observe so a paused attempt shows as paused, and delivers U12 boundary reads (interrupt, advice) to the running attempt",
       "acceptance_and_verification": "A context over budget is compacted or refused at start; a paused attempt is reported paused only once its calls have settled; an interrupt message reaches only an eligible running attempt and never a paused one; tested with a message and a pause arriving mid-turn",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "775fcbbf",
+          "e1279ae7",
+          "0dc661b9",
+          "c9ff061d",
+          "cf595b06",
+          "f0cbb882",
+          "a2200470"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The runtime admits the first call (compacting once, else refusing with the blocker), declines to resume a stored conversation over the resume share, reports pausing and paused honestly and delivers interrupts and advice only at the right boundaries. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "H12g",
@@ -4156,14 +4187,26 @@
       "depends_on": [
         "H12b"
       ],
-      "deliverable": "The worker process is reaped when its attempt is paused, stopped or lost; a missed pin marker is recorded as lost; no provider key can appear in the worker's files, environment or output; the launcher is exercised on all six CI cells",
-      "acceptance_and_verification": "Pause, stop and loss each leave no worker process behind (tested with a real process); a pin marker that never arrived is recorded as lost, not as kept; a scan of the worker's home, scratch, environment, channel traffic and logs finds none of the provider keys the relay uses; the process tests run on Linux, macOS and Windows",
-      "status": "planned",
+      "deliverable": "The worker process is reaped when its attempt is paused, stopped or lost; a missed pin marker is recorded as lost; no provider key can appear in the worker's files, environment or output; the launcher is exercised on the Linux CI cells (macOS and Windows moved to H12r on 2026-11-08)",
+      "acceptance_and_verification": "Pause, stop and loss each leave no worker process behind (tested with a real process); a pin marker that never arrived is recorded as lost, not as kept; a scan of the worker's home, scratch, environment, channel traffic and logs finds none of the provider keys the relay uses; the process tests run on Linux (running them on macOS and Windows needs launchers that mount the Node installation, which is card H12r's work, and moved there on 2026-11-08)",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "f91be3a0",
+          "2c4ef1eb",
+          "1346e48f",
+          "f4fa7f32"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The worker-process gaps are closed on Linux; running the same process tests on macOS and Windows moved to H12r on 2026-11-08. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "H12k",
