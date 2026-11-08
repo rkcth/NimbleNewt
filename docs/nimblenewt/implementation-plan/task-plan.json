@@ -2867,6 +2867,37 @@
       ],
       "deliverable": "Split from L02c (2026-10-29): count local processes and child work in the inventory (uncooperative ones named, offered Force Stop), take the cleanup spend from the runtime",
       "acceptance_and_verification": "A process that ignores the request is listed and Force Stop offered; the cleanup spend is charged",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "133178e1",
+          "114f3ba8",
+          "e6264da7",
+          "81a1c260",
+          "2af37000",
+          "922237be"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Parts 1-3 built the Stop inventory contract, the ending of jobs and swarm children, the per-attempt cleanup charge ledger and its chat view. This closing part: the sandbox lists a run's real processes (Linux /proc, macOS descendants), the worker process itself only once asked to end, what the agent started while it runs; a close that cannot end the process reports it (ProcessNotEnded) instead of hanging, so the worker is not confirmed stopped and the Stop names it (uncooperative, Force Stop offered); Force Stop tells the hosts to kill what they hold (endLocalWork); winding the worker down is charged once as stop-cleanup compute. Tested end to end with a real bubblewrap worker that ignores the close. Left for L02e: swarm children of wider scopes, charge-window starvation, a task's view of a wider-scope Stop, chat name resolution for scopes, a remote worker's process report. Green exhaustive run pending (to be added to ci_runs)."
+      }
+    },
+    {
+      "id": "L02e",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish Stop: swarm children of wider scopes, charge-window starvation, the stop view through a wider scope",
+      "depends_on": [
+        "L02d"
+      ],
+      "deliverable": "Split from L02d (2026-11-08): L02d lists a sandbox's real processes, ends them (Force Stop kills what a close could not end) and charges winding them down as the cleanup's compute. Left: a Stop of an agent, team or the installation walks the swarm descendants of their tasks (today only a task's Stop does; `swarm.cancel` settles the rest); the stop-charge sweep's window is not starved by entries that stay only for an unfinished request (the first 2000 open entries all listing a blocked Stop keep later entries from being paid); a task's `stop_cleanup` view finds a Stop made through its agent, team, swarm parent or the installation; chat resolves an agent's or team's name for the scope form; a per-request cumulative cleanup total; a remote worker's own report of its processes (today one unknown item per live placement); a local worker whose close could not end its process is confirmed stopped once a later look finds its sandboxes empty (today it stays unconfirmed after Force Stop killed it, so its scratch is kept); a Stop or Force Stop made after such an attempt has finished still lists and reaches what its sandbox holds (today only attempts live or seen during that Stop are asked)",
+      "acceptance_and_verification": "A Stop of an agent ends its tasks' swarm children's work; 2000 settled entries listing a blocked Stop do not keep a later unpaid charge from being paid by the sweep; asking about a task stopped through its agent shows that Stop's cleanup; mutation check recorded",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -9514,7 +9545,8 @@
         "K01i",
         "F04l",
         "F04m",
-        "F04n"
+        "F04n",
+        "L02e"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

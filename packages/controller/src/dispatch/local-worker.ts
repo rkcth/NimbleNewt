@@ -17,6 +17,8 @@ export interface SandboxSession {
    * Optional: a sandbox that cannot list its processes leaves it out and nothing is claimed about them. `costMicros` and `computeMs` are running totals for the session.
    */
   work?(): Promise<{ readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[]; readonly costMicros?: number; readonly computeMs?: number }>;
+  /** Force Stop (card L02d): kills everything this confinement still holds, without asking first, and waits a moment for it to go. Optional: a sandbox that cannot leaves it out (its `close` is all there is). */
+  end?(): Promise<void>;
 }
 export interface SandboxPort {
   /** Opens the sandbox for a recipe. It refuses (throws) when this host has no confinement: nothing ever runs unconfined as a fallback. */
@@ -208,6 +210,18 @@ export class LocalWorker implements WorkerHost {
       if (said || entry.base.costMicros > 0 || entry.base.computeMs > 0) costs.push({ attemptId, costMicros: cost, computeMs: compute });
     }
     return { processes, costs, known };
+  }
+
+  /**
+   * Force Stop's last step on this host (card L02d): every sandbox session these attempts have had is told to kill what it still holds (`SandboxSession.end`), whether or not its close went through. A session that fails is
+   * reported after the others were told (the stop looks again afterwards and names what is left).
+   */
+  async endLocalWork(attemptIds: readonly string[]): Promise<void> {
+    const failures: string[] = [];
+    // All at once (review 3 of L02d): each session waits a moment for what it killed to go, so one after the other the Force Stop would wait that moment for every session of every attempt.
+    const sessions = attemptIds.slice(0, 500).flatMap((attemptId) => this.#sessions.get(attemptId)?.sessions ?? []).filter((s) => s.end !== undefined);
+    for (const r of await Promise.allSettled(sessions.map((s) => s.end!()))) if (r.status === "rejected") failures.push(String((r.reason as Error)?.message ?? r.reason).slice(0, 200));
+    if (failures.length > 0) throw new Error(`the sandbox could not end everything: ${failures.join("; ").slice(0, 500)}`);
   }
 
   /** Announces this host's capabilities (from its own facts) under its own credential, and beats once. */
@@ -422,7 +436,8 @@ export class LocalWorker implements WorkerHost {
         try { await done; restartFailed = false; } catch (error) { restartFailed = true; throw error; } finally { if (restarting === done) restarting = undefined; }
       },
       tell: async (text) => { await runtime!.tell?.(text); },
-      stop: async () => { stopped = true; await restarting?.catch(() => undefined); await runtime!.close().catch(() => undefined); await sandbox.close().catch(() => undefined); },
+      // A sandbox whose close fails (its process could not be ended, card L02d) makes the stop fail after everything was tried, so the dispatcher never takes the worker as confirmed gone; Stop lists what is left.
+      stop: async () => { stopped = true; await restarting?.catch(() => undefined); await runtime!.close().catch(() => undefined); await sandbox.close(); },
     };
   }
 }

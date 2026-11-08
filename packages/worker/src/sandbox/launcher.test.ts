@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
 import { SandboxError } from "./errors.js";
-import { SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
+import { groupKillSafe, SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
 import type { SandboxRecipe } from "./recipe.js";
 import { bubblewrapBackend } from "./linux.js";
 
@@ -53,6 +53,119 @@ describe("sandbox launcher (bubblewrap)", () => {
   };
   const sh = (script: string, r?: SandboxRecipe, limits?: { timeoutMs?: number; maxOutputBytes?: number }): Promise<RunResult> => run(["/bin/sh", "-c", script], r, limits);
   const ifUsable = (name: string, fn: () => Promise<void>): void => { test(name, async (t) => { if (!usable) return t.skip(`bubblewrap unusable: ${launcher.capacity.reason}`); await fn(); }); };
+
+  ifUsable("L02d: a run lists its live processes (the confinement, the program and what it started, even detached), names none of another run's, and nothing once it has ended", async () => {
+    const started = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "setsid sleep 30 & sleep 31 & echo up; wait"], timeoutMs: 20_000, maxOutputBytes: 1000, stream: { onStdout: () => undefined } });
+    const other = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "exec sleep 32"], timeoutMs: 20_000, maxOutputBytes: 1000 });
+    try {
+      let listed: Awaited<ReturnType<NonNullable<typeof started.processes>>>;
+      for (let i = 0; ; i++) {
+        listed = await started.processes!();
+        if ((listed?.processes.filter((p) => p.name === "sleep").length ?? 0) >= 2 || i > 100) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(listed !== undefined);
+      const names = listed.processes.map((p) => p.name);
+      assert.equal(names[0], "bwrap", "the confinement is the root");
+      assert.equal(names.filter((n) => n === "sleep").length, 2, `both sleeps, the detached one included: ${names.join(",")}`);
+      assert.ok(names.includes("sh"));
+      const otherPids = new Set((await other.processes!())!.processes.map((p) => p.pid));
+      assert.ok(otherPids.size > 0, "positive control: the other run lists its own");
+      assert.ok(listed.processes.every((p) => !otherPids.has(p.pid)), "no process of another run is listed");
+      assert.ok(listed.processes.every((p) => /^\d+$/.test(p.started) && p.pid > 0));
+    } finally {
+      started.kill(); other.kill();
+    }
+    await started.result;
+    await other.result;
+    assert.deepEqual((await started.processes!())!.processes, [], "after the run nothing is left: the private process list ended with it");
+  });
+
+  ifUsable("L02d review: a kill also ends a process a look saw that left the run's process group (a trusted-host run's setsid), and only while it is still the same process", async () => {
+    const host = await SandboxLauncher.create({ protectedPaths: [secretDir], trustedHost: { authority: "owner decision (test)" }, audit: () => undefined });
+    const started = await host.launch({ recipe: recipe({ mode: "trusted-host" }), command: ["/bin/sh", "-c", "setsid sleep 41 </dev/null >/dev/null 2>&1 & echo up; sleep 42"], timeoutMs: 20_000, maxOutputBytes: 1000, stream: { onStdout: () => undefined } });
+    const field = (pid: number, i: number): string | undefined => { try { const s = readFileSync(`/proc/${pid}/stat`, "utf8"); return s.slice(s.lastIndexOf(")") + 2).split(" ")[i]; } catch { return undefined; } };
+    const startOf = (pid: number): string | undefined => field(pid, 19);
+    let away: { pid: number; started: string } | undefined;
+    try {
+      for (let i = 0; i < 100 && away === undefined; i++) {
+        const listed = (await started.processes!())!.processes;
+        // The detached sleep is in its own session: its process group is not the run's.
+        const found = listed.find((p) => p.name === "sleep" && field(p.pid, 2) !== undefined && field(p.pid, 2) !== String(listed[0]!.pid));
+        if (found !== undefined) away = { pid: found.pid, started: found.started };
+        else await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(away !== undefined, "the detached process was listed");
+      assert.equal(startOf(away.pid), away.started);
+    } finally { started.kill(); }
+    await started.result;
+    for (let i = 0; i < 40 && startOf(away.pid) === away.started; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.notEqual(startOf(away.pid), away.started, "the process that left the group was ended by the kill");
+    await host.stop();
+  });
+
+  ifUsable("L02d review: once the launched process has exited its process ID is never walked again (it may be reused); what an earlier look saw and outlived it is what is listed, also before the run has ended", async () => {
+    const host = await SandboxLauncher.create({ protectedPaths: [secretDir], trustedHost: { authority: "owner decision (test)" }, audit: () => undefined });
+    // The detached sleep keeps the output pipe open, so the run ends only after the drain that follows the shell's exit.
+    const started = await host.launch({ recipe: recipe({ mode: "trusted-host" }), command: ["/bin/sh", "-c", "setsid sleep 43 & sleep 0.5; exit 0"], timeoutMs: 20_000, maxOutputBytes: 1000 });
+    const stat = (pid: number): string[] => { try { const s = readFileSync(`/proc/${pid}/stat`, "utf8"); return s.slice(s.lastIndexOf(")") + 2).split(" "); } catch { return []; } };
+    const alive = (pid: number): boolean => { const s = stat(pid); return s.length > 0 && !/^[ZX]/.test(s[0]!); };
+    let ended = false;
+    void started.result.then(() => { ended = true; });
+    try {
+      let root = 0, sleeper = 0;
+      for (let i = 0; i < 100 && sleeper === 0; i++) {
+        const listed = (await started.processes!())!.processes;
+        root = listed[0]?.pid ?? 0;
+        // The detached sleep (its own session, so not in the run's process group), not the shell's `sleep 0.5`.
+        sleeper = listed.find((p) => p.name === "sleep" && stat(p.pid)[2] !== undefined && stat(p.pid)[2] !== String(root))?.pid ?? 0;
+        if (sleeper === 0) await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(root > 0 && sleeper > 0, "the run and its detached process were listed");
+      for (let i = 0; i < 100 && alive(root); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(alive(root), false, "the shell has exited");
+      assert.equal(ended, false, "the run has not ended yet (the drain)");
+      const after = (await started.processes!())!.processes.map((p) => p.pid);
+      assert.ok(after.includes(sleeper), `what outlived the launched process is still listed: ${JSON.stringify(after)}`);
+    } finally { started.kill(); }
+    await started.result;
+    await host.stop();
+  });
+
+  ifUsable("L02d review 3: a kill in the drain after the launched process exited still ends the rest of its process group (the ID cannot be reused while the group has members); it is skipped once the ID is taken", async () => {
+    // Pure part: before the exit always; after it only while no process holds the ID.
+    assert.equal(groupKillSafe(7, false, () => true), true);
+    assert.equal(groupKillSafe(7, true, () => false), true);
+    assert.equal(groupKillSafe(7, true, () => true), false, "an ID taken after the exit belongs to another program: its group is not killed");
+    assert.equal(groupKillSafe(process.pid, true), false, "the real check sees a live ID as taken");
+    const host = await SandboxLauncher.create({ protectedPaths: [secretDir], trustedHost: { authority: "owner decision (test)" }, audit: () => undefined });
+    // The detached sleep keeps the output pipe open (the drain); the second sleep stays in the run's process group and holds no pipe. No look is made, so only the group kill can reach it.
+    let out = "";
+    const started = await host.launch({ recipe: recipe({ mode: "trusted-host" }), command: ["/bin/sh", "-c", "setsid sleep 45 & sleep 46 </dev/null >/dev/null 2>&1 & echo \"$$ $!\"; sleep 0.3; exit 0"], timeoutMs: 20_000, maxOutputBytes: 1000, stream: { onStdout: (c) => { out += c.toString("utf8"); } } });
+    const stat = (pid: number): string[] => { try { const s = readFileSync(`/proc/${pid}/stat`, "utf8"); return s.slice(s.lastIndexOf(")") + 2).split(" "); } catch { return []; } };
+    const alive = (pid: number): boolean => { const s = stat(pid); return s.length > 0 && !/^[ZX]/.test(s[0]!); };
+    let ended = false;
+    void started.result.then(() => { ended = true; });
+    let member = 0, away = 0;
+    try {
+      for (let i = 0; i < 100 && !/^\d+ \d+\n/.test(out); i++) await new Promise((r) => setTimeout(r, 20));
+      const [shell, bg] = out.trim().split(" ").map(Number);
+      member = bg!;
+      assert.ok(shell! > 0 && member > 0 && stat(member)[2] === String(shell), "the background sleep is in the run's process group");
+      for (let i = 0; i < 100 && alive(shell!); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(alive(shell!), false, "the shell has exited");
+      assert.equal(ended, false, "the run has not ended yet (the drain)");
+      for (const name of readdirSync("/proc")) { try { if (/^\d+$/.test(name) && readFileSync(`/proc/${name}/cmdline`, "utf8") === "sleep\u000045\u0000" && stat(Number(name))[2] !== String(shell)) away = Number(name); } catch { /* gone */ } }
+      started.kill();
+      for (let i = 0; i < 50 && alive(member); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(alive(member), false, "the group kill in the drain reached the member of the run's group");
+    } finally {
+      for (const pid of [member, away]) if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+      started.kill();
+    }
+    await started.result;
+    await host.stop();
+  });
 
   ifUsable("capacity is advertised only after a real confined start, and names the backend and version", async () => {
     assert.equal(launcher.capacity.available, true);

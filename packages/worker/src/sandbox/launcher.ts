@@ -7,6 +7,7 @@ import { seatbeltBackend } from "./seatbelt.js";
 import { SandboxError } from "./errors.js";
 import { DEFAULT_HEADROOM, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, nextCoreOffset, type Headroom, type LimitCapabilities, type LimitEnforcement, type ResourceLimits } from "./limits.js";
 import { canonical, normalizeRecipe, protectedPathsFor, sha256, type NormalizedRecipe, type SandboxMode, type SandboxRecipe } from "./recipe.js";
+import { linuxProcessTree, linuxStillRunning, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";
 
 /** What is written to the audit trail before every launch (card A03: the mode is visible there). */
 export interface LaunchRecord {
@@ -101,8 +102,13 @@ export interface SandboxRun {
   readonly guest: GuestView;
   /** How each limit asked for was applied (the same figures the launch record holds); empty when none was asked for. Absent on a run that does not report it. */
   readonly enforcement?: readonly LimitEnforcement[];
-  /** Ends the process and everything it started. Safe to call more than once. */
+  /** Ends the process and everything it started. Safe to call more than once; after the run has ended it ends what outlived it (a process seen by `processes` that still runs, same start time). */
   kill(): void;
+  /**
+   * The processes of this run alive now (card L02d): the launched process and everything below it, parents first. Once the run has ended: only what outlived it (a process seen by an earlier look that is still the same process).
+   * `undefined` where this system cannot list them (no /proc and no backend that finds descendants). Optional: a run that cannot say leaves it out.
+   */
+  processes?(): Promise<{ readonly processes: readonly RunProcess[]; readonly truncated: boolean } | undefined>;
   /** Writes to the standard input of a run started with `stream`; resolves when the text has been handed to the program. Rejects for any other run, and once the program has gone. */
   write(text: string): Promise<void>;
   /** Closes the standard input of a run started with `stream` (the program reads end-of-file). */
@@ -114,6 +120,18 @@ export interface SandboxRun {
 export const stripTrailingSeparator = (path: string): string => path.replace(/[\\/]$/, "");
 const SUPERVISOR_ROOT = stripTrailingSeparator(fileURLToPath(new URL("../../", import.meta.url)));
 const EXIT_DRAIN_MS = 2000;
+
+/** Whether some process holds this process ID now (a signal 0 reaches it, or exists but may not be signalled). */
+const idTaken = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
+
+/**
+ * Whether the launcher may kill the process group named by a run's launched process (review of L02d). Before Node has seen that process exit, always: it is the group's leader and holds the ID. After the exit (Node has
+ * reaped it), only while no process holds the ID: a group whose members still run keeps its ID from reuse, so if the ID is taken the run's group is empty and a group of that ID belongs to another program.
+ * `taken` is injectable for tests.
+ */
+export function groupKillSafe(pid: number, exited: boolean, taken: (pid: number) => boolean = idTaken): boolean {
+  return !exited || !taken(pid);
+}
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_STDIN_BYTES = 1024 * 1024;
@@ -250,7 +268,10 @@ export class SandboxLauncher {
     let ended = false;
     const finalKill = (): void => {
       // The process group first (it holds the launcher's own children), then the child itself; a sandbox with a private process list ends with its first process.
-      if (child.pid !== undefined) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ } }
+      // Once Node has seen the launched process exit (the drain while a survivor holds the output pipes), its ID is free again: the group is killed only while no process holds that ID (review of L02d). While a member of
+      // the run's group is alive the system cannot give the ID to a new process (POSIX keeps a process group's ID from reuse), so the group kill still reaches it; an ID that is taken means the old group is empty and
+      // a group with that ID now is someone else's.
+      if (child.pid !== undefined && groupKillSafe(child.pid, child.exitCode !== null || child.signalCode !== null)) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ } }
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
     };
     // Without a private process list, every descendant seen while the run goes is remembered with its start time, so one whose parent has since exited (and was handed to launchd) is still
@@ -297,7 +318,45 @@ export class SandboxLauncher {
       child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, stdoutTruncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
-    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, enforcement, kill: () => { killed = true; killTree(); },
+    // Every process a look found (card L02d), so one that outlives the run is still found and can still be ended. Bounded: the oldest entries go first.
+    const looked = new Map<number, RunProcess>();
+    const note = (list: readonly RunProcess[]): void => { for (const p of list) { looked.delete(p.pid); looked.set(p.pid, p); } while (looked.size > 4 * MAX_RUN_PROCESSES) looked.delete(looked.keys().next().value!); };
+    const linux = process.platform === "linux";
+    const exited = (): boolean => child.exitCode !== null || child.signalCode !== null;
+    const survivors = async (): Promise<RunProcess[]> => {
+      if (looked.size === 0) return [];
+      if (linux) return linuxStillRunning([...looked.values()]);
+      if (backend?.startTimes === undefined) return [];
+      const now = await backend.startTimes([...looked.keys()]);
+      return [...looked.values()].filter((p) => now.get(p.pid) === p.started);
+    };
+    const processes = async (): Promise<{ processes: readonly RunProcess[]; truncated: boolean } | undefined> => {
+      if (child.pid === undefined) return { processes: [], truncated: false };
+      // Once Node has seen the launched process exit it has reaped it, and its process ID may already belong to an unrelated program: the tree is never walked from it again (review of L02d), only what an earlier look saw
+      // is checked (same start time). Before that the ID cannot be reused (an exited, unreaped process keeps it), and the /proc walk below is synchronous, so nothing reaps it during the walk.
+      if (ended || exited()) {
+        // The tree ends with the run, but the kernel takes a moment to end the last of a private process list: what is still there after a short settle outlived it.
+        let left = await survivors();
+        for (let i = 0; i < 5 && left.length > 0; i++) { await new Promise((r) => setTimeout(r, 100)); left = await survivors(); }
+        return { processes: left, truncated: false };
+      }
+      if (linux) { const tree = linuxProcessTree(child.pid); note(tree.processes); return tree; }
+      if (backend?.descendants === undefined || backend.startTimes === undefined) return undefined;
+      const below = await backend.descendants(child.pid);
+      const rootStarted = (await backend.startTimes([child.pid])).get(child.pid);
+      // The looks above wait: if the launched process exited (and was reaped) meanwhile, what they found may be another program's, so it is not taken (nor remembered for a later kill).
+      if (exited()) return { processes: await survivors(), truncated: false };
+      if (rootStarted === undefined) return { processes: [], truncated: false };
+      const list: RunProcess[] = [{ pid: child.pid, parent: 0, name: "unknown", started: rootStarted }, ...below.slice(0, MAX_RUN_PROCESSES - 1).map((p) => ({ pid: p.pid, parent: 0, name: "unknown", started: p.started }))];
+      note(list);
+      return { processes: list, truncated: below.length > MAX_RUN_PROCESSES - 1 };
+    };
+    const endSurvivors = (): void => {
+      void survivors().then((left) => { for (const p of left.reverse()) { try { process.kill(p.pid, "SIGKILL"); } catch { /* already gone */ } } }).catch(() => undefined);
+    };
+    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, enforcement, // What an earlier look saw and still runs (same start time) is ended too, also while the run goes (review of L02d): a process that left the run's process group (a trusted-host run's `setsid`) is not reached by the
+      // group kill, and in the moment between the launched process's exit and the run's end the group kill alone would leave it.
+      kill: () => { killed = true; if (!ended) killTree(); endSurvivors(); }, processes,
       write: (text) => (stream === undefined || ended ? Promise.reject(new SandboxError("unavailable", "this run takes no input")) : new Promise<void>((resolve, reject) => { child.stdin.write(text, (error) => (error ? reject(error) : resolve())); })),
       endInput: () => { if (stream !== undefined) child.stdin.end(); }, result };
     this.#live.add(run);

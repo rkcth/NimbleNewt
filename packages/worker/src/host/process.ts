@@ -1,6 +1,7 @@
 import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseFromChild, type BridgeReplyMessage, type ChannelStart, type FromChild, type HeaderList, type ToChild } from "@nimblenewt/contracts";
 import type { LimitEnforcement } from "../sandbox/limits.js";
 import type { LaunchRequest, RunResult, SandboxLauncher, SandboxRun } from "../sandbox/launcher.js";
+import type { RunProcess } from "../sandbox/proc.js";
 
 /**
  * The host's end of the channel to one worker process (card H12b). It reads the process's lines, answers its bridge requests and model calls through the functions the composer gave it, and turns the process's replies into promises. Nothing the process
@@ -22,7 +23,11 @@ export interface ProcessHandlers {
   renew?(): Promise<{ readonly leaseMs: number } | { readonly fenced: string }>;
 }
 
-export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000 } as const;
+/** `killWaitMs`: how long `close` waits after the kill for the process to end before it gives up and says so (card L02d: a process the OS cannot end is reported, never waited on for ever). */
+export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
+
+/** `close` gave up: the process was asked to end, then killed, and it is still there (card L02d). */
+export class ProcessNotEnded extends Error {}
 
 interface Waiter<T> { readonly resolve: (value: T) => void; readonly reject: (error: Error) => void }
 type Result = Extract<FromChild, { t: "result" }>;
@@ -51,6 +56,9 @@ export class WorkerProcess {
   /** The grace the start gave the process after a loss; the host ends the process itself when it has not gone by then. */
   #graceMs: number | undefined;
   #graceTimer: ReturnType<typeof setTimeout> | undefined;
+  /** When the host first asked the process to end (a close or a kill), and when its run ended (card L02d: the time between is what winding it down took). */
+  #endAskedAt: number | undefined;
+  #endedAt: number | undefined;
 
   private constructor(handlers: ProcessHandlers) { this.#handlers = handlers; }
 
@@ -60,6 +68,7 @@ export class WorkerProcess {
     process.#run = await launcher.launch({ ...request, stream: { onStdout: (chunk) => process.#onStdout(chunk) } });
     void process.#run.result.then((result) => {
       process.#exit = result;
+      process.#endedAt = performance.now();
       const tail = result.stderr.trim().split("\n").slice(-3).join(" | ").slice(0, 400);
       process.#end(new Error(`the worker process ended (${result.timedOut ? "time limit" : result.killed ? "stopped" : result.exitCode === null ? `signal ${String(result.signal)}` : `exit code ${result.exitCode}`})${tail === "" ? "" : `: ${tail}`}`));
     });
@@ -87,7 +96,25 @@ export class WorkerProcess {
   }
 
   /** Kills the process now (a protocol breach, a stop). */
-  kill(why: string): void { this.#end(new Error(why)); this.#run.kill(); }
+  kill(why: string): void { this.#endAskedAt ??= performance.now(); this.#end(new Error(why)); this.#run.kill(); }
+
+  /** Whether the process (its run) has not ended yet. */
+  get alive(): boolean { return this.#endedAt === undefined; }
+  /** Whether the host has asked it to end (a close or a kill). */
+  get endAsked(): boolean { return this.#endAskedAt !== undefined; }
+  /**
+   * How long winding the process down has taken, in whole ms: from the first request to end until its run ended (or until `now` while it has not). 0 when it was never asked to end (card L02d). Measured on the monotonic clock
+   * (`performance.now`), so a change of the wall clock never makes it negative or huge (review of L02d: it is charged as compute).
+   */
+  windDownMs(now: number = performance.now()): number { return this.#endAskedAt === undefined ? 0 : Math.max(0, Math.round((this.#endedAt ?? now) - this.#endAskedAt)); }
+  /** The run's processes now (card L02d; see `SandboxRun.processes`); `undefined` where they cannot be listed. */
+  async processes(): Promise<{ readonly processes: readonly RunProcess[]; readonly truncated: boolean } | undefined> { return this.#run.processes === undefined ? undefined : this.#run.processes(); }
+  /** Force Stop (card L02d): kills the whole tree now (what outlived the run too) and waits at most `waitMs` for the run to end. */
+  async forceEnd(waitMs: number = PROCESS_LIMITS.killWaitMs): Promise<void> {
+    this.kill("the worker process was force stopped");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([this.#run.result, new Promise<void>((r) => { timer = setTimeout(r, waitMs); })]); } finally { clearTimeout(timer); }
+  }
 
   async #send(m: ToChild): Promise<void> {
     if (this.#endedWith !== undefined) return;
@@ -247,11 +274,21 @@ export class WorkerProcess {
   }
   async tell(text: string): Promise<void> { await this.#ask((id) => ({ t: "tell", id, text })); }
 
-  /** Asks the process to finish, waits a moment for it to go, then ends it. Safe to repeat. */
+  /**
+   * Asks the process to finish, waits a moment for it to go, then ends it. Safe to repeat. A process that is still there `killWaitMs` after the kill is not waited on for ever (card L02d): `close` rejects with `ProcessNotEnded`, so the
+   * caller never takes it as gone, and the process stays listed (`processes`) as asked to end and still running.
+   */
   async close(): Promise<RunResult> {
+    this.#endAskedAt ??= performance.now();
     if (this.#endedWith === undefined) await this.#send({ t: "close" });
     this.#run.endInput();
     const timer = setTimeout(() => this.#run.kill(), PROCESS_LIMITS.closeGraceMs);
-    try { return await this.#run.result; } finally { clearTimeout(timer); this.#end(new Error("the worker process was closed")); }
+    let bound: ReturnType<typeof setTimeout> | undefined;
+    const gaveUp = new Promise<undefined>((r) => { bound = setTimeout(() => r(undefined), PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs); });
+    try {
+      const result = await Promise.race([this.#run.result, gaveUp]);
+      if (result === undefined) { this.#run.kill(); throw new ProcessNotEnded(`the worker process did not end ${Math.round((PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs) / 1000)} seconds after it was asked to and killed`); }
+      return result;
+    } finally { clearTimeout(timer); clearTimeout(bound); this.#end(new Error("the worker process was closed")); }
   }
 }

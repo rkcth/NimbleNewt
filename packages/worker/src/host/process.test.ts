@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { encodeMessage, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import type { LaunchRequest, RunResult, SandboxRun } from "../sandbox/launcher.js";
-import { PROCESS_LIMITS, WorkerProcess, type ProcessHandlers } from "./process.js";
+import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type ProcessHandlers } from "./process.js";
 
 const start = { attemptId: "a", agentId: "g", namespaceId: "abcdef0123456789", credential: "c", storeDir: "/s", relayBase: "http://relay.invalid", model: { alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 10, maxTokens: 10, reasoning: false, input: ["text"] } } as ChannelStart;
 const handlers: ProcessHandlers = { bridge: async () => ({ ok: true, result: {} }), relay: async () => { throw new Error("no"); } };
@@ -151,4 +151,82 @@ test("H08b: a process may not keep more renewals waiting at the controller than 
   for (let i = 1; i <= PROCESS_LIMITS.renewInFlight + PROCESS_LIMITS.refusals + 5; i++) f.send({ t: "lease.renew", id: i });
   assert.equal(asked, PROCESS_LIMITS.renewInFlight, "only a few renewals reach the controller at once");
   assert.equal((await process.exited).killed, true);
+});
+
+// Card L02d: winding a process down is timed, a process that outlives its kill is reported (never waited on for ever), and Force Stop kills it again.
+test("L02d: close asks, kills after the grace, and gives up with ProcessNotEnded when the process is still there; the winding-down time counts from the first request; Force Stop kills again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  t.mock.method(performance, "now", () => Date.now());
+  let kills = 0;
+  let killable = false;
+  let finish!: (r: RunResult) => void;
+  const result = new Promise<RunResult>((ok) => { finish = ok; });
+  const written: ToChild[] = [];
+  const run = {
+    result, endInput: () => undefined,
+    kill: () => { kills++; if (killable) finish({ exitCode: null, signal: "SIGKILL", timedOut: false, killed: true, stdout: "", stderr: "", truncated: false, stdoutTruncated: false, durationMs: 1 }); },
+    write: async (text: string) => { written.push(...text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as ToChild)); },
+    processes: async () => ({ processes: [{ pid: 7, parent: 1, name: "node", started: "1" }], truncated: false }),
+  } as unknown as SandboxRun;
+  const p = await WorkerProcess.launch({ launch: async () => run } as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, handlers);
+  assert.equal(p.alive, true);
+  assert.equal(p.endAsked, false);
+  assert.equal(p.windDownMs(), 0, "never asked to end: nothing to count");
+  assert.deepEqual((await p.processes())?.processes.map((x) => x.pid), [7]);
+  const closing = p.close();
+  closing.catch(() => undefined);
+  await new Promise((r) => setImmediate(r));
+  assert.ok(written.some((m) => m.t === "close"), "it is asked first");
+  assert.equal(p.endAsked, true);
+  t.mock.timers.tick(PROCESS_LIMITS.closeGraceMs);
+  assert.equal(kills, 1, "killed once the grace is over");
+  t.mock.timers.tick(PROCESS_LIMITS.killWaitMs);
+  await assert.rejects(closing, (e: unknown) => e instanceof ProcessNotEnded && /did not end/.test((e as Error).message));
+  assert.equal(p.alive, true, "not taken as gone");
+  assert.equal(p.windDownMs(), PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs, "still counting from the first request");
+  t.mock.timers.tick(1000);
+  assert.equal(p.windDownMs(), PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs + 1000);
+  // Force Stop: killed again; this time it goes, and the count stops there.
+  killable = true;
+  const before = kills;
+  await p.forceEnd(10);
+  assert.ok(kills > before);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.alive, false);
+  const total = p.windDownMs();
+  t.mock.timers.tick(5000);
+  assert.equal(p.windDownMs(), total, "an ended process costs nothing more");
+});
+
+test("L02d: a process that obeys the close ends without a kill, and its winding-down time is what it took", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 5_000 });
+  t.mock.method(performance, "now", () => Date.now());
+  const f = fake();
+  const p = await launch(f);
+  const closing = p.close();
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(40);
+  f.exit();
+  const r = await closing;
+  assert.equal(r.killed, false);
+  await new Promise((r2) => setImmediate(r2));
+  assert.equal(p.alive, false);
+  assert.equal(p.windDownMs(), 40);
+});
+
+test("L02d review: the winding-down time is on the monotonic clock; a wall clock set back a day or forward a year changes nothing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 9_000_000_000 });
+  let mono = 1_000;
+  t.mock.method(performance, "now", () => mono);
+  const f = fake();
+  const p = await launch(f);
+  p.kill("stop");
+  mono += 250;
+  t.mock.timers.setTime(9_000_000_000 - 86_400_000);
+  assert.equal(p.windDownMs(), 250, "set back: never negative, never 0 while it winds down");
+  t.mock.timers.setTime(9_000_000_000 + 365 * 86_400_000);
+  mono += 50;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.alive, false);
+  assert.equal(p.windDownMs(), 300, "set forward: not a year of compute");
 });
