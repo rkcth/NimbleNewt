@@ -61,6 +61,46 @@ for (const backend of backends) {
   const route = (s: Step): string => { assert.equal(s.kind, "route", JSON.stringify(s)); return (s as Extract<Step, { kind: "route" }>).route; };
   const fail = (c: { fb: FallbackService; host: Principal }, s: Step, message: string, status?: number, extra: Record<string, unknown> = {}) => c.fb.failed(c.host, { commandId: cid("f"), callId: s.callId, failure: { message, ...(status === undefined ? {} : { status }) }, ...extra });
 
+  suite("a call may carry the caller's own ordered list (card R04c): each route is judged by the table's rules, the list is kept for later decisions, and an unsent attempt is withdrawn without a charge", async (c) => {
+    // The list replaces the role's profile: its own order, judged by the same rules (a paid route without spending authorized is skipped).
+    const s1 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request: { ...request, paidAuthorized: false }, routes: ["alpha/one", "gamma/three"] });
+    assert.equal(route(s1), "gamma/three");
+    assert.deepEqual((await c.fb.call(c.host, s1.callId))!.routes, ["alpha/one", "gamma/three"]);
+    const s2 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request, routes: ["beta/two"] });
+    assert.equal(route(s2), "beta/two");
+    // A failure moves on within the caller's list only: nothing is left, so the call waits.
+    const s3 = await fail(c, s2, "overloaded_error", 529);
+    assert.equal(s3.kind, "wait");
+    assert.match(JSON.stringify(s3), /beta\/two/);
+    await refuses("invalid_command", () => c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request, routes: [] }));
+    await refuses("invalid_command", () => c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request, routes: ["alpha/one", "alpha/one"] }));
+    // Withdrawn while unsent: skipped, no charge, not counted; once sent it can no longer be withdrawn.
+    const s4 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request, routes: ["alpha/one"] });
+    await c.fb.withdraw(c.host, { commandId: cid("w"), callId: s4.callId, attempt: 1, reason: "the worker never started" });
+    const withdrawn = (await c.fb.call(c.host, s4.callId))!;
+    assert.deepEqual([withdrawn.attempts[0]!.outcome, withdrawn.charges ?? []], ["skipped", []]);
+    const s5 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request, routes: ["alpha/one"] });
+    await c.fb.sent(c.host, { commandId: cid("s"), callId: s5.callId, attempt: 1 });
+    await refuses("invalid_transition", () => c.fb.withdraw(c.host, { commandId: cid("w"), callId: s5.callId, attempt: 1, reason: "x" }));
+    // Only the dispatcher reads calls.
+    await refuses("forbidden", () => c.fb.call(c.agent, s5.callId));
+  });
+
+  suite("budgetWait says, without writing, that the task's budget or retry budget is used up, exactly as begin would wait (card R04c)", async (c) => {
+    assert.equal(await c.fb.budgetWait(c.task), undefined, "no budget, no wait");
+    await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxCostMicros: 1000, maxFailedAttempts: 1 });
+    assert.equal(await c.fb.budgetWait(c.task), undefined);
+    const s1 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
+    await fail(c, s1, "something odd");
+    assert.match((await c.fb.budgetWait(c.task))!, /retry budget is used up/);
+    const s2 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
+    assert.equal(s2.kind, "wait");
+    await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: null });
+    const s3 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
+    await c.fb.succeeded(c.host, { commandId: cid("ok"), callId: s3.callId, usage: usage(1000) });
+    assert.match((await c.fb.budgetWait(c.task))!, /budget is used up/);
+  });
+
   suite("credit, rate-limit and outage failures move to the next eligible route; spend is added across attempts", async (c) => {
     const s1 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
     assert.equal(route(s1), "alpha/one");

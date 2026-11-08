@@ -17,6 +17,7 @@ import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { CallBody } from "../mcp/mcp.js";
+import type { CutoverService } from "../routing/cutover.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
 import type { ActivityService, ExplanationBody } from "../activity/activity.js";
@@ -223,6 +224,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
   retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
+  model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
@@ -267,6 +269,7 @@ export type StatusRequest =
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
@@ -282,6 +285,8 @@ export interface StatusDeps {
   };
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
+  /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
+  readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates">;
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
   readonly assignments: AssignmentService;
@@ -438,6 +443,7 @@ export class StatusService {
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
+      case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -514,6 +520,37 @@ export class StatusService {
     const c = cite(query.recordKind.slice(0, 80), id.slice(0, 200));
     const what = byName ? `${shown(query.name!, 80)} ${shown(query.version!, 20)}` : `${shown(query.recordKind, 80)} ${shown(id, 200)}`;
     return { observedAt: this.#runner.now(), lines: found.retained ? [line(`${what} is kept from deletion for ${found.reasons.length} reason(s):`, c), ...found.reasons.slice(0, 20).map((why) => line(shown(why, 300), c)), ...(found.reasons.length > 20 ? [line(`${found.reasons.length - 20} more reason(s) are not shown.`, c)] : [])] : [line(`${what} is not held by anything retention knows of; a rule may remove it when its time comes.`, c)] };
+  }
+
+  /**
+   * The owner's routing controls (card R04c): each disabled, draining or cut-over target with why and since when, the failback policy, and the targets that are down. With `level` and `name`, the three facts about taking that
+   * target out of service, kept apart: routing applied, requests still running on it, safe to stop. Owner only.
+   */
+  async modelRouteLines(by: Principal, query: { level?: string; name?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const routes = this.#deps.routes;
+    if (routes === undefined || by.kind !== "owner") return undefined;
+    if ((query.level === undefined) !== (query.name === undefined)) invalid(query.level === undefined ? "level" : "name", "give both a level and a name, or neither");
+    const c = cite("route-controls", "controls");
+    const controls = await routes.controls();
+    const lines: Line[] = [];
+    if (query.level !== undefined) {
+      const r = await routes.report(by, { level: query.level as Parameters<CutoverService["report"]>[1]["level"], name: query.name! });
+      const target = `${shown(r.level, 10)} ${shown(r.name, 64)}`;
+      lines.push(line(`${target}: routing ${r.routingApplied ? `applied (${r.mode === "drain" ? "draining" : r.mode === "cutover" ? "cut over" : "disabled"})` : "not applied: new work can still reach it"}.`, c));
+      lines.push(line(`${r.inFlightRemaining} request(s) still running on it${r.cancelPending ? "; cancellations of the cutover are still being carried out" : ""}${r.drainUntil === undefined ? "" : r.drainDeadlinePassed ? "; the drain deadline has passed" : `; the drain ends at ${shown(r.drainUntil, 30)}`}.`, c));
+      lines.push(line(r.safeToStop ? `It is safe to stop${r.stopDiscardsCache ? " (stopping a local service loses its in-memory cache)" : ""}.` : "It is not safe to stop yet.", c));
+      if (r.possibleCharges > 0) lines.push(line(`${r.possibleCharges} abandoned attempt(s) on a paid provider may still have been charged.`, c));
+      return { observedAt: this.#runner.now(), lines };
+    }
+    lines.push(controls.entries.length === 0 ? line("No routing controls are in force: every configured route may take new work.", c) : line(`${controls.entries.length} routing control(s) in force:`, c));
+    for (const e of controls.entries.slice(0, 50)) lines.push(line(`${shown(e.level, 10)} ${shown(e.name, 64)} is ${e.mode === "drain" ? `draining until ${shown(e.drainUntil ?? "", 30)}` : e.mode === "cutover" ? "cut over" : "disabled"} since ${shown(e.at, 30)}: ${shown(e.reason, 200)}.`, c));
+    const f = controls.failback;
+    lines.push(line(f.mode === "manual" ? "A target that failed comes back only when you restore it." : `A target that failed comes back by itself after ${f.minProbes} good probe(s) over at least ${f.stableSeconds} s, unless it failed again within ${f.holdDownSeconds} s of its last restore.`, c));
+    const health = await routes.healthStates();
+    const down = health.items.filter((h) => h.state === "down");
+    for (const h of down.slice(0, 20)) lines.push(line(`${shown(h.scope, 10)} ${shown(h.name, 64)} is down since ${shown(h.since, 30)} (${shown(h.lastClass, 20)})${h.needsOwner ? "; it needs you to restore it" : ""}.`, h.scope === "model" ? c : cite("route-health", `${h.scope}-${h.name}`)));
+    if (down.length > 20 || health.truncated) lines.push(line("More targets are down than are shown.", c));
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /** The retention values in force and which of them the owner set. Owner only. */

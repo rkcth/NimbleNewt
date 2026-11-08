@@ -54,7 +54,8 @@ import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
 import { PolicyService, ProtectedBranchService } from "../policy/index.js";
 import type { ReviewService } from "../review/index.js";
-import { DifficultyService, type RoutingService } from "../routing/index.js";
+import { DifficultyService, type FallbackService, type RoutingService } from "../routing/index.js";
+import { cutoverListener, routeCallsOf } from "./route-calls.js";
 import { DISPATCHER_PRINCIPAL, type GrantService, type Principal, type PrincipalService, type TaskCredentialService } from "../security/index.js";
 import type { StopService } from "../lifecycle/stop.js";
 import { ImprovementService, StandupService, agendaOutcomeSink, allocationFromValue, improvementOutcomeSink, needsOwnerFrom, noticesFrom } from "../standups/index.js";
@@ -252,6 +253,11 @@ export interface ComposeInput {
   readonly eventSourcesOff?: () => Promise<ReadonlySet<string>>;
   /** Health probes of failed-over routes (card R04c): off unless given, and then only while `enabled()` says so. */
   readonly probes?: { readonly cutover: Pick<CutoverService, "downTargets" | "probe">; readonly probes: RouteProbes };
+  /**
+   * Provider drain and cutover (card R04c): the dispatcher's model calls go through `fallback` (with the default route resolver; an operator's own resolver keeps choosing routes by itself), a cutover cancels the running
+   * generation and runtime of the attempts it cut, and every tick carries out what the controls leave due (an expired drain becomes a cutover; a cancellation a crash left is done again).
+   */
+  readonly routes?: { readonly cutover: CutoverService; readonly fallback: FallbackService };
   /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
   /** Told when the approval policy denies an agent's tool call, once the refusal is on record (card U11c). */
@@ -318,8 +324,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const difficulty = DifficultyService.withEpoch(storage, epoch, i.routing, i.contracts, ro);
   const route: RouteResolver = i.options.route ?? (async ({ commandId, taskId }) => {
     const d = await difficulty.resolve(principal, { commandId, taskId, role: "worker", data: "local-only", paidAuthorized: false });
-    return d.outcome === "chosen" ? { route: d.route!, ...(d.profile?.harness === undefined ? {} : { harness: d.profile.harness }), role: d.role, request: d.request, routing: d.routingRevision ?? 0, profiles: d.profilesRevision } : { none: true, reasons: d.reasons };
+    // The other routes the configuration allows, in order, so the owner's routing controls can send new work past a closed one (card R04c).
+    const alternatives = d.candidates.filter((c) => c.eligible && c.route !== d.route).map((c) => c.route);
+    return d.outcome === "chosen" ? { route: d.route!, ...(d.profile?.harness === undefined ? {} : { harness: d.profile.harness }), role: d.role, request: d.request, routing: d.routingRevision ?? 0, profiles: d.profilesRevision, ...(alternatives.length === 0 ? {} : { alternatives }) } : { none: true, reasons: d.reasons };
   });
+  // The model calls of attempts through the fallback service (card R04c), with the default resolver only (see `routes`).
+  const modelCalls = i.routes === undefined || i.options.route !== undefined ? undefined : routeCallsOf(i.routes.fallback, i.routes.cutover, principal);
   const live: { dispatcher?: DispatcherService } = {};
   const delivery = i.options.invitations ?? InvitationInbox.withEpoch(storage, epoch, ro);
   const nudge = i.options.nudge;
@@ -356,7 +366,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     ...(i.release === undefined ? [] : [{ name: "release.expire", run: async () => { await i.release!.expire(); } }]),
     ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches),
     // The event is already in the agent's inbox; waking it is making sure an attempt is there to read it: one running will at its next boundary, one waiting for a place will when it starts (card H13c).
-    ...wakeLoops(watches, attemptWaker(() => live.dispatcher, principal)), ...(i.records === undefined ? [] : recordLoops(i.records, projects)), ...(i.responsibilities === undefined ? [] : [...responsibilityLoops(i.responsibilities.checks, i.responsibilities.incidents, projects, i.responsibilities.notify), ...(i.responsibilities.coverage === undefined ? [] : coverageLoops(i.responsibilities.coverage.service, i.responsibilities.coverage.notify))]), ...(i.eventSources === undefined ? [] : sourceLoops(SourceService.withEpoch(storage, epoch, events, ro), i.eventSources, i.eventSourcesOff, { tell: (n) => notifications.emitFromController({ commandId: n.id, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: n.text }), log: (m) => i.onError?.(new Error(m)) })), ...(i.probes === undefined ? [] : probeLoops(i.probes.cutover, i.probes.probes)), ...(i.retention === undefined ? [] : [{ name: "retention.sweep", run: async (by: Principal) => { await i.retention!.restoreReserve?.(); await i.retention!.sweep(by); } }]), ...(i.backups === undefined ? [] : [{ name: "backups.nightly", run: async () => { void i.backups!.runScheduled().catch(() => undefined); /* started, not awaited: a long copy never holds up the other loops; a failure is kept in the backup status */ } }]), ...improvementOutcomeLoops(improvements, projects), ...untoldImprovementLoops(improvements, projects, (n) => notifications.emitFromController({ commandId: n.key, kind: "maintenance", level: "notice", ref: { kind: "improvement-item", id: n.itemId }, detail: n.text, projectId: n.projectId })), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
+    ...wakeLoops(watches, attemptWaker(() => live.dispatcher, principal)), ...(i.records === undefined ? [] : recordLoops(i.records, projects)), ...(i.responsibilities === undefined ? [] : [...responsibilityLoops(i.responsibilities.checks, i.responsibilities.incidents, projects, i.responsibilities.notify), ...(i.responsibilities.coverage === undefined ? [] : coverageLoops(i.responsibilities.coverage.service, i.responsibilities.coverage.notify))]), ...(i.eventSources === undefined ? [] : sourceLoops(SourceService.withEpoch(storage, epoch, events, ro), i.eventSources, i.eventSourcesOff, { tell: (n) => notifications.emitFromController({ commandId: n.id, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: n.text }), log: (m) => i.onError?.(new Error(m)) })), ...(i.probes === undefined ? [] : probeLoops(i.probes.cutover, i.probes.probes)), ...(i.routes === undefined ? [] : [{ name: "routes.tick", run: async (by: Principal) => { await i.routes!.cutover.tick(by); } }]), ...(i.retention === undefined ? [] : [{ name: "retention.sweep", run: async (by: Principal) => { await i.retention!.restoreReserve?.(); await i.retention!.sweep(by); } }]), ...(i.backups === undefined ? [] : [{ name: "backups.nightly", run: async () => { void i.backups!.runScheduled().catch(() => undefined); /* started, not awaited: a long copy never holds up the other loops; a failure is kept in the backup status */ } }]), ...improvementOutcomeLoops(improvements, projects), ...untoldImprovementLoops(improvements, projects, (n) => notifications.emitFromController({ commandId: n.key, kind: "maintenance", level: "notice", ref: { kind: "improvement-item", id: n.itemId }, detail: n.text, projectId: n.projectId })), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     // A pause the owner gave a time to is lifted when the time comes, and only that scope (card L06b).
     { name: "lifecycle.resume-conditions", run: async (by) => { await pauses.liftDue(by); } },
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token), async (c) => {
@@ -488,6 +498,11 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const relayEnded = unlimited();
     // A paid route is stopped, before the call is sent, once the owner's aggregate spending cap is reached; a local or free route is never asked.
     const paidCallGate = async (order: WorkOrder): Promise<string | undefined> => {
+      // A run whose model call a cutover took back sends nothing more, even before its worker has been stopped (card R04c).
+      if (modelCalls !== undefined && live.dispatcher !== undefined) {
+        const mc = (await live.dispatcher.get(principal, order.attemptId))?.modelCall;
+        if (mc !== undefined && !(await modelCalls.current(mc))) return `the route ${mc.route} of this attempt was cut over or closed; the call is not sent`;
+      }
       const table = (await i.routing.get()) as unknown as { providers?: Record<string, { paid?: boolean }> } | undefined;
       const provider = order.route.slice(0, Math.max(0, order.route.indexOf("/")));
       if (table?.providers?.[provider]?.paid !== true) return undefined;
@@ -552,7 +567,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route,
+      ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       routeChange: async (c) => {
         // The owner can turn the check off (chat-settable; on by default): the attempt then starts as it did before.
@@ -573,6 +588,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...((i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning) === undefined ? {} : { safeLongRunning: (i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning)! }), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
+    // A cutover cancels the running generation and runtime of the attempts it cut (card R04c).
+    i.routes?.cutover.bind(i.routes.fallback, cutoverListener({ dispatcher: () => live.dispatcher, generation, principal, elevated: recovering(principal) }));
     i.bindWorkspacePort?.(async (taskId) => {
       const portOf = (hostId: string): WorkspacePort | undefined => workers.find((w) => w.hostId === hostId)?.workspace;
       const attempts = await dispatcher.liveAttemptsOf(principal, { taskId });

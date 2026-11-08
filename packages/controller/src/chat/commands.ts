@@ -179,6 +179,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "events.configure-idle": { verb: "Change how long an event subscription may sit idle", mode: "apply" },
   // Which models work may reach: switching one off is the safe direction and follows the profile; bringing one back, and how failed ones return by themselves, widen what is used and are shown first.
   "routing.disable": { verb: "Stop new work reaching a model route", mode: "profile" },
+  // Planned maintenance (card R04c): new work stops now and running work may finish within the time the owner gives, so like disabling it follows the profile. A cutover cancels running work at once (and may leave
+  // charges to settle), so it is shown first in every profile (provisional; the typed recovery order still runs it at once).
+  "routing.drain": { verb: "Drain a model route for maintenance (new work stops now; running work may finish within drainSeconds, which the owner states)", mode: "profile" },
+  "routing.cutover": { verb: "Cut over from a model route at once (new work stops and the attempts running on it are cancelled and move to the next route)", mode: "propose" },
   "routing.reenable": { verb: "Let a model route be used again", mode: "propose" },
   "routing.failback.set": { verb: "Change how failed model routes come back", mode: "propose" },
   // How tasks are matched to model profiles decides what they cost and where they run: the profiles are shown first; a task's own difficulty follows the profile.

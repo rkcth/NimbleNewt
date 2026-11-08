@@ -7,7 +7,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { classifyFailure } from "../context/budget.js";
-import { ROUTING_LIMITS, checkRequest, type RouteRequest } from "./policy.js";
+import { ROUTING_LIMITS, checkRequest, selectRoute, type RouteRequest, type Selection } from "./policy.js";
 import type { RoutingService } from "./service.js";
 
 export type FailureClass = "credit" | "rate-limit" | "outage" | "auth" | "context-overflow" | "invalid-request" | "unknown";
@@ -59,6 +59,8 @@ export interface CallBody {
   readonly routingRevision: number;
   /** Position in the ordered list, kept so a restart or a later retry continues where this call was. */
   readonly list?: ListPosition;
+  /** The ordered routes the caller resolved for this call (card R04c: the dispatcher's difficulty profile), used instead of the table's profile for the role; each is still judged by the table's rules and the gate. */
+  readonly routes?: readonly string[];
   readonly charges?: readonly Charge[];
   readonly late?: readonly LateReport[];
   /** Effects reported by the caller; none of them is ever repeated by a fallback. */
@@ -76,6 +78,15 @@ export type Step =
 const used = (attempts: readonly { readonly outcome: string }[]): number => attempts.filter((a) => a.outcome !== "skipped").length;
 export const FALLBACK_LIMITS = { attempts: 4, message: 300, effects: 100, rateLimitSeconds: 60, outageSeconds: 300, late: 20, charges: 10 } as const;
 const spendKind = (taskId: string): string => `msp-${taskId}`;
+/** The name the caller's own list is judged under (it never reaches the stored table). */
+const LISTED = "listed";
+const ROUTE_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+function checkRoutes(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > ROUTING_LIMITS.perProfile) return invalid("routes", `must be a list of 1 to ${ROUTING_LIMITS.perProfile} routes`);
+  const out = value.map((r, i) => (typeof r === "string" && ROUTE_NAME.test(r) ? r : invalid(`routes[${i}]`, "must be provider/model")));
+  if (new Set(out).size !== out.length) invalid("routes", "lists the same route twice");
+  return out;
+}
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const count = (v: unknown, field: string): number => (Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= 1e15 ? (v as number) : invalid(field, "must be a whole number from 0"));
 
@@ -154,20 +165,21 @@ export class FallbackService {
   }
 
   /** Starts a call: the first eligible route, or a visible wait (no route, or the task's budget is used up). */
-  async begin(by: Principal, command: NoActor & { taskId: string; request: unknown }): Promise<Step> {
+  async begin(by: Principal, command: NoActor & { taskId: string; request: unknown; routes?: readonly string[] }): Promise<Step> {
     this.#dispatcher(by);
-    onlyKnown(command, ["commandId", "taskId", "request"]);
+    onlyKnown(command, ["commandId", "taskId", "request", "routes"]);
     const taskId = checkTaskId(command.taskId);
     const request = checkRequest(command.request);
+    const routes = command.routes === undefined ? undefined : checkRoutes(command.routes);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined) throw new DomainError("not_found", "no such task");
     const callId = derivedId("mcl", scopedCommandId(by.id, command.commandId));
     const ref: AggregateRef = { kind: "model-call", id: callId };
     await this.#runner.command("model.begin", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { taskId, request: request as unknown as JsonObject },
+      payload: { taskId, request: request as unknown as JsonObject, ...(routes === undefined ? {} : { routes: [...routes] }) },
       build: async () => {
-        const decided = await this.#decide(taskId, request, [], undefined, undefined, false, callId);
-        const body: CallBody = { taskId, projectId: task.projectId, request, attempts: decided.route === undefined ? [] : [{ route: decided.route, at: this.#runner.now(), outcome: "started" }], state: decided.route === undefined ? "waiting" : "running", ...(decided.route === undefined ? { waiting: decided.waiting! } : {}), routingRevision: decided.revision, ...this.#position(decided, undefined), effects: [], createdBy: by.id };
+        const decided = await this.#decide(taskId, request, [], undefined, undefined, false, callId, 0, routes);
+        const body: CallBody = { taskId, projectId: task.projectId, request, ...(routes === undefined ? {} : { routes }), attempts: decided.route === undefined ? [] : [{ route: decided.route, at: this.#runner.now(), outcome: "started" }], state: decided.route === undefined ? "waiting" : "running", ...(decided.route === undefined ? { waiting: decided.waiting! } : {}), routingRevision: decided.revision, ...this.#position(decided, undefined), effects: [], createdBy: by.id };
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { taskId, route: decided.route ?? null } };
       },
     }));
@@ -237,7 +249,7 @@ export class FallbackService {
         } else if (used(attempts) >= FALLBACK_LIMITS.attempts) {
           next = { ...call, attempts, effects: allEffects, state: "failed", ended: { reason: `${FALLBACK_LIMITS.attempts} attempts have failed`, why: attempts.map((a) => `${a.route}: ${a.failure?.class ?? a.outcome}`) } };
         } else {
-          const decided = await this.#decide(call.taskId, call.request, attempts, usage, undefined, false, callId, 1);
+          const decided = await this.#decide(call.taskId, call.request, attempts, usage, undefined, false, callId, 1, call.routes);
           next = decided.route === undefined
             ? { ...call, attempts, effects: allEffects, state: "waiting", waiting: decided.waiting! }
             : { ...call, attempts: [...attempts, { route: decided.route, at: this.#runner.now(), outcome: "started" }], effects: allEffects, state: "running", routingRevision: decided.revision, ...this.#position(decided, call.list) };
@@ -297,7 +309,7 @@ export class FallbackService {
         if (used(call.attempts) >= FALLBACK_LIMITS.attempts) { const { waiting: _w, ...rest } = call; void _w; next = { ...rest, effects: allEffects, state: "failed", ended: { reason: `${FALLBACK_LIMITS.attempts} attempts have failed`, why: call.attempts.map((a) => `${a.route}: ${a.failure?.class ?? a.outcome}`) } }; }
         else if (allEffects.some((e) => e.state === "uncertain")) next = { ...call, effects: allEffects, waiting: { reason: "an effect of the failed attempt is still uncertain", why: allEffects.filter((e) => e.state === "uncertain").map((e) => `effect ${e.id} is uncertain`) } };
         else {
-          const decided = await this.#decide(call.taskId, call.request, call.attempts, undefined, new Date(this.#runner.now()).getTime(), by.kind === "owner", callId);
+          const decided = await this.#decide(call.taskId, call.request, call.attempts, undefined, new Date(this.#runner.now()).getTime(), by.kind === "owner", callId, 0, call.routes);
           const { waiting: _old, ...rest } = call;
           void _old;
           next = decided.route === undefined
@@ -316,6 +328,17 @@ export class FallbackService {
    * a response that still arrives for it is not applied (`succeeded` and `failed` with `attempt`). `attempt` makes the command refuse if the call has already moved on.
    */
   abandon(by: Principal, command: NoActor & { callId: string; attempt?: number; reason: string; effects?: readonly EffectState[] }): Promise<Step> { return this.#abandon(by, command, false); }
+
+  /**
+   * The dispatcher takes back an attempt it never sent (card R04c: the worker for it never started): it stays in the list as `skipped`, records no charge and does not count toward the four attempts.
+   * Refused for an attempt that was marked `sent` (that one is reported or abandoned).
+   */
+  async withdraw(by: Principal, command: NoActor & { callId: string; attempt: number; reason: string }): Promise<Step> {
+    this.#dispatcher(by);
+    const call = (await this.#runner.get("model-call", this.#id(command.callId)))?.body as unknown as CallBody | undefined;
+    if (call?.attempts[count(command.attempt, "attempt") - 1]?.sentAt !== undefined) throw new DomainError("invalid_transition", "that attempt was sent; it is reported or abandoned, not withdrawn");
+    return this.#abandon(by, command, true);
+  }
 
   /** `unsent`: the request was never sent (the gate blocked the route after it was chosen), so no charge is possible and the attempt does not count toward the limit of four. It stays in the list as `skipped` so attempt numbers are never reused (a late response naming it is recorded, never applied to a replacement). */
   async #abandon(by: Principal, command: NoActor & { callId: string; attempt?: number; reason: string; effects?: readonly EffectState[] }, unsent: boolean): Promise<Step> {
@@ -347,7 +370,7 @@ export class FallbackService {
         } else if (used(attempts) >= FALLBACK_LIMITS.attempts) {
           next = { ...base, state: "failed", ended: { reason: `${FALLBACK_LIMITS.attempts} attempts have been used`, why: attempts.map((a) => `${a.route}: ${a.failure?.class ?? a.outcome}`) } };
         } else {
-          const decided = await this.#decide(call.taskId, call.request, attempts, undefined, undefined, false, callId);
+          const decided = await this.#decide(call.taskId, call.request, attempts, undefined, undefined, false, callId, 0, call.routes);
           next = decided.route === undefined
             ? { ...base, state: "waiting", waiting: decided.waiting! }
             : { ...base, attempts: [...attempts, { route: decided.route, at, outcome: "started" }], state: "running", routingRevision: decided.revision, ...this.#position(decided, call.list) };
@@ -356,6 +379,23 @@ export class FallbackService {
       },
     }));
     return this.#checked(by, callId);
+  }
+
+  /** One call as stored (the dispatcher's read). */
+  async call(by: Principal, callId: string): Promise<CallBody | undefined> {
+    this.#dispatcher(by);
+    return (await this.#runner.get("model-call", this.#id(callId)))?.body as unknown as CallBody | undefined;
+  }
+
+  /** Why the task may begin no call now because its budget (money, tokens or failed attempts) is used up, or undefined (the same test `begin` applies, without writing anything). */
+  async budgetWait(taskId: string): Promise<string | undefined> {
+    const id = checkTaskId(taskId);
+    const budget = await this.budget(id);
+    if (budget === undefined) return undefined;
+    const spent = await this.spend(id);
+    if ((budget.maxCostMicros !== undefined && spent.costMicros >= budget.maxCostMicros) || (budget.maxTokens !== undefined && spent.tokens >= budget.maxTokens)) return "the task's budget is used up; the owner can raise it";
+    if (budget.maxFailedAttempts !== undefined && (spent.failures ?? 0) >= budget.maxFailedAttempts) return "the task's retry budget is used up; the owner can raise it";
+    return undefined;
   }
 
   /** Calls with an attempt in progress (the requests that are in flight), oldest first by ID order. Reads every call record. */
@@ -417,11 +457,11 @@ export class FallbackService {
   }
 
   /** The next route for a call: the first eligible one not already tried (or whose cooldown has passed, on a resume), unless the budget is used up. */
-  async #decide(taskId: string, request: RouteRequest, attempts: readonly Attempt[], pending: Usage | undefined, resumeAt: number | undefined, clearBlocks = false, callId?: string, pendingFailures = 0): Promise<{ route?: string; revision: number; list?: { profile: string; routes: readonly string[] }; waiting?: NonNullable<CallBody["waiting"]> }> {
+  async #decide(taskId: string, request: RouteRequest, attempts: readonly Attempt[], pending: Usage | undefined, resumeAt: number | undefined, clearBlocks = false, callId?: string, pendingFailures = 0, routes?: readonly string[]): Promise<{ route?: string; revision: number; list?: { profile: string; routes: readonly string[] }; waiting?: NonNullable<CallBody["waiting"]> }> {
     const budget = (await this.#runner.get("model-budget", taskId))?.body as unknown as BudgetBody | undefined;
     const before = await this.spend(taskId);
     const spent = pending === undefined ? before : { costMicros: before.costMicros + pending.costMicros, tokens: before.tokens + pending.inputTokens + pending.outputTokens, calls: before.calls + 1 };
-    const selection = await this.#routing.select(request);
+    const selection = routes === undefined ? await this.#routing.select(request) : await this.#selectFrom(request, routes);
     const list = { profile: selection.profile, routes: selection.candidates.map((c) => c.route) };
     const why: string[] = [];
     if (budget !== undefined && ((budget.maxCostMicros !== undefined && spent.costMicros >= budget.maxCostMicros) || (budget.maxTokens !== undefined && spent.tokens >= budget.maxTokens))) {
@@ -460,6 +500,14 @@ export class FallbackService {
       return { route: c.route, revision: selection.revision, list };
     }
     return { revision: selection.revision, list, waiting: { reason: "no eligible route is left", ...(until === undefined ? {} : { until: new Date(until).toISOString() }), why } };
+  }
+
+  /** The caller's own ordered list, judged by the table's rules as it is now (the same rules as a profile of the table). */
+  async #selectFrom(request: RouteRequest, routes: readonly string[]): Promise<Selection & { revision: number }> {
+    const table = await this.#routing.get();
+    if (table === undefined) throw new DomainError("not_found", "no routing table is configured");
+    const { prefer: _p, ...rest } = request; void _p;
+    return { ...selectRoute({ providers: table.providers, routes: table.routes, roles: {}, exclusions: table.exclusions, profiles: { ...table.profiles, [LISTED]: routes } }, { ...rest, profile: LISTED }), revision: table.revision };
   }
 
   /** The list position to store: the fresh one when a route was chosen (index of that route), else the old one. */

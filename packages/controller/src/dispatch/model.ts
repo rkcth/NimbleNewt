@@ -48,6 +48,12 @@ export interface DispatchBody {
   readonly route: string;
   readonly role: string;
   readonly request: { readonly contextTokens: number; readonly needs: readonly string[]; readonly data: "local-only" | "cloud-allowed"; readonly paidAuthorized: boolean };
+  /**
+   * The model call this attempt's run on its route is (card R04c): begun through the fallback service just before the worker starts, so the owner's routing controls and the routes' health are consulted, a drain report counts it and
+   * a cutover cancels it. `sent` once the worker started; `ended` once its end was reported. `modelCallSeq` numbers the calls begun for the attempt, so a new one never reuses an old one's command.
+   */
+  readonly modelCall?: { readonly callId: string; readonly attempt: number; readonly route: string; /** What the attempt had spent when the call began, so the call is charged only its own part. */ readonly fromCostMicros: number; readonly sent?: boolean; readonly ended?: boolean };
+  readonly modelCallSeq?: number;
   readonly revisions: DispatchRevisions;
   readonly hostId: string;
   /** The attempt may start only on this host (card H02: it was relocated there, or parked on the host that owns its native store). Cleared when it starts. */

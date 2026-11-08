@@ -70,11 +70,28 @@ export type RouteChoice =
     readonly route: string; readonly harness?: string; readonly role: string;
     readonly request: { readonly contextTokens: number; readonly needs: readonly string[]; readonly data: "local-only" | "cloud-allowed"; readonly paidAuthorized: boolean };
     readonly routing?: number; readonly profiles?: number;
+    /** Further routes the configuration allows for the task, in order, after `route` (card R04c): when the owner's routing controls or a route's health keep new work off `route`, the first of these that is open is used. */
+    readonly alternatives?: readonly string[];
   }
   | { readonly none: true; readonly reasons: readonly string[] };
 export type RouteResolver = (command: { readonly commandId: string; readonly taskId: string }) => Promise<RouteChoice>;
 
 export interface DispatcherLoop { readonly name: string; run(by: Principal): Promise<unknown> }
+
+/** The dispatcher's side of the fallback service (card R04c). `key` names the call an attempt begins (the same key gives the same call), so a look and the begin that follows agree on it. */
+export interface ModelCalls {
+  /** Why new work may not go to this route now (a disabled, draining or cut-over target; a target that is down), or nothing when it may. Reads only. */
+  blocked(route: string, key: string): Promise<readonly string[]>;
+  /** Begins the call for the attempt's run on `route` (judged once more by the routing rules, the gate and the task's model budget). `wait` says why it may not start on it now. */
+  begin(call: { readonly key: string; readonly taskId: string; readonly route: string; readonly role: string; readonly request: RouteRequestOf }): Promise<{ readonly callId: string; readonly attempt: number } | { readonly wait: string }>;
+  /** Whether the call's attempt is still in progress (a cutover, or a gate change before it was sent, takes it back). */
+  current(call: { readonly callId: string; readonly attempt: number }): Promise<boolean>;
+  /** The worker for the attempt started: the request is under way. */
+  sent(call: { readonly callId: string; readonly attempt: number }): Promise<void>;
+  /** The attempt's run ended (or never started: `sent` false). Must not throw for an end that was already reported. */
+  ended(call: { readonly callId: string; readonly attempt: number; readonly sent: boolean; readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly costMicros: number }): Promise<void>;
+}
+type RouteRequestOf = Extract<RouteChoice, { route: string }>["request"];
 
 export interface DispatcherDeps {
   /** The dispatcher's own service principal (`service:dispatcher`, authenticated). It is the only principal that issues task credentials for admitted attempts. */
@@ -100,6 +117,11 @@ export interface DispatcherDeps {
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
   readonly blockers: Pick<BlockerService, "openBlocker">;
   readonly route: RouteResolver;
+  /**
+   * The model calls of attempts, through the fallback service (card R04c). With it the route an attempt is claimed and started on is one the owner's routing controls (disable, drain, cutover) and the routes' health leave
+   * open, the run of an attempt on its route is a model call that a drain report counts and a cutover cancels, and its end is reported. Without it routes are chosen by the configuration alone, as before.
+   */
+  readonly modelCalls?: ModelCalls;
   /** The routing table, to judge the chosen route again at each call. Without it the route is not judged again. */
   readonly routing?: Pick<RoutingService, "get">;
   readonly pauses: PauseGuard;
@@ -477,6 +499,8 @@ export class DispatcherService {
         const checkpoint = await this.#checkpoint(id, "the controller shut down").catch(() => undefined);
         const current = (await this.#load(id))!;
         await this.#live.get(id)?.handle.stop().catch(() => undefined);
+        // Its run on the route is over (card R04c): nothing is in flight on that route any more, and the next controller begins a new call when it starts the attempt again.
+        await this.#endCall(id, "abandoned", "the controller shut down");
         this.#path.forget(id, current.body.parked);
         if (current.body.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-down:${id}:${current.body.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: current.body.requestId, reason: "the controller shut down" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
         await this.#update(id, (x) => {
@@ -695,6 +719,21 @@ export class DispatcherService {
       }
     }
     await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false, stopped });
+  }
+
+  /**
+   * The owner cut over the route this attempt's model call runs on (card R04c): the run is cancelled at once (no freeze or checkpoint first: a cutover is immediate), the worker is stopped and a replacement is admitted within
+   * the attempts allowed, which goes to the next open route. Only the call that was cut is acted on: an attempt that has since begun another call, or ended, is left alone (false). Repeating it does nothing more.
+   */
+  async cutOver(by: Principal, attemptId: string, call: { readonly callId: string; readonly attempt: number; readonly reason: string }): Promise<boolean> {
+    const found = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    if (found === undefined || found.body.state === "finished") return false;
+    const d = await this.#controlled(by, attemptId);
+    const mc = d.body.modelCall;
+    // An attempt that has not started yet needs nothing more: its next advance finds the call taken back and begins one on an open route.
+    if (mc === undefined || mc.callId !== call.callId || mc.attempt !== call.attempt || d.body.state !== "running") return false;
+    await this.#end(d.body.attemptId, "abandoned", `the route ${mc.route} was cut over: ${call.reason}`.slice(0, 500), { readmit: true });
+    return true;
   }
 
   /**
@@ -1198,8 +1237,22 @@ export class DispatcherService {
     // 5. Route and harness, and the recovery gate: every admission names its harness.
     // The decision is recorded per command ID, so the ID carries the revisions it reads: a change of the owner's route configuration or of the task's contract is a new decision, an unchanged one is the recorded one.
     const key = [(await this.#runner.get("routing-table", "routing"))?.revision ?? 0, (await this.#runner.get("difficulty-profiles", "profiles"))?.revision ?? 0, (await this.#runner.get("task-contract", taskId))?.revision ?? 0].join(".");
-    const chosen = await this.#deps.route({ commandId: `dpa-route:${attemptId}:${key}`, taskId });
-    if ("none" in chosen) return block("route", "dispatch_blocked", `no model route can be used: ${chosen.reasons.join("; ")}`.slice(0, 800));
+    const configured = await this.#deps.route({ commandId: `dpa-route:${attemptId}:${key}`, taskId });
+    if ("none" in configured) return block("route", "dispatch_blocked", `no model route can be used: ${configured.reasons.join("; ")}`.slice(0, 800));
+    // 5a. The owner's routing controls and the routes' health (card R04c): new work goes to the first route of the configured order that they leave open. All closed is a wait (a drain or an outage passes), not a blocker.
+    let chosen = configured;
+    if (this.#deps.modelCalls !== undefined) {
+      const callKey = await this.#callKey(attemptId);
+      const held: string[] = [];
+      let open: string | undefined;
+      for (const r of [configured.route, ...(configured.alternatives ?? []).filter((x) => x !== configured.route)]) {
+        const why = await this.#deps.modelCalls.blocked(r, callKey);
+        if (why.length === 0) { open = r; break; }
+        held.push(`${r}: ${why.join("; ")}`);
+      }
+      if (open === undefined) return skip("route", `every route allowed for the task is closed to new work: ${held.join(" | ")}`.slice(0, 800));
+      if (open !== configured.route) chosen = { ...configured, route: open };
+    }
     const recovery = await this.#deps.contracts.recoveryOf(taskId);
     const gap = this.#deps.harnesses.checkAttempt(recovery, chosen.harness);
     if (gap !== undefined) return block("harness", "dispatch_blocked", gap);
@@ -1450,7 +1503,53 @@ export class DispatcherService {
       }
       if (pinned.kind === "changed" || pinned.kind === "unbound") { await this.#giveBack(d); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
     }
+    // The model call of this run (card R04c), begun last so an attempt that only waited holds none: the owner's controls and the routes' health are asked once more, and a drain report counts it from now on.
+    if (this.#deps.modelCalls !== undefined) {
+      const why = await this.#beginCall(b.attemptId, pre.route);
+      if (why !== undefined) { await this.#giveBack(d); return { kind: "skipped", check: "route", reason: why }; }
+      d = (await this.#load(b.attemptId)) ?? d;
+    }
     return this.#start(d, pre.host, requestId);
+  }
+
+  async #callKey(attemptId: string): Promise<string> { return `dpa-call:${attemptId}:${(await this.#load(attemptId))?.body.modelCallSeq ?? 0}`; }
+
+  /**
+   * The attempt's run on its route as a model call (card R04c). A call already begun for the same route that is still current is kept (a start that waited, then went on); one that is not (the gate took it back, the
+   * route changed) is closed and the next is begun under the next number. Returns why the attempt may not start now. The route the call is on is the attempt's route from here on.
+   */
+  async #beginCall(attemptId: string, route: Extract<RouteChoice, { route: string }>): Promise<string | undefined> {
+    const calls = this.#deps.modelCalls!;
+    const b = (await this.#load(attemptId))!.body;
+    const old = b.modelCall;
+    if (old !== undefined && old.ended !== true) {
+      if (old.route === route.route && await calls.current(old)) {
+        if (b.route !== route.route) await this.#update(attemptId, (x) => ({ ...x, route: route.route, role: route.role, request: route.request }));
+        return undefined;
+      }
+      await this.#endCall(attemptId, "abandoned", "the attempt moved to another route before it started");
+    }
+    const seq = (await this.#load(attemptId))!.body.modelCallSeq ?? 0;
+    const got = await calls.begin({ key: `dpa-call:${attemptId}:${seq}`, taskId: b.taskId, route: route.route, role: route.role, request: route.request });
+    if ("wait" in got) {
+      // A call that waits is over for this run: the next look begins a fresh one.
+      await this.#update(attemptId, (x) => ({ ...x, modelCallSeq: Math.max(x.modelCallSeq ?? 0, seq + 1) }));
+      return `the route ${route.route} may not be used now: ${got.wait}`.slice(0, 800);
+    }
+    await this.#update(attemptId, (x) => ({ ...x, route: route.route, role: route.role, request: route.request, modelCall: { callId: got.callId, attempt: got.attempt, route: route.route, fromCostMicros: x.used?.costMicros ?? 0 }, modelCallSeq: Math.max(x.modelCallSeq ?? 0, seq + 1) }));
+    return undefined;
+  }
+
+  /** Reports the end of the attempt's model call once (a call never sent is withdrawn, not charged). A failure is told and never keeps the attempt from ending. */
+  async #endCall(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string): Promise<void> {
+    const calls = this.#deps.modelCalls;
+    const b = (await this.#load(attemptId))?.body;
+    const call = b?.modelCall;
+    if (calls === undefined || b === undefined || call === undefined || call.ended === true) return;
+    try {
+      await calls.ended({ callId: call.callId, attempt: call.attempt, sent: call.sent === true, outcome, summary, costMicros: Math.max(0, (b.used?.costMicros ?? 0) - call.fromCostMicros) });
+      await this.#update(attemptId, (x) => (x.modelCall?.callId === call.callId ? { ...x, modelCall: { ...x.modelCall, ended: true } } : x));
+    } catch (error) { this.#options.onError?.(error); }
   }
 
   /** Holds the attempt's most possible spend. The amounts are decided once and written to the attempt before the budget is asked, and the reservation's command ID derives from the attempt, so a repeat after a crash (or a second dispatcher) asks for the same thing and finds the same hold. Returns why the attempt cannot start when the allowance is not there. */
@@ -1681,6 +1780,21 @@ export class DispatcherService {
       await host.release?.(b.attemptId, "the attempt ended while its worker was starting").catch(() => undefined);
       return { kind: "skipped", check: "host", reason: "the attempt ended while its worker was starting" };
     }
+    // The worker is up: its model call is under way (card R04c). A call the owner's controls took back meanwhile (a cutover that landed while the worker was starting) does not run: the worker is let go and the
+    // attempt ends, and a replacement is admitted, which goes to the next open route.
+    const mc = (await this.#load(b.attemptId))?.body.modelCall;
+    if (this.#deps.modelCalls !== undefined && mc !== undefined && mc.sent !== true && mc.ended !== true) {
+      let refused: string | undefined;
+      try {
+        if (!(await this.#deps.modelCalls.current(mc))) refused = "its model call was taken back while the worker was starting";
+        else { await this.#deps.modelCalls.sent(mc); await this.#update(b.attemptId, (x) => (x.modelCall?.callId === mc.callId ? { ...x, modelCall: { ...x.modelCall, sent: true } } : x)); }
+      } catch (error) { refused = `its model call could not be marked sent: ${errorText(error)}`; }
+      if (refused !== undefined) {
+        this.#live.set(b.attemptId, { handle, host, turn: Promise.resolve() });
+        await this.#end(b.attemptId, "abandoned", `the route ${b.route} was closed before the attempt ran (${refused})`.slice(0, 500), { readmit: true });
+        return { kind: "skipped", check: "route", reason: refused };
+      }
+    }
     const turn = this.#run(b.attemptId, handle);
     this.#live.set(b.attemptId, { handle, host, turn });
     return { kind: "started" };
@@ -1750,6 +1864,8 @@ export class DispatcherService {
     const d = (await this.#load(attemptId))!;
     const b = d.body;
     await this.#live.get(attemptId)?.handle.stop().catch(() => undefined);
+    // The run on the route is over until the attempt goes on (card R04c): a later start begins a new model call.
+    await this.#endCall(attemptId, "succeeded", "the turn ended with calls waiting for an approval");
     this.#path.forget(attemptId, b.parked);
     if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-yield:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "every call of the attempt waits for an approval" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#update(attemptId, (x) => {
@@ -1846,6 +1962,7 @@ export class DispatcherService {
     else { const host = this.#deps.workers.find((w) => w.hostId === d.body.hostId); workerStopped = host?.release === undefined ? false : await host.release(attemptId, summary.slice(0, 280)).then(() => true, () => false); }
     await this.#path.settle(attemptId, true).catch(() => undefined);
     await this.#path.cancelParked(attemptId).catch(() => undefined);
+    await this.#endCall(attemptId, outcome, summary);
     const b = (await this.#load(attemptId))!.body;
     // The owner's figures are read before anything is finished: a setting that cannot be read (storage down) throws here, the attempt stays unfinished and the end is tried again, so the replacement is never lost. A damaged setting is not an obstacle: no limits apply and the owner is told.
     const figures = options.readmit ? await this.#figuresOrNone() : undefined;
