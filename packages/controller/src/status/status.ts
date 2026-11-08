@@ -755,7 +755,8 @@ export class StatusService {
       if (q !== undefined && problem === undefined) {
         const c = cite("admission-state", "admission", q.revision === 0 ? undefined : q.revision);
         const live: Readonly<Record<string, string>> = { productive: `; ${q.running.productive} running now`, perHost: "", control: `; ${q.running.control} of them in use now`, queue: `; ${q.waiting} waiting now` };
-        lines.push(line(`Host and global quotas (the setting is at revision ${q.revision}); the ones marked "you set it" are yours, the others are the installation's defaults:`, c));
+        // The number is the revision of the whole admission record - the same record admission writes for every request and release - so it is named as that rather than as the version of the setting.
+        lines.push(line(`Host and global quotas (the admission record is at revision ${q.revision}, which every request and release also raises); the ones marked "you set it" are yours, the others are the installation's defaults:`, c));
         for (const name of Object.keys(q.limits)) {
           const value = (q.limits as Record<string, number>)[name]!;
           // Every lookup by a name read out of a record is an own-property one: a quota or host named `constructor` must not be compared with, or described by, what `Object.prototype` holds.

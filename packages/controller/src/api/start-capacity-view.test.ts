@@ -44,6 +44,7 @@ test("the capacity view in chat shows what the owner set by the state API, in th
     assert.match(before, /^Capacity caps \(your setting is at revision 0\)/m);
     assert.match(before, /^perProject \(.*\): off, nothing is capped \(the default\)$/m);
     assert.match(before, /^Host and global quotas/m);
+    assert.match(before, /^Host and global quotas \(the admission record is at revision 0, which every request and release also raises\);/m, "the header names the record its revision comes from, not the setting");
     assert.match(before, /^productive \(.*\): 4 \(the default\); 0 running now$/m);
     assert.match(before, /^Limits on spawning child tasks \(your setting is at revision 0\):$/m);
     assert.match(before, /^totalChildren \(.*\): 16 \(the default\)$/m);

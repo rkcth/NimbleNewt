@@ -100,7 +100,7 @@ for (const backend of backends) {
     // The three groups, each figure named as the installation's default, and each cap named as off.
     assert.match(body, /^Capacity caps \(your setting is at revision 0\); all are off unless you turned one on:$/m);
     for (const cap of ["perProject", "perAgent", "fanIn"]) assert.ok(body.includes(`${cap} (`) && shown.some((l) => new RegExp(`^${cap} \\(.*\\): off, nothing is capped \\(the default\\)$`).test(l.text)), `${cap} is off and called the default`);
-    assert.ok(shown.some((l) => /^Host and global quotas \(the setting is at revision 0\);/.test(l.text)), "the quotas group is there");
+    assert.ok(shown.some((l) => /^Host and global quotas \(the admission record is at revision 0, which every request and release also raises\);/.test(l.text)), "the quotas group is there, and says whose revision it shows");
     assert.match(body, /^productive \(.*\): 4 \(the default\); 0 running now$/m);
     assert.match(body, /^perHost \(.*\): 2 \(the default\)$/m);
     assert.match(body, /^control \(.*\): 2 \(the default\); 0 of them in use now$/m);
@@ -136,6 +136,22 @@ for (const backend of backends) {
     assert.match(body, /^totalChildren \(.*\): off, no total \(you set it\)$/m, "the fan-in total is turned off");
     assert.match(body, /^depth \(.*\): 3 \(the default\)$/m);
     assert.ok(shown.some((l) => l.text.includes("revision 3") && l.cites.some((c) => c.kind === "capacity-limits-settings" && c.revision === 3)), "the caps lines cite the revision read");
+  });
+
+  suite("the quotas header names the record whose revision it shows, and that number rises with every request and release", async (w, s) => {
+    await w.principals.enroll(w.owner, { commandId: cid("h"), kind: "host", name: "pc", grants: [] });
+    const before = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
+    const header = before.find((l) => l.text.startsWith("Host and global quotas ("))?.text ?? "";
+    assert.equal(header, 'Host and global quotas (the admission record is at revision 0, which every request and release also raises); the ones marked "you set it" are yours, the others are the installation\'s defaults:', "it is the admission record's revision, not the version of a setting");
+    // A request changes nothing the owner set, and still raises the number - which is the whole reason it must not read as the revision of the quotas.
+    const made = await s.quotas.request({ commandId: cid("rev"), actor: "host:pc", class: "inquiry", cpus: 1, memoryMb: 512 });
+    const asked = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
+    assert.ok(asked.some((l) => /^Host and global quotas \(the admission record is at revision 1, which every request and release also raises\);/.test(l.text)), `one request later the record stands at revision 1: ${text(asked)}`);
+    assert.ok(asked.every((l) => l.cites.every((c) => c.kind !== "admission-state" || c.revision === undefined || c.revision === 1)), "and the cites carry the same number");
+    assert.match(text(asked), /^productive \(.*\): 4 \(the default\); 0 running now$/m, "every quota the owner set is still the installation's own");
+    assert.match(text(asked), /^control \(.*\): 2 \(the default\); 1 of them in use now$/m, "what the record says is running is what moved");
+    await s.quotas.release({ commandId: cid("rel"), actor: "host:pc", requestId: made.id, reason: "it finished" });
+    assert.ok((await s.status.ask(s.owner, { kind: "capacity" }))!.lines.some((l) => /^Host and global quotas \(the admission record is at revision 2,/.test(l.text)), "and a release raises it again: releasing what ran changes the same record");
   });
 
   suite("a damaged caps record is told as the thing it is: nothing new is admitted until it is repaired, inquiries and reviews included", async (w, s) => {
@@ -256,6 +272,16 @@ for (const backend of backends) {
         `no command could have stored ${name}: ${String(value)}`,
       );
     }
+    // A stored `queue` of text is the same fault in another shape: it used to print the group with `3 waiting now` beside a bound nobody could read.
+    await damage(s.storage, s.epoch, ADM, { limits: { productive: 4, perHost: 2, control: 2, queue: "abc", depth: 3, children: 4, patience: 5 }, capacity: {}, running: [], queue: [], withdrawn: [] }, "bound-queue-text");
+    const words = text((await s.status.ask(s.owner, { kind: "capacity" }))!.lines);
+    assert.ok(words.includes("the stored admission record is damaged (queue is not a figure the controller can work from)"), `text where a bound belongs: ${words}`);
+    assert.ok(!/^queue \(/m.test(words), `and no queue line is shown beside it: ${words}`);
+    await assert.rejects(
+      () => s.quotas.changeQuotas(s.owner, { commandId: cid("bound-queue-text"), set: { queue: "abc" } }),
+      (error: unknown) => error instanceof DomainError && error.code === "invalid_command" && error.message === "set.queue: must be a whole number from 1 to 500",
+      "no command could have stored queue: \"abc\" either",
+    );
   });
 
   suite("a stored figure outside the bound is not inert either: admission works from it, which is why the group is refused whole", async (w, s) => {
