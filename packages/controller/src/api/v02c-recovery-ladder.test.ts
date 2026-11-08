@@ -192,6 +192,63 @@ test("the owner reaches stuck agents' concerns in free-form chat: lists them, ta
   }
 });
 
+test("a supervisor who hands a stuck agent's concern to the owner by hand is named in the owner's notice; nothing says it waited too long for its supervisor (card V02c review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-recovery-hand-"));
+  let clock = Date.parse("2026-11-02T08:00:00.000Z");
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    dispatch: { timer: new ManualTimer(), manual: true, clock: () => new Date(clock).toISOString() },
+  } as never);
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message?: string } }>;
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    // Ann works the task; Boss supervises her and may see and manage the task (so may pause it); a host reports Ann's progress.
+    const boss = (await c.services.agents.create(rob, { commandId: "a-boss", friendlyName: "Boss" } as never)).id;
+    const ann = (await c.services.agents.create(rob, { commandId: "a-ann", friendlyName: "Ann", supervisorId: boss } as never)).id;
+    for (const a of ["task.read", "assignment.read", "assignment.manage"]) await c.services.grants.grant(rob, { commandId: `g-${a}`, grantee: `agent:${boss}`, action: a, project, source: "direct", basis: "test" } as never);
+    await c.services.grants.grant(rob, { commandId: "g-ann", grantee: `agent:${ann}`, action: "task.read", project, source: "direct", basis: "test" } as never);
+    await c.services.principals.enroll(rob, { commandId: "e-pc", kind: "host", name: "pc", grants: [{ action: "attempt.work", project }] });
+    const host = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "host:pc")).token);
+    const task = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Build" })).id;
+    await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as", actor: rob.id, taskId: task, owner: { kind: "agent", id: ann } });
+    const a0 = (await c.services.assignments.getAssignment(task))!;
+    await c.services.assignments.admitAttempt({ commandId: "ad", actor: rob.id, taskId: task, expectedRevision: a0.revision, generation: a0.generation, owner: { kind: "agent", id: ann }, harness: "pi" } as never);
+    await c.services.projects.transitionTask({ commandId: "ip", actor: rob.id, taskId: task, expectedRevision: (await c.services.projects.getTask(task))!.revision, to: "in_progress" });
+    let k = 0;
+    // The same action over and over, reported as it happens: a loop, never silence.
+    const busy = async (): Promise<void> => { for (let i = 0; i < 6; i++) await c.services.stall.report(host, { commandId: `rep-${k++}`, taskId: task, generation: a0.generation, event: { type: "step", label: "run tests", actionKey: "tests" } }); };
+    await busy();
+    // Stall detection needs its right; the automatic steps run in the same loop family.
+    await c.services.grants.grant(rob, { commandId: "g-scan", grantee: "service:dispatcher", action: "recovery.stall-scan", project: "*", source: "direct", basis: "test" } as never);
+    await call(boot.token, "recovery.ladder.set", { levels: [["nudge", "hand-to-owner"]] }, "lad");
+    await c.dispatch.dispatcher.tick();
+    const concern = async () => (await c.services.stall.list(rob, { taskId: task })).items.find((x) => x.kind === "loop")!;
+    assert.equal((await concern()).route.to.id, boss);
+    const bossToken = (await c.services.principals.issueCredential(rob, `agent:${boss}`)).token;
+    const revision = async (): Promise<number> => (await concern()).revision;
+    const id = (await concern()).id;
+    assert.ok((await call(bossToken, "recovery.step", { concernId: id, expectedRevision: await revision(), action: "nudge", text: "how is it going?" }, "n1")).ok);
+    const handed = await call(bossToken, "recovery.step", { concernId: id, expectedRevision: await revision(), action: "hand-to-owner" }, "h1");
+    assert.ok(handed.ok, JSON.stringify(handed));
+    assert.equal((await concern()).escalatedTo, "owner");
+    await c.dispatch.dispatcher.tick();
+    assert.ok((await concern()).notifiedAt !== undefined, "the owner was told");
+    const told = (await c.storage.listAggregates("notification-item", { limit: 100 })).map((n) => n.body as unknown as { ref: { kind: string; id: string }; detail?: string }).filter((n) => n.ref.kind === "task" && n.ref.id === task);
+    assert.equal(told.length, 1, JSON.stringify(told));
+    assert.match(told[0]!.detail!, new RegExp(`was handed to you by agent:${boss}: `));
+    assert.doesNotMatch(told[0]!.detail!, /waited too long|automatic/);
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("automatic recovery steps through the composed controller: off by default; the owner switches them on in free-form chat (shown first); the dispatcher's tick, on the controller's clock, takes one rung per interval in the supervisor's name with the real effects, records each, passes reassign and stops at the owner (card V02c)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-recovery-auto-"));
   let clock = Date.parse("2026-11-02T08:00:00.000Z");

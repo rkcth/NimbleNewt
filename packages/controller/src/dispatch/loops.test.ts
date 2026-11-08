@@ -299,3 +299,32 @@ test("the coverage loop tells each project\'s notice once, marks it told only af
   assert.deepEqual(told, ["x", "y", "z"]);
   assert.deepEqual(marked, ["x", "z"], "a notice that failed is not marked told, so it comes again");
 });
+
+test("the automatic recovery steps go round the concerns a page at a time: a tick reads pages until one takes or refuses a step, at most five, and the next tick goes on from where it stopped, wrapping at the end (card V02c)", async () => {
+  const calls: (string | undefined)[] = [];
+  // Pages a, b, c, ... ; the page after "b" takes a step; the last page ("f") has no next.
+  const pages: Record<string, { next?: string; stepped: number; refused: number }> = { "": { next: "a", stepped: 0, refused: 0 }, a: { next: "b", stepped: 0, refused: 0 }, b: { next: "c", stepped: 1, refused: 0 }, c: { next: "d", stepped: 0, refused: 0 }, d: { next: "e", stepped: 0, refused: 0 }, e: { next: "f", stepped: 0, refused: 0 }, f: { next: "g", stepped: 0, refused: 0 }, g: { next: "h", stepped: 0, refused: 0 }, h: { stepped: 0, refused: 1 } };
+  const stall = {
+    scan: async () => ({ checked: 0, opened: 0, reopened: 0, cleared: 0, contended: 0 }),
+    autoStep: async (_by: unknown, page: { afterId?: string } = {}) => { calls.push(page.afterId); return { checked: 1, ...pages[page.afterId ?? ""]! }; },
+  };
+  const loop = recoveryLoops(stall as never, { runPass: async () => undefined }, async () => undefined).find((l) => l.name === "recovery.auto-step")!;
+  const by = { id: "service:dispatcher" } as never;
+  // Tick 1: the first page and "a" take nothing, "b" takes a step: three pages, then stop.
+  await loop.run(by);
+  assert.deepEqual(calls, [undefined, "a", "b"]);
+  // Tick 2 goes on from "c" and reads at most five pages.
+  calls.length = 0;
+  await loop.run(by);
+  assert.deepEqual(calls, ["c", "d", "e", "f", "g"]);
+  // Tick 3: "h" refuses one (stop) and has no next, so tick 4 starts again at the beginning.
+  calls.length = 0;
+  await loop.run(by);
+  assert.deepEqual(calls, ["h"]);
+  calls.length = 0;
+  await loop.run(by);
+  assert.deepEqual(calls, [undefined, "a", "b"]);
+  // Without the scan right the loop takes nothing and does not fail the tick.
+  const denied = recoveryLoops({ ...stall, autoStep: async () => { throw new DomainError("forbidden", "no scan right"); } } as never, { runPass: async () => undefined }, async () => undefined).find((l) => l.name === "recovery.auto-step")!;
+  await denied.run(by);
+});

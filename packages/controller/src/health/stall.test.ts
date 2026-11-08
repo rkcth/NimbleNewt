@@ -1412,9 +1412,9 @@ for (const backend of backends) {
   const autoWorld = async (c: Ctx, more: { unavailable?: (action: RecoveryAction) => string | undefined; run?: (action: RecoveryAction, key: string) => Promise<void> } = {}) => {
     const w = await ladderWorld(c);
     const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
-    const calls: { action: RecoveryAction; by: string; key: string; text: string }[] = [];
+    const calls: { action: RecoveryAction; by: string; key: string; text: string; concernId?: string }[] = [];
     const effects: RecoveryEffects = {
-      run: async (action, ctx) => { calls.push({ action, by: ctx.by.id, key: ctx.key, text: ctx.text }); await more.run?.(action, ctx.key); return {}; },
+      run: async (action, ctx) => { calls.push({ action, by: ctx.by.id, key: ctx.key, text: ctx.text, concernId: ctx.concernId }); await more.run?.(action, ctx.key); return {}; },
       unavailable: async (action) => more.unavailable?.(action),
     };
     const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
@@ -1568,6 +1568,50 @@ for (const backend of backends) {
     now += 31 * MIN;
     assert.equal((await svc.autoStep(c.owner)).stepped, 1);
     assert.deepEqual((await concern()).recoverySteps!.map((x) => x.action), ["nudge", "rebrief"]);
+  });
+
+  suite("automatic recovery steps: a holder the concern climbed to gets the full interval from the climb, not from the concern's last change (card V02c review)", async (c) => {
+    const { chief, setting, calls, effects, concern } = await autoWorld(c);
+    // Level 0 may only nudge; the holder one level up may re-brief. Four hours between rungs; the concern climbs after 24 hours undecided.
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge"], ["nudge", "rebrief"]], autoStep: true, autoStepMinutes: 240 });
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects, escalateAfterMs: 24 * HOUR });
+    now += 4 * HOUR;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    assert.deepEqual(calls.map((x) => x.action), ["nudge"]);
+    // Nothing more at level 0. At 28 hours (24 after the nudge) it climbs past Mid (who cannot see the task) to Chief.
+    now += 24 * HOUR;
+    await svc.escalateUndecided(c.owner);
+    assert.equal((await concern()).escalatedTo, `agent:${chief.id}`);
+    // Chief has just been given it: no step yet, although the concern's last change was 24 hours ago.
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0, "the new holder's wait starts at the climb");
+    now += 4 * HOUR - MIN;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0);
+    now += MIN;
+    assert.equal((await svc.autoStep(c.owner)).stepped, 1);
+    const last = (await concern()).recoverySteps!.at(-1)!;
+    assert.deepEqual([last.action, last.by, last.auto, last.level], ["rebrief", `agent:${chief.id}`, true, 1]);
+  });
+
+  suite("automatic recovery steps: at most 20 steps a call; the next call goes on from the concern after the last one stepped, so every due concern gets its rung once (card V02c review)", async (c) => {
+    const { setting, calls, svc, concern } = await autoWorld(c);
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "rebrief", "hand-to-owner"]], autoStep: true, autoStepMinutes: 30 });
+    // 25 more concerns like the first (ids of later generations, so they sort after it).
+    const first = await concern();
+    const body = (await c.storage.getAggregate({ kind: "stall-concern", id: first.id }))!.body as Record<string, unknown>;
+    const ids = [first.id];
+    for (let i = 0; i < 25; i++) {
+      const id = first.id.replace(/-\d{10}-/, `-${String(1000 + i).padStart(10, "0")}-`);
+      ids.push(id);
+      await c.storage.applyOperation({ operationId: cid("mk"), epoch: c.projects.epoch, actor: "owner:rob", correlationId: cid("mk"), at: at(), changes: [{ type: "create", ref: { kind: "stall-concern", id }, body }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    }
+    now += 31 * MIN;
+    const one = await svc.autoStep(c.owner);
+    assert.deepEqual([one.stepped, one.refused], [20, 0]);
+    assert.equal(one.next, ids[19], "the next call starts after the 20th concern stepped");
+    const two = await svc.autoStep(c.owner, { afterId: one.next! });
+    assert.deepEqual([two.stepped, two.next], [6, undefined]);
+    assert.equal((await svc.autoStep(c.owner)).stepped, 0, "each waits its interval again");
+    assert.deepEqual(calls.map((x) => x.concernId).sort(), [...ids].sort(), "every concern nudged, each once");
   });
 
   suite("automatic recovery steps: two controllers ticking at once on one concern take ONE rung (card V02c)", async (c) => {
