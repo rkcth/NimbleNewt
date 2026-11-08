@@ -282,6 +282,8 @@ export class BudgetService {
         if (this.#depth(tree, parentId) + 1 > BUDGET_LIMITS.depth) invalid("childTaskId", `a budget tree is at most ${BUDGET_LIMITS.depth} levels deep`);
         const have = free(parent);
         if (!fits(give, have)) throw new DomainError("invalid_command", `budget: the parent cannot give that (${short(give, have)})`, { field: "costMicros" });
+        // A limit of 0 states none, so a child given nothing of a dimension its parent is limited in would spend it without any limit (card H10): it must be given some of each.
+        for (const k of ["costMicros", "computeMs"] as const) if (parent.limit[k] > 0 && give[k] === 0) invalid(k, `the parent's ${k === "costMicros" ? "cost" : "compute time"} is limited, so the child must be given some of it (a child given none would have no limit)`);
         addTo(parent.delegated, give);
         parent.children.push(childId);
         tree.nodes[childId] = { taskId: childId, projectId: tree.projectId, parentId, ...(holder === undefined ? {} : { holder }), limit: { ...give }, delegated: zero(), reserved: zero(), uncertain: zero(), spent: zero(), overrun: zero(), children: [], openRequests: [] };
