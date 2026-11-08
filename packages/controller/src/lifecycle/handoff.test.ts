@@ -346,4 +346,25 @@ for (const backend of backends) {
     await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-b", "rsp-a"] }); // same list, any order: a harmless repeat
     await refuses("invalid_command", () => c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-z"] }));
   });
+
+  suite("two callers finishing the same hand-off lift its hold once: the one that lost the race to finish it does not lift a pause the owner set afterwards, nor tell the move twice (card L04c review)", async (c) => {
+    let release!: () => void;
+    const gate = new Promise<void>((ok) => { release = ok; });
+    let first = true;
+    // The manager's completion stops inside the responsibilities step, after the task has moved; the owner's advance finishes the hand-off meanwhile.
+    c.resp.apply = async (_by, r) => { if (first) { first = false; await gate; } return { moved: [...r.ids], failed: [] }; };
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    const slow = c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, reassignResponsibilities: ["rsp-a"] });
+    for (let n = 0; n < 50 && (await c.handoffs.get(c.owner, h.id))?.phase !== "transferring"; n++) await new Promise((ok) => setTimeout(ok, 5));
+    for (let n = 0; n < 50 && first; n++) await new Promise((ok) => setTimeout(ok, 5));
+    assert.equal(first, false, "the manager's completion is inside the responsibilities step");
+    assert.equal((await c.reopen().advance(c.owner, { handoffId: h.id })).phase, "transferred");
+    assert.equal(await paused(c), false, "the hold the hand-off added is lifted");
+    // The owner pauses the task with the new owner on it; then the manager's completion goes on.
+    await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "owner hold after the move" });
+    release();
+    assert.equal((await slow).phase, "transferred");
+    assert.equal(await paused(c), true, "the owner's own pause stands");
+    assert.equal(c.told.length, 1, "the move is told once");
+  });
 }

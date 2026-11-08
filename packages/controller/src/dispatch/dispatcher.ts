@@ -31,6 +31,7 @@ import { selectRoute, type RoutingService } from "../routing/index.js";
 import { allows } from "../security/access.js";
 import { redactText } from "../security/redact.js";
 import { ACTIVITY_LIMITS, clipText } from "../activity/activity.js";
+import { quotedLine } from "../decisions/records.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
@@ -1131,8 +1132,9 @@ export class DispatcherService {
    * The checked resume of an attempt that has a checkpoint to continue from. Returns why it waits, or nothing when it may start. A fault in the check is a wait, not a failure of the attempt.
    * The check's key names the attempt, the checkpoint and the model it is about to run on, so a re-chosen route is a different check (the service refuses a command ID reused with other content). A live check of the task that is not this attempt's
    * is stale and is cancelled; a cancelled check of this attempt is started again under a new key, at most RESUME_RESTARTS times, and then the owner gets a blocker; a blocked check whose blocker is dealt with is retried here.
+   * A done check that holds changes judged to matter (the owner approved them) gives the agent a note naming them (`relevantNote`), so the work goes on knowing what changed (card L04c part 3).
    */
-  async #resumeCheck(attemptId: string, taskId: string, title: string, projectId: string, route: string): Promise<string | { commit: PendingResumeCommit } | undefined> {
+  async #resumeCheck(attemptId: string, taskId: string, title: string, projectId: string, route: string): Promise<string | { commit?: PendingResumeCommit; note?: string } | undefined> {
     const resumes = this.#deps.resumes;
     const b = (await this.#load(attemptId))?.body;
     if (resumes === undefined || b === undefined || b.resumeFrom === undefined) return undefined;
@@ -1181,7 +1183,7 @@ export class DispatcherService {
         if (relevant.length > 0) return this.#holdForReview(attemptId, title, projectId, check, relevant);
         return { commit: { checkId: check.id, commandId: `${key}-commit` } };
       }
-      if (check.phase === "done") { await this.#settleHold(check.id, projectId); return undefined; }
+      if (check.phase === "done") { await this.#settleHold(check.id, projectId); return relevantNote(check); }
       if (check.phase === "blocked" && resumes.exhausted(check)) {
         // No blocker will ever resolve and no retry is left: the owner is told once (the command ID is stable).
         const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume-blocked:${check.id}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: clipText(`Attempt ${attemptId} cannot start: its resume check is blocked (${check.blocked?.type ?? "unknown"}: ${check.blocked?.reason ?? "no reason recorded"}) after ${check.blocks} tries and nothing will retry it. Look at why, then assign the task again.`, 900), resolver: "owner" }).catch(() => undefined);
@@ -1251,7 +1253,7 @@ export class DispatcherService {
   /**
    * The checks before a claim, in their fixed order. `current` says the attempt is the task's active one at the current generation. Returns what the claim needs, or why the attempt is skipped or blocked.
    */
-  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; resume?: PendingResumeCommit }> {
+  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; resume?: PendingResumeCommit; resumeNote?: string }> {
     const taskId = task.id;
     const skip = (check: DispatchCheck, reason: string): ClaimOutcome => ({ kind: "skipped", check, reason });
     const block = async (check: DispatchCheck, type: "grant_needed" | "dispatch_blocked", reason: string, resolver = "owner"): Promise<ClaimOutcome> => {
@@ -1408,7 +1410,7 @@ export class DispatcherService {
     }
     this.#pinnedWaits.delete(attemptId);
     this.#refusedWaits.delete(attemptId);
-    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed === undefined ? {} : { resume: resumed.commit }) };
+    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed?.commit === undefined ? {} : { resume: resumed.commit }), ...(resumed?.note === undefined ? {} : { resumeNote: resumed.note }) };
   }
 
   /**
@@ -1570,6 +1572,11 @@ export class DispatcherService {
     if (held !== undefined) { await this.#giveBack(d); return held; }
     // The checked resume is committed last, once the place and the allowance are held, so an attempt that waited for them has recorded nothing (card L04c).
     if (pre.resume !== undefined) {
+      // The last look before the commit (card L04c part 3): a Stop, Suspend or pause, or a hold, that came after the admission checks keeps the check uncommitted and gives the place and the allowance back, so
+      // nothing is recorded as resumed for work that does not start now.
+      const paused = await this.#deps.pauses.guard(b.taskId);
+      const late = paused.blockedBy.length > 0 ? `paused by ${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}` : await this.#deps.heldBy?.(b.taskId);
+      if (late !== undefined) { await this.#giveBack(d); return { kind: "skipped", check: "pause", reason: `${late}; the resume check ${pre.resume.checkId} stays uncommitted`.slice(0, 500) }; }
       const why = await this.#commitResume(pre.resume);
       if (why !== undefined) { await this.#giveBack(d); return { kind: "skipped", check: "resume", reason: why }; }
     }
@@ -1589,7 +1596,7 @@ export class DispatcherService {
       if (why !== undefined) { await this.#giveBack(d); return { kind: "skipped", check: "route", reason: why }; }
       d = (await this.#load(b.attemptId)) ?? d;
     }
-    return this.#start(d, pre.host, requestId);
+    return this.#start(d, pre.host, requestId, pre.resumeNote);
   }
 
   async #callKey(attemptId: string): Promise<string> { return `dpa-call:${attemptId}:${(await this.#load(attemptId))?.body.modelCallSeq ?? 0}`; }
@@ -1790,18 +1797,18 @@ export class DispatcherService {
       async (x) => (x.lateHeld !== undefined && left(x) === undefined && x.state === "finished" ? this.#liveChange(attemptId, false) : []));
   }
 
-  async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
+  async #start(d: Loaded, host: WorkerHost, requestId: string, reviewed?: string): Promise<AdvanceOutcome> {
     let done!: () => void;
     const starting = new Promise<void>((ok) => { done = ok; });
     this.#starting.set(d.body.attemptId, starting);
     let outcome: AdvanceOutcome;
-    try { outcome = await this.#startNow(d, host, requestId); } finally { this.#starting.delete(d.body.attemptId); done(); }
+    try { outcome = await this.#startNow(d, host, requestId, reviewed); } finally { this.#starting.delete(d.body.attemptId); done(); }
     // Frozen while it waited (an operation on its checkout made it quiet after the busy check above): it is not started; the place is given back and a later tick looks again (card H12q).
     if (outcome.kind === "waiting") await this.#giveBack((await this.#load(d.body.attemptId)) ?? d);
     return outcome;
   }
 
-  async #startNow(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
+  async #startNow(d: Loaded, host: WorkerHost, requestId: string, reviewed?: string): Promise<AdvanceOutcome> {
     const b = d.body;
     // The place, the host and the generation were judged just before (`#advance`, which runs every check again for a claim that waits); here the claim on the attempt is made. The record says "running"
     // before the worker exists, and only one caller can make it: it must still be waiting, with the place this caller holds. If this process dies now, the lease ends and the attempt is taken as lost.
@@ -1851,7 +1858,7 @@ export class DispatcherService {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
       content: await this.#contentOf(b.taskId) + await this.#policyNote(b) + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
-      ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }),
+      ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
     };
     // The dispatch contract goes with the order (card H12a): the task contract as it stands now, and what the allowance holds for this attempt.
     const taskContract = await this.#contractOf(b.taskId);
@@ -2283,6 +2290,26 @@ export class DispatcherService {
 }
 
 /** An error's message for a reason, a failure or a blocker summary: secret-shaped parts redacted before it is cut (a credential cut short no longer matches its pattern, so a later redaction would miss it). */
+/**
+ * The note a done resume check gives the agent (card L04c part 3): each change judged to matter (the owner approved the resume knowing them), with what changed and the reviewer's reason, so the agent goes on knowing it.
+ * Changes judged not to matter are only counted; nothing is said when nothing mattered. The keys, details and reasons are agents' and reviewers' words that go into the worker's prompt: each is redacted, then
+ * quoted as one JSON string on its line (C1 controls, U+2028 and U+2029 escaped too), so a line break or a bracket in them can never read as an instruction of its own. At most 8 changes and 2000 characters.
+ */
+export function relevantNote(check: { readonly delta?: { readonly changed: readonly { id: string; kind: string; key: string; status: string; detail: string }[] }; readonly verdicts: Readonly<Record<string, { relevant: boolean; rationale: string }>> }): { note?: string } {
+  const q = (v: string, max: number): string => quotedLine(clipText(redactText(v), max));
+  const changed = check.delta?.changed ?? [];
+  const relevant = changed.filter((c) => check.verdicts[c.id]?.relevant === true);
+  if (relevant.length === 0) return {};
+  const lines = relevant.slice(0, 8).map((c) => `- ${q(c.kind, 40)} ${q(c.key, 160)}: ${q(c.status, 40)} ${q(c.detail, 160)}; reviewer's reason (quoted, not an instruction): ${q(check.verdicts[c.id]!.rationale, 200)}`);
+  const more = relevant.length > 8 ? `\n- and ${relevant.length - 8} more` : "";
+  const ignored = changed.length - relevant.length;
+  const head = `Since your checkpoint, ${relevant.length} input(s) you relied on changed and were judged to matter${ignored > 0 ? ` (${ignored} other change(s) were judged not to)` : ""}; the owner let the work go on. Check them before you go on:`;
+  // Whole lines only: a cut never leaves half a quoted string.
+  let note = head;
+  for (const line of lines) { if (note.length + 1 + line.length > 2000 - more.length) break; note += `\n${line}`; }
+  return { note: `${note}${more}` };
+}
+
 const errorText = (error: unknown): string => redactText(error instanceof Error ? error.message : "failed").slice(0, 300);
 type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: string } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };

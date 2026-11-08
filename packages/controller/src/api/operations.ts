@@ -68,6 +68,7 @@ import type { ReplayLimitsService } from "../activity/replay-limits.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { ContinuationService } from "../continuation/continuation.js";
+import type { DependencyService } from "../dependencies/dependencies.js";
 import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { QuietHostService } from "../remote/quiet-hosts.js";
 import type { CatalogPolicyService } from "../catalog/policy.js";
@@ -168,8 +169,9 @@ export interface Context {
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
-  readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline"> & Partial<Pick<ResumeCheckService, "forTask">>;
+  /** Continuations captured by hosts and the dependencies a task's work relied on (card L04c). */
+  readonly continuations?: ContinuationOps;
   /** Absent when the controller runs without deliverable reads (card U13). */
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
@@ -292,8 +294,20 @@ const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => {
   const screenedOpt = <A extends unknown[]>(run: (...a: A) => Promise<View<TaskHandoffBody> | undefined>) => async (...a: A) => { const v = await run(...a); return v === undefined ? v : h.screen(c.principal, v); };
   return { ...h, prepare: screened(h.prepare.bind(h)), complete: screened(h.complete.bind(h)), takeover: screened(h.takeover.bind(h)), choose: screened(h.choose.bind(h)), cancel: screened(h.cancel.bind(h)), advance: screened(h.advance.bind(h)), get: screenedOpt(h.get.bind(h)), forTask: screenedOpt(h.forTask.bind(h)), sweep: h.sweep.bind(h), screen: h.screen.bind(h) } as NonNullable<Context["handoffs"]>;
 };
-const continuationsOf = (c: Context): NonNullable<Context["continuations"]> => c.continuations ?? unavailable("continuation capture");
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
+const continuationsOf = (c: Context): ContinuationOps => c.continuations ?? unavailable("continuation capture");
+/** A host reads or writes a task's continuation, dependencies and resume check only while it runs the task's live attempt or is the host it is pinned to (card L04c); with nothing to ask, it is outside. */
+const hostOutside = async (c: Context, taskId: string): Promise<boolean> => c.principal.kind === "host" && !(c.continuations !== undefined && await c.continuations.hostHolds(c.principal.id, taskId));
+
+/** What the continuation operations use (card L04c). */
+export interface ContinuationOps {
+  readonly capture: ContinuationService["capture"];
+  readonly latest: ContinuationService["latest"];
+  /** Whether the host runs the task's live attempt, or is the host it is pinned to: a host captures a continuation only for work it holds. */
+  hostHolds(hostId: string, taskId: string): Promise<boolean>;
+  readonly record: DependencyService["record"];
+  readonly manifest: DependencyService["get"];
+}
 const deliverablesOf = (c: Context): NonNullable<Context["deliverables"]> => c.deliverables ?? unavailable("deliverable reads");
 const replayLimitsOf = (c: Context): NonNullable<Context["replayLimits"]> => c.replayLimits ?? unavailable("replay limits");
 const replayOf = (c: Context): NonNullable<Context["replay"]> => c.replay ?? unavailable("activity replay");
@@ -742,11 +756,6 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["handoffId"]); const item = await handoffsOf(c).get(c.principal, a["handoffId"] as string); if (item === undefined) throw new DomainError("not_found", "no such hand-off"); return asJson({ item }); } },
   { name: "handoff.sweep", kind: "command", summary: "Owner only: carries unfinished hand-offs on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps hand-offs"); return asJson(await handoffsOf(c).sweep(c.principal)); } },
-  { name: "continuation.capture", kind: "command", summary: "A host records the continuation of a task's run at a boundary: the conversation identity, the adapter's checkpoint reference, the result of its durability check, what the run still needs (artifacts, decisions, pending effects, budget, next step) and the manifest of what the context was built from. Only a host, service or the owner can vouch that the durability check passed; an agent's own word is recorded as not verified, and a capture that is not durable is stored as incomplete and is never resumed from.", args: { taskId: "the task", identity: "the conversation's identity (the same for every capture of the task)", agent: "the agent whose run it is", boundary: "{ kind: turn-complete, timeout, manual or shutdown, turnInProgress? }", checkpoint: "{ conversationId, at, digest, runtime: { name, version }, format }", durable: "{ verified, error? } from the host's durability check", continuation: "{ artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }", manifest: "{ summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }", nonCheckpointableTools: "[{ name, reason }]", scratchRecords: "record IDs", credentialRefs: "credential names only", commandId: "required" },
-    result: "`{ id, seq, status: complete or incomplete, replayed }`.", completion: { kind: "completed" },
-    run: async (c, a, id) => { only(a, ["taskId", "identity", "agent", "boundary", "checkpoint", "durable", "continuation", "manifest", "nonCheckpointableTools", "scratchRecords", "credentialRefs"]); return asJson(await continuationsOf(c).capture(c.principal, { commandId: need(id), ...a } as never)); } },
-  { name: "continuation.latest", kind: "query", summary: "The latest complete continuation of a task (for those who may work on it or read its history), or nothing when none was captured or none was durable.", args: { taskId: "the task" }, result: "`{ item }` (absent when there is none).", completion: { kind: "completed" },
-    run: async (c, a) => { only(a, ["taskId"]); const item = await continuationsOf(c).latest(c.principal, a["taskId"] as string); return asJson(item === undefined ? {} : { item }); } },
   { name: "resume.start", kind: "command", summary: "Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.", args: { taskId: "the task", model: "{ provider, id } the resume will run on", "previousModel?": "{ provider, id } it ran on before", after: "restart, model-change or continue", commandId: "required" },
     result: "`{ item: { id, phase, delta, verdicts, blocked? } }`.",
     run: async (c, a, id) => { only(a, ["taskId", "model", "previousModel", "after"]); return asJson({ item: await resumesOf(c).start(c.principal, { commandId: need(id), ...a } as never) }); } },
@@ -767,6 +776,26 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).advance(c.principal, { checkId: a["checkId"] as string }) }); } },
   { name: "resume.get", kind: "query", summary: "A resume check, with what changed, the verdicts and the history.", args: { checkId: "the check" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["checkId"]); const item = await resumesOf(c).get(c.principal, a["checkId"] as string); if (item === undefined) throw new DomainError("not_found", "no such resume check"); return asJson({ item }); } },
+  { name: "resume.for-task", kind: "query", summary: "The task's current resume check (the one the dispatcher or a person started last, in any phase), or `not_found` when it has none or you may not resume the task (a host only for an attempt it runs or is pinned to).", args: { taskId: "the task" }, result: "`{ item }`.",
+    run: async (c, a) => {
+      only(a, ["taskId"]); const r = resumesOf(c); if (r.forTask === undefined) unavailable("resume checks by task");
+      // Someone who may not resume the task (a host that does not hold it included) learns nothing of it, not even that it exists.
+      const item = await hostOutside(c, String(a["taskId"])) ? undefined : await r.forTask!(c.principal, a["taskId"] as string).catch((e: unknown) => { if (e instanceof DomainError && e.code === "forbidden") return undefined; throw e; }); if (item === undefined) throw new DomainError("not_found", "that task has no resume check"); return asJson({ item }); } },
+  { name: "continuation.capture", kind: "command", summary: "A host (or the agent, for its own run) records what is needed to continue a task at a safe boundary: the adapter's checkpoint reference, the artifacts and decisions made, pending effects, budget, the next step, a manifest, tools a checkpoint cannot reproduce, and credentials by name only. Complete only when the host's durability check passed (an agent's word is not durability); an incomplete capture is kept, never resumed from. A host captures only for an attempt it runs or is pinned to. A resumed attempt is checked against the latest complete one.", args: { taskId: "the task", identity: "the conversation identity (the same for every capture of the task)", agent: "the run's agent, like agent:ann", boundary: "{ kind: turn-complete, timeout, manual or shutdown }", checkpoint: "{ conversationId, at, digest, runtime: { name, version }, format }", durable: "{ verified, error? }: the host's durability check", continuation: "{ artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }", manifest: "{ summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }", nonCheckpointableTools: "[{ name, reason }]", scratchRecords: "desk record IDs of the run's agent in the task's project", credentialRefs: "names of secrets, never values", commandId: "required" },
+    result: "`{ id, seq, status, replayed }`: `status` is complete or incomplete.",
+    run: async (c, a, id) => {
+      only(a, ["taskId", "identity", "agent", "boundary", "checkpoint", "durable", "continuation", "manifest", "nonCheckpointableTools", "scratchRecords", "credentialRefs"]);
+      const k = continuationsOf(c);
+      if (await hostOutside(c, String(a["taskId"]))) throw new DomainError("forbidden", "a host captures a continuation only for an attempt it runs");
+      return asJson(await k.capture(c.principal, { commandId: need(id), ...a } as never));
+    } },
+  { name: "continuation.latest", kind: "query", summary: "The latest complete continuation of a task, for those who may work on it or read the project's histories (the owner and services too, and a host only for an attempt it runs or is pinned to), or nothing when none was captured, none was durable, or you may not read it.", args: { taskId: "the task" }, result: "`{ item }` (absent when there is none).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["taskId"]); const k = continuationsOf(c); const item = await hostOutside(c, String(a["taskId"])) ? undefined : await k.latest(c.principal, a["taskId"] as string); return asJson(item === undefined ? {} : { item }); } },
+  { name: "resume.dependencies.record", kind: "command", summary: "The agent working a task (or the owner) records what the work relied on: files, directories, searches, records, decisions, tool versions, environments, external and MCP resources, and negative lookups, each with what was seen (a hash, an ETag, the members). The same dependency again replaces it. A resumed attempt is checked against them, and each change is reviewed. What the controller can judge itself is recorded only as it really is.", args: { taskId: "the task", dependencies: "[{ kind, key, hash?, etag?, scope?, cursor?, members?, freshness?, server?, protocol? }], 1 to 500", commandId: "required" },
+    result: "`{ recorded }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "dependencies"]); return asJson(await continuationsOf(c).record(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "resume.dependencies.get", kind: "query", summary: "What a task's work recorded that it relied on, for those who may work on it or read the project's histories (and the owner and services, and a host only for an attempt it runs or is pinned to), or `not_found`.", args: { taskId: "the task" }, result: "`{ item: { taskId, projectId, entries } }`.",
+    run: async (c, a) => { only(a, ["taskId"]); const k = continuationsOf(c); const item = await hostOutside(c, String(a["taskId"])) ? undefined : await k.manifest(c.principal, a["taskId"] as string); if (item === undefined) throw new DomainError("not_found", "no recorded dependencies for that task, or none you may read"); return asJson({ item }); } },
   { name: "resume.sweep", kind: "command", summary: "Owner only: carries unfinished resume checks on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps resume checks"); return asJson(await resumesOf(c).sweep(c.principal)); } },
   { name: "activity.record", kind: "command", summary: "Appends a step to a task's activity record with the exact context it used. Sensitive content goes in `payload` (stored apart, redacted, readable only with history rights); a missing manifest or payload is marked missing, never left silent.", args: { taskId: "the task", kind: "owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle or ownership", summary: "one line", "manifest?": "{ refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }", "payload?": "{ text, sensitive? } or { missing: true, reason }", "outcome?": "proposed, dispatched, confirmed or uncertain; leave out when not known", "branch?": "the branch line the step belongs to (leave out for the main line)", "supersedes?": "the number of an earlier step this one replaces", commandId: "required" },

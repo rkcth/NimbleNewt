@@ -1082,6 +1082,18 @@ export class ChatService {
         labels[String(found[0]!["id"])] = named.trim();
       }
     }
+    if (intent.op === "resume.retry" || intent.op === "resume.cancel") {
+      // The owner names the task; the check is always the one the task has now, so what is shown (the task) and what is acted on (its check) are the same. A check ID the interpreter put in is
+      // never acted on by itself: it must be the named task's current check. Nothing is guessed when the task has none.
+      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's resume check you mean");
+      const current = await this.#get(token, "resume.for-task", { taskId: args["taskId"] });
+      if (current === undefined) return refuse("not_found", "that task has no resume check");
+      if (args["checkId"] !== undefined && args["checkId"] !== current["id"]) return refuse("invalid_command", "that resume check is not the named task's current one; name the task only");
+      args["checkId"] = String(current["id"]);
+      const t = await this.#get(token, "task.get", { taskId: args["taskId"] });
+      if (typeof t?.["title"] === "string") extraTargets.push(t["title"]);
+      delete args["taskId"];
+    }
     if (intent.op === "handoff.complete" || intent.op === "handoff.cancel") {
       if (args["handoffId"] === undefined) {
         if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's hand-off you mean");

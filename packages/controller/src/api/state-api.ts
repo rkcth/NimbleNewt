@@ -75,7 +75,7 @@ import type { CommandService } from "../commands/index.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
-import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context } from "./operations.js";
+import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ContinuationOps } from "./operations.js";
 
 export const API_VERSION = 1;
 
@@ -183,8 +183,8 @@ export interface StateApiDeps {
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
-  readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline"> & Partial<Pick<ResumeCheckService, "forTask">>;
+  readonly continuations?: ContinuationOps;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;

@@ -57,29 +57,32 @@ for (const store of stores) {
       await c.services.principals.enroll(rob, { commandId: "e-yan", kind: "agent", name: "yan", grants: [{ action: "task.read", project: other }, { action: "attempt.work", project: other }] });
       const yan = (await c.services.principals.issueCredential(rob, "agent:yan")).token;
 
-      assert.equal((await call(host, "continuation.latest", { taskId: task })).result.item, undefined, "nothing captured yet");
-      const first = await call(host, "continuation.capture", { taskId: task, ...capture(true) }, "cap1");
+      assert.equal((await call(boot.token, "continuation.latest", { taskId: task })).result.item, undefined, "nothing captured yet");
+      // A host captures and reads only for an attempt it runs or is pinned to (card L04c part 3): h1 holds none of this task. The owner vouches here instead (the remote-host case is start-resume-capture).
+      assert.equal((await call(host, "continuation.capture", { taskId: task, ...capture(true) }, "cap0")).error.code, "forbidden");
+      const first = await call(boot.token, "continuation.capture", { taskId: task, ...capture(true) }, "cap1");
       assert.ok(first.ok, JSON.stringify(first));
       assert.deepEqual([first.result.seq, first.result.status, first.result.replayed], [1, "complete", false]);
-      const again = await call(host, "continuation.capture", { taskId: task, ...capture(true) }, "cap1");
+      const again = await call(boot.token, "continuation.capture", { taskId: task, ...capture(true) }, "cap1");
       assert.deepEqual([again.result.id, again.result.replayed], [first.result.id, true], "a replay records once");
-      assert.equal((await call(host, "continuation.latest", { taskId: task })).result.item.id, first.result.id);
+      assert.equal((await call(boot.token, "continuation.latest", { taskId: task })).result.item.id, first.result.id);
+      assert.equal((await call(host, "continuation.latest", { taskId: task })).result.item, undefined, "a host that does not hold the task reads nothing");
 
       // An agent saying "durable" is not believed: the capture is stored as incomplete and is not the one resumed from.
       const claimed = await call(ann, "continuation.capture", { taskId: task, ...capture(true) }, "cap2");
       assert.deepEqual([claimed.result.status, claimed.result.seq], ["incomplete", 2]);
       // A host's failed durability check is incomplete too.
-      const failed = await call(host, "continuation.capture", { taskId: task, ...capture(false) }, "cap3");
+      const failed = await call(boot.token, "continuation.capture", { taskId: task, ...capture(false) }, "cap3");
       assert.equal(failed.result.status, "incomplete");
-      assert.equal((await call(host, "continuation.latest", { taskId: task })).result.item.id, first.result.id, "only a complete capture is the latest");
+      assert.equal((await call(boot.token, "continuation.latest", { taskId: task })).result.item.id, first.result.id, "only a complete capture is the latest");
 
       // Refusals: no rights, an unknown field, a missing command ID.
       assert.equal((await call(zed, "continuation.capture", { taskId: task, ...capture(true) }, "cap4")).error.code, "forbidden");
       assert.equal((await call(zed, "continuation.latest", { taskId: task })).result.item, undefined, "a stranger sees nothing");
       assert.equal((await call(yan, "continuation.capture", { taskId: task, ...capture(true) }, "cap6")).error.code, "forbidden", "rights in another project do not reach this one");
       assert.equal((await call(yan, "continuation.latest", { taskId: task })).result.item, undefined, "nor does reading");
-      assert.equal((await call(host, "continuation.capture", { taskId: task, ...capture(true), extra: 1 }, "cap5")).error.code, "invalid_command");
-      assert.equal((await call(host, "continuation.capture", { taskId: task, ...capture(true) })).ok, false, "a command needs its ID");
+      assert.equal((await call(boot.token, "continuation.capture", { taskId: task, ...capture(true), extra: 1 }, "cap5")).error.code, "invalid_command");
+      assert.equal((await call(boot.token, "continuation.capture", { taskId: task, ...capture(true) })).ok, false, "a command needs its ID");
     } finally { await c.close(); await db.close(); }
   });
 

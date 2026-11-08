@@ -56,6 +56,6 @@ export async function world(d: string, policy: { dataHosts?: string[]; platforms
     const attemptId = (await c.services.assignments.admitAttempt({ commandId: `ad${n}`, actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: AGENT }, harness: "pi" })).id;
     return { taskId, attemptId };
   };
-  return { c, rob, host, task, now: () => new Date(now).toISOString(), advance: (ms: number) => { now += ms; }, tick: () => c.dispatch!.dispatcher.tick() };
+  return { c, rob, ownerToken: boot.token, host, task, now: () => new Date(now).toISOString(), advance: (ms: number) => { now += ms; }, tick: () => c.dispatch!.dispatcher.tick() };
 }
 

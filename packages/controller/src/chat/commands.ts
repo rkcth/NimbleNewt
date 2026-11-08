@@ -160,6 +160,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "handoff.complete": { verb: "Complete hand-off of task", mode: "profile", needsProject: true },
   "handoff.cancel": { verb: "Cancel hand-off of task", mode: "apply", needsProject: true },
   "handoff.takeover": { verb: "Take task over by force", mode: "propose", needsProject: true },
+  // A task's resume check, found as the one the task has now (card L04c): starting a blocked one over at once, or cancelling one (the dispatcher starts a cancelled check again, a few times, before it tells the owner).
+  "resume.retry": { verb: "Start the resume check of task over", mode: "apply", needsProject: true },
+  "resume.cancel": { verb: "Cancel the resume check of task", mode: "apply", needsProject: true },
   // Limits on what a task may use of model calls (card V02): they cap spending and retries, and raising one spends more, so the change is always shown first.
   "model-budget.set": { verb: "Limit model use of task", mode: "propose", needsProject: true },
   // Watching a task's events (card H13f): matching events wake the task's owner, which spends work, so an explicit order follows the profile.
@@ -247,7 +250,7 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" ? ["taskId"] : [])];
+  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
 }
 
 /**

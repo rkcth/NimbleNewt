@@ -528,18 +528,6 @@ Arguments:
 
 Result: `{ item }`.
 
-#### `continuation.latest`
-
-The latest complete continuation of a task (for those who may work on it or read its history), or nothing when none was captured or none was durable.
-
-Arguments:
-
-- `taskId`: the task
-
-Result: `{ item }` (absent when there is none).
-
-Completion: finished when accepted (`completed: true`).
-
 #### `resume.get`
 
 A resume check, with what changed, the verdicts and the history.
@@ -549,6 +537,38 @@ Arguments:
 - `checkId`: the check
 
 Result: `{ item }`.
+
+#### `resume.for-task`
+
+The task's current resume check (the one the dispatcher or a person started last, in any phase), or `not_found` when it has none or you may not resume the task (a host only for an attempt it runs or is pinned to).
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`.
+
+#### `continuation.latest`
+
+The latest complete continuation of a task, for those who may work on it or read the project's histories (the owner and services too, and a host only for an attempt it runs or is pinned to), or nothing when none was captured, none was durable, or you may not read it.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }` (absent when there is none).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `resume.dependencies.get`
+
+What a task's work recorded that it relied on, for those who may work on it or read the project's histories (and the owner and services, and a host only for an attempt it runs or is pinned to), or `not_found`.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item: { taskId, projectId, entries } }`.
 
 #### `activity.steps`
 
@@ -2842,29 +2862,6 @@ Arguments:
 
 Result: `{ advanced: [id], failed: [id] }`.
 
-#### `continuation.capture`
-
-A host records the continuation of a task's run at a boundary: the conversation identity, the adapter's checkpoint reference, the result of its durability check, what the run still needs (artifacts, decisions, pending effects, budget, next step) and the manifest of what the context was built from. Only a host, service or the owner can vouch that the durability check passed; an agent's own word is recorded as not verified, and a capture that is not durable is stored as incomplete and is never resumed from.
-
-Arguments:
-
-- `taskId`: the task
-- `identity`: the conversation's identity (the same for every capture of the task)
-- `agent`: the agent whose run it is
-- `boundary`: { kind: turn-complete, timeout, manual or shutdown, turnInProgress? }
-- `checkpoint`: { conversationId, at, digest, runtime: { name, version }, format }
-- `durable`: { verified, error? } from the host's durability check
-- `continuation`: { artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }
-- `manifest`: { summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }
-- `nonCheckpointableTools`: [{ name, reason }]
-- `scratchRecords`: record IDs
-- `credentialRefs`: credential names only
-- `commandId`: required
-
-Result: `{ id, seq, status: complete or incomplete, replayed }`.
-
-Completion: finished when accepted (`completed: true`).
-
 #### `resume.start`
 
 Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.
@@ -2950,6 +2947,39 @@ Arguments:
 - `commandId`: required
 
 Result: `{ item }`.
+
+#### `continuation.capture`
+
+A host (or the agent, for its own run) records what is needed to continue a task at a safe boundary: the adapter's checkpoint reference, the artifacts and decisions made, pending effects, budget, the next step, a manifest, tools a checkpoint cannot reproduce, and credentials by name only. Complete only when the host's durability check passed (an agent's word is not durability); an incomplete capture is kept, never resumed from. A host captures only for an attempt it runs or is pinned to. A resumed attempt is checked against the latest complete one.
+
+Arguments:
+
+- `taskId`: the task
+- `identity`: the conversation identity (the same for every capture of the task)
+- `agent`: the run's agent, like agent:ann
+- `boundary`: { kind: turn-complete, timeout, manual or shutdown }
+- `checkpoint`: { conversationId, at, digest, runtime: { name, version }, format }
+- `durable`: { verified, error? }: the host's durability check
+- `continuation`: { artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }
+- `manifest`: { summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }
+- `nonCheckpointableTools`: [{ name, reason }]
+- `scratchRecords`: desk record IDs of the run's agent in the task's project
+- `credentialRefs`: names of secrets, never values
+- `commandId`: required
+
+Result: `{ id, seq, status, replayed }`: `status` is complete or incomplete.
+
+#### `resume.dependencies.record`
+
+The agent working a task (or the owner) records what the work relied on: files, directories, searches, records, decisions, tool versions, environments, external and MCP resources, and negative lookups, each with what was seen (a hash, an ETag, the members). The same dependency again replaces it. A resumed attempt is checked against them, and each change is reviewed. What the controller can judge itself is recorded only as it really is.
+
+Arguments:
+
+- `taskId`: the task
+- `dependencies`: [{ kind, key, hash?, etag?, scope?, cursor?, members?, freshness?, server?, protocol? }], 1 to 500
+- `commandId`: required
+
+Result: `{ recorded }`.
 
 #### `resume.sweep`
 

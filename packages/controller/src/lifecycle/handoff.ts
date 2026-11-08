@@ -256,8 +256,8 @@ export class HandoffService {
     if (b.phase === "transferring" || b.phase === "transferred") throw new DomainError("invalid_command", `the hand-off is ${b.phase}; it can no longer be cancelled`, { field: "handoffId" });
     if (b.mode === "forced" && !TERMINAL.includes(b.phase)) throw new DomainError("invalid_command", "a takeover cannot be cancelled once begun", { field: "handoffId" });
     if (TERMINAL.includes(b.phase)) return view<TaskHandoffBody>(found);
-    await this.#update(command.handoffId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "cancelled; the old owner keeps the task") }), ["preparing", "blocked", "ready"]);
-    await this.#letGo(by, command.handoffId);
+    // Only the caller whose write ended the hand-off lifts its hold (see `#letGo`).
+    if (await this.#update(command.handoffId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "cancelled; the old owner keeps the task") }), ["preparing", "blocked", "ready"])) await this.#letGo(by, command.handoffId);
     return view<TaskHandoffBody>((await this.#runner.get(KIND, command.handoffId))!);
   }
 
@@ -554,7 +554,7 @@ export class HandoffService {
   async #fail(by: Principal, id: string, why: string): Promise<void> {
     const before = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
     const changed = await this.#update(id, (x) => ({ ...x, phase: "failed", blocked: undefined, failure: why, history: this.#push(x, "failed", by.id, why) }), LIVE);
-    await this.#letGo(by, id);
+    if (changed) await this.#letGo(by, id);
     if (changed && before?.autoComplete === true) { try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: before.taskId, reason: `the hand-off back failed: ${why}` }); } catch { /* best effort */ } }
   }
 
@@ -577,12 +577,17 @@ export class HandoffService {
 
   /** The task moved: the new owner may run, so a hold this hand-off added is lifted. */
   async #finish(by: Principal, id: string, b: TaskHandoffBody): Promise<void> {
-    await this.#update(id, (x) => ({ ...x, phase: "transferred", transferredAt: this.#runner.now(), history: this.#push(x, "transferred", by.id, `now owned by ${b.to.kind}:${b.to.id}`) }), ["transferring"]);
+    // Another caller finished it first (a sweep or an advance that raced this one): that caller told the move and lifted the hold; this one does neither (see `#letGo`).
+    if (!(await this.#update(id, (x) => ({ ...x, phase: "transferred", transferredAt: this.#runner.now(), history: this.#push(x, "transferred", by.id, `now owned by ${b.to.kind}:${b.to.id}`) }), ["transferring"]))) return;
     const reassigned = ((await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined)?.reassigned;
     try { await this.#onTransferred?.(by, { handoffId: id, taskId: b.taskId, from: b.from, to: b.to, ...(reassigned === undefined ? {} : { reassigned }) }); } catch { /* the record of the move is best effort */ }
     await this.#letGo(by, id);
   }
 
+  /**
+   * Lifts the hold the hand-off added. Called only by the caller whose write ended the hand-off (card L04c review): the lift's command ID is scoped by its caller, so a second caller that also got here (one that
+   * lost the race to end it) would record a second lift under its own ID, and when the owner had paused the task again in between, that lift would take the owner's own pause away.
+   */
   async #letGo(by: Principal, id: string): Promise<void> {
     const b = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
     if (b === undefined || b.heldBefore) return;
