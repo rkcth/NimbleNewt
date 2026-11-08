@@ -70,7 +70,7 @@ test("the composed controller gives the local host its tool bridge and the agent
       const send = (op: string, args: Record<string, unknown>, callId: string, token = order.credential) => services!.bridge!(order, gateway.call, token, { op, callId, args });
       try {
         seen.namespace = services!.namespaceId(order);
-        seen.forged = await send("desk.read", { query: "x" }, "forged-1", "nn_forged_credential");
+        seen.forged = await send("desk.read", { recordId: "x" }, "forged-1", "nn_forged_credential");
         for (const recovery of ["restart", "none"] as const) {
           const doc = good(await send("desk.write", { kind: "note", title: `${recovery} notes`, body: "how to use it", visibility: "shared", status: "accepted" }, `doc-${recovery}`));
           const code = good(await send("desk.write", { kind: "note", title: `${recovery} code`, body: "console.log('{\"ok\":true}')", visibility: "shared", status: "accepted" }, `code-${recovery}`));
@@ -97,6 +97,7 @@ test("the composed controller gives the local host its tool bridge and the agent
     assert.ok(seen.tools["restart"]!.startsWith(`a_${seen.namespace}.`), JSON.stringify(seen.tools));
     // A request with a credential that is not the attempt's is refused by the service, not by the host.
     assert.equal(seen.forged?.ok, false);
+    assert.equal((seen.forged as { code?: string } | undefined)?.code, "unauthenticated", JSON.stringify(seen.forged));
     assert.deepEqual(runs, [seen.tools["restart"], seen.tools["none"]], "both tools ran through the controller's runner");
     // The dispatcher asked the tool service: the call of a tool whose approved manifest says `restart` is replay-safe, the other is not.
     const restart = await c.dispatch.dispatcher.toolOperation(c.dispatch.principal, attemptId, "inv-restart");
