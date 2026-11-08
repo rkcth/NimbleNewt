@@ -26,6 +26,11 @@ const holding = (marker: string): number[] => {
   return found;
 };
 
+/** What the kernel calls a process. The listing shows this name, never the executable's file name: a process
+ * started from `process.execPath` is "node" on some runners and "MainThread" on others (Node 24 names the main
+ * thread that), so an expectation of a real process's name is read from /proc rather than written out. */
+const commOf = (pid: number): string => readFileSync(`/proc/${String(pid)}/comm`, "utf8").trim();
+
 test("a real worker process that ignores the request to end: its own process is listed, the Stop kills the whole sandbox after the grace, and winding it down is charged once as the cleanup's compute (card L02d)", { timeout: 120_000 }, async (t) => {
   const launcher = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
   const usable = launcher.capacity.available && launcher.capacity.backend === "bubblewrap" && !["/usr", "/bin", "/lib"].includes(nodeRoot);
@@ -105,13 +110,13 @@ setInterval(() => undefined, 1000);
     const ticked = await c.dispatch.dispatcher.tick();
     assert.deepEqual(ticked.started, [attempt], JSON.stringify(ticked));
     await until(() => holding(marker).length > 0, 30_000, "the worker process started its own process in the sandbox");
-    const [child] = holding(marker);
+    const child = holding(marker)[0]!;
 
     // While the attempt runs, the look lists the process the worker started (by its ID and name, read from /proc) and not the worker process itself (that is the attempt, quiesced through it).
     const ready = await call("lifecycle.readiness", { scope: { kind: "task", id: taskId } });
     assert.ok(ready.ok, JSON.stringify(ready));
     const items = ready.result.unsettled as { kind: string; ref: string; state: string }[];
-    assert.ok(items.some((i) => i.kind === "process" && i.ref === `pid ${child} "node"` && i.state === "running"), JSON.stringify(items));
+    assert.ok(items.some((i) => i.kind === "process" && i.ref === `pid ${child} ${JSON.stringify(commOf(child))}` && i.state === "running"), JSON.stringify(items));
     assert.equal(items.some((i) => /^worker process/.test(i.ref)), false, `the worker process itself is not waited on while it runs: ${JSON.stringify(items)}`);
     assert.ok((await local!.busyAttempts()).includes(attempt), "a process the agent started keeps the attempt busy for a workspace operation");
 
