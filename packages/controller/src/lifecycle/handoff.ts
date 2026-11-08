@@ -115,7 +115,7 @@ const ARCHIVE_ID = /^hnd-[a-z2-7]{20}$/;
 /** The sender's own sections, which `screen` withholds from those who merely control the task; their archives are withheld the same way. */
 const PRIVATE_SECTIONS: readonly string[] = ["drafts", "responsibilities"];
 /** Sections whose first line is a heading rather than the oldest entry: a cut keeps it (card C07j review). */
-const HEADED_SECTIONS: readonly string[] = ["brief", "responsibilities"];
+const HEADED_SECTIONS: readonly string[] = ["brief", "responsibilities", "unfinishedWork"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
   const out = text(value, field, { min: 1, max: HANDOFF_LIMITS.reason, multiline: true });
@@ -420,8 +420,26 @@ export class HandoffService {
   async get(by: Principal, handoffId: string): Promise<View<TaskHandoffBody> | undefined> {
     const found = await this.#runner.get(KIND, String(handoffId));
     if (found === undefined) return undefined;
-    try { await this.#mayControl(by, (found.body as unknown as TaskHandoffBody).taskId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
-    return view<TaskHandoffBody>(found);
+    // The package is for the next agent (card C07j review, round 4): the sender, and the recipient once the task is its own, read the hand-off as they read its archives, without the right to control the task.
+    if (await this.#mayReadArchive(by, found.body as unknown as TaskHandoffBody, "brief")) return view<TaskHandoffBody>(found);
+    return undefined;
+  }
+
+  /**
+   * The sections cut to fit in the latest hand-off of a task, going on or finished (card C07j review, round 4): how the owner, asking by chat about a task, finds the archive that holds what was cut once the
+   * hand-off is over and the `handoff` status no longer shows it. Only the cuts whose archive the caller may read are listed; undefined when the task has had no hand-off the caller may see.
+   */
+  async cutsForTask(by: Principal, taskId: string): Promise<{ handoffId: string; phase: HandoffPhase; cuts: readonly HandoffCut[] } | undefined> {
+    const tid = checkTaskId(taskId);
+    const pointer = (await this.#runner.get(ACTIVE, derivedId("hnd", `active\0${tid}`)))?.body as unknown as { handoffId?: string } | undefined;
+    if (pointer?.handoffId === undefined) return undefined;
+    const h = (await this.#runner.get(KIND, pointer.handoffId))?.body as unknown as TaskHandoffBody | undefined;
+    if (h === undefined) return undefined;
+    // The task's own sections are the widest readable: a caller who may not read those may not see the hand-off at all. The sender's own (drafts, responsibilities) are asked for apart.
+    if (!(await this.#mayReadArchive(by, h, "brief"))) return undefined;
+    const privateOk = await this.#mayReadArchive(by, h, PRIVATE_SECTIONS[0]!);
+    const cuts = (h.package?.cuts ?? []).filter((c) => privateOk || !PRIVATE_SECTIONS.includes(c.section));
+    return { handoffId: pointer.handoffId, phase: h.phase, cuts };
   }
 
   /**

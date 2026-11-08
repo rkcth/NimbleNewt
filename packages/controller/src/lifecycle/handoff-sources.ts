@@ -47,7 +47,8 @@ export function controllerHandoffSources(deps: {
     if (c.continuation.nextStep.trim() !== "") out["nextAction"] = `${c.continuation.nextStep.trim()} (from ${at})`;
     const pending = c.continuation.pendingEffects;
     // With nothing pending the section stays unset: "no effect pending" does not say there is no other unfinished work, and a package must not read as ready on that.
-    if (pending.length > 0) out["unfinishedWork"] = `Effects pending at the last checkpoint (${at}): ${pending.map((e) => `${e.effectId} (${e.state})`).join(", ")}.`;
+    // One effect per line under a heading line (card C07j review, round 4): a section over the limit keeps its heading and its last lines, so the newest pending effects stay in view; on one line a cut kept the oldest.
+    if (pending.length > 0) out["unfinishedWork"] = [`Effects pending at the last checkpoint (${at}), in the order the run listed them:`, ...pending.map((e) => `${e.effectId} (${e.state})`)].join("\n");
     if (pending.length > 0) out["backgroundOperations"] = pending.map((e) => `${e.effectId}: ${e.state}`).join("\n");
     // Artifacts first and decisions last (card C07j review): a section over the limit keeps its last entries, so the newest decision must not sit above a long artifact list that would push it out.
     const done = [...c.continuation.artifacts.map((a) => `Artifact: ${a}`), ...c.continuation.decisions.map((d) => `Decision: ${d}`)];

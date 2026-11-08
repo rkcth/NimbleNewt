@@ -25,7 +25,7 @@ test("the package takes the sections only the run knows from the task's latest c
   });
   const s = (await sources().collect({ taskId: "task-1", from, to })).sections;
   assert.match(s["nextAction"]!, /^Run the fixtures\. \(from continuation 2/);
-  assert.match(s["unfinishedWork"]!, /eff-1 \(unknown\)/);
+  assert.match(s["unfinishedWork"]!, /^Effects pending at the last checkpoint \(continuation 2, captured [^)]*\), in the order the run listed them:\neff-1 \(unknown\)$/, "a heading line, then one effect per line (card C07j review, round 4)");
   assert.equal(s["backgroundOperations"], "eff-1: unknown");
   assert.equal(s["completedWork"], "Artifact: art-1\nDecision: use the CSV path");
   assert.match(s["risks"]!, /^Evidence still required: test log\nTools whose effects a resume does not reproduce: browser \(holds a live session\)/);
