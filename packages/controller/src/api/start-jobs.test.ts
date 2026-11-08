@@ -124,7 +124,8 @@ async function setup(w: Awaited<ReturnType<typeof world>>) {
   return { boot, owner, project, supToken, task, attempt, api };
 }
 
-const until = async (ok: () => Promise<boolean>, why: string): Promise<void> => { for (let i = 0; i < 400; i++) { if (await ok()) return; await new Promise((r) => setTimeout(r, 5)); } assert.fail(why); };
+// Waits by the clock, not by a number of looks: a slow Windows worker thread reads the store much more slowly than a developer machine.
+const until = async (ok: () => Promise<boolean>, why: string): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok())) { if (Date.now() > end) assert.fail(why); await new Promise((r) => setTimeout(r, 10)); } };
 
 test("an agent starts a job through the bridge and keeps a durable handle; status, quoted output and stop work from a later attempt of its task and from no other task; a stop reaches the launcher; the owner and a supervisor read and control jobs through the API and chat (card T07b)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-t07b-start-"));
@@ -187,8 +188,15 @@ test("an agent starts a job through the bridge and keeps a durable handle; statu
     // Another task's attempt cannot see or stop the job, though the agent holds job.write on the whole project.
     let other2 = "";
     await attempt(other);
-    await run(w, owner, async (send) => {
+    await run(w, owner, async (send, order) => {
       for (const op of ["job.status", "job.output", "job.cancel"]) assert.match(refused(await send(op, { jobId: handle }, `x-${op}`), "not_found"), /no job/);
+      // Nor through the API with its task credential: one job, the build task's jobs, every live job.
+      for (const [op, args] of [["job.get", { jobId: handle }], ["job.list", { taskId: build }], ["job.live", {}], ["job.cancel", { jobId: handle, reason: "x" }]] as const) {
+        const r = await api(order.credential, op, args, op === "job.cancel" ? "tc-cancel" : undefined);
+        assert.equal(r.ok, false, `${op}: ${JSON.stringify(r)}`);
+        assert.ok(["not_found", "forbidden"].includes(r.error!.code), JSON.stringify(r));
+      }
+      assert.equal((await api(order.credential, "job.list", { taskId: other })).ok, true, "its own task's jobs it may list");
       // A job of its own, which nothing obeys but a Force Stop.
       other2 = good(await send("job.start", { tool: toolName, input: { target: "plants" }, background: true }, "start-2"))["jobId"];
     });

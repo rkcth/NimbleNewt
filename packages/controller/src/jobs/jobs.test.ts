@@ -632,7 +632,9 @@ for (const backend of backends) {
     };
     runs = new LocalJobRuns({ jobs, principal: () => host, launcher, limits: { perTask: 2, total: 3, flushMs: 5, flushChars: 64, outputBytes: 4096, graceMs: 50 } });
     const launch = (name = "a_x.build"): ScriptLaunch => ({ program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name, version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} });
-    const settle = async (id: string, state: string) => { for (let i = 0; i < 200 && (await c.read(id)).state !== state; i++) await new Promise((r) => setTimeout(r, 5)); assert.equal((await c.read(id)).state, state); };
+    // Waits by the clock, not by a number of looks (a slow Windows worker thread reads the store much more slowly).
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    const settle = async (id: string, state: string) => { await waitFor(async () => (await c.read(id)).state === state); assert.equal((await c.read(id)).state, state); };
 
     // Completed: output arrives in pieces, redacted, kept at the end; started once however often it is asked.
     const ok = await c.admit(c.t1);
@@ -674,7 +676,7 @@ for (const backend of backends) {
     await runs.start(stubborn, c.t1, launch());
     procs.at(-1)!.obey = false;
     await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "enough" });
-    for (let i = 0; i < 200 && (await c.read(stubborn)).cancel?.uncooperative !== true; i++) await new Promise((r) => setTimeout(r, 5));
+    await waitFor(async () => (await c.read(stubborn)).cancel?.uncooperative === true);
     assert.deepEqual([(await c.read(stubborn)).state, (await c.read(stubborn)).cancel?.uncooperative], ["cancellation_requested", true]);
     await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "now", force: true });
     await settle(stubborn, "cancelled");
