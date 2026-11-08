@@ -528,6 +528,27 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `handoff.archive.read`
+
+The whole of a hand-off package section that was cut to fit (card C07j). A cut section begins with `[cut: N of M entries, archive <id>]` and its package lists it in `cuts`; this reads the original by that archive ID, one part at a time. Readable by the owner, whoever may control the task, and the hand-off's sender and recipient; anyone else gets not found.
+
+Arguments:
+
+- `archiveId`: the archive the cut marker names (`hnd-…`)
+- `part` (optional): the part, from 0 (the answer says how many `parts` there are)
+
+Result: `{ item: { archiveId, handoffId, taskId, section, entries, chars, part, parts, text, truncated? } }`: `text` is part `part`; the parts joined are the section as the source gave it (credentials removed). `truncated` is set when the section was longer than an archive keeps (1,000,000 characters) and only its start is kept.
+
+#### `handoff.marks.get`
+
+What the owner marked for a task's hand-offs to keep (card C07j): when a package section is cut to fit, its entries holding one of these words or IDs are kept before the newest ones. Needs the right to control the task.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item: { taskId, marks: [text], revision } }`.
+
 #### `resume.get`
 
 A resume check, with what changed, the verdicts and the history.
@@ -1130,7 +1151,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set: `{ kind: "retention" }`), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `handoff_archive` (the whole text of a hand-off package section cut to fit, a chat answer at a time: `{ kind: "handoff_archive", taskId, section?, from? }` for the task's latest hand-off, going on or finished, or `{ kind: "handoff_archive", archiveId, from? }`; without a section it lists the cuts; `from` is the line to read on from), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set: `{ kind: "retention" }`), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2861,6 +2882,19 @@ Arguments:
 - `commandId`: required
 
 Result: `{ advanced: [id], failed: [id] }`.
+
+#### `handoff.marks.change`
+
+The owner marks what a task's hand-offs must keep when a package section is cut to fit (owner only, card C07j): an entry holding one of the marks (any case) is kept before the newest ones; the rest of the section stays readable through `handoff.archive.read`. `add` and `remove` take words or record IDs (3 to 200 characters, one line each, at most 20 marks per task); `remove` names marks there are. It applies from the next package collected. This is the form the chat uses.
+
+Arguments:
+
+- `taskId`: the task
+- `add` (optional): marks to add, for example `["dsk-…", "UTF-8 decision"]`
+- `remove` (optional): marks to take off, by their words
+- `commandId`: required
+
+Result: `{ item: { taskId, marks, revision, replayed } }`.
 
 #### `resume.start`
 

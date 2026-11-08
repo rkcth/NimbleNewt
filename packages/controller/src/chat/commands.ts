@@ -163,6 +163,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // A task's resume check, found as the one the task has now (card L04c): starting a blocked one over at once, or cancelling one (the dispatcher starts a cancelled check again, a few times, before it tells the owner).
   "resume.retry": { verb: "Start the resume check of task over", mode: "apply", needsProject: true },
   "resume.cancel": { verb: "Cancel the resume check of task", mode: "apply", needsProject: true },
+  // What a hand-off package keeps when a section is cut to fit (card C07j): the owner's marks only choose which entries stay in view (the rest stays in the archive), so the change applies at once and is undone by saying so.
+  "handoff.marks.change": { verb: "Keep entries in the hand-off packages of task when a section is cut (add), or stop (remove)", mode: "apply", needsProject: true },
   // Limits on what a task may use of model calls (card V02): they cap spending and retries, and raising one spends more, so the change is always shown first.
   "model-budget.set": { verb: "Limit model use of task", mode: "propose", needsProject: true },
   // Watching a task's events (card H13f): matching events wake the task's owner, which spends work, so an explicit order follows the profile.

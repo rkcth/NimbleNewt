@@ -13,7 +13,9 @@ import type { HandlingBody, WatchService } from "../events/handling.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
+import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { CallBody } from "../mcp/mcp.js";
@@ -215,6 +217,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task; or scopeKind task, agent, team or installation with the scopeId, which must be an ID, not a name)" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
+  handoff_archive: { keys: ["taskId|taskTitle", "section", "archiveId", "from"], about: "the whole text of a hand-off package section that was cut to fit, as the source gave it (credentials removed): name the task (its latest hand-off, going on or finished) and the section (brief, completedWork, drafts, ...), or the archive ID a cut marker names; from is the line to read on from, as the previous answer says" },
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
   agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
@@ -257,6 +260,7 @@ export type StatusRequest =
   | { readonly kind: "owner_questions"; readonly limit?: number }
   | { readonly kind: "needs_you"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
+  | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
   | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
@@ -313,7 +317,10 @@ export interface StatusDeps {
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
   readonly stops?: Pick<StopService, "cleanupSpend">;
-  readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
+  readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined>; /** The owner's marks for the task's hand-offs (card C07j), shown beside a hand-off going on. */ marks?(by: Principal, query: { taskId: string }): Promise<{ readonly marks: readonly string[] }>;
+    /** The cuts of a task's latest hand-off the caller may read, and the archived originals (card C07j review, round 4): the `handoff_archive` view. Absent: that view is not offered. */
+    cutsForTask?(by: Principal, taskId: string): Promise<{ readonly handoffId: string; readonly phase: string; readonly cuts: readonly { readonly section: string; readonly archiveId: string; readonly left: number; readonly total: number }[] } | undefined>;
+    archive?(by: Principal, query: { archiveId: string; part?: number }): Promise<{ readonly handoffId: string; readonly taskId: string; readonly section: string; readonly chars: number; readonly parts: number; readonly text: string; readonly truncated?: boolean } | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer. Absent: they are not listed. */
@@ -439,6 +446,7 @@ export class StatusService {
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "stop_cleanup": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.stopCleanupLines(by, request); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
+      case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
@@ -744,14 +752,72 @@ export class StatusService {
       if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
       throw error;
     }
-    if (h === undefined) return { observedAt: this.#runner.now(), lines: [line("No hand-off is going on for this task.", cite("task", taskId))] };
+    // The owner's marks matter before a hand-off starts (they apply to the next package), so they are shown with or without one (card C07j review).
+    const marks = await this.#deps.handoffs.marks?.(by, { taskId }).catch(() => undefined);
+    const marksLine = marks !== undefined && marks.marks.length > 0 ? [line(`When a section is cut, entries holding one of the owner's marks are kept first: ${marks.marks.map((m) => quotedLine(shown(m, 200))).join(", ")}.`, cite("task", taskId))] : [];
+    if (h === undefined) return { observedAt: this.#runner.now(), lines: [line("No hand-off is going on for this task.", cite("task", taskId)), ...marksLine] };
     const lines: Line[] = [line(`Hand-off from ${shown(h.from.id)} to ${shown(h.to.id)}, ${h.mode}: ${h.phase}. Asked by ${shown(h.requestedBy)} at ${h.requestedAt}: ${shown(h.reason)}`, cite("handoff", h.id, h.revision), cite("task", taskId))];
     if (h.returnAt !== undefined) lines.push(line(`It is temporary: the task goes back to ${shown(h.from.id)} at ${h.returnAt}, if whoever asked still holds the right to control it then.`, cite("handoff", h.id)));
     if (h.package !== undefined) lines.push(line(h.package.ready ? "The package is complete." : `The package is missing: ${h.package.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
+    // Card C07j: a section cut to fit says so here too, with where its whole text is kept.
+    for (const cut of h.package?.cuts ?? []) lines.push(line(`The ${shown(cut.section, 40)} section was cut to fit: ${cut.left} of ${cut.total} entries left out or shortened (the owner's marked ones and the newest are kept). ${cut.archiveTruncated === true ? "The first 1,000,000 characters of it are" : "Its whole text is"} kept in archive ${shown(cut.archiveId, 40)} (ask for the handoff_archive status of the section, or the state API query handoff.archive.read).`, cite("handoff", h.id)));
+    lines.push(...marksLine);
     if (h.acceptedGaps !== undefined) lines.push(line(`It was handed over with gaps accepted: ${h.acceptedGaps.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
     if (h.blocked !== undefined) lines.push(line(`It is held up: ${shown(h.blocked.reason)} You can choose: ${h.blocked.choices.join(", ")}.`, cite("handoff", h.id)));
     if (h.failure !== undefined) lines.push(line(`It failed: ${shown(h.failure)}`, cite("handoff", h.id)));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The whole of a hand-off section that was cut to fit (card C07j review, round 4), so nothing a cut left out is beyond the owner's reach by chat: by the archive ID a marker names, or by the task (its latest
+   * hand-off, going on or finished) and the section. Each entry is shown as the source gave it (credentials were removed before it was kept), numbered from 1; an entry too long for one line goes on over the next
+   * lines. One answer holds what a chat answer shows; its last line says the line to read on `from`. What the caller may not read reads as missing.
+   */
+  async handoffArchiveLines(by: Principal, request: { taskId?: string; archiveId?: string; section?: string; from?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const h = this.#deps.handoffs;
+    if (h?.archive === undefined || h.cutsForTask === undefined) return invalid("kind", "hand-off archives are not offered here");
+    const from = request.from === undefined ? 1 : Number.isSafeInteger(request.from) && request.from >= 1 ? request.from : invalid("from", "must be a line number from 1");
+    if (request.section !== undefined && typeof request.section !== "string") return invalid("section", "must be text");
+    let archiveId = request.archiveId;
+    if (archiveId === undefined) {
+      if (request.taskId === undefined) return invalid("taskId", "name the task, or the archive ID a cut marker names");
+      const taskId = checkTaskId(request.taskId);
+      const found = await h.cutsForTask(by, taskId);
+      if (found === undefined) return undefined;
+      const wanted = request.section?.trim().toLowerCase();
+      const cuts = wanted === undefined ? found.cuts : found.cuts.filter((c) => c.section.toLowerCase() === wanted);
+      if (cuts.length !== 1) {
+        const head = found.cuts.length === 0 ? `Nothing was cut from the latest hand-off of this task (${found.phase}) that you may read: its package sections are whole.`
+          : wanted === undefined ? `${found.cuts.length} sections of the latest hand-off of this task (${found.phase}) were cut to fit; say which to read.`
+          : `The ${shown(request.section, 40)} section of the latest hand-off of this task (${found.phase}) was not cut, or is not yours to read; these were cut:`;
+        return { observedAt: this.#runner.now(), lines: [line(head, cite("handoff", found.handoffId), cite("task", taskId)), ...found.cuts.map((c) => line(`The ${shown(c.section, 40)} section: ${c.left} of ${c.total} entries left out or shortened; whole in archive ${shown(c.archiveId, 40)}.`, cite("handoff", found.handoffId)))] };
+      }
+      archiveId = cuts[0]!.archiveId;
+    }
+    if (typeof archiveId !== "string") return invalid("archiveId", "must be text");
+    // The archive is read whole (at most 1,000,000 characters, in parts) and shown entry by entry, each over as many lines as it needs, so `from` names a line of this view.
+    const first = await h.archive(by, { archiveId });
+    if (first === undefined) return undefined;
+    let text = first.text;
+    for (let part = 1; part < first.parts; part++) { const next = await h.archive(by, { archiveId, part }); if (next === undefined) return undefined; text += next.text; }
+    const WIDTH = 380;
+    const rows: string[] = [];
+    text.split("\n").forEach((raw, n) => {
+      // Control characters and the characters some readers break a line at are written as escapes, so each line of the answer is one line wherever it is shown.
+      const entry = raw.replace(/[\p{Cc}\u2028\u2029]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+      let at = 0;
+      do { const piece = safeSlice(entry.slice(at, at + WIDTH + 1), WIDTH); rows.push(at === 0 ? `${n + 1}: ${piece}` : `${n + 1} (continued): ${piece}`); at += Math.max(piece.length, 1); } while (at < entry.length);
+    });
+    if (from > rows.length) return invalid("from", `this section is ${rows.length} lines long`);
+    const cites = [cite("handoff", first.handoffId), cite("task", first.taskId)];
+    // A heading line and a closing line around the rows, within the 30 lines a chat answer shows.
+    const shownRows = rows.slice(from - 1, from - 1 + 28);
+    const to = from - 1 + shownRows.length;
+    return { observedAt: this.#runner.now(), lines: [
+      line(`The ${shown(first.section, 40)} section of hand-off ${shown(first.handoffId, 40)} as the source gave it (credentials removed): ${text.split("\n").length} entries, ${first.chars} characters${first.truncated === true ? ` (only its first ${text.length} characters were kept)` : ""}.`, ...cites),
+      ...shownRows.map((r) => line(r, ...cites)),
+      line(to >= rows.length ? `Lines ${from} to ${to} of ${rows.length}: that is the end.` : `Lines ${from} to ${to} of ${rows.length}; ask again with from ${to + 1} to read on.`, ...cites),
+    ] };
   }
 
   /** The meetings planned in a project, soonest first: the title, the kind, when, how it is held and who is on the roster with how each is placed (present, unavailable, paused...), then the project's stand-ups by their latest occurrence — when each ran or is planned and its state — most recent first (card M03h). Nothing for a project the caller may not read. */

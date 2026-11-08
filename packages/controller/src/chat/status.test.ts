@@ -95,6 +95,37 @@ for (const backend of backends) {
     assert.deepEqual(asked.at(-1), { kind: "team", id: "tm-garden" });
   });
 
+  suite("the whole of a hand-off section that was cut is read by chat in free words, by the task's title and the section, a chat answer at a time (card C07j review, round 4)", async (w, script) => {
+    const a = await w.project("A");
+    const t = await w.task(a, "Build importer");
+    const entries = Array.from({ length: 40 }, (_, i) => `Decision: dsk-${String(i).padStart(20, "a")}`);
+    const asked: unknown[] = [];
+    const handoffs = {
+      forTask: async () => undefined,
+      cutsForTask: async (_by: unknown, taskId: string) => { asked.push(taskId); return { handoffId: "hnd-bbbbbbbbbbbbbbbbbbbb", phase: "transferred", cuts: [{ section: "completedWork", archiveId: "hnd-cccccccccccccccccccc", left: 30, total: 40 }] }; },
+      // Two parts, split inside an entry, as a long archive is kept: the view joins them before it numbers the entries.
+      archive: async (_by: unknown, q: { archiveId: string; part?: number }) => { const whole = entries.join("\n"); const half = Math.floor(whole.length / 2) + 7; return q.archiveId === "hnd-cccccccccccccccccccc" ? { handoffId: "hnd-bbbbbbbbbbbbbbbbbbbb", taskId: t, section: "completedWork", chars: whole.length, parts: 2, text: (q.part ?? 0) === 0 ? whole.slice(0, half) : whole.slice(half) } : undefined; },
+    };
+    const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, handoffs }, options);
+    const said = "show me everything that was cut from the completed work of the Build importer hand-off";
+    script[said] = [ask({ kind: "handoff_archive", taskTitle: "Build importer", section: "completedWork" }, said)];
+    const chat = w.chat({ status });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const r = await chat.submit(w.ownerToken, { messageId: "m-1", text: said });
+    assert.equal(r.outcomes[0]!.status, "answered", JSON.stringify(r.outcomes));
+    assert.deepEqual(asked, [t], "the title is resolved to the task");
+    const lines = r.outcomes[0]!.lines!.map((l) => l.text);
+    assert.equal(lines.length, 30, "no more than a chat answer shows, so nothing is hidden behind 'more lines'");
+    assert.equal(r.outcomes[0]!.moreLines, undefined);
+    assert.equal(lines[1], `1: ${entries[0]}`);
+    assert.equal(lines.at(-1), "Lines 1 to 28 of 40; ask again with from 29 to read on.");
+    const more = "and the rest of it from 29";
+    script[more] = [ask({ kind: "handoff_archive", taskTitle: "Build importer", section: "completedWork", from: 29 }, more)];
+    const rest = (await chat.submit(w.ownerToken, { messageId: "m-2", text: more })).outcomes[0]!.lines!.map((l) => l.text);
+    assert.deepEqual(rest.slice(1, -1), entries.slice(28).map((e, i) => `${i + 29}: ${e}`));
+    assert.equal(rest.at(-1), "Lines 29 to 40 of 40: that is the end.");
+  });
+
   suite("a question that came from quoted text is not answered; without the status service chat says so; a long answer says how much it left out", async (w, script, status) => {
     const a = await w.project("A");
     for (let i = 0; i < 35; i++) await w.task(a, `Task number ${i}`);

@@ -25,9 +25,9 @@ test("the package takes the sections only the run knows from the task's latest c
   });
   const s = (await sources().collect({ taskId: "task-1", from, to })).sections;
   assert.match(s["nextAction"]!, /^Run the fixtures\. \(from continuation 2/);
-  assert.match(s["unfinishedWork"]!, /eff-1 \(unknown\)/);
+  assert.match(s["unfinishedWork"]!, /^Effects pending at the last checkpoint \(continuation 2, captured [^)]*\), in the order the run listed them:\neff-1 \(unknown\)$/, "a heading line, then one effect per line (card C07j review, round 4)");
   assert.equal(s["backgroundOperations"], "eff-1: unknown");
-  assert.equal(s["completedWork"], "Decision: use the CSV path\nArtifact: art-1");
+  assert.equal(s["completedWork"], "Artifact: art-1\nDecision: use the CSV path");
   assert.match(s["risks"]!, /^Evidence still required: test log\nTools whose effects a resume does not reproduce: browser \(holds a live session\)/);
   assert.match(s["versions"]!, /^task contract version 4\nruntime pi 1.2, routing revision 3, environment revision 5/);
   // Nothing pending is said as a fact about the checkpoint, not as "all work is done".
@@ -49,4 +49,14 @@ test("locks the sender holds are listed in the package, a failing or empty sourc
   assert.deepEqual(asked, [{ taskId: "task-1", projectId: "prj-1", from, to }]);
   assert.equal((await sources({ locks: async () => [] }).collect({ taskId: "task-1", from, to })).sections["locks"], undefined, "no known hold is not the claim of no locks");
   assert.equal((await sources({ locks: async () => { throw new Error("down"); } }).collect({ taskId: "task-1", from, to })).sections["locks"], undefined);
+});
+
+test("drafts and responsibilities are listed oldest change first, whatever order their hashed IDs come in, so a cut keeps the newest (card C07j review)", async () => {
+  records.clear();
+  const s = (await sources({
+    drafts: async () => [{ id: "dsk-b", title: "new", body: "n", updatedAt: "2026-11-02T00:00:00.000Z" }, { id: "dsk-a", title: "old", body: "o", updatedAt: "2026-11-01T00:00:00.000Z" }],
+    responsibilities: async () => [{ id: "rsp-z", title: "late", desiredCondition: "x", state: "active", updatedAt: "2026-11-03T00:00:00.000Z" }, { id: "rsp-y", title: "early", desiredCondition: "y", state: "active", updatedAt: "2026-10-01T00:00:00.000Z" }],
+  }).collect({ taskId: "task-1", from, to })).sections;
+  assert.equal(s["drafts"], 'dsk-a "old": o\ndsk-b "new": n');
+  assert.deepEqual(s["responsibilities"]!.split("\n").slice(1).map((l) => l.split(" ")[0]), ["rsp-y", "rsp-z"]);
 });
