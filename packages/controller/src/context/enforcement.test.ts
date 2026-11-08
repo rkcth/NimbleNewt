@@ -6,7 +6,7 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextEnforcementService, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
+import { ContextEnforcementService, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
 
 after(stopServer);
 
@@ -211,6 +211,45 @@ for (const backend of backends) {
     assert.equal((await blockers.getBlocker(blocked.blockerId!))!.type, "context_overflow");
   });
 
+  suite("the rebuilt view is the prompt the worker sends on the new route: kept pieces in order, cut items by a digest that reads their full text, within the startup share; a worker's measurement makes the route measured (card C07g)", async ({ enf, owner, t, t2 }) => {
+    const at = (i: number): string => new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString();
+    const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at(1) }];
+    for (let i = 0; i < 20; i++) items.push({ id: `q${i}`, kind: "decision", text: `Open question ${i}: ${"which pot size ".repeat(40)}`, at: at(i + 2) });
+    const moved = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 32_768, items });
+    assert.equal(moved.rebuilt, true);
+    const view = moved.view;
+    assert.ok(moved.startup.cuts.length > 0, "the window is small enough that some questions are cut");
+    // The view: a header naming the route, every kept piece in its order, then the footer saying how to read what was cut.
+    assert.match(view, /^\[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route tiny\/one \(a 32768-token window\)\.\]/);
+    let from = 0;
+    for (const p of moved.startup.pieces) { const i = view.indexOf(p.text, from); assert.ok(i >= from, `piece ${p.id} is in the view, in order`); from = i + p.text.length; }
+    assert.ok(view.includes("Goal: ship v1.") && view.includes("Merge the branch."), "the goal and the owner's words whole");
+    assert.match(view, new RegExp(`${moved.startup.cuts.length} items were cut or left out to fit this route.*context\\.route-archive\\.read`));
+    // Every cut item names the full digest of its text, and that digest reads the full text back.
+    for (const cut of moved.startup.cuts) {
+      assert.ok(view.includes(cut.digest), `the view names the full digest of ${cut.id}`);
+      const back = await enf.routeArchive(owner, { taskId: t, digest: cut.digest });
+      assert.equal(back?.text, items.find((x) => x.id === cut.id)!.text, `the full text of ${cut.id} is read back by the digest the view names`);
+    }
+    // The whole view (header and footer too) stays within the startup share beside the route's fixed part (here the floor: the route was not measured, and the floor fits).
+    const budget = contextBudget(32_768);
+    assert.deepEqual([moved.measured, moved.warning], [false, undefined]);
+    assert.ok(tokensOf(view.length, budget) + tokensOf(14_000, budget) <= budget.startupTokens, `the view (${tokensOf(view.length, budget)} tokens) fits beside the floor in ${budget.startupTokens}`);
+    // Nothing to show: no view. A refusal: no view.
+    assert.equal((await enf.routeMoved(owner, { taskId: t2, attemptId: "att-1", route: "tiny/one", window: 32_768, items: [] })).view, "");
+    // A worker that has its process up measures the route; the route is measured from then on, and the view is built on the real figure (more room than the floor, so fewer cuts).
+    assert.deepEqual(await enf.measureRoute(owner, { taskId: t, attemptId: "att-1", launch: "l1", route: "tiny/one", systemPromptChars: 0, toolSchemaChars: 4_500 }), { measured: true });
+    assert.deepEqual(await enf.fixedPartOf("tiny/one", 32_768), { systemPromptChars: 0, toolSchemaChars: 4_500, tokens: 1_500 });
+    const measured = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 32_768, items });
+    assert.equal(measured.measured, true);
+    assert.ok(measured.startup.cuts.length < moved.startup.cuts.length, "the measured figure is smaller than the floor: fewer items cut");
+    assert.ok(tokensOf(measured.view.length, budget) + 1_500 <= budget.startupTokens);
+    // A measurement of nothing measures nothing; only the dispatcher's principals may measure; bad figures are refused.
+    assert.deepEqual(await enf.measureRoute(owner, { taskId: t, attemptId: "att-2", launch: "l2", route: "never/sized", systemPromptChars: 0, toolSchemaChars: 0 }), { measured: false });
+    await assert.rejects(enf.measureRoute(owner, { taskId: t, attemptId: "att-2", route: "x/y", systemPromptChars: -1, toolSchemaChars: 0 }), /systemPromptChars/);
+    await assert.rejects(enf.measureRoute({ ...owner, kind: "agent", id: "agent:ann" } as never, { taskId: t, attemptId: "att-2", route: "x/y", systemPromptChars: 1, toolSchemaChars: 1 }), /not the dispatcher/);
+  });
+
   const at2 = (i: number): string => new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString();
   const manyItems = (kind: StartupItem["kind"] = "report"): StartupItem[] => {
     const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at2(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at2(1) }];
@@ -262,6 +301,30 @@ for (const backend of backends) {
     assert.ok(big.blockerId);
     assert.deepEqual(await enf.routeKept(owner, { taskId: t2 }), {});
     assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t2 }))?.id, big.blockerId);
+  });
+
+  suite("a refusal for the route the task is on is not stale: a later attempt on that same route keeps it; one on another route closes it (card C07g review)", async ({ enf, owner, blockers, t }) => {
+    // The worker refused the first call on tiny/one after the task was placed on it (the view rebuilt on its measured figure did not fit).
+    const refused = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 4_096, items: manyItems() });
+    assert.ok(refused.blockerId);
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t, route: "tiny/one" }), {}, "the next attempt on tiny/one does not close it");
+    assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t }))?.id, refused.blockerId);
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-2", window: 65_536, call: small })).admit, false, "nothing is admitted while it is open");
+    // Back on the route it really ran on: stale, closed.
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t, route: "cloud/big" }), { closed: refused.blockerId });
+    assert.equal(await blockers.openFor("context_overflow", { kind: "task", id: t }), undefined);
+    await assert.rejects(enf.routeKept(owner, { taskId: t, route: "" }), /route/);
+  });
+
+  suite("one route blocker refused for route A, then B, then A again is marked for A: the task then on A keeps it (card C07g final review)", async ({ enf, owner, blockers, t }) => {
+    const a = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 4_096, items: manyItems() });
+    const b = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "tiny/two", window: 4_096, items: manyItems() });
+    const again = await enf.routeMoved(owner, { taskId: t, attemptId: "att-3", route: "tiny/one", window: 4_096, items: manyItems() });
+    assert.ok(a.blockerId);
+    assert.deepEqual([b.blockerId, again.blockerId], [a.blockerId, a.blockerId], "one blocker, kept open");
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t, route: "tiny/one" }), {}, "the latest refusal was for tiny/one: the task on tiny/one keeps it");
+    assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t }))?.id, a.blockerId);
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t, route: "tiny/two" }), { closed: a.blockerId }, "on another route it is stale");
   });
 
   suite("the route's fixed part is written beside the admission and never fails it: concurrent first calls on a new route all pass (finding 2)", async ({ enf, owner, t, t2 }) => {

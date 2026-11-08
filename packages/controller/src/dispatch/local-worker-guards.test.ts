@@ -62,6 +62,46 @@ test("a stored conversation over the resume share is not resumed: the runtime st
   assert.deepEqual(small.opened.from, stored, "a conversation that fits is resumed");
 });
 
+// Card C07g: a view built for a route nobody had measured is built again with the fixed part the process reports, before anything is sent; the rebuilt view replaces the order's in the first prompt.
+test("a view made on an unmeasured route is rebuilt with the process's own fixed part before the first call: the new view is what is admitted and sent, a refusal sends nothing, and a measured view or a failing rebuild keeps the order's", async () => {
+  const VIEW = "\n\nOLD VIEW";
+  const moved = order({ content: `do it${VIEW}`, startupView: { route: "llama/local", measured: false, chars: VIEW.length }, resumeNote: "carry on" });
+  const run = (sizes: string[], sent: string[]) => (): Partial<AttemptRuntime> => ({ firstCall: (c: string) => { sizes.push(c); return CALL; }, run: async (c: string) => { sent.push(c); return { status: "completed" }; } });
+  // Rebuilt: the measured figures go to the controller, the new view replaces the old one (the note still follows it), and the admission is of the prompt that is sent.
+  const sizes: string[] = []; const sent: string[] = []; const asked: unknown[] = []; const admitted: number[] = [];
+  const r = rig(run(sizes, sent), { context: { admit: async (_o, call) => { admitted.push(call.startupTokens); return { admit: true, reasons: [] }; }, resume: async () => ({ resume: true, reason: "" }), rebuildView: async (o, fixed, launch) => { asked.push([o.attemptId, fixed, typeof launch]); return { text: "NEW VIEW, built on the measured tools" }; } } });
+  await (await r.local.start(moved)).run(gateway());
+  assert.deepEqual(asked, [["att-1", { systemPromptChars: 100, toolSchemaChars: 200 }, "string"]], "measured from the process before the first call");
+  assert.deepEqual(sent, ["do it\n\nNEW VIEW, built on the measured tools\n\n[carry on]"]);
+  assert.deepEqual(sizes, ["", "do it\n\nNEW VIEW, built on the measured tools\n\n[carry on]"], "the admission measured the prompt that was sent");
+  // A rebuilt view that is empty (nothing to show any more) leaves the task's own text.
+  const emptySent: string[] = [];
+  const e = rig(run([], emptySent), { context: { admit: async () => ({ admit: true, reasons: [] }), resume: async () => ({ resume: true, reason: "" }), rebuildView: async () => ({ text: "" }) } });
+  await (await e.local.start(order({ content: `do it${VIEW}`, startupView: { route: "llama/local", measured: false, chars: VIEW.length } }))).run(gateway());
+  assert.deepEqual(emptySent, ["do it"]);
+  // The context does not fit with the real fixed part: nothing is admitted or sent, the attempt fails with the reason, and everything is closed.
+  const refusedSent: string[] = []; let admits = 0;
+  const f = rig(run([], refusedSent), { context: { admit: async () => { admits++; return { admit: true, reasons: [] }; }, resume: async () => ({ resume: true, reason: "" }), rebuildView: async () => ({ refused: "essential constraints do not fit the 8192-token route" }) } });
+  const failed = await (await f.local.start(moved)).run(gateway());
+  assert.equal(failed.status, "failed");
+  assert.match(failed.error ?? "", /first call was not sent: the owner's context does not fit route llama\/local with its measured prompt and tools: essential constraints do not fit/);
+  assert.deepEqual([refusedSent, admits], [[], 0]);
+  assert.deepEqual(f.log, ["sandbox open", "runtime open", "runtime close", "sandbox close"]);
+  // A measured view is not rebuilt; a rebuild that fails, or answers nothing, keeps the order's view (the first call is still checked with its real size) and the failure is reported.
+  for (const [what, view, rebuild] of [
+    ["measured", { route: "llama/local", measured: true, chars: VIEW.length }, async () => { throw new Error("should not be asked"); }],
+    ["failing", { route: "llama/local", measured: false, chars: VIEW.length }, async () => { throw new Error("the store is down"); }],
+    ["keep", { route: "llama/local", measured: false, chars: VIEW.length }, async () => undefined],
+    ["inconsistent", { route: "llama/local", measured: false, chars: 500 }, async () => { throw new Error("should not be asked"); }],
+  ] as const) {
+    const kept: string[] = [];
+    const k = rig(run([], kept), { context: { admit: async () => ({ admit: true, reasons: [] }), resume: async () => ({ resume: true, reason: "" }), rebuildView: rebuild } });
+    await (await k.local.start(order({ content: `do it${VIEW}`, startupView: view }))).run(gateway());
+    assert.deepEqual(kept, [`do it${VIEW}`], what);
+    assert.deepEqual(k.errors, what === "failing" ? ["context rebuild: the store is down"] : [], what);
+  }
+});
+
 test("a paused attempt is pausing while a call is in flight and paused only once it has settled; an interrupt reaches a running attempt and nothing reaches a paused one", async () => {
   const observed: string[] = [];
   const told: string[] = [];

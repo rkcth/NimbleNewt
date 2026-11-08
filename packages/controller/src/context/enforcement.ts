@@ -92,6 +92,22 @@ const legacyRouteKeys = (routeKey: string, name?: string): string[] => {
   const original = routeKey.slice(ROUTE_KEY_PREFIX.length).replace(/~([0-9a-f]{4})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16)));
   return legacyKeysOfName(original, routeKey);
 };
+/**
+ * The rebuilt view as the worker puts it in the first prompt on the new route (card C07g): a header naming the route, the kept pieces in their order (a cut item keeps its head and tail and names the full
+ * text's digest; a dropped one is a one-line reference with the digest), and a footer that says how the full text of a cut item is read. Nothing when there is nothing to show.
+ */
+export function startupViewText(startup: StartupResult, route: string, window: number): string {
+  const pieces = startup.pieces.filter((p) => p.text !== "");
+  if (pieces.length === 0) return "";
+  const footer = startup.cuts.length === 0 ? "" : `\n\n${viewFooter(startup.cuts.length)}`;
+  return `${viewHeader(route, window)}\n\n${pieces.map((p) => p.text).join("\n\n")}${footer}`;
+}
+const viewHeader = (route: string, window: number): string => `[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route ${route.length <= 80 ? route : `${route.slice(0, 77)}...`} (a ${window}-token window).]`;
+const viewFooter = (n: number): string => `[${n} item${n === 1 ? " was" : "s were"} cut or left out to fit this route. Nothing is lost: each names the digest of its full text (sha256:...); read it with the state API query context.route-archive.read, giving this task's ID and that digest (the owner's own items need the right to read the project's history).]`;
+/** What the header, the footer and the separators of a view add at most, in characters: the pieces are built with room for them, so the whole view stays within the startup share. */
+const viewFrameChars = (route: string, window: number, items: number): number => viewHeader(route, window).length + 4 + viewFooter(Math.max(2, items)).length + 2 * Math.max(0, items - 1);
+/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text (the project's rules, a resume note), in characters, when their exact size is not known yet (card C07g). */
+export const PROMPT_NOTE_RESERVE_CHARS = 2000;
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
 interface SpillBody { /** An outside server's text: read only by those who may use MCP in the project, and framed as data when paged out. */ readonly untrusted?: boolean; readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
@@ -344,9 +360,10 @@ export class ContextEnforcementService {
    * A running task moves to another route (a fallback, a cutover, a re-admitted attempt): the startup context is built again for the new route's window and its measured fixed part (card C07f). A route never measured
    * has no figure yet: its fixed part counts as 0 here (said in the reason of the record's basis `unmeasured`), and the first call on it is measured and checked by `admit` anyway. Repeating it with the same items answers with the recorded decision.
    */
-  async routeMoved(principal: Principal, command: { taskId: string; attemptId: string; route: string; harness?: string; window: number; items: readonly StartupItem[] }): Promise<Awaited<ReturnType<ContextEnforcementService["changeRoute"]>> & { measured: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "route", "harness", "window", "items"]);
+  async routeMoved(principal: Principal, command: { taskId: string; attemptId: string; route: string; harness?: string; window: number; items: readonly StartupItem[]; promptChars?: number }): Promise<Awaited<ReturnType<ContextEnforcementService["changeRoute"]>> & { measured: boolean; view: string }> {
+    onlyKnown(command, ["taskId", "attemptId", "route", "harness", "window", "items", "promptChars"]);
     const route = contextRouteKey(command.route);
+    const promptChars = command.promptChars === undefined ? 0 : Number.isSafeInteger(command.promptChars) && command.promptChars >= 0 && command.promptChars <= ENFORCEMENT_LIMITS.material ? command.promptChars : invalid("promptChars", "must be a whole number of characters");
     const window = command.window;
     // A window the budgets cannot be made for (under 1,024 tokens, or absurdly large) is a refusal with a blocker, once; not a fault at every tick.
     if (Number.isSafeInteger(window)) {
@@ -355,19 +372,38 @@ export class ContextEnforcementService {
         const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId);
         await this.#dispatch(principal, taskId);
         const reason = `the route's context window of ${window} tokens is not one the context budgets can be made for (${error.message})`;
-        const blockerId = await this.#openRouteBlock(principal, taskId, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to route ${route}: ${reason}. Set the route's contextTokens to its real window, or choose another route; then resolve this blocker.`);
+        const blockerId = await this.#openRouteBlock(principal, taskId, route, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to route ${route}: ${reason}. Set the route's contextTokens to its real window, or choose another route; then resolve this blocker.`);
         const startup: StartupResult = { pieces: [], tokens: 0, cuts: [], archive: [], blocked: { reason, needTokens: 0, haveTokens: 0 } };
-        return { rebuilt: false, startup, reason, blockerId, id: derivedId("adm", `${taskId}\0${attemptId}\0route\0badwindow\0${route}\0${window}`), replayed: false, measured: false };
+        return { rebuilt: false, startup, reason, blockerId, id: derivedId("adm", `${taskId}\0${attemptId}\0route\0badwindow\0${route}\0${window}`), replayed: false, measured: false, view: "" };
       }
     }
     const measured = await this.fixedPartOf(command.route, window, command.harness);
     // A route nobody has measured counts a floor (a prompt of the size a host assumes, and the bridge tools' schemas), not 0: a count of 0 would admit what the first call then refuses. The owner can turn the floor off.
     const floorChars = measured === undefined ? (await this.#routeSettings?.effective())?.floorChars ?? DEFAULT_ROUTE_FLOOR_CHARS : 0;
-    const fixedTokens = measured?.tokens ?? (floorChars > 0 ? tokensOf(floorChars, this.budget(window)) : 0);
+    // The view's own header and footer go in the first prompt too (card C07g), and so does the rest of the prompt (the task's own text, the rules note; `promptChars`): they are counted with the fixed part, so the pieces are cut
+    // to leave room for them and the first call that carries the view fits the startup share.
+    const frame = Array.isArray(command.items) && command.items.length > 0 && Number.isSafeInteger(window) ? tokensOf(viewFrameChars(command.route, window, command.items.length) + promptChars, this.budget(window)) : 0;
+    const fixedTokens = (measured?.tokens ?? (floorChars > 0 ? tokensOf(floorChars, this.budget(window)) : 0)) + frame;
     // The route and the window are part of the decision (a different window of the same attempt is a new decision, as is a different set of items or figure); the same ones repeat the recorded one.
     const launch = sha256(JSON.stringify([route, window, command.items, fixedTokens, measured === undefined ? "unmeasured" : "measured"])).slice(0, 16);
     const r = await this.changeRoute(principal, { taskId: command.taskId, attemptId: command.attemptId, launch, window, route, fixedTokens, items: command.items, ...(measured === undefined ? { fixedBasis: "unmeasured" as const } : {}) });
-    return { ...r, measured: measured !== undefined };
+    // What the worker puts in its first prompt on this route: the kept pieces and the references of what was cut (empty when there is nothing to show, or nothing fits).
+    return { ...r, measured: measured !== undefined, view: r.rebuilt ? startupViewText(r.startup, command.route, window) : "" };
+  }
+
+  /**
+   * The fixed part of a route as a worker measured it when its process came up (card C07g), before the first prompt is built: the system prompt and the tool schemas the process will send. Kept like the figure of an
+   * admitted first call (best effort: a failure is reported, never thrown), so a route nobody had measured is measured before the view built for it is trusted. Returns whether the route has a figure now.
+   */
+  async measureRoute(principal: Principal, command: { taskId: string; attemptId: string; launch?: string; route: string; harness?: string; systemPromptChars: number; toolSchemaChars: number }): Promise<{ measured: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "launch", "route", "harness", "systemPromptChars", "toolSchemaChars"]);
+    const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId);
+    await this.#dispatch(principal, taskId);
+    if (typeof command.route !== "string" || command.route.length < 1 || command.route.length > 500) invalid("route", "must be a route name of 1 to 500 characters");
+    const whole = (v: unknown, field: string): number => (Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= ENFORCEMENT_LIMITS.material ? (v as number) : invalid(field, "must be a whole number of characters"));
+    const call: FirstCall = { systemPromptChars: whole(command.systemPromptChars, "systemPromptChars"), toolSchemaChars: whole(command.toolSchemaChars, "toolSchemaChars"), startupTokens: 0, replyReserveTokens: 0 };
+    await this.#recordFixed(principal, { route: contextRouteKey(command.route), harness: command.harness, attemptId, admissionId: derivedId("adm", `${taskId}\0${attemptId}\0measure${launchPart(command.launch)}`), call });
+    return { measured: (await this.fixedPartOf(command.route, 131_072, command.harness)) !== undefined };
   }
 
   /**
@@ -420,7 +456,7 @@ export class ContextEnforcementService {
       payload: { taskId, attemptId, round: r, window: w, route, fixedTokens: command.fixedTokens, basis: command.fixedBasis ?? null, items: sha256(JSON.stringify(command.items)) },
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { rebuilt: review.kind === "rebuilt" } }),
     }));
-    const blockerId = review.kind === "blocked" ? await this.#openRouteBlock(principal, taskId, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to the ${w}-token route ${route}: ${review.reason}. Choose a route with a larger window (raise the route's contextTokens), reduce the task contract, supersede decisions that are no longer needed, or reassign the task; then resolve this blocker.`) : undefined;
+    const blockerId = review.kind === "blocked" ? await this.#openRouteBlock(principal, taskId, route, `${ROUTE_BLOCK} Attempt ${attemptId} cannot move to the ${w}-token route ${route}: ${review.reason}. Choose a route with a larger window (raise the route's contextTokens), reduce the task contract, supersede decisions that are no longer needed, or reassign the task; then resolve this blocker.`) : undefined;
     // The context fits this route now: a refusal this mechanism opened for an earlier move (to this route before its window was raised, or to another one) is stale and is closed, so the first call is not held for it.
     if (review.kind === "rebuilt") await this.#closeRouteBlock(principal, taskId, `The task's context now fits route ${route} (${w} tokens); the route change this blocker was about is settled.`);
     return { rebuilt: review.kind === "rebuilt", startup: review.startup, ...(review.kind === "blocked" ? { reason: review.reason } : {}), ...(warning === undefined ? {} : { warning }), ...(blockerId === undefined ? {} : { blockerId }), id, replayed: run.replayed };
@@ -430,28 +466,35 @@ export class ContextEnforcementService {
    * The task is back on the route it ran on (a route that flapped): a `context_overflow` blocker a route change opened is stale and is closed, so that admission is not held for a move that is no longer wanted. Any other context blocker stays.
    * Returns the blocker closed, if any.
    */
-  async routeKept(principal: Principal, command: { taskId: string }): Promise<{ closed?: string }> {
-    onlyKnown(command, ["taskId"]);
+  async routeKept(principal: Principal, command: { taskId: string; route?: string }): Promise<{ closed?: string }> {
+    onlyKnown(command, ["taskId", "route"]);
     const taskId = checkTaskId(command.taskId);
+    if (command.route !== undefined && (typeof command.route !== "string" || command.route.length < 1 || command.route.length > 500)) invalid("route", "must be a route name of 1 to 500 characters");
     await this.#dispatch(principal, taskId);
-    const closed = await this.#closeRouteBlock(principal, taskId, "The task is back on the route it ran on; the route change this blocker was about is no longer wanted.");
+    // A refusal for the very route the task is on is not stale (card C07g review): the worker refused the first call on this route after the task was placed on it, and a later attempt on the same route must not close it.
+    const closed = await this.#closeRouteBlock(principal, taskId, "The task is back on the route it ran on; the route change this blocker was about is no longer wanted.", command.route === undefined ? undefined : contextRouteKey(command.route));
     return closed === undefined ? {} : { closed };
   }
 
   /** The record of the blocker a route change opened (one per task): the structured mark that tells it from any other `context_overflow` blocker. */
   static #routeBlockRef = (taskId: string): AggregateRef => ({ kind: "ctx-route-block", id: derivedId("ctx", `${taskId}\0routeblock`) });
   /** Opens the task's `context_overflow` blocker for a refused move and marks it as this mechanism's; one that was already open (an admission refusal, or this one on an earlier tick) is returned and left as it is. */
-  async #openRouteBlock(principal: Principal, taskId: string, summary: string): Promise<string> {
+  async #openRouteBlock(principal: Principal, taskId: string, route: string, summary: string): Promise<string> {
     const id = await this.#block(principal, taskId, summary);
     // Marked by what the blocker is, read after it was opened or found, not by a look taken before: a blocker an admission refusal opened meanwhile is not this mechanism's, and one this mechanism opened on an earlier tick whose mark was lost is marked now.
     const blocker = await this.#blockers.getBlocker(id);
     const ref = ContextEnforcementService.#routeBlockRef(taskId);
-    if (blocker !== undefined && blocker.summary.startsWith(ROUTE_BLOCK) && ((await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string } | undefined)?.blockerId !== id) {
-      await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}`, actor: principal.id }, async () => ({
-        payload: { taskId, blockerId: id },
+    // The mark names the route the refusal was for (card C07g review), so that being on that same route does not count as having moved back.
+    const markFound = await this.#runner.get(ref.kind, ref.id);
+    const marked = markFound?.body as unknown as { blockerId?: string; route?: string } | undefined;
+    if (blocker !== undefined && blocker.summary.startsWith(ROUTE_BLOCK) && (marked?.blockerId !== id || marked.route !== route)) {
+      // The command ID carries the mark's revision as read: a blocker kept open while its refusals go A, then B, then A again is marked for A again (the ID of the first marking would replay it and leave the mark on B,
+      // and the task then placed on A would close the refusal as stale).
+      await this.#runner.command("context.route-block", { commandId: `ctx-rtm-${id}-${sha256(route).slice(0, 12)}-${markFound?.revision ?? 0}`, actor: principal.id }, async () => ({
+        payload: { taskId, blockerId: id, route },
         build: async () => {
           const old = await this.#runner.get(ref.kind, ref.id);
-          const body = { taskId, blockerId: id } as unknown as JsonObject;
+          const body = { taskId, blockerId: id, route } as unknown as JsonObject;
           return { ref, creates: old === undefined, changes: [old === undefined ? { type: "create" as const, ref, body } : { type: "update" as const, ref, expectedRevision: old.revision, body }], detail: {} };
         },
       }));
@@ -462,12 +505,13 @@ export class ContextEnforcementService {
    * Closes the open `context_overflow` blocker of the task if (and only if) a route change opened it, by the mark written with it; an admission refusal or any other context blocker stays.
    * A blocker opened before the mark existed (no mark record for the task) is recognised by the start of its text, once.
    */
-  async #closeRouteBlock(principal: Principal, taskId: string, resolution: string): Promise<string | undefined> {
+  async #closeRouteBlock(principal: Principal, taskId: string, resolution: string, /** The route the task is kept on: a refusal marked for this same route stays. */ keptOn?: string): Promise<string | undefined> {
     const open = await this.#blockers.openFor("context_overflow", { kind: "task", id: taskId });
     if (open === undefined) return undefined;
     const ref = ContextEnforcementService.#routeBlockRef(taskId);
-    const mark = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string } | undefined;
+    const mark = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as { blockerId?: string; route?: string } | undefined;
     if (mark === undefined ? !open.summary.startsWith(ROUTE_BLOCK) : mark.blockerId !== open.id) return undefined;
+    if (keptOn !== undefined && mark?.route === keptOn) return undefined;
     try { await this.#blockers.resolveBlocker({ commandId: `ctx-rtk-${open.id}`, actor: principal.id, blockerId: open.id, expectedRevision: open.revision, resolution }); } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "invalid_command"))) throw error; }
     return open.id;
   }

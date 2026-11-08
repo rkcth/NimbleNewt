@@ -41,6 +41,23 @@ describe("context budgets (C07)", () => {
     assert.deepEqual(r.pieces.map((p) => p.id), items.map((i) => i.id));
   });
 
+  test("a cut never splits a character: an emoji across the head's end or the tail's start is left out whole, and the count says so (card C07g final review)", () => {
+    const emoji = "\u{1F600}";
+    assert.equal(emoji.length, 2);
+    // The head ends (400) between the halves of the first emoji; the tail starts (length - 300) between the halves of the second.
+    const text = `${"a".repeat(399)}${emoji}${"b".repeat(600)}${emoji}${"c".repeat(299)}`;
+    const r = buildStartup([{ id: "q", kind: "decision", text, at: at(0) }], contextBudget(4_096), 700, { keepNewest: 0 });
+    const piece = r.pieces[0]!.text;
+    assert.deepEqual(r.cuts.map((c) => c.dropped), [false], "cut, not dropped");
+    assert.equal(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(piece), false, "no half character in the cut text");
+    assert.ok(piece.startsWith(`${"a".repeat(399)} [… ${600 + 2 * emoji.length} characters cut;`), piece.slice(0, 420));
+    assert.ok(piece.endsWith(`] ${"c".repeat(299)}`));
+    // Whole emoji at the ends are kept whole.
+    const kept = `${"a".repeat(398)}${emoji}${"b".repeat(600)}${emoji}${"c".repeat(298)}`;
+    const k = buildStartup([{ id: "q", kind: "decision", text: kept, at: at(0) }], contextBudget(4_096), 700, { keepNewest: 0 }).pieces[0]!.text;
+    assert.ok(k.startsWith(`${"a".repeat(398)}${emoji} [… 600 characters cut;`) && k.endsWith(`] ${emoji}${"c".repeat(298)}`), k);
+  });
+
   test("what is kept whole but does not fit is refused with a blocker, never sent", () => {
     const items: StartupItem[] = [{ id: "human", kind: "human", text: "w".repeat(200_000), at: at(1) }, { id: "goal", kind: "goal", text: "ship", at: at(2) }];
     const r = buildStartup(items, small, 5000);

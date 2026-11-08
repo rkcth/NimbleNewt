@@ -802,6 +802,22 @@ export class DecisionService implements DecisionGuard {
     const projectId = checkProjectId(command.projectId);
     const taskId = command.taskId === undefined ? undefined : checkTaskId(command.taskId);
     if (!(await this.#mayContext(by, projectId, taskId))) return undefined;
+    return this.#contextRecord(projectId, taskId);
+  }
+
+  /**
+   * The same record, read by the controller itself for the context it builds for a worker (card C07g: the startup view of a task that moves to another route). Not a state-API operation: the caller is the composition, which
+   * already decided the task is being started; the dispatcher's own service principal holds no project grants and would read nothing through `context`.
+   */
+  async controllerContext(command: { projectId: string; taskId: string }): Promise<DecisionContext | undefined> {
+    const projectId = checkProjectId(command.projectId);
+    const taskId = checkTaskId(command.taskId);
+    const task = body<TaskBody>(await this.#runner.get("task", taskId));
+    if (task?.projectId !== projectId) return undefined;
+    return this.#contextRecord(projectId, taskId);
+  }
+
+  async #contextRecord(projectId: string, taskId: string | undefined): Promise<DecisionContext> {
     const ctx = await this.#context(projectId);
     const relevant = (t: string | undefined): boolean => taskId === undefined || t === undefined || t === taskId;
     const decisions: View<OwnerDecisionBody>[] = [], goals: View<OwnerDecisionBody>[] = [], permissions: View<OwnerDecisionBody>[] = [], gates: View<OwnerDecisionBody>[] = [];

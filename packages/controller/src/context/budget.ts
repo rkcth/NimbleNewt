@@ -57,6 +57,8 @@ export interface StartupResult {
   readonly blocked?: { readonly reason: string; readonly needTokens: number; readonly haveTokens: number };
 }
 const PROTECTED: ReadonlySet<StartupKind> = new Set(["human", "permission", "goal"]);
+const isHighSurrogate = (c: number): boolean => c >= 0xd800 && c <= 0xdbff;
+const isLowSurrogate = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
 const digestOf = (text: string): string => `sha256:${createHash("sha256").update(text).digest("hex")}`;
 
 /**
@@ -76,13 +78,20 @@ export function buildStartup(items: readonly StartupItem[], budget: ContextBudge
   const cuttable = state.filter((s) => s.mode === "full").sort((a, b) => (a.it.at < b.it.at ? -1 : a.it.at > b.it.at ? 1 : a.i - b.i));
   for (const s of cuttable) {
     if (sum() <= room) break;
-    const cutText = (): string => `${s.text.slice(0, head)}\n[… ${s.text.length - head - tail} characters cut; full text archived as ${digestOf(s.it.text).slice(0, 19)}]\n${s.text.slice(-tail)}`;
+    // The head, the mark and the tail stay on one line (card C07g review): a cut never puts a line break the item did not have before the tail, so a tail taken from inside an agent's quoted words (an open
+    // question) does not start a line of its own, where it could read as an owner's item such as "[AUTHORITATIVE] ...".
+    // Neither end splits a surrogate pair (card C07g final review): an emoji across the head's end or the tail's start would leave half a character, text a model server may refuse to encode.
+    const cutText = (): string => {
+      const headEnd = head > 0 && isHighSurrogate(s.text.charCodeAt(head - 1)) ? head - 1 : head;
+      const tailStart = s.text.length - tail + (tail > 0 && isLowSurrogate(s.text.charCodeAt(s.text.length - tail)) ? 1 : 0);
+      return `${s.text.slice(0, headEnd)} [… ${tailStart - headEnd} characters cut; full text archived as ${digestOf(s.it.text)}] ${s.text.slice(tailStart)}`;
+    };
     const candidate = s.text.length > head + tail ? cutText() : s.text;
     if (candidate.length < s.text.length) { s.text = candidate; s.mode = "cut"; }
   }
   for (const s of cuttable) {
     if (sum() <= room) break;
-    s.text = `[${s.it.kind} ${s.it.id} left out; full text archived as ${digestOf(s.it.text).slice(0, 19)}]`; s.mode = "dropped";
+    s.text = `[${s.it.kind} ${s.it.id} left out; full text archived as ${digestOf(s.it.text)}]`; s.mode = "dropped";
   }
   const tokens = sum();
   const cuts: StartupCut[] = []; const archive: { id: string; digest: string; text: string }[] = [];
