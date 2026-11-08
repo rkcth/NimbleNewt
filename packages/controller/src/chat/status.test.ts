@@ -103,7 +103,8 @@ for (const backend of backends) {
     const handoffs = {
       forTask: async () => undefined,
       cutsForTask: async (_by: unknown, taskId: string) => { asked.push(taskId); return { handoffId: "hnd-bbbbbbbbbbbbbbbbbbbb", phase: "transferred", cuts: [{ section: "completedWork", archiveId: "hnd-cccccccccccccccccccc", left: 30, total: 40 }] }; },
-      archive: async (_by: unknown, q: { archiveId: string; part?: number }) => (q.archiveId === "hnd-cccccccccccccccccccc" ? { handoffId: "hnd-bbbbbbbbbbbbbbbbbbbb", taskId: t, section: "completedWork", chars: entries.join("\n").length, parts: 1, text: entries.join("\n") } : undefined),
+      // Two parts, split inside an entry, as a long archive is kept: the view joins them before it numbers the entries.
+      archive: async (_by: unknown, q: { archiveId: string; part?: number }) => { const whole = entries.join("\n"); const half = Math.floor(whole.length / 2) + 7; return q.archiveId === "hnd-cccccccccccccccccccc" ? { handoffId: "hnd-bbbbbbbbbbbbbbbbbbbb", taskId: t, section: "completedWork", chars: whole.length, parts: 2, text: (q.part ?? 0) === 0 ? whole.slice(0, half) : whole.slice(half) } : undefined; },
     };
     const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, handoffs }, options);
     const said = "show me everything that was cut from the completed work of the Build importer hand-off";
