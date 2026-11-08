@@ -54,7 +54,8 @@ export async function linuxOrphans(directory: string, options: { readonly proc?:
   const left = new Set(holding());
   return first.filter((pid) => left.has(pid)).map((pid) => {
     let comm = "unknown";
-    try { comm = readFileSync(join(proc, String(pid), "comm"), "utf8").trim().slice(0, 40) || "unknown"; } catch { /* name unknown */ }
+    // The job's program can rename itself (prctl PR_SET_NAME), so its name is reduced to printable ASCII: a terminal escape or a control character would reach the owner, the agent and the record.
+    try { comm = readFileSync(join(proc, String(pid), "comm"), "utf8").trim().replace(/[^\x20-\x7e]/g, "?").slice(0, 40) || "unknown"; } catch { /* name unknown */ }
     return `pid ${pid} (${comm})`;
   });
 }

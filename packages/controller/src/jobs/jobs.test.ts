@@ -698,4 +698,55 @@ for (const backend of backends) {
     assert.match(runs.room(c.t1) ?? "", /shutting down/);
   });
 
+  suite("the local runs stop the jobs of a task that has ended, confirm a stop asked before the process started, and record an end whose orphan names and reason carry control characters (card T07b review)", async (c) => {
+    const host = hostOf();
+    let runs: LocalJobRuns | undefined;
+    const jobs = c.reopen({ host: HOST, onCancel: (id, force) => { void runs?.stop(id, force); } });
+    const procs: { stops: boolean[]; end: (e: Partial<JobProcessEnd>) => void }[] = [];
+    const launcher: JobLauncher = {
+      start: async () => {
+        let end!: (e: JobProcessEnd) => void;
+        const ended = new Promise<JobProcessEnd>((resolve) => { end = resolve; });
+        const p = { stops: [] as boolean[], end: (e: Partial<JobProcessEnd>) => end({ exitCode: null, signal: null, timedOut: false, stopped: false, orphans: [], ...e }) };
+        procs.push(p);
+        return { stop: (force) => { p.stops.push(force); p.end({ signal: "SIGKILL", stopped: true }); }, ended };
+      },
+    };
+    const ended = new Set<string>();
+    // A long sweep period: the test sweeps by hand.
+    runs = new LocalJobRuns({ jobs, principal: () => host, launcher, taskEnded: async (taskId) => ended.has(taskId), limits: { flushMs: 5, graceMs: 50, sweepMs: 3_600_000 } });
+    const launch: ScriptLaunch = { program: "node", argv: ["main.js"], stdin: "{}", source: "", tool: { name: "a_x.build", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 1024, limits: { cpus: 1, memoryMb: 64, seconds: 60 }, env: {} };
+    const waitFor = async (ok: () => Promise<boolean>): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok()) && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); };
+    const settle = async (id: string, state: string) => { await waitFor(async () => (await c.read(id)).state === state); assert.equal((await c.read(id)).state, state); };
+
+    // The task of one job ends (cancelled, final); the other task goes on. A sweep stops only the job of the ended task, as a recorded Stop by the job host.
+    const mine = await c.admit(c.t2), theirs = await c.admit(c.t1);
+    await runs.start(mine, c.t2, launch); await runs.start(theirs, c.t1, launch);
+    await settle(mine, "running"); await settle(theirs, "running");
+    assert.deepEqual(await runs.sweep(), [], "no task has ended: nothing is stopped");
+    await c.projects.transitionTask({ commandId: cid("end"), actor: c.owner.id, taskId: c.t2, expectedRevision: 2, to: "cancelled" });
+    ended.add(c.t2);
+    assert.deepEqual(await runs.sweep(), [mine]);
+    await settle(mine, "cancelled");
+    assert.deepEqual([procs[0]!.stops, (await c.read(mine)).cancel?.requestedBy, (await c.read(mine)).cancel?.reason], [[false], HOST, "its task has ended (done or cancelled); a job does not run on after its task"]);
+    assert.equal((await c.read(theirs)).state, "running", "a job of a task that goes on runs on");
+    assert.deepEqual(await runs.sweep(), [], "asking again stops nothing more");
+
+    // A stop asked after the admission and before the process was started: nothing started, so the stop is confirmed at once and no process is launched.
+    const early = await c.admit(c.t1);
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: early, reason: "not needed after all" });
+    const launched = procs.length;
+    await runs.start(early, c.t1, launch);
+    await settle(early, "cancelled");
+    assert.equal(procs.length, launched, "nothing was launched for it");
+
+    // The job's program can rename a process it leaves behind (and a launch failure carries text it shaped): control characters never keep the end from being recorded.
+    procs[1]!.end({ exitCode: 2, orphans: ["pid 7 (\u001b[2Jevil\u0007)", "\u0000\u0001"], problem: "the job could not be started: \u001b]0;title\u0007 bad\tthing‮" });
+    await settle(theirs, "failed");
+    const failedJob = await c.read(theirs);
+    assert.deepEqual(failedJob.orphans, ["pid 7 ([2Jevil)", "an unnamed process"]);
+    assert.equal(failedJob.exit?.reason, "the job could not be started: ]0;title bad thing");
+    await runs.close();
+  });
+
 }

@@ -7,6 +7,7 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "../dispatch/testing/world.js";
 import type { Grant } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
+import { JobService } from "../jobs/index.js";
 import { launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 
@@ -617,6 +618,57 @@ for (const backend of backends) {
     for (const op of ["desk.read", "task.get", "discover", "after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
+  });
+
+  suite("job-start under a used call ID answers the same job only for the same request, also after a restart that forgot the call IDs; job output, status and labels carry no control or invisible format characters (card T07b review)", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: "job.write", project: c.project }]);
+    await c.task("t", ann);
+    const host = { id: "service:dispatcher", kind: "service", name: "dispatcher", grants: [] } as never;
+    const jobs = JobService.withEpoch(c.storage, c.epoch, { pauses: c.pauses }, { ...c.options, host: "service:dispatcher" });
+    const started: string[] = [];
+    // A service as a fresh controller builds it: same records, no memory of the call IDs used before.
+    const fresh = (): ToolExecutionService => new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true,
+      jobs, jobRuns: { room: () => undefined, start: async (jobId: string) => { started.push(jobId); } } });
+    let handle = "";
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      c.svc = fresh();
+      const name = await c.install(s, "check", "1.0.0");
+      const args = { tool: name, version: "1.0.0", input: { url: "https://a.test" }, label: "check a" };
+      const first = good(await s.send("job.start", args, "j1"));
+      assert.equal(first["state"], "awaiting-approval");
+      const review = (await c.reviews.get(c.owner, first["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: uid("dec"), requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+      handle = good(await s.send("job.start", args, "j1"))["jobId"] as string;
+      assert.match(handle, /^job-/);
+      // The controller restarts: the same request under the same call ID is the same job, started once.
+      c.svc = fresh();
+      assert.equal(good(await s.send("job.start", args, "j1"))["jobId"], handle);
+      // Another request under that call ID is refused after a restart too (different input, tool version left out but input changed, another label, background).
+      for (const [key, other] of [["input", { ...args, input: { url: "https://b.test" } }], ["input-noversion", { tool: name, input: { url: "https://b.test" }, label: "check a" }], ["label", { ...args, label: "check b" }], ["background", { ...args, background: true }]] as const) {
+        c.svc = fresh();
+        out[key] = await s.send("job.start", other as JsonObject, "j1");
+      }
+      // A label with an invisible bidirectional override, a C1 control or a line separator is refused.
+      for (const [i, label] of ["evil‮txt", "a\u0085b", "a b", "a​b"].entries()) out[`label-${i}`] = await s.send("job.start", { ...args, label }, `bad-label-${i}`);
+      // The program writes invisible format characters, C1 controls and separators; it renames a process it leaves behind.
+      await jobs.report(host, { commandId: uid("d"), jobId: handle, state: "dispatched" });
+      await jobs.report(host, { commandId: uid("r"), jobId: handle, state: "running" });
+      await jobs.report(host, { commandId: uid("o"), jobId: handle, output: "ok‮⁦gnp.exe⁩ \u0085next line​﻿ done\n" });
+      out["output"] = await s.send("job.output", { jobId: handle }, "o1");
+      await jobs.finish(host, { commandId: uid("f"), jobId: handle, outcome: "failed", exit: { reason: "it ended ‮badly" }, orphans: ["pid 9 (‮evil)"] });
+      out["status"] = await s.send("job.status", { jobId: handle }, "st1");
+    });
+    await c.tick();
+    assert.deepEqual(started, [handle], "one start for one job");
+    for (const key of ["input", "input-noversion", "label", "background"]) { const b = bad(out[key]!); assert.equal(b.code, "invalid_command", key); assert.match(b.message, /different request/, key); }
+    for (let i = 0; i < 4; i++) assert.equal(bad(out[`label-${i}`]!).code, "invalid_command");
+    const text = JSON.parse(good(out["output"]!)["output"] as string) as string;
+    assert.equal(text, "okgnp.exe nextline done\n");
+    const status = good(out["status"]!);
+    assert.deepEqual([(status["exit"] as JsonObject)["reason"], status["orphans"]], ["it ended badly", ["pid 9 (evil)"]]);
   });
 
   suite("registering a tool under a contract that restricts tools is allowed, but running it is still governed by the contract's ceiling", async (c) => {

@@ -931,7 +931,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       } catch (error) { options.onInternalError?.(error); jobsAtStart = { decided: 0, failed: 1 }; }
       if (options.jobs !== undefined && options.tools !== undefined) {
         const host = dispatch.principal;
-        jobRuns = new LocalJobRuns({ jobs, principal: () => host, launcher: options.jobs.launcher, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }), ...(options.jobs.limits === undefined ? {} : { limits: options.jobs.limits }) });
+        // A job does not run on after its task: the runs stop the jobs whose task is done or cancelled (both final), or gone.
+        const taskEnded = async (taskId: string): Promise<boolean> => { const t = await projects.getTask(taskId); return t === undefined || t.state === "done" || t.state === "cancelled"; };
+        jobRuns = new LocalJobRuns({ jobs, principal: () => host, launcher: options.jobs.launcher, taskEnded, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }), ...(options.jobs.limits === undefined ? {} : { limits: options.jobs.limits }) });
       }
     }
     const mcpParts = dispatch?.mcp;

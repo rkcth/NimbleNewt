@@ -38,10 +38,17 @@ export const JOB_RUN_LIMITS = {
   outputBytes: 16 * 1024 * 1024,
   /** How long a stop waits for the process to end before it is recorded as not obeyed. */
   graceMs: 10_000,
+  /** How often the jobs running here are checked against their tasks: a job whose task has ended is stopped. */
+  sweepMs: 30_000,
 } as const;
 
 export interface LocalJobRunsDeps {
-  readonly jobs: Pick<JobService, "get" | "report" | "finish" | "confirmCancel">;
+  readonly jobs: Pick<JobService, "get" | "report" | "finish" | "confirmCancel" | "requestCancel">;
+  /**
+   * Whether the task has ended (done or cancelled, both final; or gone). Given, every `sweepMs` the jobs running here whose task has ended are stopped (a recorded Stop by the job host): a job belongs to its task and does not outlive
+   * it. Absent: nothing is swept.
+   */
+  readonly taskEnded?: (taskId: string) => Promise<boolean>;
   /** The controller's job host (`service:dispatcher`): it records the progress, the ends and the stops. Absent while the dispatcher is not built: nothing can be started then. */
   readonly principal: () => Principal | undefined;
   readonly launcher: JobLauncher;
@@ -71,6 +78,11 @@ interface Run {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms).unref(); });
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
+/**
+ * Text from the launcher that the job's program may have shaped (an orphan's process name, a launch failure's standard error), made fit for the record: control and invisible format characters dropped, so the job service's
+ * text checks never refuse the end (a refused end would leave the job running on the record forever).
+ */
+const plainLine = (s: string): string => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, "").replace(/\t/g, " ");
 
 /**
  * The jobs agents start through the bridge, run on this machine (card T07b). Each job is one process in the sandbox, started by the controller (not by the agent's worker process), so it outlives the worker and its attempt; it never
@@ -86,10 +98,45 @@ export class LocalJobRuns {
   readonly #limits: { -readonly [K in keyof typeof JOB_RUN_LIMITS]: number };
   readonly #live = new Map<string, Run>();
   #closed = false;
+  readonly #sweeper: ReturnType<typeof setInterval> | undefined;
+  #sweeping = false;
 
   constructor(deps: LocalJobRunsDeps) {
     this.#deps = deps;
     this.#limits = { ...JOB_RUN_LIMITS, ...(deps.limits ?? {}) };
+    if (deps.taskEnded !== undefined) {
+      this.#sweeper = setInterval(() => { void this.sweep(); }, this.#limits.sweepMs);
+      this.#sweeper.unref();
+    }
+  }
+
+  /**
+   * Stops every job running here whose task has ended (done or cancelled): a job belongs to its task, so it does not run on after the task is over (card T07b review). The stop is the job service's recorded Stop, asked by the job host,
+   * and it reaches the process through `onCancel` like any other. Run every `sweepMs`; a sweep already going on is not started again. Answers the jobs it asked to stop.
+   */
+  async sweep(): Promise<string[]> {
+    const ended = this.#deps.taskEnded;
+    const host = this.#deps.principal();
+    if (ended === undefined || host === undefined || this.#closed || this.#sweeping) return [];
+    this.#sweeping = true;
+    const asked: string[] = [];
+    try {
+      const byTask = new Map<string, boolean>();
+      for (const run of [...this.#live.values()]) {
+        if (run.stopAsked === true || run.closing === true) continue;
+        let over = byTask.get(run.taskId);
+        if (over === undefined) { try { over = await ended(run.taskId); } catch (error) { this.#deps.onError?.(error); over = false; } byTask.set(run.taskId, over); }
+        if (!over) continue;
+        try {
+          await this.#deps.jobs.requestCancel(host, { commandId: `jend:${run.jobId}:${run.nonce}`, jobId: run.jobId, reason: "its task has ended (done or cancelled); a job does not run on after its task" });
+          asked.push(run.jobId);
+        } catch (error) {
+          // A job that has just ended, or whose stop is already asked, needs nothing more.
+          if (!(error instanceof DomainError && error.code === "invalid_command")) this.#deps.onError?.(error);
+        }
+      }
+    } finally { this.#sweeping = false; }
+    return asked;
   }
 
   /** Why a job of the task cannot be started now, or `undefined`. */
@@ -113,8 +160,13 @@ export class LocalJobRuns {
     if (host === undefined) throw new DomainError("unavailable", "the job host is not running");
     const job = await this.#deps.jobs.get(host, jobId);
     if (job === undefined) throw new DomainError("not_found", `job ${jobId} does not exist`);
-    if (job.state !== "admitted" || this.#live.has(jobId)) return;
     if (job.taskId !== taskId) throw new DomainError("forbidden", "the job belongs to another task");
+    // A stop asked between the admission and this start (nothing here ran it, so `stop` found nothing): nothing was started, so the stop is confirmed at once instead of leaving the job waiting for a process that never comes.
+    if (job.state === "cancellation_requested" && !this.#live.has(jobId) && !job.history.some((h) => h.state === "dispatched" || h.state === "running")) {
+      await this.#deps.jobs.confirmCancel(host, { commandId: `jstop:${jobId}:never-started`, jobId, result: "stopped" });
+      return;
+    }
+    if (job.state !== "admitted" || this.#live.has(jobId)) return;
     const full = this.room(taskId);
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
@@ -163,6 +215,7 @@ export class LocalJobRuns {
   /** Ends every job running here (the controller is shutting down) and waits until each end is recorded. */
   async close(): Promise<void> {
     this.#closed = true;
+    if (this.#sweeper !== undefined) clearInterval(this.#sweeper);
     const runs = [...this.#live.values()];
     for (const run of runs) { run.closing = true; run.proc?.stop(true); }
     await Promise.race([Promise.all(runs.map((r) => r.done)), sleep(this.#limits.graceMs)]);
@@ -208,7 +261,7 @@ export class LocalJobRuns {
     try {
       await this.#flush(run);
       const job = await this.#deps.jobs.get(host, run.jobId);
-      const orphans = end.orphans.slice(0, JOB_LIMITS.orphans).map((o) => clip(redactText(o), JOB_LIMITS.orphan));
+      const orphans = end.orphans.slice(0, JOB_LIMITS.orphans).map((o) => clip(redactText(plainLine(o)).trim() || "an unnamed process", JOB_LIMITS.orphan));
       if (job === undefined) return;
       if (job.state === "cancellation_requested") {
         await this.#deps.jobs.confirmCancel(host, { commandId: `jstop:${run.jobId}:${run.nonce}:end`, jobId: run.jobId, result: "stopped", orphans });
@@ -221,7 +274,7 @@ export class LocalJobRuns {
         : run.closing === true ? "the controller shut down and ended the job"
         : end.exitCode === 0 ? undefined
         : end.signal !== null ? `the job was ended by ${end.signal}` : `the job exited with code ${String(end.exitCode)}`;
-      const exit = { ...(end.exitCode === null ? {} : { code: end.exitCode }), ...(end.signal === null ? {} : { signal: end.signal }), ...(reason === undefined ? {} : { reason: clip(redactText(reason), JOB_LIMITS.reason) }) };
+      const exit = { ...(end.exitCode === null ? {} : { code: end.exitCode }), ...(end.signal === null ? {} : { signal: end.signal }), ...(reason === undefined ? {} : { reason: clip(redactText(plainLine(reason)).trim() || "the job ended", JOB_LIMITS.reason) }) };
       await this.#deps.jobs.finish(host, { commandId: `jrun:${run.jobId}:${run.nonce}:end`, jobId: run.jobId, outcome: reason === undefined ? "completed" : "failed", exit, ...(orphans.length === 0 ? {} : { orphans }) });
     } catch (error) {
       this.#deps.onError?.(error);
