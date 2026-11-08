@@ -331,4 +331,34 @@ for (const backend of backends) {
       await x.spawn();
     } finally { await x.w.close(); }
   });
+
+  // Review round 4 of card H10: contention on one parent.
+  suite("as many spawns at once as a parent may have live children all get their place: none is refused only because the others claimed theirs at the same moment", async () => {
+    const x = await world();
+    try {
+      await x.settings.change(x.rob, { commandId: "m1", set: { liveChildren: 64, totalChildren: null } });
+      const results = await Promise.allSettled(Array.from({ length: 64 }, () => x.spawn(x.root, { costMicros: 100, computeMs: 10 })));
+      assert.deepEqual(results.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason)), []);
+      assert.equal((await x.swarm.children(x.root, x.project)).length, 64);
+      assert.deepEqual(await delegated(x), { costMicros: 6400, computeMs: 640 });
+      await refuses("invalid_command", () => x.spawn(x.root, { costMicros: 100, computeMs: 10 }), /at most 64 live children/);
+    } finally { await x.w.close(); }
+  });
+
+  suite("two cancels of the same swarm sent together both end: neither is refused because the other stopped a child first, nothing is left live or handed down, and the parent reopens", async () => {
+    const x = await world();
+    try {
+      await x.settings.change(x.rob, { commandId: "m1", set: { liveChildren: 12 } });
+      const made = await Promise.all(Array.from({ length: 12 }, () => x.spawn(x.root, { costMicros: 100, computeMs: 10 })));
+      const both = await Promise.allSettled([x.swarm.cancel(x.rob, { commandId: "ca", parentTaskId: x.root, reason: "plans changed" }), x.swarm.cancel(x.rob, { commandId: "cb", parentTaskId: x.root, reason: "plans changed" })]);
+      assert.deepEqual(both.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason)), []);
+      const ends = both.map((r) => (r as PromiseFulfilledResult<{ settled: string[]; pending: string[] }>).value);
+      // Each settles every child or, where the other was still stopping it, reports it pending; between them every child is settled.
+      for (const end of ends) assert.equal(end.settled.length + end.pending.length, made.length, JSON.stringify(end));
+      assert.ok(ends.some((end) => end.pending.length === 0), JSON.stringify(ends));
+      assert.deepEqual((await x.tasks()).filter((t) => t.id !== x.root && t.state !== "cancelled"), [], "no child is live");
+      assert.deepEqual(await delegated(x), { costMicros: 0, computeMs: 0 });
+      await x.spawn();
+    } finally { await x.w.close(); }
+  });
 }

@@ -36,6 +36,8 @@ const GATE = "swarm-gate";
 /** The budget's own link (kind `budget-link`, ID = the task): a task that has one has an allowance node. */
 const BUDGET_LINK = "budget-link";
 const FINAL = new Set(["done", "cancelled"]);
+/** How often a change to a gate record that met another at the same moment reads again and tries again: above the most live children a parent may have, so spawns at once never run out. */
+const GATE_TRIES = 400;
 /** `sealed.roots`: the tasks whose swarm cancels hold the seal (a gate stays sealed while any does, so an inner cancel that ends does not reopen a task an outer cancel still holds). */
 interface Seal { readonly by: string; readonly at: string; readonly roots?: readonly string[] }
 interface GateBody { readonly children: readonly string[]; readonly sealed?: Seal }
@@ -59,11 +61,14 @@ const gateBody = (body: unknown): GateBody => {
 export class SwarmService {
   readonly #runner: CommandRunner;
   readonly #deps: SwarmDeps;
+  readonly #pause: (attempt: number) => Promise<void>;
 
-  private constructor(runner: CommandRunner, deps: SwarmDeps) { this.#runner = runner; this.#deps = deps; }
+  private constructor(runner: CommandRunner, deps: SwarmDeps, pause: (attempt: number) => Promise<void>) { this.#runner = runner; this.#deps = deps; this.#pause = pause; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: SwarmDeps, options: RunnerOptions = {}): SwarmService {
-    return new SwarmService(new CommandRunner(storage, epoch, options), deps);
+    // A gate record is one row that every spawn under a parent and every cancel of its swarm changes, so a loser waits a short random time before it reads again (card H10 review: up to
+    // 64 spawns at once under one parent otherwise ran out of tries and were refused for no reason but the race).
+    return new SwarmService(new CommandRunner(storage, epoch, options), deps, options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))));
   }
 
   async spawn(by: Principal, command: NoActor & { parentTaskId: string; title: string; expectedResult: string; acceptanceCriteria: string[]; costMicros?: number; computeMs?: number }): Promise<{ taskId: string; replayed: boolean }> {
@@ -155,8 +160,9 @@ export class SwarmService {
       const parentOfChild = tree.get(childId)!.parent;
       if (!(await this.#deps.budgets.canManage(by, parentOfChild))) { pending.push(childId); continue; }
       // A Stop of the child already under way (an earlier cancel that could not finish it) is carried on rather than asked for again.
-      const under = await this.#deps.stops.holding(childId);
-      const intentId = under?.mode === "stop" ? under.intentId : (await this.#deps.stops.request(by, { commandId: `swc-${command.commandId}-${childId}`, scope: { kind: "task", id: childId }, mode: "stop", reason })).intentId;
+      const intentId = await this.#stopOf(by, `swc-${command.commandId}-${childId}`, childId, reason);
+      if (intentId === "final") { await this.#takeBack(by, `swr-${command.commandId}-${childId}`, childId); settled.push(childId); continue; }
+      if (intentId === undefined) { pending.push(childId); continue; }
       const advanced = await this.#deps.stops.advance(by, { intentId });
       if (advanced.outcome === undefined || advanced.outcome.state === "recovery-required") { pending.push(childId); continue; }
       // The child is cancelled first and what it did not use is taken back after (card H10 review). Taking back lowers its limit to what it used, and a limit of 0 reads as none, so a child
@@ -164,13 +170,34 @@ export class SwarmService {
       // the same step, so once the child is cancelled every allowance it will ever have is already there: a child still being made (claimed, its spawn not yet past the hand-over) is
       // either given its allowance before the cancel, and it is taken back here, or refused it after.
       const fresh = (await this.#deps.projects.getTask(childId))!;
-      if (!FINAL.has(fresh.state)) await this.#deps.projects.transitionTask({ commandId: `swt-${command.commandId}-${childId}`, actor: by.id, taskId: childId, expectedRevision: fresh.revision, to: "cancelled" } as never);
+      // A cancel of the same swarm that cancelled the child between the read and the change has done what this one would.
+      if (!FINAL.has(fresh.state)) await this.#deps.projects.transitionTask({ commandId: `swt-${command.commandId}-${childId}`, actor: by.id, taskId: childId, expectedRevision: fresh.revision, to: "cancelled" } as never)
+        .catch(async (error: unknown) => { if (!FINAL.has((await this.#deps.projects.getTask(childId))?.state ?? "")) throw error; });
       await this.#takeBack(by, `swr-${command.commandId}-${childId}`, childId);
       settled.push(childId);
     }
     // Only this cancel's own seal is let go of: a cancel of an enclosing swarm still under way keeps the parent closed.
     if (pending.length === 0) await this.#mark(parentId, false, by.id, parentId);
     return { settled, pending };
+  }
+
+  /**
+   * The Stop that ends a child: one already under way is carried on, else one is asked for. Another cancel of the same swarm sent at the same moment may be asking at the same time (its
+   * pause or its Stop lands between this one's look and its request, which is then refused): this one looks again and carries that Stop on, settles the child when that
+   * cancel has already finished it (`final`), or, when neither shows yet, leaves the child pending for the next call (`undefined`) rather than failing the whole cancel (card H10 review).
+   */
+  async #stopOf(by: Principal, commandId: string, childId: string, reason: string): Promise<string | undefined> {
+    for (let attempt = 1; ; attempt++) {
+      const under = await this.#deps.stops.holding(childId);
+      if (under?.mode === "stop") return under.intentId;
+      try { return (await this.#deps.stops.request(by, { commandId, scope: { kind: "task", id: childId }, mode: "stop", reason })).intentId; } catch (error) {
+        // "Already paused" or "already has a stop" (invalid_command), or the Stop's own records made by the other at the same moment (stale_revision, or command_conflict on its pointer).
+        if (!(error instanceof DomainError && ["invalid_command", "stale_revision", "command_conflict"].includes(error.code))) throw error;
+        if (FINAL.has((await this.#deps.projects.getTask(childId))?.state ?? "cancelled")) return "final";
+        if (attempt >= 3) return undefined;
+        await this.#pause(attempt);
+      }
+    }
   }
 
   /** Takes back what a child holds and did not use, when it has an allowance at all; one the caller may not take back is left for someone who may. */
@@ -260,7 +287,8 @@ export class SwarmService {
         }));
         return;
       } catch (error) {
-        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 50) throw error;
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= GATE_TRIES) throw error;
+        await this.#pause(attempt + 1);
       }
     }
   }
@@ -291,7 +319,8 @@ export class SwarmService {
         }));
         return;
       } catch (error) {
-        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 50) throw error;
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= GATE_TRIES) throw error;
+        await this.#pause(attempt + 1);
       }
     }
   }
@@ -323,7 +352,8 @@ export class SwarmService {
         }));
         return;
       } catch (error) {
-        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 50) throw error;
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= GATE_TRIES) throw error;
+        await this.#pause(attempt + 1);
       }
     }
   }
