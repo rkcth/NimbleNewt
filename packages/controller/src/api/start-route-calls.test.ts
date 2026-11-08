@@ -100,6 +100,7 @@ test("model calls of the running controller go through the fallback service: a d
     // The run is a model call of the fallback service: sent, and counted by the drain report.
     const mc1 = (await c.dispatch!.dispatcher.get(owner, one.attemptId))!.modelCall!;
     assert.deepEqual([mc1.route, mc1.sent], ["strata/qwen", true]);
+    assert.ok((await c.services.fallback.call(c.dispatch!.principal, mc1.callId))!.attempts[0]!.sentAt !== undefined, "the fallback service was told the request is under way");
     const r0 = (await call("routing.report", { level: "endpoint", name: "strata-http" })).result.report;
     assert.deepEqual([r0.routingApplied, r0.inFlightRemaining, r0.safeToStop], [false, 1, false]);
 
