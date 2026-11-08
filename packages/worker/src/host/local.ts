@@ -5,7 +5,8 @@ import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
 import { GUEST, normalizeRecipe, type ReadOnlyMount } from "../sandbox/recipe.js";
-import { PROCESS_LIMITS, WorkerProcess, type RelayRequest, type RelayResponse } from "./process.js";
+import { MAX_RUN_PROCESSES, splitRunTree, type RunProcess } from "../sandbox/proc.js";
+import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type RelayRequest, type RelayResponse } from "./process.js";
 
 /**
  * The local worker host's two ports, bound to the real sandbox launcher and the real worker process (card H12b). The controller's `LocalWorker` takes a `SandboxPort` and a `RuntimeFactory`; the worker package depends on no other package of the
@@ -92,7 +93,19 @@ export interface HostRuntime {
  */
 export interface HostLease { readonly leaseMs: number; renew(): Promise<{ readonly leaseMs: number }> }
 
-export interface HostSandboxSession { readonly revision: string; close(): Promise<void> }
+/** One thing a sandbox still holds (card L02d): the controller's `SandboxSession.work` entry, restated. */
+export interface HostHeldProcess { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }
+export interface HostSandboxSession {
+  readonly revision: string;
+  close(): Promise<void>;
+  /**
+   * What this sandbox still holds and what winding it down has cost (card L02d), asked by Stop also after `close`. The worker process itself is listed only once it has been asked to end and has not; a process the agent started
+   * (below the worker process) is listed while it runs. `computeMs`: the time, summed over the sandbox's processes, from the request to end each until it ended (or until now), left out while it is 0.
+   */
+  work(): Promise<{ readonly processes: readonly HostHeldProcess[]; readonly computeMs?: number }>;
+  /** Force Stop (card L02d): kills every process this sandbox started (what outlived its run too) and waits a moment for them to go. */
+  end(): Promise<void>;
+}
 
 /** Where the worker process's program and everything it loads live on this machine, mounted read-only into the sandbox. */
 export interface WorkerApp {
@@ -240,7 +253,40 @@ const DEFAULT_REFRESH = "The owner's decisions changed. Read the decisions that 
 const MAX_RUN_MS = 24 * 60 * 60 * 1000;
 const LEASE_GRACE_MS = 10_000;
 
-interface Reserved { readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; readonly limits: ResourceLimits | undefined; process?: WorkerProcess; closed: boolean }
+interface Reserved {
+  readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; readonly limits: ResourceLimits | undefined; process?: WorkerProcess; closed: boolean;
+  /** Every worker process launched in this sandbox (a restart of the runtime launches another), for Stop (card L02d). Bounded: past 16, the oldest ended one goes, its winding-down time kept in `foldedMs`. */
+  readonly launched: WorkerProcess[];
+  foldedMs: number;
+}
+
+/** What a sandbox still holds (card L02d), from its worker processes' run trees: see `HostSandboxSession.work`. */
+async function heldBy(launched: readonly WorkerProcess[], foldedMs: number): Promise<{ processes: HostHeldProcess[]; computeMs?: number }> {
+  const items: HostHeldProcess[] = [];
+  let computeMs = foldedMs;
+  const named = (p: RunProcess): string => `pid ${p.pid} (${p.name})`;
+  for (const p of launched) {
+    const spent = p.windDownMs();
+    computeMs += spent;
+    // Asked to end and not gone after the grace a close gives it: it did not obey, and was (or is being) killed. Within the grace it is simply still ending.
+    const ignored = p.endAsked && spent > PROCESS_LIMITS.closeGraceMs;
+    const listed = await p.processes();
+    if (listed === undefined) {
+      // This system cannot list a run's processes: the worker process itself is known, what it started is not (nothing is claimed about it).
+      if (p.alive && p.endAsked) items.push({ ref: "worker process (asked to end)", kind: "process", state: ignored ? "uncooperative" : "running" });
+      continue;
+    }
+    // The run has ended: whatever is still listed outlived it.
+    if (!p.alive) { for (const x of listed.processes) items.push({ ref: named(x), kind: "process", state: "uncooperative" }); continue; }
+    const tree = splitRunTree(listed.processes);
+    // The worker process (and the confinement above it) is the attempt itself while it runs: it is quiesced and checkpointed through the attempt, not waited for as a process. Once it was asked to end it is listed until it has gone.
+    const head = tree.program ?? tree.own[0];
+    if (p.endAsked && head !== undefined) items.push({ ref: `worker process ${named(head)}`, kind: "process", state: ignored ? "uncooperative" : "running" });
+    for (const x of tree.started) items.push({ ref: named(x), kind: "process", state: ignored ? "uncooperative" : "running" });
+    if (listed.truncated) items.push({ ref: "processes:truncated", kind: "process", state: "unknown" });
+  }
+  return { processes: items.slice(0, MAX_RUN_PROCESSES), ...(computeMs > 0 ? { computeMs } : {}) };
+}
 
 export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   readonly sandbox: { open(recipe: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> };
@@ -281,15 +327,18 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
       const normalized = normalizeRecipe(recipe, planned.protectedPaths);
       // The recipe's own limits, when it states some, are the sandbox's limits (narrower or wider than the host's default); otherwise the workspace's.
-      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false };
+      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0 };
       reserved.set(order.attemptId, entry);
       return {
         revision: normalized.revision,
         close: async () => {
           entry.closed = true;
           if (reserved.get(order.attemptId) === entry) reserved.delete(order.attemptId);
-          await entry.process?.close().catch(() => undefined);
+          // A process the OS could not end is not taken as gone (card L02d): the close says so, and the sandbox keeps listing it.
+          await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; });
         },
+        work: () => heldBy(entry.launched, entry.foldedMs),
+        end: async () => { await Promise.all(entry.launched.map((p) => p.forceEnd())); },
       };
     },
   };
@@ -344,6 +393,10 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
             },
           }),
         });
+        // Remembered as soon as it exists (card L02d), so a Stop finds it even if what follows fails. Past 16, the oldest process that has ended goes and its winding-down time is kept in `foldedMs` (the total never goes down).
+        entry.launched.push(process);
+        const gone = entry.launched.length > 16 ? entry.launched.findIndex((p) => !p.alive) : -1;
+        if (gone >= 0) entry.foldedMs += entry.launched.splice(gone, 1)[0]!.windDownMs();
       } catch (error) {
         const failed = (error as { limitFailures?: NonNullable<LaunchEnforcement["failed"]> }).limitFailures;
         try { await options.onLaunch?.({ attemptId: order.attemptId, agentId: order.agentId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs, reason: String((error as Error)?.message ?? error).slice(0, 500), ...(failed === undefined ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }) }); } catch { /* the refusal itself is what is reported */ }
