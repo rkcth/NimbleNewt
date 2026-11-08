@@ -540,6 +540,53 @@ for (const backend of backends) {
     assert.equal(await paused(c), false, "the next hand-off lifts its own hold when it ends");
   });
 
+  suite("the request of a hand-off that already asked for its suspension, sent again after it ended, does not take over a pause the owner set since: the owner's time to lift it stands (card L04c review 5)", async (c) => {
+    const id = cid("h");
+    const h = await c.handoffs.prepare(c.mgr, { commandId: id, taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal((await c.handoffs.cancel(c.mgr, { handoffId: h.id })).phase, "cancelled");
+    assert.equal(await paused(c), false);
+    await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "the owner's own hold" });
+    const at = new Date(now + 3_600_000).toISOString();
+    await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: scopeOf(c.task), at });
+    const again = await c.handoffs.prepare(c.mgr, { commandId: id, taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(again.phase, "cancelled", "the same request answers as recorded");
+    const gate = await c.pauses.gate(c.owner, scopeOf(c.task));
+    assert.equal(gate?.intent, "pause");
+    assert.equal(gate?.resumeAt?.at, at, "the owner's recorded time to lift the pause is kept");
+    assert.notEqual(gate?.takenOver, true, "the owner's pause is not taken over by a suspension that is over");
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: scopeOf(c.task), reason: "resume by hand" });
+    // The same while the hand-off is still ready: the owner lifted its hold and paused with a time of their own; the request sent again leaves that time, and the cancel leaves the owner's pause.
+    const id1 = cid("h");
+    const h1 = await c.handoffs.prepare(c.mgr, { commandId: id1, taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(h1.phase, "ready");
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: scopeOf(c.task), reason: "a look" });
+    await c.pauses.pause(c.owner, { commandId: cid("p"), scope: scopeOf(c.task), reason: "the owner's own hold" });
+    await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: scopeOf(c.task), at });
+    assert.equal((await c.handoffs.prepare(c.mgr, { commandId: id1, taskId: c.task, to: c.b, reason: "move it" })).phase, "ready");
+    assert.equal((await c.pauses.gate(c.owner, scopeOf(c.task)))?.resumeAt?.at, at, "the owner's time stands while the hand-off is ready");
+    await c.handoffs.cancel(c.mgr, { handoffId: h1.id });
+    assert.equal(await paused(c), true, "the owner's pause stands");
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: scopeOf(c.task), reason: "resume by hand" });
+    // A hand-off that died before it asked for its suspension and was then cancelled: the same request sent again does not pause the task for a hand-off that is over (nothing would lift that pause).
+    const id2 = cid("h");
+    c.hook.beforeStop = async () => { throw new Error("process died before the suspension"); };
+    await assert.rejects(c.handoffs.prepare(c.mgr, { commandId: id2, taskId: c.task, to: c.b, reason: "move it" }), /process died/);
+    const h2 = (await c.handoffs.forTask(c.owner, c.task))!;
+    assert.equal((await c.handoffs.cancel(c.mgr, { handoffId: h2.id })).phase, "cancelled");
+    assert.equal((await c.handoffs.prepare(c.mgr, { commandId: id2, taskId: c.task, to: c.b, reason: "move it" })).phase, "cancelled");
+    assert.equal(await paused(c), false, "the task is not held by a hand-off that is over");
+    assert.deepEqual(await c.reopen().sweep(c.owner), { advanced: [], failed: [] });
+    assert.equal(await paused(c), false);
+    // A hand-off that died before it asked for its suspension and is still going: the same request sent again asks for it and goes on.
+    const id3 = cid("h");
+    c.hook.beforeStop = async () => { throw new Error("process died before the suspension"); };
+    await assert.rejects(c.handoffs.prepare(c.mgr, { commandId: id3, taskId: c.task, to: c.b, reason: "move it" }), /process died/);
+    const h3 = await c.handoffs.prepare(c.mgr, { commandId: id3, taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(h3.phase, "ready");
+    assert.equal((await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h3.id })).phase, "transferred");
+    assert.equal(await paused(c), false);
+  });
+
   // ---- card C07j: a cut is marked and the original kept ----------------------------------------------------------------------
 
   const base = { brief: "Ship the importer.", acceptanceCriteria: "All fixtures import.", unfinishedWork: "The CSV path.", nextAction: "Run the fixtures." };

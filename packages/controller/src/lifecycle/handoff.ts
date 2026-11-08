@@ -210,7 +210,11 @@ export class HandoffService {
     const heldBefore = (await this.#pauses.gate(by, scope))?.intent === "pause";
     // The suspension's own pause, if it makes one (the stop pauses under its command ID + "-pause", as the asker), is the hand-off's hold; any other pause is not (card L04c review 4).
     await this.#create(by, command.commandId, id, scope.id, target.projectId, from, to, assignment.generation, "prepared", reason, heldBefore, undefined, extra, { ops: [{ operationId: `${String(command.commandId)}-suspend-pause`, actor: by.id }] });
-    // The suspension that prepares the hand-off. Its command ID follows the hand-off's, so repeating the request repeats it.
+    // The same request sent again for a hand-off that already recorded its suspension, or that has ended, answers as recorded (card L04c review 5): asking for the suspension again would pause a task the hand-off
+    // no longer holds (a hold nobody lifts) or take over a pause the owner set since (dropping the owner's recorded time to lift it).
+    const existing = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
+    if (existing !== undefined && (existing.stopIntentId !== undefined || TERMINAL.includes(existing.phase))) return this.advance(by, { handoffId: id });
+    // The suspension that prepares the hand-off. Its command ID follows the hand-off's, so repeating the request repeats it (a crash before the suspension was recorded).
     const stop = await this.#stops.request(by, { commandId: `${String(command.commandId)}-suspend`, scope, mode: "suspend", reason: `hand-off: ${reason}`.slice(0, 500), ...(command.deadlineMs === undefined ? {} : { deadlineMs: command.deadlineMs }) });
     const rec = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
     const hold = rec === undefined || rec.holdRequestId !== undefined || rec.holdOps === undefined ? undefined : await this.#pauses.ownPause(scope, rec.holdOps);
