@@ -52,6 +52,8 @@ export interface AttemptBody {
   readonly reason?: string;
 }
 export interface ApprovalBody { readonly candidateId: string; readonly by: string; readonly at: string; /** The earlier failed attempts the owner acknowledged when approving a release that passed only on a retry. */ readonly acknowledged?: readonly string[] }
+/** One submitted candidate as the owner's `release` status view lists them (card X09b part 2): what to ask about and whether it is approved. */
+export interface CandidateRow { readonly candidateId: string; readonly submittedAt: string; readonly submittedBy: string; readonly approved: boolean }
 /** Index of the attempts of one platform of one candidate (so no list of all attempts is ever scanned). */
 export interface CellIndexBody { readonly candidateId: string; readonly cell: string; readonly attempts: readonly { readonly id: string; readonly n: number; readonly by: string }[] }
 /** Index of one host: the attempts still open on it and the recently ended ones it must stop. */
@@ -107,6 +109,8 @@ const ISSUERIDX = "release-issuer";
 /** The record kinds the activation part (K02) reads: it never writes them. */
 export const RELEASE_KINDS = { candidate: CANDIDATE, approval: APPROVAL } as const;
 const SETTINGS: AggregateRef = { kind: "release-settings", id: "main" };
+/** How many candidate records one list reads at most (the owner's `release` status view); a cut list says so. */
+const CANDIDATE_SCAN = 200;
 const ROLE = /^[a-z][a-z0-9-]{0,39}$/;
 
 /** The issuer settings with the profile's default under any field not set. Pure. */
@@ -712,6 +716,23 @@ export class ReleaseService {
     const candidate = (await this.#runner.get(CANDIDATE, String(candidateId)))?.body as unknown as CandidateBody | undefined;
     if (candidate === undefined) return [];
     return (await this.#attempts(candidateId, candidate.manifest.matrix)).sort((a, b) => (a.n - b.n) || (a.id < b.id ? -1 : 1));
+  }
+
+  /**
+   * The submitted candidates, newest submitted first (ties by ID): what the owner's `release` status view lists when no candidate is named.
+   * At most `CANDIDATE_SCAN` records are read and `more` says the list was cut there; the gate and attempts of each listed candidate are read with `gate` and `attempts`. Owner only.
+   */
+  async candidates(owner: Principal, page: { limit?: number } = {}): Promise<{ candidates: readonly CandidateRow[]; more: boolean }> {
+    this.#owner(owner, "list release candidates");
+    const limit = page.limit ?? 5;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) bad("limit", "must be a whole number from 1 to 20");
+    const found = await this.#runner.list(CANDIDATE, { limit: CANDIDATE_SCAN });
+    const rows = found
+      .map((a) => ({ candidateId: a.id, submittedAt: (a.body as unknown as CandidateBody).submittedAt, submittedBy: (a.body as unknown as CandidateBody).submittedBy }))
+      .sort((x, y) => (x.submittedAt === y.submittedAt ? (x.candidateId < y.candidateId ? -1 : 1) : x.submittedAt < y.submittedAt ? 1 : -1));
+    const listed: CandidateRow[] = [];
+    for (const r of rows.slice(0, limit)) listed.push({ ...r, approved: (await this.#runner.get(APPROVAL, r.candidateId)) !== undefined });
+    return { candidates: listed, more: found.length >= CANDIDATE_SCAN || rows.length > limit };
   }
 
   /** Every attempt of a candidate, read through each platform's own index (no scan of all attempts). */
