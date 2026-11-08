@@ -3,13 +3,15 @@ import { after, test } from "node:test";
 import { CAPS_REF, CapacityLimitsService } from "../admission/caps.js";
 import { AdmissionService } from "../admission/service.js";
 import { SWARM_LIMITS_REF, SwarmLimitsService } from "../swarm/limits.js";
+import { OPERATIONS } from "../api/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
 import { WaitService } from "../domain/waits.js";
 import { backends, stopServer, type Backend } from "../domain/testing/backends.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { StatusService, type StatusDeps } from "../status/index.js";
+import { StatusService, STATUS_KINDS, type StatusDeps } from "../status/index.js";
+import { ModelInterpreter } from "./model-interpreter.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 after(stopServer);
@@ -63,6 +65,18 @@ async function damage(storage: ControllerStorage, epoch: number, ref: { kind: st
 }
 
 const text = (lines: readonly { text: string }[]): string => lines.map((l) => l.text).join("\n");
+
+test("the chat is told there is a capacity view: the interpreter's list of status kinds names it, and so does the state API's status.ask (cards H10, H10b)", async () => {
+  const kind = STATUS_KINDS["capacity"];
+  assert.ok(kind !== undefined, "capacity is one of the status kinds");
+  assert.deepEqual([...kind.keys], [], "and it asks for nothing beyond the kind");
+  assert.match(kind.about, /capacity settings in force/);
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
+  await m.interpret({ text: "what are my capacity limits?", quoted: [], focus: {}, proposals: [] });
+  assert.ok(system.includes(`capacity(${kind.keys.join(", ")}) - ${kind.about}`), "the model is told the kind, the arguments it takes and what it shows");
+  assert.ok(OPERATIONS.find((o) => o.name === "status.ask")!.summary.includes("`capacity`"), "status.ask describes the same kind, so the two lists cannot drift apart");
+});
 
 for (const backend of backends) {
   const suite = (name: string, body: (w: World, s: Services, script: Record<string, unknown>) => Promise<void>) =>
@@ -190,6 +204,27 @@ for (const backend of backends) {
     assert.ok(!fixed.includes("damaged"), "nothing is called damaged once the record reads");
     assert.match(fixed, /^productive \(.*\): 6 \(you set it\); 0 running now$/m);
     assert.match(fixed, /^Host "host:pc": 8 CPU\(s\), 16384 MB declared \(you declared it\); 0 productive attempt\(s\) running on it\.$/m);
+  });
+
+  suite("a record with more declared hosts than the view lists shows the first ones in order and counts the rest, inside the lines the chat shows", async (w, s) => {
+    // More hosts than the owner's own command could ever store: `capacity.quotas.change` takes at most 50 hosts in one change and refuses a record holding more than 200 (both probed), so a record this
+    // large can only arrive by another route and is written whole here. What is under test is the view's own bound and its order, not the command's.
+    const hosts: Record<string, unknown> = {};
+    for (let i = 499; i >= 0; i--) hosts[`host:h${String(i).padStart(3, "0")}`] = { cpus: 8, memoryMb: 16_384 }; // declared newest first, so a view that kept the record's order would show host:h499 first
+    await damage(s.storage, s.epoch, { kind: "admission-state", id: "admission" }, { limits: { productive: 4, perHost: 2, control: 2, queue: 100 }, capacity: hosts }, "many-hosts");
+    const shown = (await s.status.ask(s.owner, { kind: "capacity" }))!.lines;
+    const hostLines = shown.filter((l) => l.text.startsWith('Host "')).map((l) => l.text);
+    assert.equal(hostLines.length, 10, `ten of the five hundred declared hosts are listed, not ${hostLines.length}`);
+    assert.match(hostLines[0]!, /^Host "host:h000": 8 CPU\(s\), 16384 MB declared \(you declared it\); 0 productive attempt\(s\) running on it\.$/, "the list starts at the first host in order, not the first in the record");
+    assert.match(hostLines[9]!, /^Host "host:h009"/, "and stops after the tenth");
+    assert.ok(!hostLines.some((l) => l.includes("host:h010")), "the eleventh host is not listed");
+    const ids = hostLines.map((l) => l.slice(6, l.indexOf('", ')));
+    assert.deepEqual(ids, [...ids].sort(), "the hosts shown are in host-ID order");
+    assert.match(text(shown), /^490 more host\(s\) are declared than are shown\.$/m, "the rest are counted, not dropped in silence");
+    assert.ok(shown.filter((l) => l.text.startsWith('Host "') || l.text.includes("more host(s)")).every((l) => l.cites.some((c) => c.kind === "admission-state")), "every host line and the count cite the record they read");
+    // ASSUMPTION: the answer is bounded by its own shape (one line per group and per damaged group, three caps, four quotas, three spawn limits, ten host lines and one counting line), so the view needs no
+    // line-count branch of its own - the removed `CAPACITY_LINES` cut was unreachable, and the chat cuts a status answer to thirty lines and counts the rest whatever the view writes. This is the guard for that.
+    assert.ok(shown.length <= 30, `the answer is ${shown.length} lines, and the chat shows thirty`);
   });
 
   suite("a caller who is not the owner reads exactly what it would read if the view did not exist", async (w, s) => {

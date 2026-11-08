@@ -389,10 +389,12 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 const cite = (kind: string, id: string, revision?: number): Cite => ({ kind, id, ...(revision === undefined ? {} : { revision }) });
 const line = (text: string, ...cites: Cite[]): Line => ({ text, cites });
 const FRESH_WORDS: Readonly<Record<Freshness, string>> = { fresh: "recent", stale: "old", unknown: "not heard from lately" };
-/** How many declared hosts the capacity view lists before it counts the rest (the owner's own setting can name up to 200). */
+/** How many declared hosts the capacity view lists before it counts the rest (the owner's own `capacity.quotas.change` refuses a record holding more than 200). */
 const CAPACITY_HOSTS = 10;
-/** The most lines the capacity view writes; a longer answer says how many figures it left out (the chat shows thirty lines of an answer). */
-const CAPACITY_LINES = 30;
+// ASSUMPTION: this answer needs no line-count cut, so it has none. Its shape bounds it - one line per group, one damaged line per group, three caps, four quotas, three spawn limits, at most
+// CAPACITY_HOSTS host lines and one line counting the rest - which is 25 lines at the widest. The chat cuts any status answer to CHAT_LIMITS.statusLines (30) and counts what it left out anyway, so the
+// `lines.length > CAPACITY_LINES` branch that used to sit at the end of `capacityLines` could neither be reached by any service nor exercised by a test; it is removed as dead code, and the test "a record
+// with more declared hosts than the view lists ..." keeps the bound honest: it fills a record with more hosts than the owner's own command would track and fails if the answer ever outgrows thirty lines.
 /** What each capacity figure lets the controller do, in the owner's words (cards H10, H10b). A name the code does not know is shown by its own name. */
 const CAPACITY_WORDS: Readonly<Record<string, string>> = {
   perProject: "productive attempts running at once for one project", perAgent: "productive attempts running at once for one agent", fanIn: "running child attempts that report to one supervising agent",
@@ -682,9 +684,10 @@ export class StatusService {
   }
 
   /**
-   * The capacity settings the owner can change in chat, read back from the same services the state API reads (cards H10, H10b): the optional caps, the host and global
-   * quotas and the limits on spawning child tasks. Every figure says whether it is the owner's own or the default, and an off one says so. A group whose service is not
-   * here, or whose stored record is damaged, is one line and the rest of the answer stands; only a real storage failure is thrown. Owner only.
+   * The capacity settings the owner can change in chat, read back from the same services the state API reads (cards H10, H10b): the optional caps, the host and global quotas and the limits on spawning
+   * child tasks. Every figure says whether it is the owner's own or the default, an off one says what that means, and a damaged record says what it stops - admission for the caps and the quotas, spawning
+   * for the swarm limits - because that is what the services reading them really do. A group whose service is not here, whose record cannot be read or whose stored figures are not figures is one line and
+   * the rest of the answer stands: nothing the records hold throws out of this view, and only a failure of the read itself is passed on. Owner only.
    */
   async capacityLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const settings = this.#deps.capacity;
@@ -759,9 +762,7 @@ export class StatusService {
         }
       }
     }
-    const at = this.#runner.now();
-    if (lines.length > CAPACITY_LINES) return { observedAt: at, lines: [...lines.slice(0, CAPACITY_LINES - 1), line(`${lines.length - (CAPACITY_LINES - 1)} more figure(s) are not shown; the state API reads each group in full.`, capsAbsent)] };
-    return { observedAt: at, lines };
+    return { observedAt: this.#runner.now(), lines };
   }
 
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
