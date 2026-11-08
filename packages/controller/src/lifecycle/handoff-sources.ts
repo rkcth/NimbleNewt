@@ -45,7 +45,8 @@ export function controllerHandoffSources(deps: {
     // With nothing pending the section stays unset: "no effect pending" does not say there is no other unfinished work, and a package must not read as ready on that.
     if (pending.length > 0) out["unfinishedWork"] = `Effects pending at the last checkpoint (${at}): ${pending.map((e) => `${e.effectId} (${e.state})`).join(", ")}.`;
     if (pending.length > 0) out["backgroundOperations"] = pending.map((e) => `${e.effectId}: ${e.state}`).join("\n");
-    const done = [...c.continuation.decisions.map((d) => `Decision: ${d}`), ...c.continuation.artifacts.map((a) => `Artifact: ${a}`)];
+    // Artifacts first and decisions last (card C07j review): a section over the limit keeps its last entries, so the newest decision must not sit above a long artifact list that would push it out.
+    const done = [...c.continuation.artifacts.map((a) => `Artifact: ${a}`), ...c.continuation.decisions.map((d) => `Decision: ${d}`)];
     if (done.length > 0) out["completedWork"] = done.join("\n");
     if (c.nonCheckpointableTools.length > 0) out["risks"] = `Tools whose effects a resume does not reproduce: ${c.nonCheckpointableTools.map((t) => `${t.name} (${t.reason})`).join("; ")}.`;
     out["versions"] = `runtime ${c.checkpoint.runtime.name} ${c.checkpoint.runtime.version}, routing revision ${c.manifest.routingRevision}, environment revision ${c.manifest.environmentRevision} (${at})`;

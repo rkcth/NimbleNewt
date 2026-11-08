@@ -27,7 +27,7 @@ test("the package takes the sections only the run knows from the task's latest c
   assert.match(s["nextAction"]!, /^Run the fixtures\. \(from continuation 2/);
   assert.match(s["unfinishedWork"]!, /eff-1 \(unknown\)/);
   assert.equal(s["backgroundOperations"], "eff-1: unknown");
-  assert.equal(s["completedWork"], "Decision: use the CSV path\nArtifact: art-1");
+  assert.equal(s["completedWork"], "Artifact: art-1\nDecision: use the CSV path");
   assert.match(s["risks"]!, /^Evidence still required: test log\nTools whose effects a resume does not reproduce: browser \(holds a live session\)/);
   assert.match(s["versions"]!, /^task contract version 4\nruntime pi 1.2, routing revision 3, environment revision 5/);
   // Nothing pending is said as a fact about the checkpoint, not as "all work is done".

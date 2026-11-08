@@ -1,7 +1,7 @@
 import { quotedLine } from "../decisions/records.js";
 
 /**
- * Cutting a hand-off section to size (card C07j). A section is a list of entries, one per line, oldest first (the sources write them so: decisions in the order they were recorded, then artifacts). A section
+ * Cutting a hand-off section to size (card C07j). A section is a list of entries, one per line, oldest first (the sources write them so: artifacts, then decisions in the order they were recorded, so the newest decision is the last entry). A section
  * that does not fit keeps the entries the owner marked and then the most recent ones, says on its first line how many entries were left out or shortened and where the original is kept, and is never cut
  * silently. The original itself is archived by the hand-off service before the cut package is written.
  */
@@ -32,7 +32,17 @@ export function safeSlice(value: string, max: number): string {
  * A line a source returned that holds anything like the controller's cut marker (an agent's text can say anything, and some readers break a line at U+2028, U+2029 or U+0085) is quoted as one JSON string,
  * with those characters escaped, so the only marker a reader sees is the one the controller put there.
  */
-export const neutralise = (line: string): string => (/\[\s*cut\s*:/i.test(line) ? `(an entry quoted, not a cut marker) ${quotedLine(line)}` : line);
+export const neutralise = (line: string): string => (looksLikeMarker(line) ? `(an entry quoted, not a cut marker) ${quotedLine(line).replace(/\p{Cf}/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}` : line);
+
+/**
+ * Read as a reader would see the line: invisible format characters (zero-width spaces and joiners, bidi controls, soft hyphens) are dropped and compatibility forms folded (a full-width bracket or letter is
+ * the plain one), so `[\u200Bcut:` or `\uFF3B\uFF43\uFF55\uFF54:` is caught. Beside the marker's opening, a line with the marker's `archive hnd-` or its count wording is quoted too (a look-alike letter in `cut` does not hide it).
+ * The quoted form escapes those format characters, so what an agent hid is visible.
+ */
+function looksLikeMarker(line: string): boolean {
+  const seen = line.replace(/\p{Cf}/gu, "").normalize("NFKC");
+  return /\[\s*cut\s*:/i.test(seen) || /archive\W{0,3}hnd-/i.test(seen) || /\d+\s+of\s+\d+\s+entries/i.test(seen);
+}
 
 /** Whether an entry holds one of the owner's marks (case does not matter). */
 const markedBy = (marks: readonly string[]) => {
@@ -48,8 +58,8 @@ export interface SectionCut {
 }
 
 /**
- * Cuts `text` to at most `limit` characters. Entries the owner marked are kept first (newest first, as many as fit); then the most recent entries, newest first, until one does not fit, which is shortened
- * into the room left (from its start) when enough of it fits. The kept entries stay in their order, below the marker.
+ * Cuts `text` to at most `limit` characters. The newest entry is kept first (whole when it fits; otherwise room is held for its start), then the entries the owner marked (newest first, as many as fit),
+ * then the most recent entries, newest first, until one does not fit, which is shortened into the room left (from its start) when enough of it fits. The kept entries stay in their order, below the marker.
  */
 export function cutSection(text: string, limit: number, marks: readonly string[], archiveId: string, /** Set when the archive holds only the first this many characters of the section. */ archivedChars?: number): SectionCut {
   if (text.length <= limit) return { text };
@@ -62,9 +72,13 @@ export function cutSection(text: string, limit: number, marks: readonly string[]
   const chosen = new Map<number, string>();
   let used = 0;
   const cost = (entry: string): number => entry.length + (chosen.size > 0 ? 1 : 0);
+  // The newest entry is never crowded out by marked ones (an agent's text can hold a mark's words): it is kept first when it fits whole, and otherwise room is held back to show its start.
+  const newest = entries[total - 1]!;
+  if (newest.length <= room) { used = newest.length; chosen.set(total - 1, newest); }
+  const reserve = chosen.has(total - 1) ? 0 : MIN_SHORT + SHORTENED.length + 1;
   for (let i = total - 1; i >= 0; i--) {
     const e = entries[i]!;
-    if (marked(e) && used + cost(e) <= room) { used += cost(e); chosen.set(i, e); }
+    if (!chosen.has(i) && marked(e) && used + cost(e) + reserve <= room) { used += cost(e); chosen.set(i, e); }
   }
   let shortened = false;
   for (let i = total - 1; i >= 0; i--) {
