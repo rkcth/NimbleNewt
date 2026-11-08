@@ -2446,12 +2446,21 @@
       ],
       "deliverable": "Split from C09g (2026-10-29): artifact steps for local workers, chat access, the per-task explanation index",
       "acceptance_and_verification": "Each step of a real run appears in the activity record",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "b0950daf"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A task's activity and its explanation index are read in chat; a local worker publishes artifacts through its tool bridge, and every artifact published for a task, every agent message and every bridge write is a step of the run, shown with a real sandboxed worker through startController. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "L05",

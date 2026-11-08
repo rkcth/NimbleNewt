@@ -909,6 +909,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C09h — Record activity: local worker artifacts, chat access, explanation index
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `b0950daf`; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A task's activity and its explanation index are read in chat; a local worker publishes artifacts through its tool bridge, and every artifact published for a task, every agent message and every bridge write is a step of the run, shown with a real sandboxed worker through startController. Green exhaustive run pending (to be added to ci_runs).
 - **Blockers:** C09g, H12k.
 - **Deliverable:** Split from C09g (2026-10-29): artifact steps for local workers, chat access, the per-task explanation index.
 - **Acceptance and verification:** Each step of a real run appears in the activity record.
