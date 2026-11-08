@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -97,4 +97,17 @@ test("the orphan scan ends what still holds a job's directory and names only wha
     assert.deepEqual(holding(directory), []);
     assert.deepEqual(await linuxOrphans(join(directory, "nothing-here")), []);
   } finally { stuck.kill("SIGKILL"); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("an orphan's name is reduced to printable ASCII: a process the job renamed to a terminal escape or a bidirectional override reaches no one as such (card T07b review)", async () => {
+  // A /proc of our own making (it runs on every system): one process holds the job's directory and keeps its name, which the job's program chose.
+  const proc = realpathSync(mkdtempSync(join(tmpdir(), "nn-fakeproc-")));
+  try {
+    const directory = "/runs/job-abc";
+    mkdirSync(join(proc, "4242"));
+    writeFileSync(join(proc, "4242", "cmdline"), `bwrap\0${directory}/work\0`);
+    writeFileSync(join(proc, "4242", "comm"), "\u001b[2J‮evil\u0007\n");
+    const named = await linuxOrphans(directory, { proc, kill: () => undefined, settleMs: 1 });
+    assert.deepEqual(named, ["pid 4242 (?[2J?evil?)"]);
+  } finally { rmSync(proc, { recursive: true, force: true }); }
 });
