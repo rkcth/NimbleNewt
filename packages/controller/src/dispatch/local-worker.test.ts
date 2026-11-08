@@ -61,6 +61,38 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 
+  test(`${backend.name}: Force Stop tells every sandbox an attempt had to kill what it holds, for staff only and only for the attempts asked; a sandbox whose close could not end its process keeps the worker from counting as confirmed stopped (card L02d)`, async () => {
+    const ended: string[] = [];
+    let closeFails = false;
+    let refuse = "";
+    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary, order: WorkOrder) => ({ revision: recipe.revision, close: async () => { if (closeFails) throw new Error("the worker process did not end"); }, end: async () => { ended.push(order.attemptId); if (order.attemptId === refuse) throw new Error("kill refused"); } }) };
+    const { store, w, d } = await setup({ sandbox });
+    try {
+      const ann = await w.agent("ann", workGrants(w.project, ["read-file"]));
+      const { attemptId } = await w.task("t", ann);
+      const { attemptId: other } = await w.task("u", ann);
+      await d.tick();
+      await d.idle();
+      await d.endLocalWorkOf(w.owner, [attemptId!]);
+      assert.deepEqual(ended, [attemptId], "only the attempt asked about");
+      await refuses("forbidden", () => d.endLocalWorkOf(ann as never, [attemptId!]));
+      await d.endLocalWorkOf(w.owner, ["not-an-attempt"]);
+      assert.deepEqual(ended, [attemptId], "a malformed ID is not asked about");
+      // A third attempt whose sandbox refuses the kill: the others are still told, and the failure is reported, never taken as "ended".
+      closeFails = true;
+      const { attemptId: third } = await w.task("v", ann);
+      refuse = third!;
+      await d.tick();
+      await d.idle();
+      ended.length = 0;
+      await assert.rejects(d.endLocalWorkOf(w.owner, [attemptId!, other!, third!]), /kill refused/);
+      assert.deepEqual(ended.sort(), [attemptId!, other!, third!].sort());
+      // The third attempt's sandbox could not be closed: the dispatcher did not confirm its worker stopped.
+      assert.equal(((await d.get(w.owner, third!)) as unknown as { workerStopped?: boolean }).workerStopped, false);
+      assert.notEqual(((await d.get(w.owner, attemptId!)) as unknown as { workerStopped?: boolean }).workerStopped, false);
+    } finally { await store.close(); }
+  });
+
   test(`${backend.name}: an attempt whose sandbox still holds a process counts as busy for a workspace operation, though no call is in flight, and a sandbox that cannot say makes the look fail (card H12q review)`, async () => {
     let closed = false;
     let fail = false;

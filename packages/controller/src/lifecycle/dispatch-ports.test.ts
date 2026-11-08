@@ -330,6 +330,43 @@ test("a Stop of a task ends a swarm child's work only for someone who may contro
   assert.deepEqual(cancelled, ["job-theirs"]);
 });
 
+test("a Force Stop tells the runtime to kill what it holds for every attempt seen (also one that ended), only those the asker may control, and the look afterwards names what is left; a graceful stop does not (card L02d)", async () => {
+  const stopped: string[] = [];
+  const dispatcher = {
+    liveAttemptsOf: async (_by: Principal, s: { taskId?: string }) => (s.taskId === "task-x" ? ["att-1"] : s.taskId === "task-theirs" ? ["att-3"] : []),
+    get: async (_by: Principal, id: string) => ({ taskId: id === "att-3" ? "task-theirs" : "task-x", agentId: "agent:a", state: "running" }) as never,
+    operations: async () => [] as never, stop: async (_by: Principal, id: string) => { stopped.push(id); }, quiesce: async () => ({}), release: async () => undefined,
+  };
+  const ended: string[][] = [];
+  const held = new Map<string, "uncooperative">([["att-gone", "uncooperative"], ["att-1", "uncooperative"], ["att-3", "uncooperative"]]);
+  let endFails = false;
+  const local = {
+    processes: async (attempts: readonly string[]) => attempts.filter((a) => held.has(a)).map((a) => ({ ref: `pid of ${a}`, kind: "process" as const, state: held.get(a)! })),
+    end: async (attempts: readonly string[]) => { ended.push([...attempts].sort()); if (endFails) throw new Error("kill refused"); for (const a of attempts) if (a !== "att-1") held.delete(a); },
+  };
+  const manager = { id: "agent:mgr", kind: "agent" } as unknown as Principal;
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, local, undefined, {
+    descendants: async (taskId) => ({ ids: taskId === "task-x" ? ["task-theirs"] : [], truncated: false }),
+    mayControl: async (by, taskId) => by.kind === "owner" || taskId !== "task-theirs",
+  });
+  const task = { kind: "task", id: "task-x" } as const;
+  ports.remember!(task, ["att-gone"]);
+  const graceful = await ports.terminate(task, { force: false, by: manager });
+  assert.deepEqual(ended, [], "a graceful stop asks, it does not kill");
+  assert.ok(["pid of att-gone", "pid of att-1"].every((r) => graceful.unresolved.includes(r)), JSON.stringify(graceful));
+  ports.remember!(task, ["att-gone"]);
+  const forced = await ports.terminate(task, { force: true, by: manager });
+  assert.deepEqual(ended, [["att-1", "att-gone"]], "every attempt seen for the scope that the asker may control; not the child they may not control");
+  assert.ok(!forced.unresolved.includes("pid of att-gone"), "what was killed is not named");
+  assert.ok(forced.unresolved.includes("pid of att-1") && forced.unresolved.includes("pid of att-3"), `what is still there is named: ${JSON.stringify(forced)}`);
+  // A runtime that fails to kill: the stop goes on and names what it finds.
+  endFails = true;
+  ended.length = 0;
+  const failed = await ports.terminate(task, { force: true, by: manager });
+  assert.deepEqual(ended, [["att-1"]]);
+  assert.ok(failed.unresolved.includes("pid of att-1"), JSON.stringify(failed));
+});
+
 test("a Stop of an agent asks only that agent's jobs to stop (the owner of a job is the agent of its attempt), also on a task with no live attempt; a cut list is an unknown item (card L02d)", async () => {
   const owners: Record<string, string> = { "att-1": "agent:a", "att-other": "agent:b", "att-gone": "agent:a" };
   const dispatcher = {

@@ -5,7 +5,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { WORKER_CHANNEL_VERSION, encodeMessage, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import type { LaunchRequest, RunResult, SandboxRun } from "../sandbox/launcher.js";
+import type { RunProcess } from "../sandbox/proc.js";
 import { estimateStoredTokens, localWorkerParts, recoveryFor, type HostOrder } from "./local.js";
+import { PROCESS_LIMITS } from "./process.js";
 
 // Card H12b: the recipe the dispatcher states (named reaches and limits) becomes a real recipe when the sandbox is opened. Nothing is launched here; the launcher's own checks run on the recipe at open.
 const root = realpathSync(mkdtempSync(join(tmpdir(), "nn host local ")));
@@ -181,6 +183,104 @@ test("a turn cut by the host closing its process (a stop, a restart for a recipe
   assert.equal(result.status, "failed");
   assert.deepEqual(result.usage, { turnSeq: 1, cache: figures(25) }, "taken from the attempt's cache and reported, not left behind");
   await session.close();
+});
+
+// Card L02d: what a sandbox still holds, from its worker process's run tree, and what winding it down cost.
+/** A launcher whose run the test plays: ready at the start; `tree` is the run's process list; it obeys `close` and the kill only while `obeys` is true. */
+function heldProcess() {
+  let finish!: (r: RunResult) => void;
+  const result = new Promise<RunResult>((ok) => { finish = ok; });
+  const state = { obeys: true, ended: false, kills: 0, tree: [] as RunProcess[], survivors: [] as RunProcess[], cannotList: false };
+  const exit = () => { if (state.ended) return; state.ended = true; finish({ exitCode: null, signal: null, timedOut: false, killed: true, stdout: "", stderr: "", truncated: false, stdoutTruncated: false, durationMs: 1 }); };
+  let emit!: (m: FromChild) => void;
+  const run = {
+    result, endInput: () => undefined,
+    kill: () => { state.kills++; if (state.obeys) { exit(); state.survivors = []; } },
+    write: async (text: string) => {
+      for (const m of text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as ToChild)) {
+        if (m.t === "start") queueMicrotask(() => emit({ t: "ready", v: WORKER_CHANNEL_VERSION }));
+        if (m.t === "close" && state.obeys) exit();
+      }
+    },
+    processes: async () => (state.cannotList ? undefined : { processes: state.ended ? state.survivors : state.tree, truncated: false }),
+  } as unknown as SandboxRun;
+  const launcher = { launch: async (request: LaunchRequest) => { emit = (m) => request.stream!.onStdout(Buffer.from(encodeMessage(m))); return run; } };
+  return { launcher, state };
+}
+const heldParts = (launcher: unknown) => localWorkerParts<unknown>({
+  launcher: launcher as never, app, protectedPaths: [], workspace: () => work, requireEnforced: false,
+  model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }),
+  namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+});
+const proc = (pid: number, parent: number, name: string): RunProcess => ({ pid, parent, name, started: String(pid) });
+const TREE = [proc(10, 1, "bwrap"), proc(11, 10, "bwrap"), proc(12, 11, "node"), proc(20, 12, "server")];
+
+test("L02d: a running sandbox lists what the agent started but not its own worker process; once asked to end it lists the worker until it has gone, and the time it took is the cleanup's compute", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 50_000 });
+  const played = heldProcess();
+  played.state.tree = TREE;
+  const p = heldParts(played.launcher);
+  const session = await p.sandbox.open(order([]).recipe, order([]));
+  assert.deepEqual(await session.work(), { processes: [] }, "nothing launched yet");
+  await p.runtimes.open(order([]), {}, undefined);
+  assert.deepEqual(await session.work(), { processes: [{ ref: "pid 20 (server)", kind: "process", state: "running" }] }, "the worker process is the attempt itself; the server the agent started is listed");
+  // The process ignores the close: within the grace it is still ending (running), after it it did not obey (uncooperative), and the close gives up instead of waiting for ever.
+  played.state.obeys = false;
+  const closing = session.close();
+  closing.catch(() => undefined);
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(1000);
+  assert.deepEqual((await session.work()).processes.map((x) => [x.ref, x.state]), [["worker process pid 12 (node)", "running"], ["pid 20 (server)", "running"]]);
+  assert.equal((await session.work()).computeMs, 1000);
+  t.mock.timers.tick(PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs);
+  await assert.rejects(closing, /did not end/, "the close says the process is still there");
+  const stuck = await session.work();
+  assert.deepEqual(stuck.processes.map((x) => [x.ref, x.state]), [["worker process pid 12 (node)", "uncooperative"], ["pid 20 (server)", "uncooperative"]]);
+  assert.equal(stuck.computeMs, 1000 + PROCESS_LIMITS.closeGraceMs + PROCESS_LIMITS.killWaitMs);
+  // Force Stop kills it again; a process that left something behind when its run ended still lists that as having outlived it.
+  played.state.obeys = true;
+  const kills = played.state.kills;
+  await session.end();
+  assert.ok(played.state.kills > kills, "Force Stop killed again");
+  await new Promise((r) => setImmediate(r));
+  const after = await session.work();
+  assert.deepEqual(after.processes, []);
+  const total = after.computeMs;
+  t.mock.timers.tick(10_000);
+  assert.equal((await session.work()).computeMs, total, "an ended process costs nothing more");
+});
+
+test("L02d: a process that outlived its run is uncooperative; a system that cannot list processes names only the worker once it was asked to end; a winding down of 0 ms charges nothing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 50_000 });
+  const played = heldProcess();
+  played.state.tree = TREE;
+  const p = heldParts(played.launcher);
+  const session = await p.sandbox.open(order([]).recipe, order([]));
+  await p.runtimes.open(order([]), {}, undefined);
+  // The run ends at once on the close, but a process the agent started outlived it.
+  const closing = session.close();
+  await closing;
+  played.state.survivors = [proc(30, 1, "daemon")];
+  const after = await session.work();
+  assert.deepEqual(after.processes, [{ ref: "pid 30 (daemon)", kind: "process", state: "uncooperative" }]);
+  assert.equal(after.computeMs, undefined, "it ended in 0 ms: no figure");
+  // A system with no process list: nothing is claimed about what the agent started, and the worker is named only once asked to end.
+  const blind = heldProcess();
+  blind.state.cannotList = true;
+  blind.state.obeys = false;
+  const q = heldParts(blind.launcher);
+  const s2 = await q.sandbox.open(order([]).recipe, order([]));
+  await q.runtimes.open(order([]), {}, undefined);
+  assert.deepEqual((await s2.work()).processes, []);
+  const c2 = s2.close();
+  c2.catch(() => undefined);
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(PROCESS_LIMITS.closeGraceMs + 1);
+  assert.deepEqual((await s2.work()).processes, [{ ref: "worker process (asked to end)", kind: "process", state: "uncooperative" }]);
+  t.mock.timers.tick(PROCESS_LIMITS.killWaitMs);
+  await assert.rejects(c2, /did not end/);
+  blind.state.obeys = true;
+  await s2.end();
 });
 
 test.after(() => { rmSync(root, { recursive: true, force: true }); void dirname; });

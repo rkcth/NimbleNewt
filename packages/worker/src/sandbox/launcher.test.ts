@@ -54,6 +54,33 @@ describe("sandbox launcher (bubblewrap)", () => {
   const sh = (script: string, r?: SandboxRecipe, limits?: { timeoutMs?: number; maxOutputBytes?: number }): Promise<RunResult> => run(["/bin/sh", "-c", script], r, limits);
   const ifUsable = (name: string, fn: () => Promise<void>): void => { test(name, async (t) => { if (!usable) return t.skip(`bubblewrap unusable: ${launcher.capacity.reason}`); await fn(); }); };
 
+  ifUsable("L02d: a run lists its live processes (the confinement, the program and what it started, even detached), names none of another run's, and nothing once it has ended", async () => {
+    const started = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "setsid sleep 30 & sleep 31 & echo up; wait"], timeoutMs: 20_000, maxOutputBytes: 1000, stream: { onStdout: () => undefined } });
+    const other = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "exec sleep 32"], timeoutMs: 20_000, maxOutputBytes: 1000 });
+    try {
+      let listed: Awaited<ReturnType<NonNullable<typeof started.processes>>>;
+      for (let i = 0; ; i++) {
+        listed = await started.processes!();
+        if ((listed?.processes.filter((p) => p.name === "sleep").length ?? 0) >= 2 || i > 100) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(listed !== undefined);
+      const names = listed.processes.map((p) => p.name);
+      assert.equal(names[0], "bwrap", "the confinement is the root");
+      assert.equal(names.filter((n) => n === "sleep").length, 2, `both sleeps, the detached one included: ${names.join(",")}`);
+      assert.ok(names.includes("sh"));
+      const otherPids = new Set((await other.processes!())!.processes.map((p) => p.pid));
+      assert.ok(otherPids.size > 0, "positive control: the other run lists its own");
+      assert.ok(listed.processes.every((p) => !otherPids.has(p.pid)), "no process of another run is listed");
+      assert.ok(listed.processes.every((p) => /^\d+$/.test(p.started) && p.pid > 0));
+    } finally {
+      started.kill(); other.kill();
+    }
+    await started.result;
+    await other.result;
+    assert.deepEqual((await started.processes!())!.processes, [], "after the run nothing is left: the private process list ended with it");
+  });
+
   ifUsable("capacity is advertised only after a real confined start, and names the backend and version", async () => {
     assert.equal(launcher.capacity.available, true);
     assert.equal(launcher.capacity.backend, "bubblewrap");
