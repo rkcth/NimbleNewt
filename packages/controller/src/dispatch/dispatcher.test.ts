@@ -1932,6 +1932,32 @@ for (const backend of backends) {
     assert.equal(c.worker.starts[3]!.resumeFrom !== undefined, true);
   });
 
+  suite("a turn that ends the moment its worker is stopped (as the local worker's does) does not end the attempt a shutdown leaves waiting: it resumes from its checkpoint (card C07l)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const { taskId, attemptId } = await c.task("long job", ann);
+    let runs = 0;
+    c.worker.script = async ({ worker }) => {
+      if (++runs > 1) return { status: "completed", text: "done" };
+      // Stopping the worker closes the turn's process, and the turn answers at once with what a closed process gives.
+      const stopped = deferred<void>();
+      worker.stop = async () => { worker.stopped++; stopped.resolve(); };
+      await stopped.promise;
+      return { status: "cancelled", error: "the process was closed" };
+    };
+    assert.deepEqual((await c.dispatcher.tick()).started, [attemptId]);
+    assert.deepEqual(await c.dispatcher.shutdown(), { closed: 1, errors: [] });
+    await c.dispatcher.idle();
+    const waiting = (await c.dispatcher.get(c.owner, attemptId!))!;
+    assert.deepEqual([waiting.state, waiting.resumeNote, waiting.resumeFrom !== undefined], ["waiting", "the controller restarted; carry on from the checkpoint", true]);
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "active", "the attempt was not ended by the closed turn");
+    const next = c.restart();
+    assert.deepEqual((await next.tick()).started, [attemptId]);
+    await next.idle();
+    assert.equal(c.worker.starts[1]!.resumeNote, "the controller restarted; carry on from the checkpoint");
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "succeeded");
+    assert.equal((await c.assignments.getAssignment(taskId))!.attempts, 1, "no new attempt was admitted");
+  });
+
   suite("a shutdown leaves a parked attempt and the owner's pending approval alone, and the approval still resumes it afterwards", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
     await c.task("push", ann);
