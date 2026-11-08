@@ -47,3 +47,12 @@ const all: Backend[] = [
  * exhaustive tier (`npm test`, or the Exhaustive tests workflow).
  */
 export const backends: Backend[] = process.env["NIMBLENEWT_TIER"] === "typical" ? all.filter((b) => b.name === "reference store" || b.name === "SQLite") : all;
+
+/**
+ * The backend of this name as a list, for a suite divided among test files by backend (one file per backend, so that a long suite stays well within the per-file
+ * time limit on a slow CI machine). Empty when the typical tier leaves that backend out; a name that is no backend at all is a mistake.
+ */
+export function backendsNamed(name: string): Backend[] {
+  if (!all.some((b) => b.name === name)) throw new Error(`no backend named ${name}`);
+  return backends.filter((b) => b.name === name);
+}
