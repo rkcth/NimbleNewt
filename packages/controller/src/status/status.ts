@@ -28,6 +28,7 @@ import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
+import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, routeFor, shown, whoText,
@@ -231,6 +232,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
+  release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
@@ -276,6 +278,7 @@ export type StatusRequest =
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
@@ -310,6 +313,11 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** Which event sources are watched (card H13f). Absent: the view is not offered. */
   readonly eventSources?: { get(by: Principal): Promise<{ readonly revision: number; readonly sources: readonly { readonly id: string; readonly type: string; readonly enabled: boolean; readonly critical: boolean; readonly defined: boolean; readonly watches?: string }[] }> };
+  /**
+   * Release testing (card X09b part 2): the same reads the API's `release.gate`, `release.attempts` and `release.status` make, and the candidate list for the owner's `release` status view.
+   * `status` is the staging and activation state; absent: the view says staging is not set up here. Absent altogether: the view is not offered.
+   */
+  readonly release?: Pick<ReleaseService, "gate" | "attempts" | "candidates"> & { status?(by: Principal): Promise<ActivationStatus> };
   /** Whether reconnected remote workers take their attempts up again by themselves, and the attempts that wait for the owner's decision (card H09b). Absent: the view is not offered. */
   readonly reconnect?: {
     get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: string | null; readonly profile: string; readonly effective: string; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }>;
@@ -463,6 +471,7 @@ export class StatusService {
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
+      case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
       case "jobs": { onlyKnown(request, ["kind", "limit"]); return this.jobLines(by, request.limit); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
@@ -609,6 +618,82 @@ export class StatusService {
       ...shownSources.map((s) => line(`${shown(s.id, 64)} (${shown(s.type, 30)}${s.defined ? ", defined by you" : ", built in or from the host"}${s.critical ? ", cannot be turned off" : ""}): ${s.enabled ? "on" : "off"}${s.watches === undefined ? "" : `; ${shown(s.watches, 250)}`}.`, c)),
       ...(got.sources.length > shownSources.length ? [line(`${got.sources.length - shownSources.length} more are not shown.`, c)] : []),
     ] };
+  }
+
+  /**
+   * The owner's release view (card X09b part 2): one candidate, or the newest `limit` of them, each with the gate per platform (pass, flaky pass, fail, interrupted, timed out, running or not run)
+   * and its attempts with state, host and time, and what is staged and current when this controller stages releases. Every text a host or a candidate carries (a result summary, a host name, a
+   * platform name) is quoted on one line, never followed. Owner only: to anyone else this reads exactly like a view that does not exist. The answer stays bounded; when it had to be cut, the last
+   * line says how to ask for the rest.
+   */
+  async releaseLines(by: Principal, request: { candidateId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const release = this.#deps.release;
+    if (release === undefined || by.kind !== "owner") return undefined;
+    if (request.candidateId !== undefined && (typeof request.candidateId !== "string" || request.candidateId.trim() === "" || request.candidateId.length > 120)) invalid("candidateId", "needs the candidate's ID (the rcn- ID release.submit returned)");
+    const limit = request.limit ?? 5;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) invalid("limit", "must be a whole number from 1 to 10");
+    const platform = (cell: GateCell["cell"]): string => quotedLine(shown(`${cell.os} ${cell.arch}${cell.osVersion === undefined ? "" : ` ${cell.osVersion}`}`, 60));
+    const gateWords = (cell: GateCell): string => {
+      const state = cell.state === "passed" ? cell.flaky ? `flaky pass (passed only after ${cell.earlierFailures.length} earlier failure${cell.earlierFailures.length === 1 ? "" : "s"})` : "pass" : cell.state === "failed" ? "fail" : cell.state === "missing" ? "not run" : cell.state === "timed_out" ? "timed out" : cell.state === "running" ? "running" : cell.state;
+      return `${state} (${cell.attempts} attempt${cell.attempts === 1 ? "" : "s"})`;
+    };
+    const attemptWords = (a: ReleaseAttemptBody & { id: string }): string => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quotedLine(shown(a.hostId, 80))}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quotedLine(shown(a.result.summary, 160))}`}${a.reason === undefined ? "" : `; reason: ${quotedLine(shown(a.reason, 160))}`}`;
+    const lines: Line[] = [];
+    let candidates: readonly CandidateRow[];
+    let moreCandidates = false;
+    if (request.candidateId !== undefined) candidates = [{ candidateId: request.candidateId, submittedAt: "", submittedBy: "", approved: false }];
+    else {
+      let got;
+      try { got = await release.candidates(by, { limit }); }
+      catch (error) {
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+        throw error;
+      }
+      candidates = got.candidates;
+      moreCandidates = got.more;
+      if (candidates.length === 0) lines.push(line("No release candidate has been submitted yet: release.submit is the start.", cite("release-candidates", "list")));
+    }
+    for (const candidate of candidates) {
+      const c = cite("release-candidate", candidate.candidateId);
+      let gate: Gate;
+      try { gate = await release.gate(by, candidate.candidateId); }
+      catch (error) {
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) {
+          // A named candidate that is missing or unreadable reads like a missing subject; a listed one (it moved in the moment of the read) is simply skipped.
+          if (request.candidateId !== undefined) return undefined;
+          continue;
+        }
+        throw error;
+      }
+      let attempts: (ReleaseAttemptBody & { id: string })[];
+      try { attempts = await release.attempts(by, candidate.candidateId); }
+      catch (error) {
+        if (error instanceof DomainError && error.code === "forbidden") return undefined;
+        throw error;
+      }
+      lines.push(line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: approving needs acknowledgeFlaky)" : ""}.`, c));
+      for (const cell of gate.cells) lines.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
+      for (const a of attempts) lines.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
+    }
+    if (moreCandidates) lines.push(line("More candidates have been submitted than are listed; ask again naming one (kind release with its candidateId) or with a larger limit.", cite("release-candidates", "list")));
+    const staging = cite("release-activation", "main");
+    if (release.status === undefined) lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
+    else {
+      try {
+        const st = await release.status(by);
+        lines.push(line(`Staging: ${st.current === undefined ? "nothing has been activated yet" : `the current release is ${quotedLine(shown(st.current.id, 80))} since ${shown(st.current.at, 30)}`}${st.previous === undefined ? "" : `; going back would return to ${quotedLine(shown(st.previous.id, 80))}`}; ${st.staged.length} staged release${st.staged.length === 1 ? "" : "s"}; activation ${st.settings.requireApproval ? "needs the candidate approved (release.approve)" : "does not need an approval right now"}${st.diverged ? `; WARNING: the launcher's pointer says ${quotedLine(shown(st.pointer ?? "nothing", 80))}, not the release the record calls current` : ""}.`, staging));
+      } catch (error) {
+        if (!(error instanceof DomainError) || (error.code !== "forbidden" && error.code !== "unavailable")) throw error;
+        lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
+      }
+    }
+    const max = 30;
+    if (lines.length > max) {
+      const kept = lines.slice(0, max - 1);
+      kept.push(line(`${lines.length - (max - 1)} more line(s) are not shown: ask again for one candidate (kind release with its candidateId) or, for one candidate's full evidence, release.attempts.`, cite("release-candidates", "list")));
+      return { observedAt: this.#runner.now(), lines: kept };
+    }
+    return { observedAt: this.#runner.now(), lines };
   }
 
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
