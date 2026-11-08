@@ -590,7 +590,8 @@ for (const backend of backends) {
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (_t: unknown, raw: unknown) => { touched.push((raw as { op: string }).op); return { v: 1, op: "x", ok: true, result: {} } as never; } },
-      messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true });
+      messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
+      jobs: { admit: async () => { touched.push("job.admit"); return { id: "job-x", replayed: false }; }, get: async () => { touched.push("job.get"); return undefined; }, requestCancel: async () => { touched.push("job.cancel"); return { id: "job-x", operation: "stop_tool", replayed: false }; } }, jobRuns: { room: () => undefined, start: async () => { touched.push("job.run"); } } });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = c.session(async (s) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
@@ -602,6 +603,9 @@ for (const backend of backends) {
       out["message.send"] = await send("message.send", { to: "agent:ben", class: "informational", purpose: "p", text: "t" }, "w4");
       out["artifact.publish"] = await send("artifact.publish", { name: "n", files: [{ path: "a.md", text: "a" }] }, "w7");
       out["tool.register"] = await send("tool.register", { name: "x", kind: "skill", version: "1.0.0", manifest: JSON.parse(JSON.stringify(manifest({ entryPoint: undefined, interpreter: undefined }))), instructionsRecordId: doc["id"] as string }, "w5");
+      out["job.start"] = await send("job.start", { tool: "toolbox.build", input: {} }, "w8");
+      // Reading a job and stopping one are not refused for a pause (here the job does not exist).
+      out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
       out["task.get"] = await send("task.get", {}, "r2");
       out["discover"] = await send("tool.discover", {}, "r3");
@@ -609,9 +613,10 @@ for (const backend of backends) {
       out["after"] = await send("desk.write", { kind: "note", title: "n", body: "b3", visibility: "shared", status: "accepted" }, "w6");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after"]) good(out[op]!);
-    assert.deepEqual(touched, ["task.get"], "no write reached a service while paused");
+    assert.equal(bad(out["job.status"]!).code, "not_found");
+    assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
   });
 
   suite("registering a tool under a contract that restricts tools is allowed, but running it is still governed by the contract's ceiling", async (c) => {
