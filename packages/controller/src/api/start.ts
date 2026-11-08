@@ -68,7 +68,7 @@ import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
 import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
-import { McpService } from "../mcp/index.js";
+import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
 import { ContinuationService, ResumeCheckService, ResumeSettingsService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
@@ -264,6 +264,8 @@ export interface Controller {
   readonly tools?: ToolExecutionService;
   /** The jobs this machine runs for agents (card T07b), when `jobs` and `tools` were given and the dispatcher was built. */
   readonly jobRuns?: LocalJobRuns;
+  /** A long-running MCP operation as a job (card T07b): admitted as `by` on an approved server, called over the dispatcher's MCP client, ended with its answer or recorded outcome-unknown. Present when `dispatch.mcp` was given and the dispatcher was built. */
+  readonly mcpJobs?: { call(by: Principal, call: McpJobCall): ReturnType<typeof callToolAsJob> };
   /** What the start-up rule decided for the jobs that were live when this controller started (card T07b), when the dispatcher was built. */
   readonly jobsAtStart?: { readonly decided: number; readonly failed: number };
   /** The owner chat and the coordinator, when `chat` was given. */
@@ -932,6 +934,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         jobRuns = new LocalJobRuns({ jobs, principal: () => host, launcher: options.jobs.launcher, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }), ...(options.jobs.limits === undefined ? {} : { limits: options.jobs.limits }) });
       }
     }
+    const mcpParts = dispatch?.mcp;
+    const mcpHost = dispatch?.principal;
+    const mcpJobs = mcpParts === undefined || mcpHost === undefined ? undefined : { call: (by: Principal, call: McpJobCall) => callToolAsJob({ jobs, client: mcpParts.client, host: mcpHost }, by, call) };
     let tools: ToolExecutionService | undefined;
     if (options.tools !== undefined && dispatch !== undefined) {
       const ro = {};
@@ -959,7 +964,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
-      ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
+      ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
       close: async () => { maintenanceStopped = true; if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };

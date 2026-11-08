@@ -301,3 +301,25 @@ test("a controller that starts decides every job the last one left live, by the 
     assert.deepEqual(w.problems, []);
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("with the MCP client composed, a long-running MCP operation is a job of the controller: admitted only on an approved server, and a revoked one is never dialed (card T07b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-t07b-mcp-"));
+  const looked: string[] = [];
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), manual: true, workers: [], mcp: { resolve: async (name: string) => { looked.push(name); return ["93.184.216.34"]; } } },
+  });
+  try {
+    assert.ok(c.mcpJobs !== undefined && c.dispatch?.mcp !== undefined, c.dispatchProblem);
+    const s = c.services;
+    const owner = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
+    const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    const taskId = (await s.projects.createTask({ commandId: "t1", actor: owner.id, projectId: project, title: "Search the docs" })).id;
+    const mcp = c.dispatch.mcp.service;
+    const server = (await mcp.register(owner, { commandId: "mcp", name: "docs", mode: "remote", transport: "streamable-http", protocolRevision: "2025-06-18", sdk: { name: "@modelcontextprotocol/sdk", version: "1.12.0" }, remote: { url: "https://mcp.example.com/v1", credentialRef: "docs.token", scopes: ["docs:read"] }, audience: [project], allowed: { tools: ["search"] } } as never)).id;
+    await mcp.revoke(owner, { commandId: "mrv", serverId: server, expectedRevision: (await c.storage.getAggregate({ kind: "mcp-server", id: server }))!.revision });
+    await assert.rejects(c.mcpJobs.call(owner, { commandId: "mj", taskId, serverId: server, operationId: "search-1", tool: "search" }), /not approved or was revoked/);
+    assert.deepEqual(looked, [], "nothing was looked up or dialed");
+    assert.deepEqual((await s.jobs.list(owner, taskId)).jobs, [], "no job was admitted");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

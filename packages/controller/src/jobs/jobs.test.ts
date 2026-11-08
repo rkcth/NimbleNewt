@@ -9,6 +9,7 @@ import { GrantService, PrincipalService, type Grant, type Principal } from "../s
 import type { PauseOptions } from "../lifecycle/index.js";
 import { JOB_LIMITS, JobService, LocalJobRuns, decideAtStart, type JobBody, type JobLauncher, type JobOptions, type JobProcessEnd } from "./index.js";
 import type { ScriptLaunch } from "../toolbridge/index.js";
+import { callToolAsJob, type McpJobCall, type RemoteToolResult } from "../mcp/index.js";
 
 after(stopServer);
 
@@ -576,6 +577,42 @@ for (const backend of backends) {
     const refused = await decideAtStart(jobs, c.reader, { epoch: 9, before: clock(), isLocal: () => true });
     assert.ok(refused.failed.some((f) => f.jobId === unseen), JSON.stringify(refused));
     assert.equal((await c.read(unseen)).state, "admitted");
+  });
+
+  suite("a long-running MCP operation is a job: admitted only on an approved server, called once, ended with the server's answer, failed when refused before sending and outcome-unknown when no answer came (card T07b)", async (c) => {
+    const approved = new Set([SERVER]);
+    const jobs = c.reopen({ host: HOST, connections: { usable: async (id) => approved.has(id) } });
+    const host = hostOf();
+    const calls: string[] = [];
+    let answer: () => Promise<RemoteToolResult> = async () => ({ content: [{ type: "text", text: `found 3 pages; Authorization: Bearer ${"abcdefghijklmnopqrstuvwxyz0123456789ABCD"}` }], isError: false });
+    const client = { callTool: async (serverId: string, name: string) => { calls.push(`${serverId}:${name}`); return answer(); } };
+    const call = (op: string, extra: Partial<McpJobCall> = {}) => callToolAsJob({ jobs, client, host }, c.worker, { commandId: `mcp-${op}`, taskId: c.t1, serverId: SERVER, operationId: op, tool: "search", args: { q: "seeds" }, ...extra });
+    const done = await call("op-1");
+    assert.deepEqual([done.state, done.replayed, calls.length], ["completed", false, 1]);
+    const job = await c.read(done.jobId);
+    assert.deepEqual([job.kind, job.serverId, job.resumability, job.history.map((h) => h.state)], ["mcp", SERVER, "none", ["admitted", "dispatched", "running", "completed"]]);
+    assert.ok(job.output.tail.startsWith("found 3 pages") && !job.output.tail.includes("abcdefghijklmnopqrstuvwxyz0123456789ABCD"), job.output.tail);
+    // Asking again for the same operation calls nothing.
+    assert.deepEqual([(await call("op-1")).replayed, calls.length], [true, 1]);
+    // A tool that reports an error fails the job; a refusal before sending fails it; no answer leaves it outcome-unknown.
+    answer = async () => ({ content: [{ type: "text", text: "no such index" }], isError: true });
+    assert.equal((await call("op-2")).state, "failed");
+    answer = async () => { throw new DomainError("forbidden", "MCP server docs is revoked; no new connection is made"); };
+    const refusedJob = await call("op-3");
+    assert.deepEqual([refusedJob.state, (await c.read(refusedJob.jobId)).exit?.reason], ["failed", "MCP server docs is revoked; no new connection is made"]);
+    answer = async () => { throw new DomainError("unavailable", "no answer within 30000 ms"); };
+    const lost = await call("op-4");
+    assert.equal(lost.state, "outcome_unknown");
+    assert.match((await c.read(lost.jobId)).unknown!.reason, /may have run there/);
+    assert.deepEqual((await jobs.unresolved(c.owner, c.t1)).map((j) => j.id), [lost.jobId]);
+    // A server that is not approved (or was revoked) admits no new operation, and nothing is called.
+    approved.clear();
+    const before = calls.length;
+    await refuses("forbidden", () => call("op-5"), (e) => assert.match(e.message, /not approved or was revoked/));
+    assert.equal(calls.length, before);
+    // Without job.write on the task nobody may start one.
+    approved.add(SERVER);
+    await refuses("forbidden", () => callToolAsJob({ jobs, client, host }, c.reader, { commandId: "mcp-r", taskId: c.t1, serverId: SERVER, operationId: "op-6", tool: "search" }));
   });
 
   suite("the local runs start an admitted job once, stream bounded output, end it completed or failed, and confirm a Stop and a Force Stop through the launcher with the orphans it could not end (card T07b)", async (c) => {
