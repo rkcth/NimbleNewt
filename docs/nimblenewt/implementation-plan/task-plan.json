@@ -2105,7 +2105,9 @@
         "commits": [
           "8ed7021c",
           "9d2b79e3",
-          "466bb692"
+          "466bb692",
+          "5c5034ee",
+          "09c1ca95"
         ],
         "ci_runs": [],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
