@@ -217,6 +217,8 @@ export interface StateApiDeps {
 
   /** When present, the rest of a tool result cut to the window can be read in pages through the API (card C07d). */
   readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>; /** The full text of an item cut when a task moved to a smaller route (card C07f). */ readonly readRouteArchive?: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined> };
+  /** When present, a hand-off note named in an attempt's first call can be read through the API (card C07m). */
+  readonly handoffNotes?: { readonly read: (by: Principal, noteId: string) => Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined> };
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** When present, the owner can read and set notification settings through the API (card U11b). */
@@ -358,6 +360,7 @@ export class StateApi {
         ...(this.#deps.pauses === undefined ? {} : { pauses: this.#deps.pauses }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),
+        ...(this.#deps.handoffNotes === undefined ? {} : { handoffNotes: this.#deps.handoffNotes }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
         ...(this.#deps.notifications === undefined ? {} : { notifications: this.#deps.notifications }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),

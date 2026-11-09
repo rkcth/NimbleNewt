@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
+import { BLOCKER_TYPES } from "../domain/blockers.js";
 import { DECLINED, ENDED_CANCEL, STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
@@ -18,6 +19,7 @@ import type { GenerationService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import type { HostService } from "../hosts/index.js";
 import type { PauseGuard } from "../lifecycle/index.js";
+import type { HandoffPhase } from "../lifecycle/index.js";
 import type { McpService } from "../mcp/index.js";
 import type { ContextEnforcementService } from "../context/index.js";
 import type { HandoffFacts } from "../context/budget.js";
@@ -26,6 +28,7 @@ import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
 import { describePolicyContext, type PolicyService } from "../policy/index.js";
 import { ActionCatalog } from "../policy/catalog.js";
+import { handoffBrief } from "./handoff-brief.js";
 import type { ReviewService } from "../review/index.js";
 import { selectRoute, type RoutingService } from "../routing/index.js";
 import { allows } from "../security/access.js";
@@ -116,7 +119,7 @@ export interface DispatcherDeps {
   readonly denied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
-  readonly blockers: Pick<BlockerService, "openBlocker">;
+  readonly blockers: Pick<BlockerService, "openBlocker" | "openFor">;
   readonly route: RouteResolver;
   /**
    * The model calls of attempts, through the fallback service (card R04c). With it the route an attempt is claimed and started on is one the owner's routing controls (disable, drain, cutover) and the routes' health leave
@@ -166,7 +169,12 @@ export interface DispatcherDeps {
    * Context enforcement (card C07b) at the end of an attempt: an attempt that failed for want of context is counted (repeated overflow opens a visible blocker), and an attempt that ended without a hand-off gets
    * one written by the controller from `handoffFacts` (default: the task's title, how the attempt ended and the last checkpoint position).
    */
-  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow"> & Partial<Pick<ContextEnforcementService, "limitTool">>;
+  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow"> & Partial<Pick<ContextEnforcementService, "limitTool" | "latestHandoffFor">>;
+  /**
+   * The hand-off a task was last handed over with, as the controller's own hand-off records say it (card C07m): its ID, its phase and who it went between, with nothing of the package. The dispatcher names it
+   * in the first prompt of the attempt that follows, when that attempt's agent is the one the task was handed to. Without it the call says nothing about the package.
+   */
+  readonly handedIn?: (taskId: string) => Promise<{ id: string; phase: HandoffPhase; to: { kind: string; id: string } } | undefined>;
   /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
   readonly toolWindow?: (route: string) => number | undefined;
   /**
@@ -175,7 +183,7 @@ export interface DispatcherDeps {
    * It is asked once more as the worker is started (card C07g): the `view` it answers then (the kept pieces and the references of what was cut, for the new route) goes in the attempt's first prompt, with `measured` saying whether the route's
    * fixed part was measured (a worker that can measure its own process rebuilds a view that was not, before it is sent).
    */
-  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
+  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number, /** The paragraph of what the task was handed with (card C07m), in characters, counted as it is: room for it is kept on top of the reserve for the notes not measured here (the rules, a resume note). */ readonly noteChars?: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
   /** The task is on the same route it last ran on: a refusal that an earlier move to another route left behind is closed (card C07f). */
   readonly routeKept?: (kept: { readonly taskId: string; /** The route the task is on (a refusal made for this same route is not stale). */ readonly route: string }) => Promise<void>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
@@ -1394,7 +1402,7 @@ export class DispatcherService {
           // Whatever was remembered for this attempt (a "kept" from an earlier tick on the old route) is no longer true: a refusal or an error below must not leave it standing.
           this.#routeOk.delete(attemptId);
           let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
           if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
           this.#remember(attemptId, cacheKey);
         }
@@ -1835,12 +1843,14 @@ export class DispatcherService {
     // before the worker exists, and only one caller can make it: it must still be waiting, with the place this caller holds. If this process dies now, the lease ends and the attempt is taken as lost.
     // Card C07g: an attempt that starts on a route other than the one its task last ran on carries the context rebuilt for this route in its first prompt. The context is asked once more here (the same facts give the
     // same decision; facts that changed since the check give the view as it is now). A refusal or an error now starts nothing: the place is given back and the next pass checks the move again (and blocks on a refusal).
+    // What the task was handed with, read now: it goes in the first prompt, and its size goes with the request for the route view, which has to leave room for it (card C07g).
+    const handed = await this.#handedInNote(b);
     let view: { readonly text: string; readonly measured: boolean } | undefined;
     if (this.#deps.routeChange !== undefined) {
       const previous = ((await this.#runner.get(PLACED_KIND, b.taskId))?.body as unknown as { route?: string } | undefined)?.route;
       if (previous !== undefined && previous !== b.route) {
         let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
+        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length, noteChars: handed.length }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (!moved.ok) { this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (moved.view !== undefined && moved.view.text !== "") view = moved.view;
       }
@@ -1877,7 +1887,7 @@ export class DispatcherService {
     const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: await this.#contentOf(b.taskId) + await this.#policyNote(b) + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
+      content: await this.#contentOf(b.taskId) + (await this.#policyNote(b)) + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
     };
@@ -1935,6 +1945,41 @@ export class DispatcherService {
   async #contentOf(taskId: string): Promise<string> {
     const task = await this.#deps.projects.getTask(taskId);
     return task === undefined ? "" : `${task.title}${task.description === "" ? "" : `\n\n${task.description}`}`;
+  }
+
+  /**
+   * What this attempt was handed by the work that came before it (card C07m), said in bounded lines before the route view: the hand-off the task came to its agent with, the hand-off note of the attempt this
+   * one follows, and the task's open blockers. Each is named by its record and by the operation its agent reads it with, so the call stays bounded however much the earlier attempt left behind — the package
+   * itself is never copied into the prompt (it grows with every hand-off, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
+   */
+  async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<string> {
+    // Best effort in the plain sense: a read that fails is left out of the paragraph and reported, never guessed at, and never stops the attempt from starting.
+    const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
+    const context = this.#deps.context;
+    const [handedIn, note, blockers] = await Promise.all([
+      this.#deps.handedIn === undefined ? Promise.resolve(undefined) : missing(this.#deps.handedIn(b.taskId)),
+      context?.latestHandoffFor === undefined ? Promise.resolve(undefined) : missing(context.latestHandoffFor(this.#deps.principal, b.taskId)),
+      missing(this.#openBlockersOf(b.taskId)),
+    ]);
+    // The package is named only to the agent the task was actually handed to by it: that one may read it with `handoff.get` and no one else can, so naming it to anyone else would only mislead.
+    const forThisAgent = handedIn !== undefined && handedIn.phase === "transferred" && handedIn.to.kind === "agent" && `agent:${handedIn.to.id}` === b.agentId;
+    // The note of this very attempt (there is none while it has not ended) is not "the attempt before yours"; anything the task holds is given as it is.
+    const previous = note !== undefined && note.attemptId !== b.attemptId ? note : undefined;
+    return handoffBrief({
+      taskId: b.taskId,
+      ...(forThisAgent ? { handedIn: { id: handedIn.id } } : {}),
+      ...(previous === undefined ? {} : { note: { id: previous.id, attemptId: previous.attemptId, source: previous.source } }),
+      ...(blockers === undefined || blockers.length === 0 ? {} : { blockers }),
+    });
+  }
+
+  /** The blockers that hold this task up (one indexed read per type: a subject has at most one open blocker of each). A type that cannot be read is left out, never guessed at, and the failure is reported. */
+  async #openBlockersOf(taskId: string): Promise<readonly { id: string; type: string; summary: string; resolver: string }[]> {
+    const subject = { kind: "task", id: taskId };
+    const found = await Promise.all(BLOCKER_TYPES.map(async (type) => await this.#deps.blockers.openFor(type, subject).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; })));
+    return found.filter((b) => b !== undefined)
+      .sort((x, y) => (x.openedAt === y.openedAt ? (x.id < y.id ? -1 : x.id > y.id ? 1 : 0) : x.openedAt < y.openedAt ? -1 : 1))
+      .map((b) => ({ id: b.id, type: b.type, summary: b.summary, resolver: b.resolver }));
   }
 
   async #pin(b: DispatchBody): Promise<number | undefined> {

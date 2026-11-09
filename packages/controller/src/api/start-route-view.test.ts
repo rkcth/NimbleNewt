@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { AdmissionService } from "../admission/index.js";
+import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS } from "../context/index.js";
+import { BlockerService } from "../domain/blockers.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, ScriptedWorker, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
@@ -246,4 +248,69 @@ test("hostile open questions reach the first prompt on a new route only as quote
     assert.equal(back.ok, true, JSON.stringify(back));
     assert.equal(back.result.item.text, `${lead}${JSON.stringify(long).slice(1)}`);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
+});
+
+// Card C07m second review: the room the composed controller keeps beside the route view is the task's own text, plus the reserve for the notes it cannot measure (the rules, a resume note), plus the hand-off
+// paragraph as it is — added, not the larger of the reserve and the paragraph (which would let the paragraph eat the room the rules were promised).
+test("a route move keeps room for the task's text, the reserve for the rules and the hand-off paragraph, added together (card C07m review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rview-room-"));
+  const asked: { attemptId: string; route: string; promptChars: number | undefined }[] = [];
+  const original = ContextEnforcementService.prototype.routeMoved;
+  ContextEnforcementService.prototype.routeMoved = function (this: ContextEnforcementService, principal, command) {
+    asked.push({ attemptId: command.attemptId, route: command.route, promptChars: command.promptChars });
+    return original.call(this, principal, command);
+  };
+  const worker = new ScriptedWorker("host:w1", async ({ worker: handle }) => {
+    await new Promise<void>((resolve) => { const t = setInterval(() => { if (handle.stopped > 0) { clearInterval(t); resolve(); } }, 5); });
+    return { status: "cancelled", text: "stopped" };
+  });
+  let c: Controller | undefined;
+  try {
+    c = await startController({
+      storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+      dispatch: { timer: new ManualTimer(), manual: true, workers: [worker] },
+    } as never);
+    const s = c.services;
+    const boot = await s.principals.bootstrapOwner({ name: "rob" });
+    const owner = await s.principals.authenticate(boot.token);
+    const call = (op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => c!.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    await s.routing.setTable(owner, { commandId: "rt", expectedRevision: 0, table } as never);
+    await s.cutover.setTopology(owner, { commandId: "topo", expectedRevision: 0, topology } as never);
+    await DifficultyService.withEpoch(c.storage, c.epoch, s.routing, s.contracts).setProfiles(owner, { commandId: "sp", expectedRevision: 0, profiles: PROFILES } as never);
+    await s.principals.enroll(owner, { commandId: "e-host", kind: "host", name: "w1", grants: [] });
+    const hostP = await s.principals.authenticate((await s.principals.issueCredential(owner, "host:w1")).token);
+    const hosts = HostService.withEpoch(c.storage, c.epoch, s.assignments);
+    await hosts.announce(hostP, { commandId: "an", capabilities: { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] } });
+    await hosts.heartbeat(hostP, { commandId: "hb", sequence: 1 });
+    await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
+    await PolicyService.withEpoch(c.storage, c.epoch, s.grants).set(owner, { scope: "installation", commandId: "pol", profile: "autonomous" } as never);
+    const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    await s.principals.enroll(owner, { commandId: `e-${ANN}`, kind: "agent", name: ANN, grants: [...workGrants(project)] });
+    const taskId = (await s.projects.createTask({ commandId: "t1", actor: owner.id, projectId: project, title: "Water the beds", description: "Soak the north bed twice a week." })).id;
+    await s.projects.transitionTask({ commandId: "r1", actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
+    await s.assignments.assignTask({ commandId: "as1", actor: owner.id, taskId, owner: { kind: "agent", id: ANN } });
+    assert.equal((await call("decision.record", { projectId: project, category: "decision", topic: "hose", statement: "Use the soaker hose.", wording: "Use the soaker hose.", basedOn: 0 }, "d-hose")).ok, true);
+    const a = (await s.assignments.getAssignment(taskId))!;
+    await s.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: ANN }, harness: "pi" });
+    await c.dispatch!.dispatcher.tick();
+    // Something holds the task up, so the next first call carries a hand-off paragraph of a measurable size.
+    await BlockerService.withEpoch(c.storage, c.epoch).openBlocker({ commandId: "blk-room", actor: owner.id, type: "wait_overdue", subject: { kind: "task", id: taskId }, summary: "the hose lease is overdue", resolver: "owner" });
+    assert.equal((await call("routing.cutover", { level: "endpoint", name: "strata-http", reason: "swap the card" }, "cut1")).ok, true);
+    const replacement = (await s.assignments.getAssignment(taskId))!.activeAttemptId!;
+    await c.dispatch!.dispatcher.tick();
+    const order = worker.handles.find((h) => h.order.attemptId === replacement)?.order;
+    assert.equal(order?.route, "gpu2/qwen");
+    const brief = order!.content.indexOf("\n\n[What the controller hands you");
+    const view = order!.content.indexOf("\n\n[The owner's decisions");
+    assert.ok(brief > 0 && view > brief, `the paragraph comes before the view: ${JSON.stringify(order!.content.slice(0, 300))}`);
+    const paragraph = view - brief;
+    const taskText = "Water the beds\n\nSoak the north bed twice a week.";
+    assert.ok(order!.content.startsWith(taskText));
+    const moves = asked.filter((x) => x.attemptId === replacement && x.route === "gpu2/qwen");
+    assert.ok(moves.length >= 1, "the move was asked");
+    for (const m of moves) assert.equal(m.promptChars, taskText.length + PROMPT_NOTE_RESERVE_CHARS + paragraph, `room kept: ${m.promptChars}; task ${taskText.length}, reserve ${PROMPT_NOTE_RESERVE_CHARS}, paragraph ${paragraph}`);
+  } finally {
+    ContextEnforcementService.prototype.routeMoved = original;
+    await c?.close(); rmSync(d, { recursive: true, force: true });
+  }
 });

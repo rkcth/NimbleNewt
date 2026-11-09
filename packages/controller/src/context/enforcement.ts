@@ -28,6 +28,8 @@ const sameSource = (a: SourceRef, b: SourceRef): boolean => JSON.stringify(a) ==
 /** Part of an admission's identity that tells one start of the worker apart from another (the same attempt resumed after a restart, a host loss or a move is judged afresh, not given the answer of an earlier, smaller conversation). */
 const launchPart = (launch: unknown): string => (launch === undefined ? "" : `\0launch\0${key("launch", launch)}`);
 const handoffId = (taskId: string, attemptId: string, source: string): string => derivedId("hof", `${taskId}\0${attemptId}\0${source}`);
+/** A hand-off note's ID, as the next attempt's first call names it. */
+const HANDOFF_ID = /^hof-[a-z2-7]{20}$/;
 const label = (s: SourceRef): string => (s.kind === "desk-record" || s.kind === "owner-decision" ? s.id : `${s.scopeId}#${s.seq}`);
 
 export interface AdmissionBody {
@@ -117,7 +119,8 @@ const viewHeader = (route: string, window: number): string => `[The owner's deci
 const viewFooter = (n: number): string => `[${n} item${n === 1 ? " was" : "s were"} cut or left out to fit this route. Nothing is lost: each names the digest of its full text (sha256:...); read it with the state API query context.route-archive.read, giving this task's ID and that digest (the owner's own items need the right to read the project's history).]`;
 /** What the header, the footer and the separators of a view add at most, in characters: the pieces are built with room for them, so the whole view stays within the startup share. */
 const viewFrameChars = (route: string, window: number, items: number): number => viewHeader(route, window).length + 4 + viewFooter(Math.max(2, items)).length + 2 * Math.max(0, items - 1);
-/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text (the project's rules, a resume note), in characters, when their exact size is not known yet (card C07g). */
+/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text when their exact size is not known yet (card C07g): the project's rules and a resume note. The paragraph of what
+the task was handed with (card C07m, bounded by `HANDOFF_BRIEF_LIMITS.chars`) is measured by the dispatcher and room is kept for it on top of this. */
 export const PROMPT_NOTE_RESERVE_CHARS = 2000;
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
@@ -944,9 +947,34 @@ export class ContextEnforcementService {
   async latestHandoff(principal: Principal, taskId: string): Promise<{ id: string; attemptId: string; source: "attempt" | "controller"; text: string } | undefined> {
     taskId = checkTaskId(taskId);
     if ((await this.#task(principal, taskId, true)) === undefined) return undefined;
+    return await this.#latestHandoff(taskId);
+  }
+  /**
+   * The same read for the controller's own dispatcher (card C07m): the gate that writes a note is the gate that reads it back, so an attempt can be told the ID of the note the attempt before it left. It answers
+   * without the text: the first call names the record, and reading it is `readHandoff`, which asks the caller about the task.
+   */
+  async latestHandoffFor(principal: Principal, taskId: string): Promise<{ id: string; attemptId: string; source: "attempt" | "controller" } | undefined> {
+    taskId = checkTaskId(taskId);
+    await this.#dispatch(principal, taskId);
+    const latest = await this.#latestHandoff(taskId);
+    return latest === undefined ? undefined : { id: latest.id, attemptId: latest.attemptId, source: latest.source };
+  }
+  async #latestHandoff(taskId: string): Promise<{ id: string; attemptId: string; source: "attempt" | "controller"; text: string } | undefined> {
     const head = (await this.#runner.get("ctx-handoff-head", derivedId("ctx", `${taskId}\0handoff`)))?.body as unknown as { latest: string } | undefined;
     const rec = head === undefined ? undefined : await this.#runner.get("ctx-handoff", head.latest);
     const b = rec?.body as unknown as HandoffBody | undefined;
     return b === undefined ? undefined : { id: head!.latest, attemptId: b.attemptId, source: b.source, text: b.text };
+  }
+  /**
+   * One hand-off note by the ID the next attempt's first call names (card C07m): the note the ended attempt wrote itself, or the one the controller wrote for it. Needs the right to work on the task the note
+   * belongs to; a note that does not exist and one the caller may not read read the same.
+   */
+  async readHandoff(principal: Principal, noteId: string): Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined> {
+    const found = typeof noteId === "string" && HANDOFF_ID.test(noteId) ? await this.#runner.get("ctx-handoff", noteId) : undefined;
+    if (found === undefined) return undefined;
+    const b = found.body as unknown as HandoffBody;
+    if ((await this.#task(principal, b.taskId, true)) === undefined) return undefined;
+    // Only what the operation documents: the record's project and who wrote it stay in the record.
+    return { id: found.id, taskId: b.taskId, attemptId: b.attemptId, source: b.source, endedBecause: b.endedBecause, text: b.text };
   }
 }

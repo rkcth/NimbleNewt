@@ -55,6 +55,16 @@ Arguments:
 
 Result: `{ item: { itemId, text, digest } }`.
 
+#### `context.handoff.read`
+
+One hand-off note of a task: what the attempt before yours wrote when it ended, or what the controller wrote for it from the records (the first call of the attempt that follows names the note's ID, `hof-…`, and this reads it). Needs the right to work on the task; a note you may not read and one that does not exist read the same.
+
+Arguments:
+
+- `noteId`: the note the first call names (`hof-…`)
+
+Result: `{ item: { id, taskId, attemptId, source, endedBecause, text } }`: `source` is `attempt` (the agent wrote it itself before ending) or `controller` (the controller wrote it when the attempt ended without one); `text` is the note as written, credentials removed.
+
 #### `grant.list`
 
 The rights the owner has granted, with their IDs and revisions (owner only).

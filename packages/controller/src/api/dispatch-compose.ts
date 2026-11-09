@@ -43,6 +43,7 @@ import type { AgentService } from "../agents/index.js";
 import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
+import type { HandoffService } from "../lifecycle/handoff.js";
 import type { Availability } from "../conversations/index.js";
 import { ActivityService } from "../activity/index.js";
 import type { BackupService } from "../backup/index.js";
@@ -182,6 +183,8 @@ export interface DispatchHandle {
   readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>;
   /** The full text of an item cut when a task moved to a smaller route (card C07f), for someone who may work on the task. */
   readonly readRouteArchive: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined>;
+  /** One hand-off note of a task, by the ID its next attempt's first call names (card C07m), for someone who may work on the task. */
+  readonly readHandoffNote: (by: Principal, noteId: string) => Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined>;
   /** Charges time that is not a model call (a review, a job) to a task, as the dispatcher does; the commandId makes a repeat count once (card R05f). */
   /** Charges that could not be booked and are waiting for a retry, or were given up on (owner or dispatcher). */
   /** The attendance service, composed with the meetings and the budget (card R05g proves a held meeting reaches budget.usage through it). */
@@ -261,6 +264,10 @@ export interface ComposeInput {
   readonly routes?: { readonly cutover: CutoverService; readonly fallback: FallbackService };
   /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
+  /**
+   * The hand-offs the controller keeps (card C07m): a new attempt's first prompt names the hand-off its task came with, so its agent knows where the package is kept. Absent: the call says nothing about it.
+   */
+  readonly handoffs?: Pick<HandoffService, "latestForTask">;
   /** Told when the approval policy denies an agent's tool call, once the refusal is on record (card U11c). */
   readonly onDenied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
@@ -617,10 +624,11 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
-      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       routeChange: async (c) => {
-        // The task's own text is in the prompt beside the view; the notes added to it (the rules, a resume note) are not known in full yet, so room is kept for them.
-        const moved = await moveContext(c, c.taskChars + PROMPT_NOTE_RESERVE_CHARS);
+        // The task's own text is in the prompt beside the view; `PROMPT_NOTE_RESERVE_CHARS` keeps room for the notes not measured here (the project's rules, a resume note), and the paragraph of what the task
+        // was handed with (card C07m) is counted as it is on top of that — taking the larger of the two instead would let a long hand-off paragraph eat the room the rules were promised (C07m review).
+        const moved = await moveContext(c, c.taskChars + PROMPT_NOTE_RESERVE_CHARS + (c.noteChars ?? 0));
         if (moved === undefined) return { ok: true };
         // The view (card C07g) goes in the first prompt of the attempt on the new route: its kept pieces and the references of what was cut.
         return moved.rebuilt ? { ok: true, view: { text: moved.view, measured: moved.measured } } : { ok: false, reason: `${moved.reason ?? "the context does not fit the new route"} (moved from ${c.previousRoute} to ${c.route}; ${remedies})` };
@@ -678,6 +686,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         return { text: found.untrusted === true ? framedMcp(found.tool ?? "mcp", found.text, undefined, true) : found.text, ...(found.next === undefined ? {} : { next: found.next }) };
       },
       readRouteArchive: (by, taskId, digest) => context.routeArchive(by, { taskId, digest }),
+      readHandoffNote: (by, noteId) => context.readHandoff(by, noteId),
       principal,
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
       ...(mcpParts === undefined ? {} : { mcp: mcpParts }),

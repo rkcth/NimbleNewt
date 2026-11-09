@@ -455,6 +455,18 @@ export class HandoffService {
   }
 
   /**
+   * The hand-off a task was last handed over with, going on or finished, as the controller's own dispatcher reads it (card C07m): its ID, its phase and who it went between — nothing of the package. The
+   * dispatcher names that ID in the new owner's first prompt, so the agent knows where the brief, the decisions and the next action are kept; reading them is still `get`, which asks the caller about the task.
+   */
+  async latestForTask(taskId: string): Promise<{ id: string; phase: HandoffPhase; from: Owner; to: Owner } | undefined> {
+    const tid = checkTaskId(taskId);
+    const pointer = (await this.#runner.get(ACTIVE, derivedId("hnd", `active\0${tid}`)))?.body as unknown as { handoffId?: string } | undefined;
+    if (pointer?.handoffId === undefined) return undefined;
+    const h = (await this.#runner.get(KIND, pointer.handoffId))?.body as unknown as TaskHandoffBody | undefined;
+    return h === undefined ? undefined : { id: pointer.handoffId, phase: h.phase, from: h.from, to: h.to };
+  }
+
+  /**
    * The sections cut to fit in the latest hand-off of a task, going on or finished (card C07j review, round 4): how the owner, asking by chat about a task, finds the archive that holds what was cut once the
    * hand-off is over and the `handoff` status no longer shows it. Only the cuts whose archive the caller may read are listed; undefined when the task has had no hand-off the caller may see.
    */
