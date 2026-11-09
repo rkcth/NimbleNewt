@@ -78,7 +78,7 @@ test("a hand-off section over the limit is cut with a marker naming its archive,
     const status = await call(boot.token, "status.ask", { request: { kind: "handoff", taskId: task } });
     assert.ok(status.ok, JSON.stringify(status));
     const text = status.result.item.lines.map((l: { text: string }) => l.text).join("\n");
-    assert.match(text, new RegExp(`The brief section was cut to fit: ${Number(m[1])} of 101 entries left out or shortened`));
+    assert.match(text, new RegExp(`The brief section was cut to fit or summarised: ${Number(m[1])} of 101 entries left out or shortened`));
     assert.match(text, new RegExp(`archive ${m[3]}`));
     assert.match(text, /owner's marks are kept first: "keep-me"/);
 

@@ -1967,7 +1967,7 @@ export class DispatcherService {
   /**
    * What this attempt was handed by the work that came before it (card C07m), said in bounded lines before the route view: the hand-off the task came to its agent with, the hand-off note of the attempt this
    * one follows, and the task's open blockers. Each is named by its record and by the operation its agent reads it with, so the call stays bounded however much the earlier attempt left behind — the package
-   * itself is never copied into the prompt (it grows with every hand-off, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
+   * itself is never copied into the prompt (its completed work is summarised so it stays the same size across hand-offs, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
    */
   async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<string> {
     // Best effort in the plain sense: a read that fails is left out of the paragraph and reported, never guessed at, and never stops the attempt from starting.

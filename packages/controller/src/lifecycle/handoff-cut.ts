@@ -8,8 +8,9 @@ import { quotedLine } from "../decisions/records.js";
 
 /** The controller's marker: the first line of a cut section, and only there. `left` entries of `total` were left out or shortened; the whole section is in `archive`. */
 export const CUT_MARKER = /^\[cut: (\d+) of (\d+) entries, archive ([a-z]+-[a-z2-7]{20})\]/;
-const help = (archiveId: string, archivedChars: number | undefined): string => ` Entries were left out to fit (the owner's marked ones and the newest are kept); ${archivedChars === undefined ? "the whole section is kept" : `the first ${archivedChars} characters of the section are kept (it was longer than an archive holds)`}: read it with the state API query handoff.archive.read { "archiveId": "${archiveId}" }.`;
-const marker = (left: number, total: number, archiveId: string, archivedChars: number | undefined): string => `[cut: ${left} of ${total} entries, archive ${archiveId}]${help(archiveId, archivedChars)}`;
+const FIT = "Entries were left out to fit (the owner's marked ones and the newest are kept)";
+const help = (archiveId: string, archivedChars: number | undefined, why: string = FIT): string => ` ${why}; ${archivedChars === undefined ? "the whole section is kept" : `the first ${archivedChars} characters of the section are kept (it was longer than an archive holds)`}: read it with the state API query handoff.archive.read { "archiveId": "${archiveId}" }.`;
+const marker = (left: number, total: number, archiveId: string, archivedChars: number | undefined, why?: string): string => `[cut: ${left} of ${total} entries, archive ${archiveId}]${help(archiveId, archivedChars, why)}`;
 /** Said at the end of an entry that was shortened to fill the room left (it still counts as cut). */
 export const SHORTENED = " [... shortened; whole in the archive]";
 /** A shortened entry is kept only when at least this much of it fits; less says nothing useful. */
@@ -118,4 +119,71 @@ export function cutSection(text: string, limit: number, marks: readonly string[]
   const out = [marker(total - whole, total, archiveId, archivedChars), ...kept].join("\n");
   if (out.length > limit) throw new RangeError(`cut section is ${out.length} characters, over ${limit}`);
   return { text: out, cut: { left: total - whole, total } };
+}
+
+/** The kinds of entry a digest counts by the label the source puts before each (`Decision: ...`); any other entry counts as an entry. */
+const KINDS: readonly (readonly [string, string, string])[] = [["Decision: ", "decision", "decisions"], ["Artifact: ", "artifact", "artifacts"]];
+/** An entry's kind: its index in `KINDS`, or -1 for any other entry. */
+const kindOf = (entry: string): number => KINDS.findIndex(([p]) => entry.startsWith(p));
+const counted = (left: ReadonlyMap<number, number>): string => {
+  const parts = KINDS.flatMap(([, one, many], k) => { const n = left.get(k) ?? 0; return n === 0 ? [] : [`${n} ${n === 1 ? one : many}`]; });
+  const other = left.get(-1) ?? 0;
+  if (other > 0) parts.push(`${other} other entr${other === 1 ? "y" : "ies"}`);
+  return parts.length === 0 ? "no entry" : parts.join(" and ");
+};
+/**
+ * The newest `keep` entries, among them the newest entry of each kind (review of card C07k): the sources list a kind at a time (artifacts, then decisions), not in the order they happened, so the newest
+ * `keep` lines alone left out every artifact, the run's newest one too, as soon as it had recorded `keep` decisions.
+ */
+const newestKept = (kinds: readonly number[], keep: number): Set<number> => {
+  const chosen = new Set<number>();
+  const seen = new Set<number>();
+  for (let i = kinds.length - 1; i >= 0; i--) if (!seen.has(kinds[i]!)) { seen.add(kinds[i]!); chosen.add(i); }
+  for (let i = kinds.length - 1; i >= 0 && chosen.size < keep; i--) chosen.add(i);
+  return chosen;
+};
+
+/** Whether `digestSection` summarises `text` rather than giving it as `cutSection` does: it has more than `keep` entries. */
+export const summarised = (text: string, keep: number): boolean => text.split("\n").length > keep;
+
+/**
+ * Whether `digestSection` gives `text` as it is, with no marker (second review of card C07k): a section of `keep` entries or fewer that fits `limit`, and also one of more entries that fits `limit` while its
+ * newest entries beside the marker would not (it then falls back to `cutSection`, which gives a fitting section whole). The hand-off service asks this before it archives anything, so a section given whole is
+ * never recorded as cut ("0 of 0 entries left out"). The marker's size depends on the archive ID only by its length, which is fixed, so a placeholder of that length answers for every archive.
+ */
+export const givenWhole = (text: string, keep: number, limit: number): boolean => text.length <= limit && (!summarised(text, keep) || digestSection(text, keep, limit, [], "hnd-aaaaaaaaaaaaaaaaaaaa").cut === undefined);
+
+/**
+ * Card C07k: a section that only grows across hand-offs (the run's completed work: every artifact and decision it has recorded) is summarised so the package does not grow with the number of hand-offs.
+ * The newest `keep` entries (among them the newest of each kind) are shown whole, with the entries the owner marked (newest first, while the section stays within `limit`); the older ones are counted by kind on the marker line, which names the
+ * archive that keeps the whole section, so every decision is still found by its reference there. The marker is the C07j cut marker, so every reader of a cut reads a digest the same way. A section of `keep`
+ * entries or fewer is given as `cutSection` gives it (whole when it fits); one whose newest entries do not fit `limit` beside the marker is cut as `cutSection` cuts it.
+ */
+export function digestSection(text: string, keep: number, limit: number, marks: readonly string[], archiveId: string, archivedChars?: number, options: CutOptions = {}): SectionCut {
+  if (!Number.isSafeInteger(keep) || keep < 1) throw new RangeError("a digest keeps at least the newest entry");
+  const entries = text.split("\n");
+  const total = entries.length;
+  if (!summarised(text, keep)) return cutSection(text, limit, marks, archiveId, archivedChars, options);
+  const matchOn = options.matchOn !== undefined && options.matchOn.length === total ? options.matchOn : entries;
+  // An entry's kind is read from the line as the source wrote it (second review of card C07k): a decision whose text reads like a marker is quoted by `neutralise`, and still counts as a decision.
+  const kinds = matchOn.map(kindOf);
+  const chosen = newestKept(kinds, keep);
+  // Sizes are kept as running sums (review of card C07k): rendering the whole section again for every marked entry made a long section with a broad mark take minutes.
+  const left = new Map<number, number>();
+  for (let i = 0; i < total; i++) if (!chosen.has(i)) left.set(kinds[i]!, (left.get(kinds[i]!) ?? 0) + 1);
+  let body = 0;
+  for (const i of chosen) body += entries[i]!.length + 1;
+  const header = (): string => marker(total - chosen.size, total, archiveId, archivedChars, `Older entries are summarised so the package does not grow with every hand-off: ${counted(left)} left out (the owner's marked ones and the newest ${keep}, among them the newest of each kind, are kept)`);
+  const size = (): number => header().length + body;
+  if (size() > limit) return cutSection(text, limit, marks, archiveId, archivedChars, options);
+  const marked = markedBy(marks);
+  for (let i = total - 1; i >= 0; i--) {
+    if (chosen.has(i) || !marked(matchOn[i]!)) continue;
+    const k = kinds[i]!;
+    chosen.add(i); body += entries[i]!.length + 1; left.set(k, left.get(k)! - 1);
+    if (size() > limit) { chosen.delete(i); body -= entries[i]!.length + 1; left.set(k, left.get(k)! + 1); }
+  }
+  const out = [header(), ...entries.filter((_, i) => chosen.has(i))].join("\n");
+  if (out.length > limit) throw new RangeError(`digest section is ${out.length} characters, over ${limit}`);
+  return { text: out, cut: { left: total - chosen.size, total } };
 }
