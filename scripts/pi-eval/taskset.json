@@ -1,0 +1,251 @@
+{
+  "version": 1,
+  "pinned": "2026-11-09",
+  "note": "Replayed merged cards. base = the merge's first parent; solution = the merge; hiddenFiles are copied from the solution only after the agent has ended; testFiles run from test.cwd. Sizes by non-test source lines changed: S under 100, M 100-250, L over 250 or several subsystems.",
+  "agent": {
+    "provider": "radiance",
+    "model": "qwen3.8-flash-next-iq4r",
+    "thinking": "medium"
+  },
+  "defaults": {
+    "repeats": 3,
+    "timeoutMinutes": {
+      "S": 60,
+      "M": 120,
+      "L": 180
+    },
+    "copy": [
+      "node_modules",
+      "packages/*/node_modules"
+    ],
+    "setup": {
+      "argv": [
+        "node",
+        "node_modules/typescript/bin/tsc",
+        "--build",
+        "--force"
+      ]
+    },
+    "test": {
+      "cwd": "packages/controller",
+      "env": {
+        "NIMBLENEWT_REQUIRE_SANDBOX": "1"
+      },
+      "argv": [
+        "node",
+        "--import",
+        "{{WORKTREE_URL}}/scripts/offline-guard.mjs",
+        "--test",
+        "{{TEST_FILES}}"
+      ],
+      "timeoutMinutes": 30
+    }
+  },
+  "variants": {
+    "A": {
+      "prompt": "prompts/variant-a.md",
+      "about": "the plain prompt"
+    },
+    "B": {
+      "prompt": "prompts/variant-b.md",
+      "about": "a stepwise PLAN.md with a checkbox per step and a commit per step"
+    },
+    "C": {
+      "needs": "W04",
+      "about": "B plus the bounded continuation hook of W04"
+    },
+    "D": {
+      "needs": "W04",
+      "about": "C plus a relaunch that reuses the stored session (pi --session-id)"
+    }
+  },
+  "tasks": [
+    {
+      "id": "quote-lines",
+      "title": "Proposal lines quote every borrowed name (describe-quote)",
+      "size": "S",
+      "base": "eac67f7145f3433472e65110bc7580fa7e49b199",
+      "solution": "081248b759beb57c11ba5d3d4ee1b61e4767ae1a",
+      "prompt": "tasks/quote-lines.md",
+      "hiddenFiles": [
+        "packages/controller/src/chat/chat.test.ts",
+        "packages/controller/src/chat/commands-one-line.test.ts",
+        "packages/controller/src/chat/commands-preview.test.ts",
+        "packages/controller/src/chat/coordinator.test.ts"
+      ],
+      "testFiles": [
+        "dist/chat/chat.test.js",
+        "dist/chat/commands-one-line.test.js",
+        "dist/chat/commands-preview.test.js",
+        "dist/chat/coordinator.test.js"
+      ]
+    },
+    {
+      "id": "flaky-proposal",
+      "title": "A flaky release approval is a shown proposal, not a phrase",
+      "size": "S",
+      "base": "91bddde60b725bc51af53d840c2e0ecb2cc3f9a0",
+      "solution": "212db81441f0764d716802c485ffb5bce373a86b",
+      "prompt": "tasks/flaky-proposal.md",
+      "hiddenFiles": [
+        "packages/controller/src/chat/release-owner-words.test.ts",
+        "packages/controller/src/chat/release-words.test.ts"
+      ],
+      "testFiles": [
+        "dist/chat/release-owner-words.test.js",
+        "dist/chat/release-words.test.js"
+      ]
+    },
+    {
+      "id": "grant-proposals",
+      "title": "Grants with no limit or no end are shown proposals",
+      "size": "S",
+      "base": "e78581b6d72d76bf1c4ae9f9627f785fa7efd9a8",
+      "solution": "eac67f7145f3433472e65110bc7580fa7e49b199",
+      "prompt": "tasks/grant-proposals.md",
+      "hiddenFiles": [
+        "packages/controller/src/api/start-chat.test.ts",
+        "packages/controller/src/chat/commands-preview.test.ts",
+        "packages/controller/src/chat/grant-consequence.test.ts",
+        "packages/controller/src/chat/policy-edit.test.ts",
+        "packages/controller/src/chat/status.test.ts"
+      ],
+      "testFiles": [
+        "dist/api/start-chat.test.js",
+        "dist/chat/commands-preview.test.js",
+        "dist/chat/grant-consequence.test.js",
+        "dist/chat/policy-edit.test.js",
+        "dist/chat/status.test.js"
+      ]
+    },
+    {
+      "id": "landing-proposal",
+      "title": "Landing on main is a confirmed proposal",
+      "size": "M",
+      "base": "5f788be407f15b634ad5a69fceb396e4e991688f",
+      "solution": "0e84a1b9f8a0abc17e50f2c1be670219f283777d",
+      "prompt": "tasks/landing-proposal.md",
+      "hiddenFiles": [
+        "packages/controller/src/api/start-integration.test.ts",
+        "packages/controller/src/chat/landing-proposal.test.ts",
+        "packages/controller/src/chat/meeting-decision-chat-suite.ts",
+        "packages/controller/src/chat/release-words.test.ts"
+      ],
+      "testFiles": [
+        "dist/api/start-integration.test.js",
+        "dist/chat/landing-proposal.test.js",
+        "dist/chat/release-words.test.js"
+      ]
+    },
+    {
+      "id": "c07n",
+      "title": "C07n: a route of unknown window is checked or refused",
+      "size": "M",
+      "base": "081248b759beb57c11ba5d3d4ee1b61e4767ae1a",
+      "solution": "b3851601a581b392fdd596df3588948d25799f84",
+      "prompt": "tasks/c07n.md",
+      "hiddenFiles": [
+        "packages/controller/src/api/start-c07n.test.ts",
+        "packages/controller/src/dispatch/first-call-hops.test.ts",
+        "packages/controller/src/dispatch/local-worker-guards.test.ts",
+        "packages/controller/src/dispatch/runtime-guards.test.ts"
+      ],
+      "testFiles": [
+        "dist/api/start-c07n.test.js",
+        "dist/dispatch/first-call-hops.test.js",
+        "dist/dispatch/local-worker-guards.test.js",
+        "dist/dispatch/runtime-guards.test.js"
+      ]
+    },
+    {
+      "id": "phrase-hints",
+      "title": "Dated rights in chat, host moves as proposals, refusals that ask",
+      "size": "M",
+      "base": "d4aba792b46a42a8226e0768e10da66614801a55",
+      "solution": "9bb923b4cf4c24723b62dd8d793da584e2e3ae1a",
+      "prompt": "tasks/phrase-hints.md",
+      "hiddenFiles": [
+        "packages/controller/src/api/quiet-host-api.test.ts",
+        "packages/controller/src/api/start-chat.test.ts",
+        "packages/controller/src/chat/commands-preview.test.ts",
+        "packages/controller/src/chat/grant-consequence.test.ts",
+        "packages/controller/src/chat/grant-dates.test.ts",
+        "packages/controller/src/chat/meeting-decision-chat-suite.ts",
+        "packages/controller/src/chat/policy-edit.test.ts",
+        "packages/controller/src/remote/quiet-hosts.test.ts"
+      ],
+      "testFiles": [
+        "dist/api/quiet-host-api.test.js",
+        "dist/api/start-chat.test.js",
+        "dist/chat/commands-preview.test.js",
+        "dist/chat/grant-consequence.test.js",
+        "dist/chat/grant-dates.test.js",
+        "dist/chat/policy-edit.test.js",
+        "dist/remote/quiet-hosts.test.js"
+      ]
+    },
+    {
+      "id": "m03h-1",
+      "title": "M03h part 1: stand-ups status view and chat reach",
+      "size": "L",
+      "base": "0e84a1b9f8a0abc17e50f2c1be670219f283777d",
+      "solution": "e78581b6d72d76bf1c4ae9f9627f785fa7efd9a8",
+      "prompt": "tasks/m03h-1.md",
+      "hiddenFiles": [
+        "packages/controller/src/chat/standup-commands.test.ts",
+        "packages/controller/src/standups/standups.test.ts",
+        "packages/controller/src/status/status.test.ts"
+      ],
+      "testFiles": [
+        "dist/chat/standup-commands.test.js",
+        "dist/standups/standups.test.js",
+        "dist/status/status.test.js"
+      ]
+    },
+    {
+      "id": "l02e-2",
+      "title": "L02e: wider Stops walk swarm children, sweep not starved, stop view through a wider scope",
+      "size": "L",
+      "base": "9bb923b4cf4c24723b62dd8d793da584e2e3ae1a",
+      "solution": "1c8816fe817a380facaac382a571e2f4df4281f1",
+      "prompt": "tasks/l02e-2.md",
+      "hiddenFiles": [
+        "packages/controller/src/lifecycle/dispatch-ports.test.ts",
+        "packages/controller/src/lifecycle/stop-sequences.test.ts",
+        "packages/controller/src/lifecycle/stop-suite.ts",
+        "packages/controller/src/status/status.test.ts"
+      ],
+      "testFiles": [
+        "dist/lifecycle/dispatch-ports.test.js",
+        "dist/lifecycle/stop-sequences.test.js",
+        "dist/status/status.test.js"
+      ]
+    },
+    {
+      "id": "c07m",
+      "title": "C07m: the first call names the hand-off, the previous note and the open blockers",
+      "size": "L",
+      "base": "b3851601a581b392fdd596df3588948d25799f84",
+      "solution": "eb19ba95a06ff24ec19c6000b63349a3425d14ef",
+      "prompt": "tasks/c07m.md",
+      "hiddenFiles": [
+        "packages/controller/src/api/start-handoff-call.test.ts",
+        "packages/controller/src/api/start-route-view.test.ts",
+        "packages/controller/src/context/enforcement.test.ts",
+        "packages/controller/src/dispatch/first-call-hops.test.ts",
+        "packages/controller/src/dispatch/handoff-call.test.ts",
+        "packages/controller/src/dispatch/route-change.test.ts",
+        "packages/controller/src/lifecycle/handoff.test.ts"
+      ],
+      "testFiles": [
+        "dist/api/start-handoff-call.test.js",
+        "dist/api/start-route-view.test.js",
+        "dist/context/enforcement.test.js",
+        "dist/dispatch/first-call-hops.test.js",
+        "dist/dispatch/handoff-call.test.js",
+        "dist/dispatch/route-change.test.js",
+        "dist/lifecycle/handoff.test.js"
+      ]
+    }
+  ]
+}
