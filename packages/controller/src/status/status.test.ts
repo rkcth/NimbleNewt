@@ -1416,6 +1416,59 @@ for (const backend of backends) {
     assert.deepEqual((await none.ask(c.owner, { kind: "meetings", projectId: c.project }))!.lines.map((l) => l.text), ["Planning: scheduled, 2026-10-24T14:00:00.000Z to 2026-10-24T15:00:00.000Z, live, planned. No roster."], "a project with no stand-ups gets no extra line");
   });
 
+  suite("a project's stand-ups are told as schedules and meetings of their own, two lines each, with the ended ones counted and the roster cut when it is long (card M03h)", async (c) => {
+    const met = { scheduleId: "msc-aaaaaaaaaaaaaaaaaaaa1", revision: 3, title: "Daily stand-up", state: "active", time: "09:00", timeZone: "Europe/Berlin", recurrence: "daily", window: { from: "08:00", to: "10:00" }, durationMinutes: 30, roster: ["agent:ann", "agent:bob"], occurrences: 5, nextAt: "2026-10-23T07:00:00.000Z", nextOccurrenceId: "mto-aaaaaaaaaaaaaaaaaaaa2", nextRevision: 1, lastAt: "2026-10-22T07:00:00.000Z", lastState: "held", lastOccurrenceId: "mto-aaaaaaaaaaaaaaaaaaaa3", lastRevision: 2 };
+    const paused = { scheduleId: "msc-aaaaaaaaaaaaaaaaaaaa4", revision: 1, title: 'Friday "review"', state: "paused", time: "10:00", timeZone: "UTC", recurrence: "weekly on Fri", durationMinutes: 45, roster: [], occurrences: 0 };
+    const items = [met, paused];
+    let askedLimit: number | undefined;
+    const standups = {
+      recent: async () => ({ items: [], more: false }),
+      overview: async (by: Principal, _p: string, page?: { limit?: number }) => {
+        if (by.kind !== "owner") return undefined;
+        askedLimit = page?.limit;
+        const kept = items.slice(0, page?.limit ?? 10);
+        return { items: kept, more: kept.length < items.length, ended: 2 };
+      },
+    };
+    const status = c.rebuild({}, { standups });
+    const got = (await status.ask(c.owner, { kind: "standups", projectId: c.project }))!;
+    assert.deepEqual(got.lines.map((l) => l.text), [
+      '"Daily stand-up": active, daily at 09:00 Europe/Berlin, 30 minutes, held between 08:00 and 10:00. On the roster: agent:ann, agent:bob.',
+      "next one 2026-10-23T07:00:00.000Z; its last meeting was 2026-10-22T07:00:00.000Z, held; 5 meetings of it so far.",
+      '"Friday \\"review\\"": paused, weekly on Fri at 10:00 UTC, 45 minutes. Nothing is on its roster.',
+      "nothing is planned for it ahead; it has not met yet; 0 meetings of it so far.",
+      "2 ended stand-ups of this project are left out.",
+    ], "one line for the schedule, one for its meetings, then what was left out");
+    cited(got.lines);
+    assert.deepEqual(got.lines[0]!.cites.map((x) => `${x.kind}:${x.id ?? ""}:${x.revision ?? ""}`), [`meeting-schedule:${met.scheduleId}:3`, `project:${c.project}:`], "the schedule line rests on the schedule and the project");
+    assert.deepEqual(got.lines[1]!.cites.map((x) => x.kind), ["meeting", "meeting", "meeting-schedule", "project"], "the meeting line rests on both meetings and the schedule");
+    const limited = (await status.ask(c.owner, { kind: "standups", projectId: c.project, limit: 1 }))!;
+    assert.equal(askedLimit, 1, "the stand-up source is asked for the page the owner asked for");
+    assert.deepEqual(limited.lines.map((l) => l.text).slice(2), ["There are more stand-ups than shown.", "2 ended stand-ups of this project are left out."]);
+    // A caller who may not read the project's meetings is told nothing, and the view is not offered without the stand-up service.
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "standups", projectId: c.project }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "standups", projectId: c.project }), undefined, "no stand-up service: the view is not offered");
+    await refuses("invalid_command", () => status.ask(c.owner, { kind: "standups", projectId: c.project, limit: 0 }));
+    await refuses("invalid_command", () => status.ask(c.owner, { kind: "standups", projectId: c.project, limit: 26 }));
+    await refuses("invalid_command", () => status.ask(c.owner, { kind: "standups", projectId: c.project, agent: "agent:ann" } as never));
+    await refuses("invalid_command", () => status.ask(c.owner, { kind: "standups", projectId: "nope!" }));
+    // A long roster is listed up to ten and counted after; a window it does not have is not invented; an end date is told.
+    const crowd = { scheduleId: "msc-aaaaaaaaaaaaaaaaaaaa7", revision: 9, title: "Crowded", state: "active", time: "08:00", timeZone: "UTC", recurrence: "daily", durationMinutes: 15, roster: Array.from({ length: 12 }, (_x, i) => `agent:w${i}`), occurrences: 1, lastAt: "2026-10-22T08:00:00.000Z", lastState: "missed", lastOccurrenceId: "mto-aaaaaaaaaaaaaaaaaaaa8", lastRevision: 4, endsOn: "2026-11-30" };
+    const long = c.rebuild({}, { standups: { recent: async () => ({ items: [], more: false }), overview: async () => ({ items: [crowd], more: false, ended: 0 }) } });
+    assert.deepEqual((await long.ask(c.owner, { kind: "standups", projectId: c.project }))!.lines.map((l) => l.text), [
+      '"Crowded": active, daily at 08:00 UTC, 15 minutes. On the roster: agent:w0, agent:w1, agent:w2, agent:w3, agent:w4, agent:w5, agent:w6, agent:w7, agent:w8, agent:w9, and 2 more.',
+      "nothing is planned for it ahead; its last meeting was 2026-10-22T08:00:00.000Z, missed; 1 meeting of it so far, and no more after 2026-11-30.",
+    ]);
+    // Nothing running: the answer says so, and says when there are ended ones behind it.
+    const none = c.rebuild({}, { standups: { recent: async () => ({ items: [], more: false }), overview: async () => ({ items: [], more: false, ended: 0 }) } });
+    assert.deepEqual((await none.ask(c.owner, { kind: "standups", projectId: c.project }))!.lines.map((l) => l.text), ["No stand-up is set up in this project."]);
+    const onlyEnded = c.rebuild({}, { standups: { recent: async () => ({ items: [], more: false }), overview: async () => ({ items: [], more: false, ended: 3 }) } });
+    assert.deepEqual((await onlyEnded.ask(c.owner, { kind: "standups", projectId: c.project }))!.lines.map((l) => l.text), ["This project has no stand-up running; 3 ended ones are not shown."]);
+    // A project the owner has none of, and a stand-up source that finds nothing for this caller.
+    assert.equal(await status.ask(c.owner, { kind: "standups", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }), undefined, "a project that is not there reads as nothing to show");
+  });
+
   suite("the hand-off going on for a task is told: who to whom, why, how far, what the package lacks, what holds it up and when a temporary one returns (card L03f)", async (c) => {
     const t = await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "Build" });
     let going: Record<string, unknown> | undefined = { id: "hnd-1", revision: 3, taskId: t.id, from: { kind: "agent", id: "agt-a" }, to: { kind: "agent", id: "agt-b" }, phase: "blocked", mode: "prepared", reason: "Ann is leaving", requestedBy: "owner:rob", requestedAt: "2026-10-22T09:00:00.000Z", returnAt: "2026-11-01T00:00:00.000Z", package: { missing: ["next action"], ready: false }, blocked: { reason: "the task is still running a tool.", choices: ["wait", "cancel"] } };

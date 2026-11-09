@@ -894,4 +894,59 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.standups.recent(c.owner, c.a, { limit: 51 }));
   });
 
+  suite("the project's stand-ups are told as schedules, each with the meeting coming up next and the one last held; one that has not met is shown and ended ones are counted and left out unless asked for (card M03h)", async (c) => {
+    const daily = await c.schedule();
+    const later = await c.schedule({ title: "Later review", time: "10:00", windowTo: "11:00" });
+    at("2026-10-23T07:00:00.000Z");
+    const created = (await c.meetings.tick(c.host)).created;
+    const dailyOcc = created.find((x) => x.scheduleId === daily.scheduleId)!.occurrenceId;
+    await c.meetings.settle({ ...c.host, kind: "service" } as Principal, { commandId: "s1", occurrenceId: dailyOcc, outcome: "held" });
+    // Made after the clock passed: these have no meeting of their own yet.
+    const fresh = await c.schedule({ title: "Not yet met" });
+    const weekly = await c.schedule({ title: "Weekly review", recurrence: { kind: "weekly", days: [3, 1] }, time: "10:30", windowTo: "11:00" });
+    const once = await c.schedule({ title: "One-off", recurrence: { kind: "once", date: "2026-11-02" }, time: "09:30" });
+
+    const got = (await c.standups.overview(c.owner, c.a))!;
+    assert.deepEqual(got.items.map((x) => [x.title, x.state, x.recurrence, x.nextAt ?? "-", x.lastAt ?? "-"]), [
+      ["Later review", "active", "daily", "2026-10-23T08:00:00.000Z", "-"],
+      ["Daily stand-up", "active", "daily", "-", "2026-10-23T07:00:00.000Z"],
+      ["Not yet met", "active", "daily", "-", "-"],
+      ["One-off", "active", "once on 2026-11-02", "-", "-"],
+      ["Weekly review", "active", "weekly on Mon, Wed", "-", "-"],
+    ], "the one with a meeting ahead comes first, then the rest by title");
+    assert.deepEqual([got.more, got.ended], [false, 0]);
+    const met = got.items.find((x) => x.scheduleId === daily.scheduleId)!;
+    assert.deepEqual([met.lastOccurrenceId, met.lastState, met.lastRevision, met.occurrences, met.revision], [dailyOcc, "held", 2, 1, met.revision], "the last meeting is the one that was settled, with the revision to cite");
+    assert.deepEqual([met.time, met.timeZone, met.durationMinutes, met.window, met.roster], ["09:00", "Europe/Berlin", 30, { from: "08:00", to: "10:00" }, [c.pA, c.pB].sort()]);
+    const ahead = got.items.find((x) => x.scheduleId === later.scheduleId)!;
+    assert.ok(ahead.nextOccurrenceId !== undefined && ahead.nextRevision !== undefined && ahead.lastAt === undefined, "a meeting ahead, none held yet");
+    assert.deepEqual([got.items.find((x) => x.scheduleId === fresh.scheduleId)!.occurrences, got.items.find((x) => x.scheduleId === weekly.scheduleId)!.occurrences], [0, 0], "a stand-up that has not met is told, not left out");
+    assert.ok(got.items.every((x) => x.scheduleId !== "" && x.title !== ""));
+    assert.ok((await c.standups.overview(c.owner, c.a))!.items.find((x) => x.scheduleId === once.scheduleId) !== undefined);
+
+    // The limit pages the shown kind; `more` says some were left out.
+    const one = (await c.standups.overview(c.owner, c.a, { limit: 2 }))!;
+    assert.deepEqual(one.items.map((x) => x.title), ["Later review", "Daily stand-up"]);
+    assert.equal(one.more, true);
+
+    // An ended stand-up is counted but not shown, unless asked for.
+    const rev = (await c.meetings.schedule(c.owner, once.scheduleId))!.revision;
+    await c.standups.update(c.mgr, { commandId: cid("u"), scheduleId: once.scheduleId, expectedRevision: rev, state: "ended" });
+    const after = (await c.standups.overview(c.owner, c.a))!;
+    assert.ok(!after.items.some((x) => x.scheduleId === once.scheduleId), "an ended stand-up is not one the project is running");
+    assert.equal(after.ended, 1);
+    const withEnded = (await c.standups.overview(c.owner, c.a, { includeEnded: true }))!;
+    assert.deepEqual([withEnded.items.filter((x) => x.scheduleId === once.scheduleId).map((x) => x.state), withEnded.ended], [["ended"], 0]);
+
+    // Who may read it: whoever may read the project's meetings; anyone else gets nothing, and a readable project with none answers an empty list.
+    assert.deepEqual((await c.standups.overview(c.reader, c.a))!.items.map((x) => x.title), after.items.map((x) => x.title));
+    assert.equal(await c.standups.overview(c.eve, c.a), undefined, "a manager of another project sees none");
+    assert.equal(await c.standups.overview(c.dev, c.a), undefined, "an agenda writer without the meeting read sees none");
+    assert.deepEqual(await c.standups.overview(c.owner, c.b), { items: [], more: false, ended: 0 }, "a project with no stand-ups answers an empty list");
+    await refuses("invalid_command", () => c.standups.overview(c.owner, "nope!", {}));
+    await refuses("invalid_command", () => c.standups.overview(c.owner, c.a, { limit: 0 }));
+    await refuses("invalid_command", () => c.standups.overview(c.owner, c.a, { limit: 51 }));
+  });
+
 }
+
