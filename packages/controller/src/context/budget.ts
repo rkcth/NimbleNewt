@@ -185,66 +185,78 @@ export interface NoteCut {
   /** The whole note as it was composed (credentials removed) — what to keep under `digest` when `cut` is set. */
   readonly whole: string;
   readonly cut: boolean;
-  /** Lines of `whole` the cut left out (always the oldest ones; 0 when only the tail of the last kept line went). */
+  /** Lines of `whole` the cut left out: the oldest of each list; when even the head does not fit, every line not shown whole (0 when only the tail of the note's last line went). */
   readonly droppedLines: number;
   readonly droppedChars: number;
   /** `sha256:` of `whole`: the digest a cut names, and the ID the whole text is kept under. */
   readonly digest: string;
 }
 
+/** A list a note carries: its entries in the order they were recorded, oldest first, under an optional heading line of its own. */
+export interface NoteList { readonly heading?: string; readonly lines: readonly string[] }
+
 /**
- * Composes a note that has to fit `maxChars` (card C07p). `head` lines always stay; `list` lines are kept newest first (the list
- * is given in the order it was recorded, oldest first), so a cut never loses the newest entry — the opposite of a plain tail slice.
- * A cut says how much was left out and names where the whole text can be read (`readWith`); without a `readWith` it says honestly
- * that the rest is not kept anywhere. One line per entry, the marker last, and no cut leaves half a character.
+ * Composes a note that has to fit `maxChars` (card C07p). `head` lines always stay; the lines of each list (`list`, then `lists`) are
+ * kept newest first (each list is given in the order it was recorded, oldest first), so a cut never loses a list's newest entry - the
+ * opposite of a plain tail slice. With several lists the cut takes the oldest line of whichever list has the most left, so one long
+ * list does not push every entry of another out; a list's heading stays as long as the list had entries. A cut says how much was left
+ * out and names where the whole text can be read (`readWith`); without a `readWith` it says honestly that the rest is not kept
+ * anywhere. One line per entry, the marker last, and no cut leaves half a character. Credentials are removed line by line, so a
+ * removal can never join two lines and the counts the marker gives are exact.
  * `plainMarker` writes the marker without its brackets, for a note that is itself put inside a bracketed block (a worker's resume
  * note), where a `]` of our own would close that block and let the rest of the note speak as the block's surroundings.
  */
-export function cutNote(input: { readonly head: readonly string[]; readonly list: readonly string[] }, maxChars: number, options: { readonly readWith?: string; readonly plainMarker?: boolean } = {}): NoteCut {
+export function cutNote(input: { readonly head: readonly string[]; readonly list?: readonly string[]; readonly lists?: readonly NoteList[] }, maxChars: number, options: { readonly readWith?: string; readonly plainMarker?: boolean } = {}): NoteCut {
   if (!Number.isSafeInteger(maxChars) || maxChars < NOTE_MIN_CHARS) throw new RangeError(`a note that may be cut is ${NOTE_MIN_CHARS} characters or more`);
-  // Every line of a note is one line: a line break the note itself did not put there would read as the controller speaking (card C07g).
-  const lines = [...input.head, ...input.list].map((l) => l.replace(/[\r\n]+/g, " "));
-  const whole = redactText(lines.join("\n"));
+  // Every line of a note is one line: a line break the note itself did not put there would read as the controller speaking (card C07g). Redacted one line at a time: a credential shape matched across
+  // a line break (`token:` at the end of one line and the next line's first word) would otherwise join two lines, and every count below would be off.
+  const fold = (l: string): string => redactText(l.replace(/[\r\n]+/g, " ")).replace(/[\r\n]+/g, " ");
+  const head = input.head.map(fold);
+  const groups = [...(input.list === undefined ? [] : [{ lines: input.list }]), ...(input.lists ?? [])]
+    .map((g: NoteList) => ({ heading: g.heading === undefined || g.lines.length === 0 ? undefined : fold(g.heading), lines: g.lines.map(fold) }));
+  const render = (from: readonly number[]): string[] => [...head, ...groups.flatMap((g, k) => [...(g.heading === undefined ? [] : [g.heading]), ...g.lines.slice(from[k])])];
+  const all = render(groups.map(() => 0));
+  const whole = all.join("\n");
   const digest = digestOf(whole);
-  const kept = whole.split("\n");
-  const headLines = input.head.length;
-  const markerFor = (dropped: number, chars: number): string => {
-    // `dropped` is 0 when nothing whole went out, only the tail of the last kept line; both forms are shorter than the worst case measured below.
-    const left = dropped === 0 ? `the tail of this note left out (${chars} characters)` : `${dropped} older line${dropped === 1 ? "" : "s"} of this note left out (${chars} characters)`;
+  const markerFor = (kind: "older" | "tail" | "rest", dropped: number, chars: number): string => {
+    const left = kind === "tail" ? `the tail of this note left out (${chars} characters)`
+      : kind === "rest" ? `the rest of this note left out (${dropped} line${dropped === 1 ? "" : "s"}, ${chars} characters)`
+      : `${dropped} older line${dropped === 1 ? "" : "s"} of this note left out (${chars} characters)`;
     const [open, close] = options.plainMarker === true ? ["", ""] : ["[", "]"];
     return options.readWith === undefined
       ? `${open}… ${left}; the whole note was not kept, so the part left out cannot be read${close}`
       : `${open}… ${left}; the whole note is archived for this task as ${digest} — read it with ${options.readWith}, giving this task's ID and that digest${close}`;
   };
   if (whole.length <= maxChars) return { text: whole, whole, cut: false, droppedLines: 0, droppedChars: 0, digest };
-  // Measured at its largest (every list line and character left out), so the note the marker lands on always fits.
-  const worst = markerFor(kept.length, whole.length);
-  if (maxChars < worst.length + 40) throw new RangeError("the note's limit leaves no room for a marker naming where the whole text is kept");
-  // What the list costs from each position on, and what the lines that must be kept cost (each line carries the newline after it, so the last is over-counted by one).
-  const listLines = kept.slice(headLines);
-  const headChars = Math.max(0, kept.slice(0, headLines).reduce((n, l) => n + l.length + 1, 0) - 1);
-  const tail: number[] = new Array(listLines.length + 1).fill(0);
-  for (let i = listLines.length - 1; i >= 0; i--) tail[i] = tail[i + 1]! + listLines[i]!.length + 1;
-  /** Whether the lines that must be kept plus the list from `from` on, with the marker, fit. */
-  const fits = (from: number): boolean => {
-    const listChars = Math.max(0, tail[from]! - 1);
-    const shown = headChars === 0 ? listChars : listChars === 0 ? headChars : headChars + 1 + listChars;
-    return shown + 1 + worst.length <= maxChars;
-  };
-  let from = 0;
-  while (from < listLines.length && !fits(from)) from++;
-  if (!fits(from)) {
-    // Even the lines that must be kept do not fit: the note is cut at its tail, on a whole character, and the marker counts that too.
-    const shown = clipToChar(kept.slice(0, headLines).join("\n"), Math.max(0, maxChars - 1 - worst.length));
-    const dropped = kept.length - shown.split("\n").length;
-    const marker = markerFor(dropped, whole.length - shown.length);
-    const text = shown === "" ? marker : `${shown}\n${marker}`;
-    return { text, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
+  // Measured at its largest (every line and character left out, in its longest form), so the note the marker lands on always fits.
+  const worst = Math.max(...(["older", "tail", "rest"] as const).map((k) => markerFor(k, all.length, whole.length).length));
+  if (maxChars < worst + 40) throw new RangeError("the note's limit leaves no room for a marker naming where the whole text is kept");
+  // The order list lines go in: always the oldest line of the list with the most lines left (the first such list on a tie).
+  const left = groups.map((g) => g.lines.length);
+  const order: number[] = [];
+  for (let n = left.reduce((a, b) => a + b, 0); n > 0; n--) { let k = 0; for (let j = 1; j < left.length; j++) if (left[j]! > left[k]!) k = j; order.push(k); left[k]!--; }
+  const from = groups.map(() => 0);
+  let shownChars = whole.length;
+  let dropped = 0;
+  while (dropped < order.length && shownChars + 1 + worst > maxChars) {
+    const k = order[dropped]!;
+    shownChars -= groups[k]!.lines[from[k]!]!.length + 1;
+    from[k]!++;
+    dropped++;
   }
-  const shown = [...kept.slice(0, headLines), ...listLines.slice(from)].join("\n");
-  const dropped = from;
-  const marker = markerFor(dropped, whole.length - shown.length);
-  return { text: `${shown}\n${marker}`, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
+  if (shownChars + 1 + worst > maxChars) {
+    // Even the lines that must be kept do not fit: the note is cut at its tail, on a whole character, and the marker counts every line that is not shown whole as left out - the list's newest lines too.
+    const shown = clipToChar(head.join("\n"), Math.max(0, maxChars - 1 - worst));
+    const shownLines = shown === "" ? [] : shown.split("\n");
+    const whole0 = shownLines.length === 0 ? 0 : shownLines.length - (shownLines.at(-1) === head[shownLines.length - 1] ? 0 : 1);
+    const gone = all.length - whole0;
+    // Only the tail of the note's last line went: no line is counted as left out, only characters.
+    const tailOnly = gone === 1 && all.length === head.length && shown !== "";
+    const marker = tailOnly ? markerFor("tail", 0, whole.length - shown.length) : markerFor("rest", gone, whole.length - shown.length);
+    return { text: shown === "" ? marker : `${shown}\n${marker}`, whole, cut: true, droppedLines: tailOnly ? 0 : gone, droppedChars: whole.length - shown.length, digest };
+  }
+  const shown = render(from).join("\n");
+  return { text: `${shown}\n${markerFor("older", dropped, whole.length - shown.length)}`, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
 }
 
 export interface HandoffFacts {
@@ -272,12 +284,11 @@ export function handoffNote(facts: HandoffFacts, maxChars = 4000, options: { rea
   ];
   if (facts.nextStep !== undefined) head.push(`Next step recorded: ${quoted(facts.nextStep, 300)}`);
   if (facts.checkpoint !== undefined) head.push(`Checkpoint: position ${facts.checkpoint.at}, ${oneLine(facts.checkpoint.digest, 200)}`);
-  const list = [
-    ...(facts.effects.length > 0 || facts.artifacts.length > 0 ? ["Effects and artifacts, oldest first (a cut leaves the oldest out):"] : []),
-    ...facts.effects.map((e) => `- effect ${oneLine(e.id, 120)} [${oneLine(e.state, 60)}] ${quoted(e.summary, 200)}`),
-    ...facts.artifacts.map((a) => `- artifact ${oneLine(a.id, 120)} ${quoted(a.title, 120)}`),
-  ];
-  return cutNote({ head, list }, maxChars, options);
+  // Two lists, each in the order it was recorded: a cut leaves the oldest of each out, so neither the newest effect nor the newest artifact is the price of the other list's length.
+  return cutNote({ head, lists: [
+    { heading: "Effects, oldest first (a cut leaves the oldest out):", lines: facts.effects.map((e) => `- effect ${oneLine(e.id, 120)} [${oneLine(e.state, 60)}] ${quoted(e.summary, 200)}`) },
+    { heading: "Artifacts, oldest first (a cut leaves the oldest out):", lines: facts.artifacts.map((a) => `- artifact ${oneLine(a.id, 120)} ${quoted(a.title, 120)}`) },
+  ] }, maxChars, options);
 }
 
 /** The hand-off note as the attempt or the next agent is given it (see `handoffNote` for what it keeps and what it names). */

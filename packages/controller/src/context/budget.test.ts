@@ -150,7 +150,7 @@ describe("context budgets (C07)", () => {
     assert.ok(!text.includes("sk-ant-api03"), "no credential");
     assert.match(text, /merged main \(token \[redacted\]\)/, "the credential is removed inside the quoted summary");
     // One line per entry, so nothing an agent wrote in a summary or a title starts a line of its own.
-    assert.equal(text.split("\n").length, 8, text);
+    assert.equal(text.split("\n").length, 9, text);
     const long = handoffFromFacts({ task: "t", endedBecause: "x", effects: Array.from({ length: 500 }, (_, i) => ({ id: `eff-${i}`, state: "confirmed", summary: "s".repeat(50) })), artifacts: [], lastKnownState: "y" }, 1000);
     assert.ok(long.length <= 1000, `${long.length} over the limit`);
     assert.match(long, /older lines of this note left out \(\d+ characters\)/, "the cut does not say what it left out");
@@ -241,6 +241,42 @@ describe("context budgets (C07)", () => {
     const plain = handoffFromFacts({ task: "t", endedBecause: "x", effects, artifacts: [], lastKnownState: "y" }, 1_500);
     assert.ok(!plain.includes(NOTE_ARCHIVE_READ), plain.split("\n").at(-1)!);
     assert.ok(plain.includes("was not kept, so the part left out cannot be read"));
+  });
+
+  test("a cut keeps the newest effect and the newest artifact, under their own headings (C07p review)", () => {
+    // Effects and artifacts are two lists, not one history: a single list cut from its front gave up every effect, the newest included, before the oldest artifact.
+    const effects = Array.from({ length: 60 }, (_, i) => ({ id: `eff-${String(i).padStart(3, "0")}`, state: "confirmed", summary: `effect ${i}` }));
+    const artifacts = Array.from({ length: 60 }, (_, i) => ({ id: `art-${String(i).padStart(3, "0")}`, title: `artifact ${i}` }));
+    const note = handoffNote({ task: "t", endedBecause: "x", effects, artifacts, lastKnownState: "y" }, 1_500, { readWith: NOTE_ARCHIVE_READ });
+    assert.ok(note.cut && note.text.length <= 1_500, `${note.text.length} characters`);
+    assert.ok(note.text.includes("eff-059"), "the newest effect went out to make room for artifacts");
+    assert.ok(note.text.includes("art-059"), "the newest artifact went out");
+    assert.ok(!note.text.includes("eff-000 ") && !note.text.includes("art-000 "), "an oldest entry survived");
+    for (const heading of ["Effects, oldest first", "Artifacts, oldest first"]) assert.ok(note.text.includes(heading), `the heading ${heading} was cut as if it were an entry`);
+    assert.equal(note.droppedLines, note.whole.split("\n").length - note.text.split("\n").length + 1, "the marker's count is not the lines that went");
+    const kept = note.text.split("\n");
+    assert.ok(kept.findIndex((l) => l.startsWith("- artifact")) > kept.findIndex((l) => l.startsWith("Artifacts,")), "an artifact is shown outside its own list");
+  });
+
+  test("removing a credential never joins two lines of a note (C07p review)", () => {
+    // `token:` ends the task line; redacting the whole text at once matched `token:\nLast` as a secret and the line after it was gone.
+    const note = handoffNote({ task: "Rotate the deploy token:", endedBecause: "x", effects: [], artifacts: [], lastKnownState: "rotated" }, 4000);
+    assert.equal(note.whole.split("\n").length, 3, note.whole);
+    assert.match(note.whole, /\nLast known state: "rotated"$/, note.whole);
+    const cut = cutNote({ head: ["Task: Rotate the deploy token:"], list: Array.from({ length: 40 }, (_, i) => `- entry ${i} ${"x".repeat(30)}`) }, 900, { readWith: NOTE_ARCHIVE_READ });
+    assert.equal(cut.whole.split("\n").length, 41, "a line of the whole note was swallowed by the redaction");
+    assert.equal(cut.droppedLines + cut.text.split("\n").length - 1, 41, "the marker does not count every line");
+    assert.ok(cut.text.startsWith("Task: Rotate the deploy token:\n- entry"), cut.text.slice(0, 80));
+  });
+
+  test("a note whose head alone does not fit says the rest went, not that older lines did (C07p review)", () => {
+    // The list's lines are the newest the note has: calling them "older" would tell the reader the newest is in front of them.
+    const note = cutNote({ head: [`Task: ${"x".repeat(800)}`, "Last known state: y"], list: ["- the newest entry"] }, 600, { readWith: NOTE_ARCHIVE_READ });
+    assert.ok(note.cut && note.text.length <= 600);
+    const marker = note.text.split("\n").at(-1)!;
+    assert.match(marker, /the rest of this note left out \(3 lines, \d+ characters\)/, marker);
+    assert.ok(!/older line/.test(marker), marker);
+    assert.equal(note.droppedLines, 3);
   });
 
   test("a note that is put inside a bracketed block cuts without brackets of its own (C07p)", () => {
