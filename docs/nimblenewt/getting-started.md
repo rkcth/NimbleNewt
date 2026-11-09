@@ -125,6 +125,7 @@ await controller.services.routing.setTable(owner, { commandId: "setup-routing-1"
 ### Step 6. Hosts and workers
 
 - Enrol a host: `controller.services.principals.enroll(owner, { commandId, kind: "host", name: "laptop", grants: [] })` and issue it a credential with `issueCredential(owner, "host:laptop")`. The worker on that machine uses the credential to **announce** its capabilities and send heartbeats (`HostService`); `setup.readiness` counts a host only once it has announced.
+- Every route that work runs on needs a known context window: the host's own figure (`dispatch.local.window`, or `window` on each entry of `dispatch.remote.hosts`), else the route's `contextTokens` in the routing table (Step 5). An attempt on a route neither states is refused before its first call, on local and remote hosts alike, with a `context_overflow` blocker naming the route (cards C07n, C07o).
 - Limits for local agents (`workers.limits.set`) and where local-only data may go (`placement.set`; the strict profile allows only hosts you list) are owner settings you can leave at their defaults.
 - **Not built:** a local worker host that starts without hand-built code (the composition itself is H12k, built; a ready-made builder is U14, the product workspace composition H12t), and the Windows sandbox (**A03b**). The sandbox for Linux (bubblewrap) and macOS (Seatbelt) exists (A03). Remote hosts are covered by H07 and the worker transport.
 
