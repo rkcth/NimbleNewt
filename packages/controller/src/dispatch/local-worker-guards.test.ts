@@ -62,6 +62,63 @@ test("a stored conversation over the resume share is not resumed: the runtime st
   assert.deepEqual(small.opened.from, stored, "a conversation that fits is resumed");
 });
 
+// Card C07n: the worker continues a stored conversation only when its size was judged. The checkpoint shape the worker package's host writes is read without an embedder-supplied
+// reader, and a checkpoint that says nothing at all is left behind rather than carried in unchecked.
+test("a checkpoint is judged whether or not the guard brings a reader: the worker package's shape is read, and one that says nothing is not resumed", async () => {
+  const judged: number[] = [];
+  const readers: RuntimeGuards["context"] = { admit: async () => ({ admit: true, reasons: [] }), resume: async (_o, tokens) => { judged.push(tokens); return { resume: tokens < 20_000, reason: `the stored conversation is ${tokens} tokens, over 20000; starting fresh` }; } };
+  // Of the worker package's shape: 30,000 tokens, over the share, so it starts fresh and says why.
+  let content = "";
+  const big = rig(() => ({ run: async (c: string) => { content = c; return { status: "completed" }; } }), { context: readers });
+  await (await big.local.start(order({ resumeFrom: { nn: { contextTokens: 30_000 } } }))).run(gateway());
+  assert.deepEqual(judged, [30_000], "the size was read from the checkpoint's own shape");
+  assert.equal(big.opened.from, undefined, "the runtime did not get the checkpoint");
+  assert.match(content, /the stored conversation is 30000 tokens, over 20000; starting fresh\]$/, "the agent is told why it starts without its conversation");
+  // One that says nothing: no size to judge, so nothing is continued, and it is said in the attempt's note and to the host.
+  const quiet = rig(() => ({ run: async (c: string) => { content = c; return { status: "completed" }; } }), { context: readers });
+  await (await quiet.local.start(order({ resumeFrom: { pi: { conversationId: 7 } } }))).run(gateway());
+  assert.deepEqual(judged, [30_000], "there was no size to judge it against");
+  assert.equal(quiet.opened.from, undefined, "a checkpoint of unknown size is not carried in");
+  assert.match(content, /\[the size of the stored conversation is not known \(its checkpoint does not say\), so it was not resumed; starting fresh from the continuation record\]$/, content.slice(-200));
+  assert.deepEqual(quiet.errors, ["resume decision: the checkpoint does not say how large the stored conversation is"], "the host is told its checkpoints say nothing");
+  // A fitting conversation of the known shape is resumed as before; a worker with no context guard at all is untouched by any of this.
+  const fits = rig(() => ({}), { context: readers });
+  await (await fits.local.start(order({ resumeFrom: { nn: { contextTokens: 900 } } }))).run(gateway());
+  assert.deepEqual(fits.opened.from, { nn: { contextTokens: 900 } }, "a conversation that fits is resumed");
+  const unguarded = rig(() => ({}), {});
+  await (await unguarded.local.start(order({ resumeFrom: { pi: { conversationId: 7 } } }))).run(gateway());
+  assert.deepEqual(unguarded.opened.from, { pi: { conversationId: 7 } }, "a worker without the context guard resumes as it always did");
+});
+
+// Card C07n: a reader that answers nothing is not a pass. The worker package's own checkpoint shape is read after it, so a checkpoint that does carry a figure is still judged on it.
+test("a reader that answers nothing falls back to the checkpoint's own shape: the conversation is judged, and one that says nothing is still not resumed", async () => {
+  const judged: number[] = [];
+  const readers: RuntimeGuards["context"] = { admit: async () => ({ admit: true, reasons: [] }), storedTokens: () => undefined, resume: async (_o, tokens) => { judged.push(tokens); return { resume: tokens < 20_000, reason: `the stored conversation is ${tokens} tokens, over 20000; starting fresh` }; } };
+  let content = "";
+  const known = rig(() => ({ run: async (c: string) => { content = c; return { status: "completed" }; } }), { context: readers });
+  await (await known.local.start(order({ resumeFrom: { pi: { conversationId: 7 }, nn: { contextTokens: 30_000 } } }))).run(gateway());
+  assert.deepEqual(judged, [30_000], "the reader answered nothing and the checkpoint's own figure was not read after it");
+  assert.equal(known.opened.from, undefined, "a conversation over the resume share was carried in unchecked");
+  assert.match(content, /the stored conversation is 30000 tokens, over 20000; starting fresh\]$/, content.slice(-200));
+  assert.deepEqual(known.errors, [], JSON.stringify(known.errors));
+  // A checkpoint that says nothing either: nothing is resumed, and the host is told.
+  const quiet = rig(() => ({ run: async () => ({ status: "completed" }) }), { context: readers });
+  await (await quiet.local.start(order({ resumeFrom: { pi: { conversationId: 7 } } }))).run(gateway());
+  assert.deepEqual(judged, [30_000], "there was no figure to judge it against");
+  assert.equal(quiet.opened.from, undefined, "a checkpoint of unknown size is not carried in");
+  assert.deepEqual(quiet.errors, ["resume decision: the checkpoint does not say how large the stored conversation is"], JSON.stringify(quiet.errors));
+});
+
+test("card C07n: a refusal a smaller call cannot change is final at once (no compaction is spent on it)", async () => {
+  let compacted = 0; const rounds: number[] = [];
+  const r = rig(() => ({ firstCall: () => CALL, compact: async () => { compacted++; } }), { context: { admit: async (_o, _c, round) => { rounds.push(round); return { admit: false, retryable: false, reasons: ["route x/y has no context window the controller knows"] }; }, resume: async () => ({ resume: true, reason: "fits" }) } });
+  const result = await (await r.local.start(order())).run(gateway());
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /no context window the controller knows/);
+  assert.deepEqual(rounds, [1], "the call was asked about once");
+  assert.equal(compacted, 0, "a compaction cannot make a window known");
+});
+
 // Card C07g: a view built for a route nobody had measured is built again with the fixed part the process reports, before anything is sent; the rebuilt view replaces the order's in the first prompt.
 test("a view made on an unmeasured route is rebuilt with the process's own fixed part before the first call: the new view is what is admitted and sent, a refusal sends nothing, and a measured view or a failing rebuild keeps the order's", async () => {
   const VIEW = "\n\nOLD VIEW";

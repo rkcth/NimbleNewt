@@ -293,10 +293,43 @@ for (const backend of backends) {
 
 // Findings checked outside the 50 hops (each a small direct case, `todo` until its card lands).
 
-test("a route whose window the controller does not know is checked anyway: a first call far over any window is not sent", { todo: "C07n: dispatch/runtime-guards.ts:57 admits every first call (and :74 resumes every stored conversation) when the binding's window for the route is undefined" }, async () => {
-  const guards = controllerGuards({ context: { admit: async () => { throw new Error("not asked"); }, budget: (n: number) => contextBudget(n), confirmUsage: async () => { throw new Error("not asked"); } } as never, pause: {} as never, messages: {} as never, system: {} as never, agent: async () => ({}) as never, assignee: async () => ({}) as never, window: () => undefined });
+// Card C07n (this was C07l's finding 2, todo until that card's split landed): a route whose window the binding does not know is never admitted unchecked. It is judged by the routing table's figure for
+// the route when there is one, and refused visibly when there is neither, with a blocker naming the route and where its window is set.
+test("a route whose window the controller does not know is checked anyway: a first call far over any window is not sent", async () => {
+  const asked: string[] = [];
+  const blocked: string[] = [];
+  const binding = { pause: {} as never, messages: {} as never, system: {} as never, agent: async () => ({}) as never, assignee: async () => ({}) as never };
+  const guards = controllerGuards({
+    ...binding,
+    context: {
+      admit: async () => { asked.push("admit"); throw new Error("not asked"); },
+      budget: (n: number) => contextBudget(n),
+      confirmUsage: async () => { asked.push("confirm"); throw new Error("not asked"); },
+      blockUnknownWindow: async (_by: never, command: { route: string; what: string }) => { blocked.push(`${command.what} on ${command.route}`); return { blockerId: "blk-aaaaaaaaaaaaaaaaaaaaaa", reason: `route ${command.route} has no window` }; },
+    } as never,
+    window: () => undefined,
+  });
   const decision = await guards.context!.admit({ attemptId: "att-1", taskId: "tsk-1", route: "unknown/route" } as never, { systemPromptChars: 3_000_000, toolSchemaChars: 0, startupTokens: 0, replyReserveTokens: 0 }, 1);
   assert.equal(decision.admit, false, "a first call of a million tokens on a route of unknown window was admitted");
+  assert.deepEqual(asked, [], "the context service was not asked to judge a call it has no window to judge against");
+  assert.match(decision.reasons.join("; "), /unknown\/route/, "the refusal does not name the route");
+  assert.match(decision.reasons.join("; "), /set its window/, "the refusal does not say how to set the window");
+  assert.deepEqual(blocked, ["first call on unknown/route"], "the owner is told by a blocker");
+  // The same for a stored conversation: it is not continued on a guess, and the owner is told the same way.
+  const resumed = await guards.context!.resume({ attemptId: "att-1", taskId: "tsk-1", route: "unknown/route" } as never, 500);
+  assert.equal(resumed.resume, false, "a stored conversation of a route of unknown window was resumed");
+  assert.match(resumed.reason, /not resumed/, resumed.reason);
+  assert.deepEqual(blocked, ["first call on unknown/route", "stored conversation on unknown/route"], resumed.reason);
+  // A route the routing table does give a figure for is judged on it: the host's own map is not the only source.
+  const judged: number[] = [];
+  const table = controllerGuards({
+    ...binding,
+    context: { admit: async (_by: never, command: { window: number }) => { judged.push(command.window); return { admit: judged.length > 1, reasons: [`startup is over the ${command.window}-token route`] }; }, budget: (n: number) => contextBudget(n), confirmUsage: async () => undefined } as never,
+    window: () => undefined, routeWindow: () => 8192,
+  });
+  assert.equal((await table.context!.admit({ attemptId: "att-2", taskId: "tsk-1", route: "offtable/none" } as never, { systemPromptChars: 3_000_000, toolSchemaChars: 0, startupTokens: 0, replyReserveTokens: 0 }, 1)).admit, false);
+  assert.deepEqual(judged, [8192], "the routing table's figure for the route was used");
+  assert.equal((await table.context!.resume({ attemptId: "att-2", taskId: "tsk-1", route: "offtable/none" } as never, 500)).resume, true, "a conversation that fits the table's window is resumed");
 });
 
 test("the controller's hand-off note that does not fit names where its whole text is kept", { todo: "C07p: context/budget.ts:178 cuts the controller's hand-off note at its tail ([… hand-off cut at N characters]) and keeps no original" }, () => {

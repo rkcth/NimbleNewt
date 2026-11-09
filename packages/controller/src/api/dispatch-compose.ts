@@ -17,7 +17,7 @@ import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -121,8 +121,9 @@ export interface DispatchStartOptions {
    * `LocalWorker` over the operator's sandbox launcher, worker process and model relay; the result is added to `workers`. The worker package holds no controller service: only these functions.
    */
   readonly local?: {
-    /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
+    /** The model's context window for the order's route, in tokens. `undefined` means this host does not state one for the route: the routing table's `contextTokens` for it is used instead, and a route neither says is refused (card C07n). */
     readonly window: (order: WorkOrder) => number | undefined;
+    /** The size of the conversation a checkpoint holds, in tokens. Absent: the controller's own reader of the worker package's checkpoint shape (`checkpointStoredTokens`) judges every stored conversation, so a resume is never left unchecked (card C07n). */
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
     /** What one agent on this host may use (cpus, memoryMb, diskMb, processes), checked at start and handed to `build` as `limits` for the host's `workspace` to carry (`AttemptWorkspace.limits`). Absent: none applied. */
     readonly limits?: LocalWorkerLimits;
@@ -421,14 +422,30 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
   const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, { ...ro, ...(i.contextRouteSettings === undefined ? {} : { routeSettings: i.contextRouteSettings }), ...(i.onError === undefined ? {} : { onError: i.onError }) });
   /**
+   * Card C07n: the context window a route carries in the owner's routing table (its `contextTokens`). Asked when the host's own figure does not know the route, so a route missing from the host's map is still
+   * checked against what the owner configured for it. A route neither says is refused by the guards (never admitted unchecked) with a blocker naming it.
+   */
+  const tableWindow = async (route: string): Promise<number | undefined> => {
+    try { return usableWindow((await i.routing.get())?.routes[route]?.contextTokens); } catch (error) { i.onError?.(error); return undefined; }
+  };
+  /**
+   * The window of an order's route: the local host's own figure when it is one, else the routing table's (card C07n). `undefined` when neither says. The same rule as the guards' `windowOf` (C07n second review): a host
+   * figure that is no window (0, negative, fractional, NaN) asks the routing table, so the route-move rebuild and the first-call admission never judge one attempt against two different windows.
+   */
+  const windowOfRoute = async (order: WorkOrder): Promise<number | undefined> => {
+    let own: number | undefined;
+    try { own = usableWindow(i.options.local?.window(order)); } catch { own = undefined; }
+    return own ?? await tableWindow(order.route);
+  };
+  /**
    * A task's context built again for the route an attempt moves to (cards C07f, C07g): the owner's decision record as startup items, cut to the route's window and measured fixed part. `undefined` when there is nothing to build
    * for (the owner turned the check off, or the route says no window); otherwise the context service's answer, with the view the first prompt carries.
    */
   const moveContext = async (c: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string }, promptChars: number): Promise<Awaited<ReturnType<ContextEnforcementService["routeMoved"]>> | undefined> => {
     // The owner can turn the check off (chat-settable; on by default): the attempt then starts as it did before.
     if (i.contextRouteSettings !== undefined && !(await i.contextRouteSettings.effective()).check) return undefined;
-    // The window of the new route (the local host's, else the routing table's); a route that says none has nothing to rebuild for (the first call on it is still checked by admission).
-    const window = (() => { try { return i.options.local?.window({ route: c.route } as WorkOrder); } catch { return undefined; } })() ?? (await i.routing.get())?.routes[c.route]?.contextTokens;
+    // The window of the new route (the local host's, else the routing table's, card C07n); a route that says none has nothing to rebuild for (its first call is refused as unchecked).
+    const window = await windowOfRoute({ route: c.route } as WorkOrder);
     if (window === undefined) return undefined;
     // Read as the controller: the dispatcher's own principal holds no project grants, and through `context` it would read nothing (the C07f hook was built on an empty record until card C07g).
     const record = await decisions.controllerContext({ projectId: c.projectId, taskId: c.taskId });
@@ -454,7 +471,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       agent: (order) => i.taskCredentials.authenticate(order.credential),
       assignee: (order) => i.taskCredentials.agentOf(principal, order.attemptId),
       window: i.options.local.window,
-      ...(i.options.local.storedTokens === undefined ? {} : { storedTokens: i.options.local.storedTokens }),
+      // Card C07n: a route the host's figure does not know is checked against the routing table's `contextTokens` for it; a route neither says is refused with a blocker, never admitted unchecked.
+      // A routing table that cannot be read is not a route without a window (C07n review): the error reaches the guards, so the call is refused as unchecked without a blocker telling the owner to set a figure
+      // that is already set, and a stored conversation starts fresh.
+      routeWindow: async (order) => (await i.routing.get())?.routes[order.route]?.contextTokens,
+      // And a stored conversation is judged whatever the embedder passed: a checkpoint of the worker package's shape says its size, and one that says nothing is not resumed.
+      storedTokens: i.options.local.storedTokens ?? checkpointStoredTokens,
       // Card C07g: the worker's process is up and says what it sends besides the prompt; the route is measured with that, and the view built again on the measured figure before the first call.
       rebuildView: async (order, fixed, launch, promptChars) => {
         await context.measureRoute(principal, { taskId: order.taskId, attemptId: order.attemptId, launch, route: order.route, ...(order.harness === undefined ? {} : { harness: order.harness }), systemPromptChars: fixed.systemPromptChars, toolSchemaChars: fixed.toolSchemaChars });

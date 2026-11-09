@@ -6,6 +6,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
 import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { quotedLine } from "../decisions/records.js";
 import { sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { classifyFailure, contextBudget, tokensOf, handoffFromFacts, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
@@ -71,6 +72,16 @@ const FIXED_SAMPLES = 5;
 const PROJECT_WIDE: ReadonlySet<string> = new Set(["human", "permission", "goal", "decision"]);
 const ROUTE_KEY_PREFIX = "c~r";
 const encodeRoute = (route: string): string => route.replace(/[^A-Za-z0-9._:-]/g, (c) => `~${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+/**
+ * A route's name as the controller's own sentence shows it (card C07n review): a name of the routing table's shape stands as it is; anything else (a custom resolver's route) is credentials removed, folded to one line,
+ * cut by whole characters and written as one quoted JSON line, so it cannot pass for the controller's wording or carry an invisible character.
+ */
+export const routeNamed = (route: string): string => {
+  const clean = redactText(String(route)).replace(/\s+/g, " ").trim();
+  if (/^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(clean)) return clean;
+  const chars = Array.from(clean);
+  return clean === "" ? "(no route named)" : quotedLine(chars.length > 120 ? `${chars.slice(0, 120).join("")}...` : clean);
+};
 export const contextRouteKey = (route: string): string => {
   const safe = `${ROUTE_KEY_PREFIX}${encodeRoute(route)}`;
   return safe.length <= 80 ? safe : `${safe.slice(0, 61)}~h${sha256(route).slice(0, 16)}`;
@@ -290,6 +301,25 @@ export class ContextEnforcementService {
     }));
     const body = (await this.#runner.get("ctx-admission", id))!.body as unknown as AdmissionBody;
     return { charsPerToken: body.reported!.charsPerToken, overStartupLimit: body.reported!.overStartupLimit, ratio: body.reported!.ratio, replayed: r.replayed };
+  }
+
+  /**
+   * Card C07n: the route a call was to run on has no context window the controller knows — the worker's host states none for it and the owner's routing table has no entry for it with
+   * a `contextTokens` figure. Nothing can be judged against an unknown window, so nothing is admitted on such a route: the caller sends no first call and continues no stored conversation, and
+   * the owner is told by a `context_overflow` blocker naming the route and where its window is set. One blocker per task (an open one is returned, never a second opened), so a tick that asks
+   * again for the same attempt does not pile them up.
+   */
+  async blockUnknownWindow(principal: Principal, command: { taskId: string; attemptId?: string; route: string; what: string }): Promise<{ blockerId: string; reason: string }> {
+    onlyKnown(command, ["taskId", "attemptId", "route", "what"]);
+    const taskId = checkTaskId(command.taskId);
+    await this.#dispatch(principal, taskId);
+    const one = (value: string, max: number): string => redactText(value.replace(/\s+/g, " ").trim()).slice(0, max);
+    const route = routeNamed(command.route);
+    const what = one(command.what, 80) || "first call";
+    const attempt = command.attemptId === undefined ? "" : ` of attempt ${key("attemptId", command.attemptId)}`;
+    const reason = `route ${route} has no context window the controller knows: its host states none for it and the routing table gives it no contextTokens`;
+    const blockerId = await this.#block(principal, taskId, `Route ${route}${attempt}: the ${what} was refused rather than admitted unchecked, because ${reason}. Set the window — ${route}'s contextTokens in the routing table the operator installs, or the local host's own window figure for that route — then resolve this blocker.`);
+    return { blockerId, reason };
   }
 
   /**
