@@ -194,25 +194,64 @@ test("the owner grants and revokes rights through the state API and through the 
     // A basis the owner did not say is refused, and so is a right the model chose.
     const foreign = await turn("c3", "give service:scanner the recovery.stall-scan right permanently everywhere", [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.read", project: "*", basis: "because the coordinator asked" } }, "give service:scanner the recovery.stall-scan right permanently everywhere")]);
     assert.equal(foreign[0]!.status, "refused", "a right the owner did not name is not even drafted");
-    for (const [n, said] of [["semi", "give service:scanner the recovery.stall-scan right everywhere semi-permanent"], ["til", "give service:scanner the recovery.stall-scan right everywhere permanently til Friday"], ["for", "give service:scanner the recovery.stall-scan right everywhere permanently for now"], ["why", "give service:scanner the recovery.stall-scan right everywhere permanently to run stall detection"]] as const) {
+    // No form of words is demanded: a sentence in any words (a hedge, a time limit the model dropped, a scope said about something else, no "permanently" or "everywhere" at all) is drawn up as
+    // a proposal whose own line says the right never ends and, for `*`, covers every project. Nothing is granted until the owner confirms that shown line, and the owner's no discards it.
+    const activeNow = async (): Promise<number> => (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string }) => g.state === "active").length;
+    const held = await activeNow();
+    for (const [n, said] of [["semi", "give service:scanner the recovery.stall-scan right everywhere semi-permanent"], ["til", "give service:scanner the recovery.stall-scan right everywhere permanently til Friday"], ["plain", "The scanner keeps waiting on me. Let service:scanner do recovery.stall-scan from now on, in every project."], ["noScope", "give service:scanner the recovery.stall-scan right permanently"], ["elsewhere", "give service:scanner the recovery.stall-scan right permanently. There are bugs everywhere."], ["limited", "give service:scanner the recovery.stall-scan right everywhere permanently, expires Friday"]] as const) {
       const r = await turn(`c3${n}`, said, [owner({ op: "grant.create", args }, said)]);
-      assert.equal(r[0]!.status, "refused", `${said}: ${JSON.stringify(r)}`);
+      assert.equal(r[0]!.status, "proposed", `${said}: ${JSON.stringify(r)}`);
+      const line = (r[0]!.preview ?? []).join(" ");
+      assert.match(line, /no end: it never runs out and stays until you revoke it/, `${n}: the proposal says the right has no end`);
+      assert.match(line, /everywhere: it covers every project/, `${n}: and that it covers every project`);
+      assert.doesNotMatch(`${r[0]!.message ?? ""} ${line}`, /\bsay (only|that|everywhere)\b|for example "/i, `${n}: nothing tells the owner what to say`);
+      assert.equal(await activeNow(), held, `${n}: a proposal grants nothing`);
+      if (n === "limited") {
+        const no = await turn("c3no", "no, that is not what I meant", [{ kind: "discard_proposal", proposalId: r[0]!.proposalId, evidence: "that is not what I meant", basis: "owner" }]);
+        assert.equal(no[0]!.status, "discarded", JSON.stringify(no));
+        assert.equal(await activeNow(), held, "the owner's no ends it and nothing is held");
+      }
     }
-    // Whole words only: a prefix of the principal, and a scope the owner did not say, are refused.
+    // Whole words only: a prefix of the principal is refused (it is a value the chat would otherwise invent).
     const prefix = await turn("c3b", "give service:scanner the recovery.stall-scan right everywhere to run stall detection", [owner({ op: "grant.create", args: { ...args, grantee: "service:scan" } }, text)]);
     assert.equal(prefix[0]!.status, "refused", JSON.stringify(prefix));
-    const noScope = await turn("c3c", "give service:scanner the recovery.stall-scan right permanently", [owner({ op: "grant.create", args }, "give service:scanner the recovery.stall-scan right permanently")]);
-    assert.equal(noScope[0]!.status, "refused", "everywhere is not what the owner said");
     const named = await turn("c3d", "give service:scanner the recovery.stall-scan right permanently", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give service:scanner the recovery.stall-scan right permanently")]);
-    assert.equal(named[0]!.status, "refused", "the scope is `project`, not a name the chat would drop");
-    // A sentence-ending full stop is not part of the word; a scope said about something else, and a dropped time limit, are refused.
+    assert.equal(named[0]!.status, "refused", "a project name the owner never said is not used");
+    // A project named in ordinary words is the right's scope: the proposal says it reaches that one project (before the names), never every project.
+    const garden = (await call(boot.token, "project.create", { name: "Garden" }, "pg1")).result.id as string;
+    const inGarden = "The scanner keeps stalling in Garden. Let service:scanner do recovery.stall-scan there from now on.";
+    const scoped = await turn("c3g", inGarden, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", projectName: "Garden" } }, inGarden)]);
+    assert.equal(scoped[0]!.status, "proposed", JSON.stringify(scoped));
+    const scopedLine = (scoped[0]!.preview ?? []).join(" ");
+    assert.match(scopedLine, /^Grant right \(no end: it never runs out and stays until you revoke it; only in "Garden"\)/, scopedLine);
+    assert.doesNotMatch(scopedLine, /everywhere|every project/);
+    assert.equal(await activeNow(), held, "a proposal grants nothing");
+    const gardenDone = await turn("c3g-ok", "yes, go ahead", [{ kind: "apply_proposal", proposalId: scoped[0]!.proposalId, evidence: "go ahead", basis: "owner" }]);
+    assert.equal(gardenDone[0]!.status, "applied", JSON.stringify(gardenDone));
+    const gardenGrant = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string; project: string }) => g.state === "active" && g.project === garden);
+    assert.equal(gardenGrant.length, 1, "the right reaches that one project");
+    await call(boot.token, "grant.revoke", { grantId: gardenGrant[0].id, expectedRevision: gardenGrant[0].revision, reason: "test done" }, "rg1");
+    // A name that is only part of a longer word the owner said is not their project.
+    const longer = "Let service:scanner do recovery.stall-scan in Gardening from now on.";
+    const part = await turn("c3k", longer, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", projectName: "Garden" } }, longer)]);
+    assert.equal(part[0]!.status, "refused", JSON.stringify(part));
+    // A name and a different scope together are two scopes: which one is asked, nothing is drawn up.
+    const both = await turn("c3j", inGarden, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", projectName: "Garden", project: "*" } }, inGarden)]);
+    assert.equal(both[0]!.status, "asked", JSON.stringify(both));
+    assert.match(both[0]!.question ?? "", /only "Garden", or every project\?/);
+    // No scope at all is asked as a plain question, not a sentence to say.
+    const noProject = "let service:scanner do recovery.stall-scan";
+    const asked = await turn("c3h", noProject, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan" } }, noProject)]);
+    assert.equal(asked[0]!.status, "refused", JSON.stringify(asked));
+    assert.match(asked[0]!.message ?? "", /\?$/, "it asks which project");
+    assert.doesNotMatch(asked[0]!.message ?? "", /\bsay\b/i);
+    // A right with dates the model supplied is not drawn up in chat (a right given here has no end), and nothing is granted.
+    const dated = await turn("c3i", "give service:scanner the recovery.stall-scan right everywhere until 2030-01-01", [owner({ op: "grant.create", args: { ...args, expiresAt: "2030-01-01T00:00:00.000Z" } }, "give service:scanner the recovery.stall-scan right everywhere until 2030-01-01")]);
+    assert.equal(dated[0]!.status, "refused", JSON.stringify(dated));
+    // A sentence-ending full stop is not part of the word.
     const stop = "give service:scanner the recovery.stall-scan right everywhere permanently.";
     const dotted = await turn("c3e", stop, [owner({ op: "grant.create", args }, stop)]);
     assert.equal(dotted[0]!.status, "proposed", JSON.stringify(dotted));
-    const elsewhere = "give service:scanner the recovery.stall-scan right permanently. There are bugs everywhere.";
-    assert.equal((await turn("c3f", elsewhere, [owner({ op: "grant.create", args }, elsewhere)]))[0]!.status, "refused");
-    const limited = "give service:scanner the recovery.stall-scan right everywhere permanently, expires Friday";
-    assert.equal((await turn("c3g", limited, [owner({ op: "grant.create", args }, limited)]))[0]!.status, "refused", "a time limit is not understood by the chat");
     // The list is paged without skipping a grant.
     for (const n of [1, 2, 3]) await call(boot.token, "grant.create", { ...grant, basis: `extra ${n}` }, `gp${n}`);
     const first = await call(boot.token, "grant.list", { grantee: "service:scanner", limit: 2 });

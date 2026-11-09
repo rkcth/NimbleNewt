@@ -62,7 +62,7 @@ for (const backend of backends) {
     script["all the tools"] = [ask({ kind: "tools", projectId: a, extra: 1 }, "all the tools")];
     const chat = w.chat({ status });
     const noFocus = await chat.submit(w.ownerToken, { messageId: "m-1", text: "what changed since yesterday" });
-    assert.deepEqual([noFocus.outcomes[0]!.status, noFocus.outcomes[0]!.message], ["refused", "Say which project you mean."]);
+    assert.deepEqual([noFocus.outcomes[0]!.status, noFocus.outcomes[0]!.message], ["refused", "Which project do you mean?"]);
     await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
     const focused = await chat.submit(w.ownerToken, { messageId: "m-2", text: "what changed since yesterday" });
     assert.equal(focused.outcomes[0]!.status, "answered");

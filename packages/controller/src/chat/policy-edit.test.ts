@@ -370,7 +370,7 @@ for (const backend of backends) {
     assert.equal((await c.policy.evaluate({ principalId: ann, projectId: c.a, tool: "git-commit", environment: "staging" })).mode, "owner");
   });
 
-  suite("a stated length or date is used exactly; a grant that could never be waived or has no limits is refused", async (c, script) => {
+  suite("a stated length or date is used exactly; a grant that could never be waived is refused and one missing its audience or ceiling is asked about", async (c, script) => {
     const ann = "agent:ann";
     const week = `Let ${ann} push in development for a week.`;
     script[week] = [pe({ type: "grant", grantee: ann, approve: { class: "push" }, lengthDays: 7 }, "push in development")];
@@ -390,8 +390,18 @@ for (const backend of backends) {
       assert.match(r.reply[0]!, pattern);
     };
     await refusal(`Let ${ann} change access whenever.`, { type: "grant", grantee: ann, approve: { class: "access-change" } }, "stays_decision", /always stays your decision/);
-    await refusal(`Let ${ann} send mail to anyone.`, { type: "grant", grantee: ann, approve: { class: "external-send" } }, "needs_audience", /per account and audience/);
-    await refusal(`Let ${ann} spend money freely.`, { type: "grant", grantee: ann, approve: { class: "spend" } }, "needs_limit", /state its limit/);
+    // What a grant lacks is asked about in the chat's own words, not refused for not using a phrase (card U04, shown-proposal redesign).
+    const asks = async (text: string, change: Record<string, unknown>, pattern: RegExp) => {
+      script[text] = [pe(change, text.slice(4, 40))];
+      const before = (await c.grants.held(ann, NOW)).length;
+      const r = await c.say(text);
+      const o = only(r.outcomes);
+      assert.equal(o.status, "asked", JSON.stringify(o));
+      assert.match(o.question!, pattern, JSON.stringify(o));
+      assert.equal((await c.grants.held(ann, NOW)).length, before, `"${text}" grants nothing while the question stands`);
+    };
+    await asks(`Let ${ann} send mail to anyone.`, { type: "grant", grantee: ann, approve: { class: "external-send" } }, /which account or audience/i);
+    await asks(`Let ${ann} spend money freely.`, { type: "grant", grantee: ann, approve: { class: "spend" } }, /how much.*spend/i);
     await refusal(`Let ${ann} use mystery-tool freely.`, { type: "grant", grantee: ann, approve: { tool: "mystery-tool" } }, "unsupported", /not a classified action/);
     await refusal(`Let nobody-here commit to things.`, { type: "grant", grantee: "nobody-here", approve: { class: "commit" } }, "not_found", /no active agent/);
     // sends and spending are granted per audience and with a limit
@@ -888,16 +898,13 @@ for (const backend of backends) {
     assert.match(JSON.stringify(permit.draft), /Only the owner, for the whole installation, can set it past its default/);
   });
 
-  suite("a grant may have no end when the owner says so; it is shown as permanent, never expires, and a replay makes one grant", async (c, script) => {
+  suite("a grant with no end is a proposal that says it never ends; it is not applied unseen, a replay makes one grant, and only the owner can apply it", async (c, script) => {
     const ann = "agent:ann";
-    // the model cannot add 'no end' that the owner never said
-    script[`Let ${ann} commit in development.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development")];
-    assert.equal(only((await c.say(`Let ${ann} commit in development.`)).outcomes).code, "unsupported_value");
     script[`Let ${ann} commit in development permanently.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development permanently")];
     const r = await c.say(`Let ${ann} commit in development permanently.`);
     const o = only(r.outcomes);
     assert.equal(o.status, "proposed", JSON.stringify(o));
-    assert.match(r.reply[0]!, /Length: no end .*permanent: it has no end time/);
+    assert.match(r.reply[0]!, /Length: no end .*no end date is recorded on it/);
     assert.match(r.reply[0]!, /does not expire by itself/);
     assert.deepEqual(await c.grants.held(ann, NOW), [], "shown first, no grant yet");
     const first = await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId! });
@@ -947,21 +954,19 @@ for (const backend of backends) {
     assert.equal((await c.grants.held(ann, NOW))[0]!.body.expiresAt, new Date(Date.parse(NOW) + 14 * DAY).toISOString());
   });
 
-  suite("a spending grant may state 'no limit' explicitly: only in the owner's words, still a proposal, and it spends without a ceiling", async (c, script) => {
+  suite("a spending grant with no ceiling is still a proposal, and it spends without a ceiling; without a stated ceiling the chat asks how much", async (c, script) => {
     const ann = "agent:ann";
-    script[`Let ${ann} spend in staging for a week.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" }, spendLimit: null, environments: ["staging"], lengthDays: 7 }, "spend in staging for a week")];
-    assert.equal(only((await c.say(`Let ${ann} spend in staging for a week.`)).outcomes).code, "unsupported_value");
     script[`Let ${ann} spend in staging for a week with no limit.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" }, spendLimit: null, environments: ["staging"], lengthDays: 7 }, "spend in staging for a week with no limit")];
     const r = await c.say(`Let ${ann} spend in staging for a week with no limit.`);
     const o = only(r.outcomes);
     assert.equal(o.status, "proposed", JSON.stringify(o));
-    assert.match(r.reply[0]!, /Spend limit: none, as you said/);
+    assert.match(r.reply[0]!, /Spend limit: none\./);
     assert.equal((await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId! })).status, "applied");
     const g = (await c.grants.held(ann, NOW))[0]!.body;
     assert.deepEqual([g.terms?.spendUnlimited, g.terms?.spendLimit], [true, undefined]);
-    // without saying anything about the limit it is still refused
+    // without any ceiling at all the chat asks, in its own words
     script[`Let ${ann} spend money.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" } }, "spend money")];
-    assert.equal(only((await c.say(`Let ${ann} spend money.`)).outcomes).code, "needs_limit");
+    assert.equal(only((await c.say(`Let ${ann} spend money.`)).outcomes).status, "asked");
   });
 
   suite("a large finite length cannot stand in for 'no end': the number must be in the owner's words and under the ceiling, and a date that cannot be held is a refusal, not a crash", async (c, script) => {
@@ -974,20 +979,6 @@ for (const backend of backends) {
     assert.equal(only((await c.say(`Let ${ann} commit in development for 36500 days.`)).outcomes).status, "proposed", "the ceiling itself is allowed");
     assert.equal(chooseGrantLength({ now: NOW, lengthDays: 36501 }).ok, false);
     assert.equal(chooseGrantLength({ now: NOW, until: "+275760-09-13T00:00:00Z" }).ok, false);
-  });
-
-  suite("'no end' and 'no limit' words are read per sentence with negation: 'don't make it permanent', 'this is taking forever' and 'not unlimited' do not count", async (c, script) => {
-    const ann = "agent:ann";
-    for (const said of [`Let ${ann} commit in development, don't make it permanent.`, `This is taking forever, let ${ann} commit in development.`, `Let ${ann} commit in development. It should not never expire? Maybe permanent.`]) {
-      script[said] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development")];
-      assert.equal(only((await c.say(said)).outcomes).code, "unsupported_value", said);
-    }
-    const nolimit = `Let ${ann} spend in staging for a week, but not unlimited.`;
-    script[nolimit] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" }, spendLimit: null, environments: ["staging"], lengthDays: 7 }, "spend in staging for a week")];
-    assert.equal(only((await c.say(nolimit)).outcomes).code, "unsupported_value");
-    assert.equal(saysWords(/\b(permanent(ly)?|forever)\b/i, "Make it permanent."), true);
-    assert.equal(saysWords(/\b(permanent(ly)?|forever)\b/i, "Keep it forever, please."), true);
-    assert.equal(saysWords(/\b(permanent(ly)?|forever)\b/i, "Is it permanent?"), false);
   });
 
   suite("a grant whose decision fixed neither an end time nor permanence is not made", async (c, script) => {
@@ -1003,7 +994,7 @@ for (const backend of backends) {
   });
 }
 
-test("saysWords: curly quotes negate, a negation must govern the words, and 'never expires' is a no-end word", () => {
+test("saysWords (kept for the host-move order): curly quotes negate, and a negation must govern the words", () => {
   const permanent = /\bpermanent(ly)?\b|\bno\s+end\b|\bnever\s+expires?\b|\bdoesn'?t\s+expire\b/i;
   assert.equal(saysWords(permanent, "Don’t make it permanent."), false, "curly apostrophe");
   assert.equal(saysWords(permanent, "Don't make it permanent."), false);

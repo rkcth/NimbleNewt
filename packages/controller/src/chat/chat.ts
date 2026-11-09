@@ -435,7 +435,7 @@ export class ChatService {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
         if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "timeline"].includes(String(request["kind"]))) {
-          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
         // A task's activity, explanations, replay, hand-off or stop cleanup is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
@@ -443,7 +443,7 @@ export class ChatService {
         if (request["kind"] === "stop_cleanup" && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
         if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
         if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
-          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           const wanted = request["taskTitle"];
           const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
           // One exact match decides. Several, or only partial matches, are listed and the owner is asked; nothing is read until the owner says which.
@@ -465,7 +465,7 @@ export class ChatService {
           delete request["agentName"];
           if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) { push({ i, kind: "refused", code: "invalid_command", message: "meetingTopic and agentName must be text" }); continue; }
           if (request["occurrenceId"] === undefined) {
-            if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+            if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
             const recent = await this.#get(token, "standup.recent", { projectId: currentFocus.projectId, limit: 50 });
             const all = (recent?.["items"] as Record<string, unknown>[] | undefined) ?? [];
             const words = typeof topic === "string" ? topic : "";
@@ -508,7 +508,7 @@ export class ChatService {
         let target: string | undefined;
         if (intent.action === "answer" || intent.action === "decompose" || intent.action === "assign") {
           const found = intent.projectId === undefined && intent.projectName === undefined ? (currentFocus.projectId === undefined ? undefined : { ok: true as const, id: currentFocus.projectId, name: currentFocus.projectName ?? "" }) : await this.#projectByIntent(token, intent.projectId, intent.projectName);
-          if (found === undefined) { const ask = await this.#askProject(); push(ask.ok ? { i, kind: "refused", code: "invalid_command", message: "Say which project you mean." } : askOrRefuse(i, ask, n)); continue; }
+          if (found === undefined) { const ask = await this.#askProject(); push(ask.ok ? { i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" } : askOrRefuse(i, ask, n)); continue; }
           if (!found.ok) { push(askOrRefuse(i, found, n)); continue; }
           target = found.id;
           projectId = found.id;
@@ -742,26 +742,37 @@ export class ChatService {
 
     // A right is only what the owner said: the principal, the action, the grant and the scope must each appear in the message as a whole word, never as a part of a longer one.
     if (intent.op.startsWith("grant.")) {
-      if (args["projectName"] !== undefined || args["projectId"] !== undefined) return refuse("invalid_command", "a right names its scope as `project`: a project ID, or * for everywhere");
+      if (args["projectId"] !== undefined) return refuse("invalid_command", "projectId is not an argument of a right; its scope is `project`");
       for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
+      // A project the owner named by its name (already checked above to be in their own words) is the right's scope: the project with exactly that name, or a question when several have it.
+      // A name and a different `project` together are two scopes, and which one the owner meant is asked rather than picked.
+      const named = args["projectName"];
+      delete args["projectName"];
+      if (named !== undefined && intent.op !== "grant.create") return refuse("invalid_command", "projectName is not an argument of this operation");
+      if (named !== undefined) {
+        if (typeof named !== "string") return refuse("invalid_command", "projectName must be text");
+        if (!wholeWord(words, named.trim())) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Which project should this right cover?");
+        const found = await this.#projectByIntent(token, undefined, named);
+        if (!found.ok) return found.kind === "ask" ? { ok: false, kind: "ask", question: found.question, options: found.options } : found;
+        if (args["project"] !== undefined && args["project"] !== found.id) return { ok: false, kind: "ask", question: `Should this right cover only "${found.name.slice(0, 80)}", or ${args["project"] === "*" ? "every project" : "another project"}?`, options: [] };
+        args["project"] = found.id;
+        labels[found.id] = found.name;
+      }
       if (intent.op === "grant.create") {
         const scope = args["project"];
-        // The chat gives a right only in one plain form, so nothing can limit, negate or change it unseen: "give <principal> the <action> right everywhere permanently" (or in <project ID>). Every word that is not one of those, or filler from a short fixed list, refuses the message; the reason recorded with the right is the owner's message itself.
-        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "the chat gives rights with no time limit; for a limited right use the grant.create operation with expiresAt");
-        const FILL = new Set(["please", "give", "grant", "allow", "let", "the", "right", "permission", "access", "to", "everywhere", "permanently", "in", "all", "every", "projects", "project"]);
-        let rest = words.toLowerCase();
-        for (const v of [args["grantee"], args["action"], scope]) if (typeof v === "string" && v !== "*") rest = rest.split(v.toLowerCase()).join(" ");
-        const leftover = rest.split(/[\s,;.!?:]+/).filter((w) => w.length > 0 && w !== "*" && !FILL.has(w));
-        if (leftover.length > 0) return refuse("unsupported_value", `"${leftover[0]!.slice(0, 40)}" is not understood in a request for a right. Say only: give <who> the <action> right everywhere permanently (a limited right uses the grant.create operation).`);
-        if (!/\bpermanently\b/i.test(words)) return refuse("unsupported_value", "say that the right is permanent: give <who> the <action> right everywhere permanently");
+        // A right given in chat has no end and is always a proposal (`grant.*` is shown first in every profile). Its consequence (no end; every project when the scope is `*`) is stated on the proposal
+        // line itself (`describe`), and the owner's confirmation of that shown proposal is the consent: nothing here reads the owner's wording for "permanently" or "everywhere", and nothing tells them
+        // what to say. A negated, limited or conditional sentence the interpreter read as a plain grant is still only shown, and the owner's no ends it. The reason recorded is the owner's message itself.
+        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "a right given in chat has no end date, so a right that ends or starts later was not drawn up here; it can be made through the grant.create operation with its dates");
         args["basis"] = `owner chat: ${words}`.slice(0, 200);
-        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(words)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
+        if (scope === "*") { /* every project: the proposal says so */ }
+        else if (typeof scope === "string" && named !== undefined) { /* resolved from the name the owner said, above */ }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
           const found = await this.#projectByIntent(token, scope, undefined);
           if (!found.ok) return found;
           labels[found.id] = found.name;
-        } else return refuse("invalid_command", "which project? Name its ID, or say everywhere.");
+        } else return refuse("invalid_command", "Which project should this right cover, or should it cover every project?");
       }
     }
 
@@ -2107,7 +2118,7 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
         for (const l of o.lines ?? []) lines.push(`${l.text} [${l.cites.map((c) => `${c.kind} ${c.id}`).join(", ")}]`);
         if (o.moreLines !== undefined) lines.push(`${o.moreLines} more line${o.moreLines === 1 ? "" : "s"} not shown; ask for a narrower view.`);
         break;
-      case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId}: say to apply it, or to discard it.` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
+      case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId} waits for your word: apply it, or discard it?` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Apply it, or discard it?`); break;
       case "applied":
         if (!(o.op === "decision.record" && o.shown !== undefined)) lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
         // A captured or corrected agenda topic is shown as it now reads, so the owner can check it.
