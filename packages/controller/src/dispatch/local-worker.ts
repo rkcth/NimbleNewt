@@ -257,7 +257,9 @@ export class LocalWorker implements WorkerHost {
     const startFresh = (why: string): void => { from = undefined; note = note === undefined ? why : `${note}\n${why}`; };
     if (from !== undefined && guards?.context !== undefined) {
       try {
-        const stored = guards.context.storedTokens?.(from) ?? checkpointStoredTokens(from);
+        // The reader the host was given answers where it gives a figure; where it answers nothing, the worker package's own checkpoint shape is read (card C07n).
+        const byReader = await guards.context.storedTokens?.(from);
+        const stored = byReader === undefined ? await checkpointStoredTokens(from) : byReader;
         if (stored === undefined) {
           report("resume decision", new Error("the checkpoint does not say how large the stored conversation is"));
           startFresh("the size of the stored conversation is not known (its checkpoint does not say), so it was not resumed; starting fresh from the continuation record");

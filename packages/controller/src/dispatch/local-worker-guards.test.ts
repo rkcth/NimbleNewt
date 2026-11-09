@@ -90,6 +90,25 @@ test("a checkpoint is judged whether or not the guard brings a reader: the worke
   assert.deepEqual(unguarded.opened.from, { pi: { conversationId: 7 } }, "a worker without the context guard resumes as it always did");
 });
 
+// Card C07n: a reader that answers nothing is not a pass. The worker package's own checkpoint shape is read after it, so a checkpoint that does carry a figure is still judged on it.
+test("a reader that answers nothing falls back to the checkpoint's own shape: the conversation is judged, and one that says nothing is still not resumed", async () => {
+  const judged: number[] = [];
+  const readers: RuntimeGuards["context"] = { admit: async () => ({ admit: true, reasons: [] }), storedTokens: () => undefined, resume: async (_o, tokens) => { judged.push(tokens); return { resume: tokens < 20_000, reason: `the stored conversation is ${tokens} tokens, over 20000; starting fresh` }; } };
+  let content = "";
+  const known = rig(() => ({ run: async (c: string) => { content = c; return { status: "completed" }; } }), { context: readers });
+  await (await known.local.start(order({ resumeFrom: { pi: { conversationId: 7 }, nn: { contextTokens: 30_000 } } }))).run(gateway());
+  assert.deepEqual(judged, [30_000], "the reader answered nothing and the checkpoint's own figure was not read after it");
+  assert.equal(known.opened.from, undefined, "a conversation over the resume share was carried in unchecked");
+  assert.match(content, /the stored conversation is 30000 tokens, over 20000; starting fresh\]$/, content.slice(-200));
+  assert.deepEqual(known.errors, [], JSON.stringify(known.errors));
+  // A checkpoint that says nothing either: nothing is resumed, and the host is told.
+  const quiet = rig(() => ({ run: async () => ({ status: "completed" }) }), { context: readers });
+  await (await quiet.local.start(order({ resumeFrom: { pi: { conversationId: 7 } } }))).run(gateway());
+  assert.deepEqual(judged, [30_000], "there was no figure to judge it against");
+  assert.equal(quiet.opened.from, undefined, "a checkpoint of unknown size is not carried in");
+  assert.deepEqual(quiet.errors, ["resume decision: the checkpoint does not say how large the stored conversation is"], JSON.stringify(quiet.errors));
+});
+
 test("card C07n: a refusal a smaller call cannot change is final at once (no compaction is spent on it)", async () => {
   let compacted = 0; const rounds: number[] = [];
   const r = rig(() => ({ firstCall: () => CALL, compact: async () => { compacted++; } }), { context: { admit: async (_o, _c, round) => { rounds.push(round); return { admit: false, retryable: false, reasons: ["route x/y has no context window the controller knows"] }; }, resume: async () => ({ resume: true, reason: "fits" }) } });
