@@ -197,8 +197,10 @@ export interface NoteCut {
  * is given in the order it was recorded, oldest first), so a cut never loses the newest entry — the opposite of a plain tail slice.
  * A cut says how much was left out and names where the whole text can be read (`readWith`); without a `readWith` it says honestly
  * that the rest is not kept anywhere. One line per entry, the marker last, and no cut leaves half a character.
+ * `plainMarker` writes the marker without its brackets, for a note that is itself put inside a bracketed block (a worker's resume
+ * note), where a `]` of our own would close that block and let the rest of the note speak as the block's surroundings.
  */
-export function cutNote(input: { readonly head: readonly string[]; readonly list: readonly string[] }, maxChars: number, options: { readonly readWith?: string } = {}): NoteCut {
+export function cutNote(input: { readonly head: readonly string[]; readonly list: readonly string[] }, maxChars: number, options: { readonly readWith?: string; readonly plainMarker?: boolean } = {}): NoteCut {
   if (!Number.isSafeInteger(maxChars) || maxChars < NOTE_MIN_CHARS) throw new RangeError(`a note that may be cut is ${NOTE_MIN_CHARS} characters or more`);
   // Every line of a note is one line: a line break the note itself did not put there would read as the controller speaking (card C07g).
   const lines = [...input.head, ...input.list].map((l) => l.replace(/[\r\n]+/g, " "));
@@ -209,9 +211,10 @@ export function cutNote(input: { readonly head: readonly string[]; readonly list
   const markerFor = (dropped: number, chars: number): string => {
     // `dropped` is 0 when nothing whole went out, only the tail of the last kept line; both forms are shorter than the worst case measured below.
     const left = dropped === 0 ? `the tail of this note left out (${chars} characters)` : `${dropped} older line${dropped === 1 ? "" : "s"} of this note left out (${chars} characters)`;
+    const [open, close] = options.plainMarker === true ? ["", ""] : ["[", "]"];
     return options.readWith === undefined
-      ? `[… ${left}; the whole note was not kept, so the part left out cannot be read]`
-      : `[… ${left}; the whole note is archived for this task as ${digest} — read it with ${options.readWith}, giving this task's ID and that digest]`;
+      ? `${open}… ${left}; the whole note was not kept, so the part left out cannot be read${close}`
+      : `${open}… ${left}; the whole note is archived for this task as ${digest} — read it with ${options.readWith}, giving this task's ID and that digest${close}`;
   };
   if (whole.length <= maxChars) return { text: whole, whole, cut: false, droppedLines: 0, droppedChars: 0, digest };
   // Measured at its largest (every list line and character left out), so the note the marker lands on always fits.

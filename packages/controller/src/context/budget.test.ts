@@ -243,6 +243,21 @@ describe("context budgets (C07)", () => {
     assert.ok(plain.includes("was not kept, so the part left out cannot be read"));
   });
 
+  test("a note that is put inside a bracketed block cuts without brackets of its own (C07p)", () => {
+    // The worker wraps a resume note in `[…]`; a `]` of ours there would close the block and let the rest of the note speak as the prompt's own text.
+    const head = ["The calls that waited for approval were decided while this attempt waited (newest last):"];
+    const list = Array.from({ length: 40 }, (_, i) => `- call top-${String(i).padStart(2, "0")}${"a".repeat(18)} was approved`);
+    const plain = cutNote({ head, list }, 500, { plainMarker: true, readWith: NOTE_ARCHIVE_READ });
+    assert.equal(plain.cut, true);
+    assert.ok(plain.text.length <= 500, `${plain.text.length} over the limit`);
+    assert.ok(!plain.text.includes("[") && !plain.text.includes("]"), `the note carries a bracket: ${JSON.stringify(plain.text.split("\n").at(-1))}`);
+    const marker = plain.text.split("\n").at(-1)!;
+    assert.match(marker, /older lines of this note left out \(\d+ characters\)/, marker);
+    assert.ok(marker.includes(NOTE_ARCHIVE_READ), marker);
+    assert.ok(plain.text.includes("top-39"), "the newest verdict is not the one kept");
+    assert.equal(cutNote({ head, list: list.slice(0, 3) }, 500, { plainMarker: true }).text, [...head, ...list.slice(0, 3)].join("\n"), "a note that fits is unchanged by the option");
+  });
+
   test("defaults are the Paperclip rule of thumb", () => {
     assert.deepEqual([BUDGET_DEFAULTS.startupShare, BUDGET_DEFAULTS.workingShare, BUDGET_DEFAULTS.resumeShare, BUDGET_DEFAULTS.charsPerToken], [0.25, 0.6, 0.6, 3]);
   });

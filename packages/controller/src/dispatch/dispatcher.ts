@@ -22,7 +22,7 @@ import type { PauseGuard } from "../lifecycle/index.js";
 import type { HandoffPhase } from "../lifecycle/index.js";
 import type { McpService } from "../mcp/index.js";
 import type { ContextEnforcementService } from "../context/index.js";
-import type { HandoffFacts } from "../context/budget.js";
+import { cutNote, type HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -55,6 +55,11 @@ const PLACED_KIND = "task-placement";
 /** Where the scan of assignments stopped (card H12c): the next tick, of this process or of one after a restart, goes on from there instead of from the beginning. */
 const CURSOR: AggregateRef = { kind: "dispatch-cursor", id: "scan" };
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
+/**
+ * The room the note of parked-call verdicts is given (card C07p): every call an attempt may be waiting on (`DISPATCH_LIMITS.parked`), each on a line of its own with an ID of the longest the tool bridge accepts
+ * (120), plus the line that heads the list and the marker a cut leaves. Before this the note was one line cut at 500 characters, which is fewer than four verdicts.
+ */
+const PARKED_NOTE_CHARS = DISPATCH_LIMITS.parked * 200;
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 
 /** A freeze lifted; the agent's own ending's freeze stays unless asked for (card H12n). */
@@ -497,8 +502,8 @@ export class DispatcherService {
       if (parked && before !== undefined) {
         const fresh = verdicts.filter((v) => !(before.body.resumedFor ?? []).includes(v.operationId));
         if (fresh.length > 0) {
-          const note = fresh.map((v) => `call ${v.operationId} was ${v.verdict}`).join("; ");
-          await this.#update(id, (b) => ({ ...b, state: "waiting", resumeNote: note.slice(0, 500), resumedFor: [...new Set([...(b.resumedFor ?? []), ...fresh.map((v) => v.operationId)])].slice(-DISPATCH_LIMITS.parked * 4) }));
+          const note = this.#verdictNote(fresh);
+          await this.#update(id, (b) => ({ ...b, state: "waiting", resumeNote: note, resumedFor: [...new Set([...(b.resumedFor ?? []), ...fresh.map((v) => v.operationId)])].slice(-DISPATCH_LIMITS.parked * 4) }));
         }
       }
     }
@@ -990,6 +995,17 @@ export class DispatcherService {
 
   #mayRead(by: Principal, body: DispatchBody): boolean {
     return by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "assignment.read", body.projectId, { resource: { kind: "task", id: body.taskId }, now: this.#runner.now() });
+  }
+
+  /**
+   * What an attempt is told when it is woken for calls that waited for approval (card C07p): every verdict, one to a line, newest last. Until now this was one line cut at 500 characters — fewer than four
+   * verdicts — so an attempt whose calls filled more than that was woken without being told how the later ones were decided, and it could not ask, because nothing said anything was missing. The bound is
+   * instead large enough to carry all of them (`PARKED_NOTE_CHARS`), which is what the agent needs the moment it resumes and cannot look up for itself. The marker a cut would leave carries no brackets: the
+   * worker puts a resume note in a bracketed block of the prompt, where one `]` of ours would close that block and let the rest of the note speak as the prompt's own text; and it names no archive, because
+   * the dispatcher writes none — if the list ever outgrew its bound the note would say plainly that the rest cannot be read, not point at a record nobody made.
+   */
+  #verdictNote(verdicts: readonly { operationId: string; verdict: string }[]): string {
+    return cutNote({ head: ["The calls that waited for approval were decided while this attempt waited (newest last):"], list: verdicts.map((v) => `- call ${v.operationId} was ${v.verdict}`) }, PARKED_NOTE_CHARS, { plainMarker: true }).text;
   }
 
   /**
