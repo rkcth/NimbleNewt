@@ -123,6 +123,8 @@ for (const backend of backends) {
     said("what did stopping the whole installation cost", { kind: "stop_cleanup", scopeKind: "installation" });
     said("what did the stop of the installation cost please", { kind: "stop_cleanup", scopeKind: "installation", scopeName: "the installation" });
     said("what did stopping the Garden team cost", { kind: "stop_cleanup", scopeKind: "team", scopeId: garden, scopeName: "whatever words went with it" });
+    said("what did stopping the Order seeds task cost", { kind: "stop_cleanup", scopeKind: "task", scopeId: t });
+    said("what did stopping the installation itself cost", { kind: "stop_cleanup", scopeKind: "installation", scopeId: "installation" });
     for (const [idx, [text, scope]] of ([
       ["what did stopping bob cost", { kind: "agent", id: bob }],
       ["how much did the stop of the Garden team spend", { kind: "team", id: garden }],
@@ -132,6 +134,9 @@ for (const backend of backends) {
       ["what did the stop of the installation cost please", { kind: "installation", id: "installation" }],
       // An ID the owner gave is used as given, and the name field stops in the chat: the request is answered, not refused for the extra key.
       ["what did stopping the Garden team cost", { kind: "team", id: garden }],
+      // A flat scope that already carries its own ID is sent as it came: the chat neither looks anything up nor rewrites it.
+      ["what did stopping the Order seeds task cost", { kind: "task", id: t }],
+      ["what did stopping the installation itself cost", { kind: "installation", id: "installation" }],
     ] as [string, unknown][]).entries()) {
       const r = await chat.submit(w.ownerToken, { messageId: `m-${String(idx)}`, text });
       assert.equal(r.outcomes[0]!.status, "answered", `${text}: ${JSON.stringify(r.outcomes)}`);
@@ -189,6 +194,13 @@ for (const backend of backends) {
     const which = await chat.submit(w.ownerToken, { messageId: "m-5", text: "i meant the bob team" });
     assert.equal(which.outcomes[0]!.status, "answered", JSON.stringify(which.outcomes));
     assert.deepEqual(asked.at(-1), { kind: "team", id: teamOfBob });
+    // A kind a stop is never read for is named back as what it is, rather than the flat scope's own complaint about a missing ID.
+    said("what did stopping the Alpha project cost", { kind: "stop_cleanup", scopeKind: "project", scopeName: "Alpha" });
+    const wrong = (await chat.submit(w.ownerToken, { messageId: "m-6", text: "what did stopping the Alpha project cost" })).outcomes[0]!;
+    assert.deepEqual([wrong.status, wrong.code], ["refused", "invalid_command"], JSON.stringify(wrong));
+    assert.match(wrong.message!, /a task, an agent, a team or the whole installation/);
+    assert.match(wrong.message!, /"Alpha"|"project"/);
+    assert.equal(asked.length, 3, "a scope that does not exist reads nothing");
   });
 
   suite("a name nothing answers to is said plainly, and a name written by someone else is shown escaped, never as it was written (card L02e leftover)", async (w, script) => {

@@ -444,10 +444,11 @@ export class ChatService {
         // owner gave is used as given, and the words are the chat's own field, never sent to the status service (which takes IDs and refuses an unknown key).
         if (request["kind"] === "stop_cleanup") {
           const declared = request["scopeKind"];
-          // An ID the owner gave decides: words beside it are dropped, as a task title beside an ID is. The status service takes IDs only, so the words never leave the chat.
-          const given = request["scope"] === undefined && request["scopeId"] === undefined && typeof request["scopeName"] === "string" ? (request["scopeName"] as string).trim() : "";
+          // An ID the owner gave decides, and nothing here overwrites it: words beside it are dropped, as a task title beside an ID is. The status service takes IDs only, so the words never leave the chat.
+          const bare = request["scope"] === undefined && request["scopeId"] === undefined;
+          const given = bare && typeof request["scopeName"] === "string" ? (request["scopeName"] as string).trim() : "";
           const named = given === "" ? undefined : given;
-          if (declared === "installation") request["scopeId"] = "installation"; // the whole installation has the one ID: nothing to look up, nothing to choose
+          if (declared === "installation" && bare) request["scopeId"] = "installation"; // the whole installation has the one ID: nothing to look up, nothing to choose
           else if (named !== undefined && declared !== undefined && declared !== "agent" && declared !== "team" && declared !== "task") {
             push({ i, kind: "refused", code: "invalid_command", message: `a stop is read for a task, an agent, a team or the whole installation, not for ${quotedText(String(declared), 40)}. Which did you mean?` });
             continue;
@@ -465,7 +466,7 @@ export class ChatService {
             if (found.length > 1) { push({ i, kind: "asked", question: `More than one ${what} here answers to the name in your message. Which did you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((f) => `${quotedText(f.name, 60)} (${f.kind})`) }); continue; }
             request["scopeKind"] = found[0]!.kind;
             request["scopeId"] = found[0]!.id;
-          } else if (declared === "task") {
+          } else if (declared === "task" && bare) {
             // A task is read by its title, not by a flat scope: the words (when there are none already) become the task title the block below answers for the project in focus.
             if (named !== undefined && request["taskTitle"] === undefined && request["taskId"] === undefined) request["taskTitle"] = named;
             delete request["scopeKind"];
