@@ -38,7 +38,7 @@ import { quotedLine } from "../decisions/records.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody } from "./model.js";
+import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { sealContract } from "../remote/contract.js";
 import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork } from "./ports.js";
@@ -1018,7 +1018,8 @@ export class DispatcherService {
       if (d === undefined) throw new DomainError("not_found", `attempt ${attemptId} has no dispatch record`);
       // The extra changes are worked out first: a caller that finds it lost a race (its record already exists) tells `mutate` so by a flag the extra function sets.
       const more = extra === undefined ? [] : await extra(d.body);
-      const next = mutate(d.body);
+      // The usage sink (card M03h): a move into or out of `running` opens or closes a slot span in the same commit.
+      const next = withSlotSpans(d.body, mutate(d.body), this.#runner.now());
       const ref: AggregateRef = { kind: DISPATCH_KIND, id: d.aggregate.id };
       try {
         await this.#runner.command("dispatch.update", { commandId: `dpa-up:${attemptId}:${d.revision}:${this.#instance}`, actor: DISPATCHER_ACTOR }, async () => ({

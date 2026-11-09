@@ -116,6 +116,13 @@ export interface DispatchBody {
   /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */
   readonly workerStopped?: boolean;
   readonly outcome?: { readonly status: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly at: string };
+  /**
+   * When the attempt held a worker slot (card M03h, the usage sink): one span per run, opened when the record turns `running` and closed when it leaves `running` (it parks, waits after a controller shutdown, or
+   * finishes), stamped by the dispatcher's clock in the same commit. A resumed attempt therefore has one span per run, and its waiting between them is not counted. The newest `DISPATCH_LIMITS.slotSpans` are kept;
+   * `slotSpansCut` is the end of the newest span let go (for a record that ran before this field and resumed after it, its last heartbeat), so a reader knows that runs before it are not on record. Absent on records from before this field.
+   */
+  readonly slotSpans?: readonly { readonly from: string; readonly to?: string }[];
+  readonly slotSpansCut?: string;
 }
 
 export type OperationState = "awaiting-approval" | "in-progress" | "confirmed" | "failed" | "cancelled" | "uncertain" | "refused";
@@ -164,8 +171,35 @@ export interface ToolOperationBody {
   readonly judgedAt: { readonly policy: { readonly installation: number; readonly project?: number }; readonly decisions: number };
 }
 
-export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300 } as const;
+export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300, slotSpans: 64 } as const;
 export const DISPATCHER_ACTOR = "dispatcher";
+
+/**
+ * The usage sink (card M03h): `next` with its slot spans brought up to date for the move from `prev`. Entering `running` opens a span at `now`; leaving it closes the open one at `now`; any other move leaves the spans
+ * as they are, so a repeat of the same rewrite (the dispatcher's `mutate` is replayed on its own result) adds nothing. Spans past the bound are let go oldest first and the cut remembered.
+ * A run that leaves `running` after its lease ran out (its worker or controller was gone and the attempt is ended as lost, perhaps hours later when a controller comes back) is closed when the lease ran out,
+ * not when the loss was noticed. A span never opens before the end of the one before it (a clock set back), so spans do not overlap. A record that ran before the sink and opens its first span now has
+ * runs that are not on record: its cut is set, so the review says so rather than counting only the newer runs as the whole.
+ */
+export function withSlotSpans(prev: DispatchBody, next: DispatchBody, now: string): DispatchBody {
+  const was = prev.state === "running", is = next.state === "running";
+  if (was === is) return next;
+  const spans = [...(next.slotSpans ?? prev.slotSpans ?? [])];
+  let cut = next.slotSpansCut ?? prev.slotSpansCut;
+  if (is) {
+    const last = spans[spans.length - 1];
+    if (last !== undefined && last.to === undefined) return next; // already open
+    if (last === undefined && prev.slotSpans === undefined && prev.startedAt !== undefined && cut === undefined) cut = prev.lastHeartbeatAt ?? now; // it ran before the sink
+    spans.push({ from: last?.to !== undefined && last.to > now ? last.to : now });
+  } else {
+    const last = spans[spans.length - 1];
+    if (last === undefined || last.to !== undefined) return next; // a run from before the sink: nothing to close
+    const lapsed = prev.lease !== undefined && prev.lease.until < now ? prev.lease.until : now;
+    spans[spans.length - 1] = { from: last.from, to: lapsed < last.from ? last.from : lapsed };
+  }
+  while (spans.length > DISPATCH_LIMITS.slotSpans) { const gone = spans.shift()!; cut = gone.to ?? gone.from; }
+  return { ...next, slotSpans: spans, ...(cut === undefined ? {} : { slotSpansCut: cut }) };
+}
 
 const TOOL_NAME = /^[a-z][a-z0-9-]{0,39}(?:\.[a-z0-9-]{1,39})?$/;
 const CALL_ID = /^[A-Za-z0-9._:-]{1,120}$/;
