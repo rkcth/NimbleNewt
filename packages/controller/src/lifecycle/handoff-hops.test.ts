@@ -188,7 +188,9 @@ for (const backend of backends) {
     for (const h of hops) {
       for (const [name, text] of Object.entries(h.sections)) {
         const raw = h.raw[name] ?? "";
-        if (raw.length <= HANDOFF_LIMITS.section) { assert.equal(text, raw, `hop ${h.hop}: ${name} fits and is given whole`); continue; }
+        // Since card C07k the completed work is also summarised past a fixed number of entries, under the same marker, so it is judged by its entries as well as its size.
+        const fits = raw.length <= HANDOFF_LIMITS.section && !(name === "completedWork" && raw.split("\n").length > HANDOFF_LIMITS.digestWhole);
+        if (fits) { assert.equal(text, raw, `hop ${h.hop}: ${name} fits and is given whole`); continue; }
         const m = /^\[cut: (\d+) of (\d+) entries, archive (\S+)\]/.exec(text);
         assert.ok(m !== null, `hop ${h.hop}: ${name} was cut with no marker`);
         const lines = raw.split("\n");
@@ -202,7 +204,7 @@ for (const backend of backends) {
     }
   });
 
-  test(`${backend.name}: 50 hand-offs: the average package size of the last 10 hops is no more than 5 percent above the first 10`, { todo: "C07k: lifecycle/handoff-sources.ts:48-49 lists every decision and nothing summarises the decisions, so the package grows with every hand-off until it reaches the section limit" }, async () => {
+  test(`${backend.name}: 50 hand-offs: the average package size of the last 10 hops is no more than 5 percent above the first 10`, async () => {
     const hops = await run();
     const first = mean(hops.slice(0, 10).map((h) => h.total));
     const lastTen = mean(hops.slice(-10).map((h) => h.total));

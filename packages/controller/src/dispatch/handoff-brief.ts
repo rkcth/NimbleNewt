@@ -7,8 +7,8 @@ import { quoted } from "../status/explain.js";
  * package the task arrived with (its next action, decisions, acceptance criteria and open questions), the hand-off note written when the previous attempt ended, and the task's open blockers — was in the call by
  * neither word nor reference: each is readable through an operation the agent was never told about.
  *
- * This module writes that reference: one bracketed paragraph, each item named by its record ID with the operation that reads it, so the call stays bounded whatever the hand-off carries (the package itself grows
- * with every hop; card C07k). Nothing here copies package text into the prompt; nothing here is silently left out either — a list that is cut says how many were not shown and where the rest is read.
+ * This module writes that reference: one bracketed paragraph, each item named by its record ID with the operation that reads it, so the call stays bounded whatever the hand-off carries (the package itself is
+ * summarised so it stays the same size across hops, card C07k, and is still never copied in). Nothing here copies package text into the prompt; nothing here is silently left out either — a list that is cut says how many were not shown and where the rest is read.
  *
  * Every text a person or an agent wrote (a blocker's summary, who may resolve it) goes through `quoted` (one line, credentials removed, controls and separators escaped) and then through `bracketless`, so no text
  * can close this paragraph or start a line of its own inside it. Record IDs and blocker types are checked against their shape and quoted if they do not match it.

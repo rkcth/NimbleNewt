@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CUT_MARKER, SHORTENED, cutSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
+import { CUT_MARKER, SHORTENED, cutSection, digestSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
 
 // Card C07j: the cut of one hand-off section, on its own. The service tests (handoff.test.ts) check it with the archive in every store.
 const ARCHIVE = "hnd-abcdefghijklmnopqrst";
@@ -184,4 +184,49 @@ test("a heading line is kept after the newest entry and before the marks; marks 
   const marked = cutSection(shown.join("\n"), 4000, ['chose "utf-8"'], ARCHIVE, undefined, { matchOn: raw });
   assert.ok(marked.text.includes(shown[5]!), "the marked line, quoted, is kept");
   assert.ok(!cutSection(shown.join("\n"), 4000, ['chose "utf-8"'], ARCHIVE).text.includes(shown[5]!), "matched on the quoted form it would be missed");
+});
+
+// Card C07k: a section that only grows across hand-offs is summarised past a fixed number of entries, under the same marker, before it reaches the limit.
+const work = (artifacts: number, decisions: number): string[] => [...Array.from({ length: artifacts }, (_, i) => `Artifact: art-${i}`), ...Array.from({ length: decisions }, (_, i) => `Decision: dec-${String(i).padStart(3, "0")}`)];
+
+test("a digest gives a section of no more than its whole entries unchanged", () => {
+  const text = work(1, 7).join("\n");
+  assert.deepEqual(digestSection(text, 8, 4000, [], ARCHIVE), { text });
+});
+
+test("a digest keeps the newest entries whole and counts the older ones by kind on the cut marker, naming the archive", () => {
+  const all = work(2, 100);
+  const out = digestSection(all.join("\n"), 8, 4000, [], ARCHIVE);
+  const lines = out.text.split("\n");
+  const m = CUT_MARKER.exec(lines[0]!);
+  assert.ok(m !== null, lines[0]);
+  assert.deepEqual([Number(m[1]), Number(m[2]), m[3]], [94, 102, ARCHIVE]);
+  assert.deepEqual(out.cut, { left: 94, total: 102 });
+  assert.match(lines[0]!, /92 decisions and 2 artifacts left out \(the owner's marked ones and the newest 8 are kept\)/);
+  assert.match(lines[0]!, /handoff\.archive\.read \{ "archiveId": "hnd-abcdefghijklmnopqrst" \}/);
+  assert.deepEqual(lines.slice(1), all.slice(-8), "the newest eight entries, whole and in order");
+});
+
+test("a digest is the same size however long the section grows (the package stops growing with the hand-offs)", () => {
+  const sizes = [20, 60, 199].map((n) => digestSection(work(1, n).join("\n"), 8, 4000, [], ARCHIVE).text.length);
+  assert.ok(Math.max(...sizes) - Math.min(...sizes) <= 4, `${sizes.join(", ")}: only the counts on the marker differ`);
+});
+
+test("a digest also keeps the owner's marked older entries whole, in their order, and counts only the rest", () => {
+  const all = work(0, 50);
+  const out = digestSection(all.join("\n"), 8, 4000, ["dec-003"], ARCHIVE);
+  const lines = out.text.split("\n");
+  assert.deepEqual(lines.slice(1), ["Decision: dec-003", ...all.slice(-8)]);
+  assert.match(lines[0]!, /^\[cut: 41 of 50 entries, archive hnd-abcdefghijklmnopqrst\] Older entries are summarised[^;]*: 41 decisions left out/);
+});
+
+test("a digest whose newest entries do not fit beside the marker is cut to the limit as any section is", () => {
+  const all = entries(40, 200);
+  const out = digestSection(all.join("\n"), 30, 4000, [], ARCHIVE);
+  assert.ok(out.text.length <= 4000);
+  assert.deepEqual(out, cutSection(all.join("\n"), 4000, [], ARCHIVE));
+});
+
+test("a digest that keeps no entry is refused", () => {
+  assert.throws(() => digestSection("a\nb", 0, 4000, [], ARCHIVE), RangeError);
 });

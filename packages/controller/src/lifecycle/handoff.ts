@@ -9,7 +9,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { cutSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
+import { cutSection, digestSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
 import type { PauseScope, PauseService } from "./pause.js";
 import type { StopService } from "./stop.js";
 
@@ -116,7 +116,7 @@ export interface HandoffArchive {
   readonly truncated?: boolean;
 }
 
-export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30, reassign: 50, marks: 20, mark: 200, archivePart: 40_000, archiveChars: 1_000_000 } as const;
+export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30, reassign: 50, marks: 20, mark: 200, archivePart: 40_000, archiveChars: 1_000_000, digestWhole: 8 } as const;
 const KIND = "handoff";
 const ACTIVE = "handoff-active";
 /** The original of a cut section: the first part (with what it is) and, for a long one, further parts. */
@@ -128,6 +128,12 @@ const ARCHIVE_ID = /^hnd-[a-z2-7]{20}$/;
 const PRIVATE_SECTIONS: readonly string[] = ["drafts", "responsibilities"];
 /** Sections whose first line is a heading rather than the oldest entry: a cut keeps it (card C07j review). */
 const HEADED_SECTIONS: readonly string[] = ["brief", "responsibilities", "unfinishedWork"];
+/**
+ * Sections that only grow across hand-offs (card C07k): the run's completed work lists every artifact and decision it recorded, so it gains entries at every hand-off. Past `HANDOFF_LIMITS.digestWhole`
+ * entries it is summarised (its newest entries and the owner's marked ones whole, the older counted on a marker naming the archive of the whole section), so the package stays the same size however
+ * many hand-offs the task has had.
+ */
+const DIGESTED_SECTIONS: readonly string[] = ["completedWork"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
   const out = text(value, field, { min: 1, max: HANDOFF_LIMITS.reason, multiline: true });
@@ -657,6 +663,7 @@ export class HandoffService {
   /**
    * The package. Only the named sections travel, with credentials removed; anything else a source returned is dropped. A section over the limit is never cut silently (card C07j): its original is archived
    * first, then it keeps the entries the owner marked and the most recent ones, under a marker naming the archive. A line that reads like a marker is quoted, so the only marker is the controller's.
+   * A section that only grows across hand-offs is summarised the same way past a fixed number of entries, before it reaches the limit (card C07k), so the package does not grow with every hand-off.
    */
   async #collect(handoffId: string, b: Pick<TaskHandoffBody, "taskId" | "projectId" | "from" | "to">): Promise<NonNullable<TaskHandoffBody["package"]>> {
     let got: Awaited<ReturnType<HandoffSources["collect"]>>;
@@ -670,11 +677,14 @@ export class HandoffService {
       // Redacted whole, before any cut, so a credential is never split into pieces the redaction would not know.
       const original = wellFormed(redactText(value));
       const shown = original.split("\n").map(neutralise).join("\n");
-      if (shown.length <= HANDOFF_LIMITS.section) { sections[name] = shown; continue; }
+      const digested = DIGESTED_SECTIONS.includes(name);
+      if (shown.length <= HANDOFF_LIMITS.section && !(digested && shown.split("\n").length > HANDOFF_LIMITS.digestWhole)) { sections[name] = shown; continue; }
       marks ??= await this.#marks(b.taskId);
       const archived = await this.#archive(handoffId, b, name, original);
       // A brief's title and the line saying what the responsibilities are and how to move them head their sections and stay with them; marks are looked for in the lines as the source wrote them.
-      const cut = cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId, archived.truncated ? archived.chars : undefined, { heading: HEADED_SECTIONS.includes(name), matchOn: original.split("\n") });
+      const options = { heading: HEADED_SECTIONS.includes(name), matchOn: original.split("\n") };
+      const archivedChars = archived.truncated ? archived.chars : undefined;
+      const cut = digested ? digestSection(shown, HANDOFF_LIMITS.digestWhole, HANDOFF_LIMITS.section, marks, archived.archiveId, archivedChars, options) : cutSection(shown, HANDOFF_LIMITS.section, marks, archived.archiveId, archivedChars, options);
       sections[name] = cut.text;
       cuts.push({ section: name, archiveId: archived.archiveId, left: cut.cut?.left ?? 0, total: cut.cut?.total ?? 0, chars: original.length, ...(archived.truncated ? { archiveTruncated: true } : {}) });
     }
