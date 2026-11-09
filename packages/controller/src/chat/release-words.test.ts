@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { foreignValue, RELEASE_ID_KEYS, saysAcknowledgeFlaky, saysPlatform } from "./commands.js";
+import { foreignValue, RELEASE_ID_KEYS, saysAcknowledgeFlaky, saysMainAutomatic, saysPlatform } from "./commands.js";
 
 /**
  * The owner's own words behind a flaky approval and behind a release ID (card X09b part 2 review). `acknowledgeFlaky` is a boolean, so `foreignValue` cannot see it: it needs its own word check, and a
@@ -47,6 +47,43 @@ test("saying you accept a flaky pass is the owner's own acceptance of the failur
   // With no candidate to bind to, the acceptance still has to be an acceptance.
   assert.equal(saysAcknowledgeFlaky("I accept the earlier failures, approve it"), true, "an acceptance with no candidate named is still an acceptance");
   assert.equal(saysAcknowledgeFlaky("the gate looks flaky, approve it"), false, "naming flaky is not accepting it");
+});
+
+test("a curly apostrophe is still a negation: phones type ’, and it must not turn a refusal into an acceptance (third review, D1)", () => {
+  const cand = "rcn-64c39134f5136c6cfe8ea2b4";
+  // The straight apostrophe already refused all of these; the curly one (and the modifier letter apostrophe) must refuse them too.
+  const no = [
+    `approve ${cand}, I don’t accept the earlier failures`,
+    `approve ${cand}, I won’t accept a flaky pass`,
+    `approve ${cand}, we can’t accept the failures`,
+    `approve ${cand}, it isn’t flaky`,
+    `approve ${cand}, that wasn’t my acceptance of the failures`,
+    `approve ${cand}, I donʼt accept the failures`,
+    `approve ${cand}, I don‘t accept the failures`,
+  ];
+  for (const words of no) {
+    assert.equal(saysAcknowledgeFlaky(words, cand), false, `"${words}" accepts nothing`);
+    assert.equal(saysAcknowledgeFlaky(words.replace(/[’ʼ‘]/g, "'"), cand), false, "the same sentence typed with a straight apostrophe accepts nothing");
+  }
+
+  // The same shared negation rule guards landing on main with no human step.
+  const noMain = [
+    "don’t send it straight to main",
+    "won’t go to main automatically",
+    "we can’t land it straight to main",
+    "it isn’t automatic to main",
+    "donʼt push it straight to main",
+  ];
+  for (const words of noMain) {
+    assert.equal(saysMainAutomatic(words), false, `"${words}" does not order main-automatic`);
+    assert.equal(saysMainAutomatic(words.replace(/[’ʼ‘]/g, "'")), false, "the same sentence typed with a straight apostrophe orders nothing");
+  }
+
+  // Normalising the apostrophe must not invent an order or an acceptance that was never said.
+  assert.equal(saysMainAutomatic("land finished work on main automatically"), true, "a plain order still lands on main");
+  assert.equal(saysMainAutomatic("don’t send it straight to main. From now on land finished work on main automatically"), true, "the denial is one sentence, the order another");
+  assert.equal(saysMainAutomatic("don’t send it straight to main; it is not automatic to main"), false, "normalising the apostrophe invents no order");
+  assert.equal(saysAcknowledgeFlaky(`approve ${cand}, I’m fine with the earlier failures`, cand), true, "a curly apostrophe in I’m still carries the acceptance");
 });
 
 test("a release ID or a host ID only counts when the owner said it as a whole word, not as the start of a longer name", () => {

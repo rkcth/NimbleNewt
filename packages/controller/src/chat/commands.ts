@@ -233,8 +233,12 @@ export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId
 const MAIN_AUTOMATIC = /\bmain[\s-]*automatic(?:ally)?\b|\bautomatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main\b|\b(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main\b/i;
 /** A negation in the same sentence as the phrase (not, never, don't, without, no, stop): then it is not an order to turn it on. */
 const NEGATED = /\b(?:not|never|no|nothing|without|neither|nor|don'?t|do\s+not|does'?n'?t|did'?n'?t|is'?n'?t|are'?n'?t|was'?n'?t|were'?n'?t|ha(?:s|ve|d)'?n'?t|could'?n'?t|should'?n'?t|would'?n'?t|can'?t|cannot|won'?t|hardly|stop|disable|turn\s+off)\b/i;
+/** Phones and keyboards type a curly or modifier apostrophe (’ ‘ ʼ) where the negations are written with `'`; every word check normalises them first, so "don’t" is checked exactly like "don't". */
+const plainApostrophes = (words: string): string => (words ?? "").replace(/[\u2018\u2019\u02bc]/g, "'");
+
 export function saysMainAutomatic(words: string): boolean {
-  return words.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
+  const said = plainApostrophes(words);
+  return said.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
 }
 
 /**
@@ -255,7 +259,7 @@ const FLAKY_CONDITIONAL = /\b(?:if|unless|only\s+if|only\s+when|provided|providi
  * nothing, while "approve rcn-a, I accept the earlier failures" and "approve rcn-a, go ahead despite the failures" do. Without a `candidateId` to bind to, any sentence may carry the acceptance.
  */
 export function saysAcknowledgeFlaky(words: string, candidateId?: string): boolean {
-  const said = (words ?? "").replace(/\s+/g, " ").trim();
+  const said = plainApostrophes(words).replace(/\s+/g, " ").trim();
   if (said === "") return false;
   let previousNames = false;
   for (const sentence of said.split(/(?<=[.?!])\s+/)) {

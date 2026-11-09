@@ -117,6 +117,20 @@ for (const backend of backends) {
       const askedFlaky = `approve the release candidate ${cand}. Is the other candidate the flaky one?`;
       const askedShown = await turn("m7d", askedFlaky, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: askedFlaky, basis: "owner" }]);
       assert.equal(askedShown[0]!.status, "refused", `a question about another platform's flakiness accepts nothing: ${JSON.stringify(askedShown[0])}`);
+      // ---- the negation a phone types (’ rather than ') refuses exactly as the straight one does (third review, D1).
+      const curlyNo = `approve the release candidate ${cand}, I don’t accept the earlier failures`;
+      const straightNo = `approve the release candidate ${cand}, I don't accept the earlier failures`;
+      for (const [id, noWords] of [["m7f", curlyNo], ["m7g", straightNo]] as const) {
+        const shownNo = await turn(id, noWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: noWords, basis: "owner" }]);
+        assert.equal(shownNo[0]!.status, "refused", `"${noWords}" is no acceptance: ${JSON.stringify(shownNo[0])}`);
+        assert.equal(shownNo[0]!.code, "unsupported_value");
+        assert.match(shownNo[0]!.message!, /your own words/i);
+        assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
+      }
+      // A curly apostrophe in the middle of a real acceptance still reads as one: the sentence says "I'm fine with …".
+      const curlyYes = `approve the release candidate ${cand}, I’m fine with the failures that came first`;
+      const curlyYesShown = await turn("m7h", curlyYes, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: curlyYes, basis: "owner" }]);
+      assert.equal(curlyYesShown[0]!.status, "proposed", `the owner's own acceptance with a typed apostrophe is read: ${JSON.stringify(curlyYesShown[0])}`);
       const acceptWords = `the gate shows a flaky platform and I accept it; approve the release candidate ${cand}`;
       const acceptShown = await turn("m7e", acceptWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: acceptWords, basis: "owner" }]);
       assert.equal(acceptShown[0]!.status, "proposed", `the owner accepting the flaky pass is an acknowledgement: ${JSON.stringify(acceptShown[0])}`);
