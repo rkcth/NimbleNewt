@@ -51,6 +51,34 @@ export function checkpointStoredTokens(from: JsonObject | undefined): number | u
   return typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : undefined;
 }
 
+/**
+ * The resume decision for an order's stored conversation (cards C07b, C07n), shared by the local worker and the controller's check before a remote host is offered the order (card C07o). `from` is the checkpoint to
+ * continue from, `undefined` when there is none or it is not carried; `note` is the order's resume note with the reason appended when it is not carried; `storedTokens` is the size that was judged and fits.
+ * A stored conversation is continued only when its size was judged and fits: a checkpoint whose size nobody says, or a check that fails, is left behind (a fresh start from the continuation record is the safe side).
+ * No guards: the order is left as it is.
+ */
+export async function judgeResume(context: RuntimeGuards["context"], order: WorkOrder, report: (what: string, error: unknown) => void): Promise<{ readonly from: JsonObject | undefined; readonly note: string | undefined; readonly storedTokens?: number }> {
+  let from = order.resumeFrom;
+  let note = order.resumeNote;
+  const startFresh = (why: string): { from: undefined; note: string } => { from = undefined; note = note === undefined ? why : `${note}\n${why}`; return { from, note }; };
+  if (from === undefined || context === undefined) return { from, note };
+  try {
+    // The reader the host was given answers where it gives a figure; where it answers nothing, the worker package's own checkpoint shape is read (card C07n).
+    const byReader = await context.storedTokens?.(from);
+    const stored = byReader === undefined ? checkpointStoredTokens(from) : byReader;
+    if (stored === undefined) {
+      report("resume decision", new Error("the checkpoint does not say how large the stored conversation is"));
+      return startFresh("the size of the stored conversation is not known (its checkpoint does not say), so it was not resumed; starting fresh from the continuation record");
+    }
+    const decision = await context.resume(order, stored);
+    return decision.resume ? { from, note, storedTokens: stored } : startFresh(decision.reason);
+  } catch (error) {
+    // The size of the stored conversation could not be judged: it is not continued.
+    report("resume decision", error);
+    return startFresh("the stored conversation could not be checked against the context budget; starting fresh");
+  }
+}
+
 /** Two reports of one turn (the part cut short by a restart and the rest) as one: the same turn number, the cache figures added when they are about the same route. */
 function mergeUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsage | undefined {
   if (a === undefined || b === undefined) return b ?? a;
@@ -252,27 +280,7 @@ export class LocalWorker implements WorkerHost {
     const report = (what: string, error: unknown): void => { try { options.onGuardError?.(order.attemptId, what, error); } catch { /* the report must not stop the attempt */ } };
     // A stored conversation over the resume share is not continued: the attempt starts fresh, and the agent is told why (C07b). Card C07n: it is continued only when its size was judged — a checkpoint
     // whose size nobody says (no reader, or one that answers nothing, and not one of the worker package's shape either) is left behind, not carried in unchecked.
-    let from = order.resumeFrom;
-    let note = order.resumeNote;
-    const startFresh = (why: string): void => { from = undefined; note = note === undefined ? why : `${note}\n${why}`; };
-    if (from !== undefined && guards?.context !== undefined) {
-      try {
-        // The reader the host was given answers where it gives a figure; where it answers nothing, the worker package's own checkpoint shape is read (card C07n).
-        const byReader = await guards.context.storedTokens?.(from);
-        const stored = byReader === undefined ? await checkpointStoredTokens(from) : byReader;
-        if (stored === undefined) {
-          report("resume decision", new Error("the checkpoint does not say how large the stored conversation is"));
-          startFresh("the size of the stored conversation is not known (its checkpoint does not say), so it was not resumed; starting fresh from the continuation record");
-        } else {
-          const decision = await guards.context.resume(order, stored);
-          if (!decision.resume) startFresh(decision.reason);
-        }
-      } catch (error) {
-        // The size of the stored conversation could not be judged: it is not continued (a fresh start from the continuation record is the safe side).
-        report("resume decision", error);
-        startFresh("the stored conversation could not be checked against the context budget; starting fresh");
-      }
-    }
+    const { from, note } = await judgeResume(guards?.context, order, report);
     let sandbox = await options.sandbox.open(order.recipe, order);
     this.#remember(order.attemptId, sandbox);
     let gateway: ToolGateway | undefined;

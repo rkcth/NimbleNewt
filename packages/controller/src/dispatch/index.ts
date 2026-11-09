@@ -5,7 +5,7 @@ export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolRes
 export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { type RouteProbes } from "./loops.js";
 export { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, coverageLoops, type CoverageNoticeLike, archiveLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, reviewLoops, standupLoops, workspaceLoops } from "./loops.js";
-export { LocalWorker, catalogFacts, checkpointStoredTokens, type AttemptLease, type AttemptRuntime, type DeliverableMessage, type MessageBoundaryName, type RuntimeGuards, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
+export { LocalWorker, catalogFacts, checkpointStoredTokens, judgeResume, type AttemptLease, type AttemptRuntime, type DeliverableMessage, type MessageBoundaryName, type RuntimeGuards, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";
 export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";
 export { ModelStreamDecoder, ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "./model-stream.js";
