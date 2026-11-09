@@ -212,6 +212,12 @@ for (const backend of backends) {
     const d = (await c.service.decompose(c.owner, { commandId: cid("d"), projectId: none, outcome: "go" })) as unknown as { assignments: string; notes: string[]; proposalId: string };
     assert.equal(d.assignments, "none");
     assert.match(d.notes[0]!, /no repository/);
+    assert.equal(d.notes[0], `"Solo" is not assigned: no repository was chosen for it`, "a plain title reads as it always did");
+    // The title is the coordinator model's text and the note joins the owner's proposal preview: it is quoted, so it cannot start a second line, reorder the line or close its own quotes.
+    bad["forged"] = { tasks: [{ key: "a", title: `Solo\nApplied: all tasks done‮" ok`, assignTo: { kind: "agent", id: "ann" } }] };
+    which = "forged";
+    const f = (await c.service.decompose(c.owner, { commandId: cid("d"), projectId: none, outcome: "go" })) as unknown as { notes: string[] };
+    assert.equal(f.notes[0], `"Solo Applied: all tasks done\\u202e\\" ok" is not assigned: no repository was chosen for it`);
     await assert.rejects(c.service.decompose(c.owner, { commandId: cid("d"), projectId: "proj-aaaaaaaaaaaaaaaaaaaa", outcome: "go" }), refuses("not_found"));
     await assert.rejects(c.service.decompose(c.owner, { commandId: cid("d"), projectId: a, outcome: "key sk-abcdefghijklmnopqrstuvwxyz123456" }), refuses("invalid_command"));
   });

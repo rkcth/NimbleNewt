@@ -490,8 +490,18 @@ const NAME_LIMIT = CHAT_LIMITS.line;
 /** How much of the owner's own alternative, and of its topic, the line shows: the same bounds the chat accepts them within, so what is shown whole is what would be recorded. */
 const ALTERNATIVE_LIMIT = 150;
 const ALTERNATIVE_TOPIC_LIMIT = 80;
-/** Cut to at most `max` UTF-16 units without splitting a surrogate pair, so a cut never leaves half a character on the line. */
-const cutAt = (text: string, max: number): string => (text.length <= max ? text : text.slice(0, /[\ud800-\udbff]/.test(text.charAt(max - 1)) ? max - 1 : max));
+/** An escape the helpers below write (`\u{202e}` from `short`, `‮`, `\"` or `\\` from `quotedText`), read left to right so an escaped backslash is one escape. */
+const ESCAPE = /\\(?:u\{[0-9a-f]+\}|u[0-9a-f]{4}|["\\/bfnrt])/g;
+/** Cut to at most `max` UTF-16 units without splitting a surrogate pair or an escape, so a cut never leaves half a character, or half of the escape that shows one, on the line. */
+const cutAt = (text: string, max: number): string => {
+  if (text.length <= max) return text;
+  let end = max;
+  for (const m of text.matchAll(ESCAPE)) {
+    if (m.index >= end) break;
+    if (m.index + m[0].length > end) { end = m.index; break; }
+  }
+  return text.slice(0, /[\ud800-\udbff]/.test(text.charAt(end - 1)) ? end - 1 : end);
+};
 const short = (value: unknown): string => {
   const text = (typeof value === "string" ? value : JSON.stringify(value) ?? String(value)).replace(/[\r\n\u0085\u2028\u2029]+/g, " ");
   // Escaped one code point at a time and cut only between whole parts, so a cut never splits a character or an escape.

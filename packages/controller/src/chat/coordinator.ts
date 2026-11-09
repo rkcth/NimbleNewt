@@ -13,6 +13,7 @@ import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { ChatService, ChatStep } from "./chat.js";
+import { quoted as quotedText } from "../status/explain.js";
 import { describe } from "./commands.js";
 import { CHAT_LIMITS } from "./interpreter.js";
 
@@ -206,7 +207,7 @@ export class CoordinatorService {
     for (const t of plan) {
       if (t.assignTo === undefined) continue;
       // Work handed to someone carries its project and repository; without one there is nothing to dispatch.
-      if (repoOf.get(t.key) === undefined) { notes.push(`"${t.title}" is not assigned: no repository was chosen for it`); continue; }
+      if (repoOf.get(t.key) === undefined) { notes.push(`${quotedText(t.title, 200)} is not assigned: no repository was chosen for it`); continue; }
       steps.push({ op: "task.assign", args: { taskId: { $ref: t.key }, owner: t.assignTo, reason: "assigned by the coordinator's plan" }, as: delegated ? "coordinator" : "owner" });
       assigned++;
     }

@@ -17,8 +17,8 @@ const cmd = (op: string, args: Record<string, unknown>, evidence: string) => [{ 
 const BREAKS = /[\n\r\u0085\u2028\u2029]/;
 const HIDDEN = /[\u0000-\u001f\u007f-\u009f\p{Cf}]/u;
 const HALVES = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u;
-/** Half an escape left behind by a cut: `\u{...}` with no closing brace, or `\u` with fewer than its four digits, both just where the `...` of a cut follows. */
-const HALF_ESCAPE = /\\u\{[0-9a-f]*\.\.\.|\\u[0-9a-f]{1,3}\.\.\./;
+/** Half an escape left behind by a cut: a bare backslash, `\u{...}` with no closing brace, or `\u` with fewer than its four digits, just where the `...` of a cut follows. */
+const HALF_ESCAPE = /\\(?:u\{[0-9a-f]*|u[0-9a-f]{0,3})?\.\.\./;
 
 /** One honest line, whatever it was built from. */
 const oneLine = (line: string, what: string): void => {
@@ -96,6 +96,15 @@ test("a long name is cut between whole characters and whole escapes, at its own 
     const line = describe("task.update", { taskId: "task-1", ...args }, { "task-1": `${"t".repeat(pad)}\u{1F600}` });
     oneLine(line, `a line cut at pad ${pad}`);
     assert.ok(line.length <= CHAT_LIMITS.line, `the cut line keeps to its room at pad ${pad}: ${line.length}`);
+  }
+
+  // The line's own cut lands on every place inside an escape: a bare value's `\u{202e}` run and a quoted name's `‮` and `\"` run, slid one character at a time across the line's bound.
+  for (let pad = 0; pad < 420; pad++) {
+    const bare = describe("task.update", { title: "q".repeat(pad), taskId: "task-1", description: `${"y".repeat(pad % 80)}‮‮‮` }, { "task-1": "t".repeat(pad) });
+    oneLine(bare, `a line cut through a bare value's escapes at pad ${pad}`);
+    const named = describe("task.update", { taskId: "task-1", title: "x".repeat(pad % 70) }, { "task-1": `${"t".repeat(pad)}‮‮‮‮""""` });
+    assert.doesNotMatch(named, /(?<!\\)(?:\\\\)*\\(?:u[0-9a-f]{0,3})?\.\.\.$/, `a line cut through a quoted name's escapes at pad ${pad}: ${named.slice(-30)}`);
+    assert.ok(bare.length <= CHAT_LIMITS.line && named.length <= CHAT_LIMITS.line, `pad ${pad}`);
   }
 });
 
