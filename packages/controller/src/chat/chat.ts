@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, saysAcknowledgeFlaky, wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -519,14 +519,15 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
-      // Accepting a platform that passed only after earlier failures is the owner's own word, never the interpreter's (card X09b part 2 review): `acknowledgeFlaky` is refused unless their message says it.
+      // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
+      // proposal that shows the exact earlier failures the gate lists, and the owner's confirmation of that shown proposal is the acceptance. No wording is a gate; the binding is the shown failures themselves.
       let command = intent;
       // Which machine, and which platform of it, a destructive release test may run on is the owner's choice: `os` and `arch` are fixed choices, so the words check lets them through and they are checked here
       // (card X09b part 2 review, item 3). The owner's own spelling counts (linux-x64, my mac, x86_64); a platform they ruled out ("linux x64, not the mac") and an ordinary word that merely spells one
@@ -554,11 +555,6 @@ export class ChatService {
           for (const { key } of off) delete args[key];
           command = { ...intent, args };
         }
-      }
-      if (intent.op === "release.approve" && intent.args["acknowledgeFlaky"] !== undefined && intent.args["acknowledgeFlaky"] !== false) {
-        // What was accepted has to be about the candidate being approved, so the word check is given its ID (card X09b part 2 review 2, item 1).
-        const approved = typeof intent.args["candidateId"] === "string" ? (intent.args["candidateId"] as string) : undefined;
-        if (!saysAcknowledgeFlaky(words, approved)) { push({ i, kind: "refused", code: "unsupported_value", message: "A release that passed only after earlier failures is approved only when your own words accept those failures (for example \"I have read the gate and accept the earlier failures, approve it with acknowledgeFlaky\"). Naming the flaky platform, asking about it or ruling it out accepts nothing, and the interpreter's acknowledgeFlaky was not used." }); continue; }
       }
       const resolved = await this.#resolve(token, command, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
@@ -672,21 +668,24 @@ export class ChatService {
       args["digest"] = digest;
       fillNotes.push(`Digest of the staged release, filled in from its record: ${digest}${found.result["ok"] === true ? "" : " (its files do not match this digest now; activation will refuse)"}`);
     }
-    // An approval is shown with what the gate says just now, so a flaky candidate shows the owner which platform failed before it passed (card X09b part 2 review): their yes is bound to what they were told.
-    // And what they were told is written into the approval itself, so a gate that gains an earlier failure before the owner confirms is refused rather than slipped past them (card X09b part 2 review 2, item 1).
+    // An approval is shown with what the gate says just now, so a flaky candidate shows the owner which platform failed before it passed and exactly which attempts those failures were (card X09b part 2 review, redone):
+    // their confirmation of that shown proposal is the acceptance — no scanning of their wording, and the interpreter's acknowledgeFlaky is dropped and re-read from the gate here.
+    // And what they were shown is written into the approval itself (expectedFailures), so a gate that changed before the owner confirms is refused rather than slipped past them (card X09b part 2 review 2, item 1).
     if (intent.op === "release.approve" && typeof args["candidateId"] === "string") {
       delete args["expectedFailures"];
+      delete args["acknowledgeFlaky"];
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.gate", args: { candidateId: args["candidateId"] } });
-      if (found.ok) {
-        const cells = (found.result["gate"] as { cells?: readonly { cell: { os: string; arch: string }; flaky?: boolean; earlierFailures?: readonly { id: string }[] }[] } | undefined)?.cells ?? [];
-        const flaky = cells.filter((x) => x.flaky === true);
-        if (flaky.length > 0) fillNotes.push(`release.gate just now: ${flaky.map((x) => `${x.cell.os} ${x.cell.arch} passed only after ${x.earlierFailures?.length ?? 0} earlier failure${(x.earlierFailures?.length ?? 0) === 1 ? "" : "s"} (${(x.earlierFailures ?? []).map((f) => f.id).join(", ")})`).join("; ")}. Approving accepts that these platforms had to be retried before they went green.${args["acknowledgeFlaky"] === undefined || args["acknowledgeFlaky"] === false ? " Without acknowledgeFlaky this approval is refused." : ""}`);
-        if (args["acknowledgeFlaky"] === true) {
-          const shown = cells.flatMap((x) => x.earlierFailures ?? []).map((f) => f.id);
-          if (shown.length === 0) fillNotes.push("release.gate just now: no platform failed before it passed. Your acceptance is bound to that: if a platform is retried and goes green before you confirm, this approval is refused and you are shown the gate as it is then.");
-          args["expectedFailures"] = shown;
-        }
-      } else if (args["acknowledgeFlaky"] === true) return refuse(found.error.code, found.error.message);
+      // The gate is what the approval is bound to: without reading it there is nothing to show and nothing to bind, so the approval is not drawn up at all.
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const cells = (found.result["gate"] as { cells?: readonly { cell: { os: string; arch: string }; flaky?: boolean; earlierFailures?: readonly { id: string }[] }[] } | undefined)?.cells ?? [];
+      const flaky = cells.filter((x) => x.flaky === true);
+      const shown = cells.flatMap((x) => x.earlierFailures ?? []).map((f) => f.id);
+      // Every approval the chat draws up carries the failures it shows — none on a clean gate — so the confirmation accepts exactly the gate the owner was shown, and a moved gate is refused at confirmation.
+      args["expectedFailures"] = shown;
+      if (flaky.length > 0) {
+        args["acknowledgeFlaky"] = true;
+        fillNotes.push(`release.gate just now: ${flaky.map((x) => `${x.cell.os} ${x.cell.arch} passed only after ${x.earlierFailures?.length ?? 0} earlier failure${(x.earlierFailures?.length ?? 0) === 1 ? "" : "s"} (${(x.earlierFailures ?? []).map((f) => f.id).join(", ")})`).join("; ")}. Approving accepts that these platforms had to be retried before they went green. If the gate shows anything different when you confirm, the approval is refused and you are shown it again.`);
+      } else fillNotes.push("release.gate just now: no platform failed before it passed. Confirming accepts the gate exactly as it stands; if the gate changes before you confirm, this approval is refused and you are shown it again.");
     }
     // A restore is proposed with the plan the controller computes NOW from the backup's record; the approval token comes from that plan (never from the interpreter's words), so the owner's yes is bound to exactly what is shown.
     if (intent.op === "backup.restore.apply") {

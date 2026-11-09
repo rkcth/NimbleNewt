@@ -587,6 +587,8 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   const ordered = [...first.filter((k) => k in args).map((k): [string, unknown] => [k, args[k]]), ...Object.entries(args).filter(([k]) => !first.includes(k))];
   for (const [key, value] of ordered) {
     if (key === "expectedRevision" || key === "expectedVersion") continue;
+    // The binding an approval carries is the chat's own reading of the gate, and the owner is shown those failures in plain words beside the proposal line; the raw argument names and attempt list are not shown again here.
+    if (op === "release.approve" && (key === "acknowledgeFlaky" || key === "expectedFailures")) continue;
     // The owner's own alternative is shown as the words they will have recorded and the topic they go under, never as the record's fields.
     if (op === "meeting.record.owner-respond" && key === "alternative" && value !== null && typeof value === "object") {
       const alt = value as Record<string, unknown>;
