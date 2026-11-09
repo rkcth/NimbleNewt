@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { resumeDecision } from "../context/budget.js";
+import { resumeDecision, tokensOf } from "../context/budget.js";
+import type { FirstCall } from "../context/dispatch.js";
 import { contextRouteKey, type ContextEnforcementService } from "../context/index.js";
 import { routeNamed } from "../context/enforcement.js";
 import type { PauseService } from "../lifecycle/index.js";
@@ -56,6 +57,21 @@ function framed(id: string, sender: string, purpose: string, text: string): stri
 export const usableWindow = (w: unknown): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
 
 export const unknownWindowReason = (route: string): string => `route ${routeNamed(route)} has no context window the controller knows (its host states none for it and the routing table gives it no contextTokens); set its window before work runs on it`;
+
+/**
+ * Card C07o: the first call of an attempt as the controller can know it before a remote host's process is up — the text the host is given and the stored conversation it carries, plus the route's fixed part (system prompt
+ * and tool schemas) as first calls on the route measured it. A route nobody has measured counts no fixed part: it is not refused on a guess (as at a route move, C07f). The figures are passed as tokens, with no system-prompt
+ * or tool-schema characters, so this estimate is never kept as a measurement of the route. No reply reserve: the controller does not know the host's model settings. With no window the guards refuse the call before the
+ * estimate is used, so it is all zeros.
+ */
+export function estimatedFirstCall(context: Pick<ContextEnforcementService, "budget" | "fixedPartOf">, windowOf: (order: WorkOrder) => Promise<number | undefined>): (order: WorkOrder, text: string, storedTokens: number) => Promise<FirstCall> {
+  return async (order, text, storedTokens) => {
+    const window = usableWindow(await windowOf(order));
+    if (window === undefined) return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: 0, replyReserveTokens: 0 };
+    const fixed = await context.fixedPartOf(order.route, window, order.harness);
+    return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: tokensOf(text.length, context.budget(window)) + storedTokens + (fixed?.tokens ?? 0), replyReserveTokens: 0 };
+  };
+}
 
 export function controllerGuards(binding: GuardBinding): RuntimeGuards {
   const { context, pause, messages } = binding;

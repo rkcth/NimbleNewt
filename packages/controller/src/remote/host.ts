@@ -1,4 +1,7 @@
+import { randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
+import type { FirstCall } from "../context/dispatch.js";
+import { judgeResume, type RuntimeGuards } from "../dispatch/local-worker.js";
 import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
 import { sealContract } from "./contract.js";
@@ -24,6 +27,18 @@ export interface RemoteWorkerHostOptions {
    * unlimited. Absent: the order goes with the task contract only (the composed controller always gives it).
    */
   readonly ownerPolicy?: { readonly limits: () => Promise<ContractLimits | undefined>; readonly bestEffort: () => Promise<boolean> };
+  /**
+   * The model's context window for an order's route on this host, in tokens, when the operator states one (card C07o; the remote counterpart of `local.window`). `undefined`: the routing table's `contextTokens` for the
+   * route is used; a route neither states is refused (card C07n).
+   */
+  readonly window?: (order: WorkOrder) => number | undefined;
+  /**
+   * The controller's check of the first call and the stored conversation before the order is offered (card C07o), bound by the composer to the same guards the local worker has (`controllerGuards`). `firstCall`
+   * estimates the first call from what the controller knows (the order's text and the route's measured fixed part); the host's own process is not up yet. Absent: the order is offered as it is.
+   */
+  readonly context?: { readonly guards: NonNullable<RuntimeGuards["context"]>; readonly firstCall: (order: WorkOrder, text: string, storedTokens: number) => Promise<FirstCall> };
+  /** Told when the check fails or a stored conversation's size is not known (the order still goes, or is refused, as the check decided). */
+  readonly onGuardError?: (attemptId: string, what: string, error: unknown) => void;
 }
 
 /**
@@ -85,8 +100,39 @@ export class RemoteWorkerHost implements WorkerHost {
     return sealContract(order, { taskContractVersion: c?.taskContractVersion ?? 0, permissions: c?.permissions ?? [], ...(c?.budget === undefined ? {} : { budget: c.budget }), ...(limits === undefined ? {} : { limits }), bestEffort });
   }
 
+  /**
+   * Card C07o: the first call and the stored conversation of an attempt are judged by the controller before the host is offered the order, through the same guards and records as the local worker's (a remote host is
+   * untrusted, and the remote API has no operation through which it could ask). A stored conversation that is not carried is taken out of the order and the reason added to its resume note; a refused first call
+   * offers nothing (the context service has recorded the refusal and opened a `context_overflow` blocker) and the attempt fails with the reason.
+   */
+  async #judge(given: WorkOrder): Promise<{ readonly order: WorkOrder; readonly refused?: string }> {
+    const context = this.options.context;
+    if (context === undefined) return { order: given };
+    const report = (what: string, error: unknown): void => { try { this.options.onGuardError?.(given.attemptId, what, error); } catch { /* the report must not stop the attempt */ } };
+    const { from, note, storedTokens } = await judgeResume(context.guards, given, report);
+    const { resumeFrom: _f, resumeNote: _n, ...rest } = given; void _f; void _n;
+    const order: WorkOrder = { ...rest, ...(from === undefined ? {} : { resumeFrom: from }), ...(note === undefined ? {} : { resumeNote: note }) };
+    // The text the host will be given: the order's own and the resume note beside it (the local worker's `[note]` form, so both measure the same thing).
+    const text = note === undefined ? order.content : `${order.content}\n\n[${note}]`;
+    try {
+      const call = await context.firstCall(order, text, storedTokens ?? 0);
+      // Each offer is judged afresh (a resumed or re-placed attempt has the same ID and a conversation that has grown), so the launch names this offer; nothing is compacted before it, so a refusal opens the blocker.
+      const decision = await context.guards.admit(order, call, 1, false, randomBytes(6).toString("hex"));
+      return decision.admit ? { order } : { order, refused: decision.reasons.join("; ") || "the first call is over the context budget" };
+    } catch (error) {
+      report("context admission", error);
+      return { order, refused: `the context check failed: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+    }
+  }
+
   async start(given: WorkOrder): Promise<WorkerHandle> {
-    const order = await this.#carry(given);
+    const judged = await this.#judge(given);
+    if (judged.refused !== undefined) {
+      const why = `the first call was not sent: ${judged.refused}`;
+      // Nothing was offered: the host never sees the order (or the task credential in it), and the attempt fails with the reason.
+      return { workerVersion: "remote", run: async () => ({ status: "failed", error: why }), checkpoint: async () => judged.order.resumeFrom ?? {}, restart: async () => { throw new DomainError("fenced", "the attempt was refused before it was offered"); }, stop: async () => undefined };
+    }
+    const order = await this.#carry(judged.order);
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.options.requirements(order), inputs: this.options.inputs?.(order) ?? [] });
     return new RemoteWorkerHandle(this.remote, this.by, order.attemptId, placed.placement, this.options);
   }
