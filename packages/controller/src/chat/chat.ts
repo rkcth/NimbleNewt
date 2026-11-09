@@ -470,8 +470,14 @@ export class ChatService {
             const all = (recent?.["items"] as Record<string, unknown>[] | undefined) ?? [];
             const words = typeof topic === "string" ? topic : "";
             const matches = all.filter((m) => looseMatch(words, String(m["title"])));
-            if (all.length === 0) { push({ i, kind: "refused", code: "not_found", message: "there is no stand-up in that project" }); continue; }
-            if (matches.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no stand-up in that project is called "${words.slice(0, 80)}"` }); continue; }
+            if (matches.length === 0) {
+              // The project's stand-ups are read from the schedules, so a stand-up that has not met yet is answered about itself rather than called a name that fits nothing (card M03h).
+              const titles = await this.#standupTitles(token, currentFocus.projectId);
+              const named = titles.filter((t) => looseMatch(words, t));
+              if (named.length > 0) { push({ i, kind: "refused", code: "not_found", message: named.length === 1 ? `${quotedText(named[0]!, 60)} has no stand-up meeting yet, so nothing has been briefed for it` : `more than one stand-up of that project has no meeting yet: ${titleList(named)}` }); continue; }
+              if (titles.length === 0) { push({ i, kind: "refused", code: "not_found", message: "there is no stand-up in that project" }); continue; }
+              push({ i, kind: "refused", code: "not_found", message: `no stand-up in that project is called "${words.slice(0, 80)}". It has ${titleList(titles)}.` }); continue;
+            }
             const coming = matches.filter((m) => m["state"] === "planned").sort((a, b) => (String(a["startsAt"]) < String(b["startsAt"]) ? -1 : 1));
             // Words that fit several stand-ups ask; with no words, the next one coming up is meant.
             if (words.trim() !== "" && new Set(matches.map((m) => String(m["title"]))).size > 1) { push({ i, kind: "asked", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["title"]).slice(0, 60)}, ${String(m["startsAt"])}`) }); continue; }
@@ -971,8 +977,7 @@ export class ChatService {
         labels[String(args["briefId"])] = `${String(brief["agent"]).slice(0, 80)}'s brief`;
       } else {
         // The stand-ups the project has set up are read from the schedules, because a stand-up made this morning is one of them even before it has met (card M03h); the meeting to prepare, or to write into, is the one its latest occurrence is.
-        const live = (((await this.#get(token, "standup.list", { projectId, limit: 50 }))?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((s) => s["state"] !== "ended");
-        const titles = live.map((s) => String(s["title"]));
+        const titles = await this.#standupTitles(token, projectId);
         const noneReady = (): string => titles.length === 0
           ? `no stand-up is set up in this project, so there is nothing to ${isNote ? "write into" : "prepare"}`
           : titles.length === 1
@@ -990,8 +995,8 @@ export class ChatService {
           const words = typeof topic === "string" ? topic : "";
           const matches = open.filter((i) => looseMatch(words, String(i["title"])));
           // Words that fit one of the project's own stand-ups are answered about that stand-up, even when it has no meeting to work on: asking which one the owner meant would be odd when they named it.
-          const named = words === "" ? [] : live.filter((s) => looseMatch(words, String(s["title"])));
-          if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(String(named[0]!["title"]), 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
+          const named = words === "" ? [] : titles.filter((t) => looseMatch(words, t));
+          if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(named[0]!, 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
           if (open.length === 0) return refuse("not_found", noneReady());
           if (matches.length === 0) {
             return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
@@ -1486,6 +1491,14 @@ export class ChatService {
     } catch { return true; }
   }
 
+  /** The titles of the stand-ups a project has set up, ended ones left out (card M03h). A stand-up made this morning is one of them even before it has met, which is why this is not read from the meetings. */
+  async #standupTitles(token: string, projectId: string | undefined): Promise<string[]> {
+    if (projectId === undefined) return [];
+    const listed = await this.#get(token, "standup.list", { projectId, limit: 50 });
+    // Sorted, because the order records come back in is not something the owner should see change between one answer and the next.
+    return (((listed?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((s) => s["state"] !== "ended").map((s) => String(s["title"]))).sort();
+  }
+
   async #get(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args });
     if (response.ok) return response.result["item"] as Record<string, unknown>;
@@ -1949,6 +1962,12 @@ function shownOf(result: JsonObject): string[] | undefined {
 }
 
 const refuse = (code: string, message: string): { ok: false; kind: "refuse"; code: string; message: string } => ({ ok: false, kind: "refuse", code, message });
+
+/** A few things the owner is being told about, as one phrase: `x`, `x and y`, `x, y and z`; a long list is cut with a count. Each is quoted, because a title like this was written by whoever set it up. */
+const titleList = (titles: readonly string[]): string => {
+  const listed = titles.slice(0, 3).map((t) => quotedText(t, 60));
+  return `${listed.slice(0, -1).join(", ")}${listed.length > 2 ? "," : ""}${listed.length > 1 ? " and " : ""}${listed[listed.length - 1] ?? ""}${titles.length > 3 ? ` and ${titles.length - 3} more` : ""}`;
+};
 const acceptedForOp = (op: string): readonly string[] => (acceptedArgs(op) ?? []).filter((k) => !(k in TITLE_KEYS) && k !== "projectName");
 
 function askOrRefuse(i: number, r: { ok: false; kind: "ask"; question: string; options: string[]; field?: string; choices?: string[] } | { ok: false; kind: "refuse"; code: string; message: string }, intentIndex: number): PlanItem {

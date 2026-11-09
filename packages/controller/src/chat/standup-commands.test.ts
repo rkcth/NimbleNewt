@@ -328,5 +328,50 @@ for (const backend of backends) {
     assert.match(String(over.message), /no stand-up is set up in this project/, "an ended stand-up is not one the project has");
     assert.equal(JSON.stringify(over).includes("Closed stand-up"), false, "the ended stand-up's title is not repeated as if it were running");
   });
+
+  suite("a stand-up's brief is read by asking in ordinary words, and a stand-up that has not met is answered about itself; an agent who is not on it is never answered with someone else's brief (card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    await ctl.sched(a, "Morning sync", when);
+    // 12:30 London with a window from 12:00, past the world's clock of 11:00 London: nothing has been arranged for this one yet.
+    await ctl.sched(a, "Friday review", { time: "12:30", windowFrom: "12:00", windowTo: "13:00" });
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const asked = async (text: string, intent: unknown): Promise<Outcome> => { script[text] = [intent]; return only((await say(w, chat, text)).outcomes); };
+    const read = (meetingTopic: string, said: string, extra: Record<string, unknown> = {}): unknown => ({ kind: "status", request: { kind: "standup_briefs", meetingTopic, ...extra }, evidence: said.replace("?", ""), basis: "owner" });
+
+    // Nothing has been ticked: a question about the stand-up that has not met is answered about that stand-up, and one about a name that fits nothing says what the project has.
+    const notYet = await asked("What did the Friday review brief say?", read("friday review", "What did the Friday review brief say?"));
+    assert.equal(notYet.status, "refused", JSON.stringify(notYet));
+    assert.match(String(notYet.message), /"Friday review" has no stand-up meeting yet, so nothing has been briefed for it/);
+    const invented = await asked("What did the lunch stand-up brief say?", read("lunch stand-up", "What did the lunch stand-up brief say?"));
+    assert.equal(invented.status, "refused", JSON.stringify(invented));
+    assert.match(String(invented.message), /no stand-up in that project is called "lunch stand-up"/);
+    assert.match(String(invented.message), /It has "Friday review" and "Morning sync"\./, "the owner is told the stand-ups the project has, by their titles, in one order");
+
+    // Once the morning stand-up has its meeting, the same kind of question reads it: prepared, noted on and quoted back as the owner's words.
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 1, "only the stand-up whose window is open has a meeting");
+    const ready = await asked("Get the morning one ready.", cmd("standup.prepare", { meetingTopic: "morning" }, "Get the morning one ready"));
+    assert.equal(ready.status, "proposed", JSON.stringify(ready));
+    const didReady = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: ready.proposalId! });
+    assert.equal(didReady.applied, true, JSON.stringify(didReady));
+    const note = await asked("Tell the morning agent: the demo is at four.", cmd("standup.add-statement", { meetingTopic: "morning", agentName: "morning", section: "note", text: "the demo is at four" }, "Tell the morning agent: the demo is at four"));
+    assert.equal(note.status, "proposed", JSON.stringify(note));
+    assert.match(JSON.stringify(note), /A-Morning sync/, "the proposal says whose brief the note goes on");
+    const didNote = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: note.proposalId! });
+    assert.equal(didNote.applied, true, JSON.stringify(didNote));
+    const seen = JSON.stringify(await asked("What does the morning agent's brief say?", read("morning", "What does the morning agent's brief say?", { agentName: "morning" })));
+    assert.match(seen, /A note from the owner \(note\): \\"the demo is at four\\"/, "the note is told as the owner's own words, quoted");
+    assert.match(seen, /brief:/, "the line cites the brief it reads");
+
+    // An agent who is not on that stand-up gets nothing of another's brief, and a note for them is refused rather than put somewhere else.
+    await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Nobody here" });
+    const outsider = JSON.stringify(await asked("What does Nobody here's brief for the morning stand-up say?", read("morning", "What does Nobody here's brief for the morning stand-up say?", { agentName: "nobody here" })));
+    assert.equal(outsider.includes("the demo is at four"), false, "another agent's note is not shown to stand in for one who has no brief");
+    const misplaced = await asked("Tell Nobody here, for the morning stand-up: the demo is at four.", cmd("standup.add-statement", { meetingTopic: "morning", agentName: "nobody here", section: "note", text: "the demo is at four" }, "Tell Nobody here, for the morning stand-up: the demo is at four"));
+    assert.equal(misplaced.status, "refused", JSON.stringify(misplaced));
+    assert.match(String(misplaced.message), /no brief in that stand-up is for an agent called/);
+  });
 }
 
