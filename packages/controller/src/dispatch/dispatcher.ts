@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
+import { BLOCKER_TYPES } from "../domain/blockers.js";
 import { DECLINED, ENDED_CANCEL, STALE_CANCEL, relevantChanges, type ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
@@ -18,6 +19,7 @@ import type { GenerationService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import type { HostService } from "../hosts/index.js";
 import type { PauseGuard } from "../lifecycle/index.js";
+import type { HandoffPhase } from "../lifecycle/index.js";
 import type { McpService } from "../mcp/index.js";
 import type { ContextEnforcementService } from "../context/index.js";
 import type { HandoffFacts } from "../context/budget.js";
@@ -26,6 +28,7 @@ import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
 import { describePolicyContext, type PolicyService } from "../policy/index.js";
 import { ActionCatalog } from "../policy/catalog.js";
+import { handoffBrief } from "./handoff-brief.js";
 import type { ReviewService } from "../review/index.js";
 import { selectRoute, type RoutingService } from "../routing/index.js";
 import { allows } from "../security/access.js";
@@ -116,7 +119,7 @@ export interface DispatcherDeps {
   readonly denied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
-  readonly blockers: Pick<BlockerService, "openBlocker">;
+  readonly blockers: Pick<BlockerService, "openBlocker" | "openFor">;
   readonly route: RouteResolver;
   /**
    * The model calls of attempts, through the fallback service (card R04c). With it the route an attempt is claimed and started on is one the owner's routing controls (disable, drain, cutover) and the routes' health leave
@@ -166,7 +169,12 @@ export interface DispatcherDeps {
    * Context enforcement (card C07b) at the end of an attempt: an attempt that failed for want of context is counted (repeated overflow opens a visible blocker), and an attempt that ended without a hand-off gets
    * one written by the controller from `handoffFacts` (default: the task's title, how the attempt ended and the last checkpoint position).
    */
-  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow"> & Partial<Pick<ContextEnforcementService, "limitTool">>;
+  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow"> & Partial<Pick<ContextEnforcementService, "limitTool" | "latestHandoffFor">>;
+  /**
+   * The hand-off a task was last handed over with, as the controller's own hand-off records say it (card C07m): its ID, its phase and who it went between, with nothing of the package. The dispatcher names it
+   * in the first prompt of the attempt that follows, when that attempt's agent is the one the task was handed to. Without it the call says nothing about the package.
+   */
+  readonly handedIn?: (taskId: string) => Promise<{ id: string; phase: HandoffPhase; to: { kind: string; id: string } } | undefined>;
   /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
   readonly toolWindow?: (route: string) => number | undefined;
   /**
@@ -1877,7 +1885,7 @@ export class DispatcherService {
     const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: await this.#contentOf(b.taskId) + await this.#policyNote(b) + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
+      content: await this.#contentOf(b.taskId) + (await this.#policyNote(b)) + (await this.#handedInNote(b)) + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
     };
@@ -1935,6 +1943,40 @@ export class DispatcherService {
   async #contentOf(taskId: string): Promise<string> {
     const task = await this.#deps.projects.getTask(taskId);
     return task === undefined ? "" : `${task.title}${task.description === "" ? "" : `\n\n${task.description}`}`;
+  }
+
+  /**
+   * What this attempt was handed by the work that came before it (card C07m), said in bounded lines before the route view: the hand-off the task came to its agent with, the hand-off note of the attempt this
+   * one follows, and the task's open blockers. Each is named by its record and by the operation its agent reads it with, so the call stays bounded however much the earlier attempt left behind — the package
+   * itself is never copied into the prompt (it grows with every hand-off, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
+   */
+  async #handedInNote(b: DispatchBody): Promise<string> {
+    const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((): undefined => undefined);
+    const context = this.#deps.context;
+    const [handedIn, note, blockers] = await Promise.all([
+      this.#deps.handedIn === undefined ? Promise.resolve(undefined) : missing(this.#deps.handedIn(b.taskId)),
+      context?.latestHandoffFor === undefined ? Promise.resolve(undefined) : missing(context.latestHandoffFor(this.#deps.principal, b.taskId)),
+      missing(this.#openBlockersOf(b.taskId)),
+    ]);
+    // The package is named only to the agent the task was actually handed to by it: that one may read it with `handoff.get` and no one else can, so naming it to anyone else would only mislead.
+    const forThisAgent = handedIn !== undefined && handedIn.phase === "transferred" && handedIn.to.kind === "agent" && `agent:${handedIn.to.id}` === b.agentId;
+    // The note of this very attempt (there is none while it has not ended) is not "the attempt before yours"; anything the task holds is given as it is.
+    const previous = note !== undefined && note.attemptId !== b.attemptId ? note : undefined;
+    return handoffBrief({
+      taskId: b.taskId,
+      ...(forThisAgent ? { handedIn: { id: handedIn.id } } : {}),
+      ...(previous === undefined ? {} : { note: { id: previous.id, attemptId: previous.attemptId, source: previous.source } }),
+      ...(blockers === undefined || blockers.length === 0 ? {} : { blockers }),
+    });
+  }
+
+  /** The blockers that hold this task up (one indexed read per type: a subject has at most one open blocker of each). A type that cannot be read is left out, never guessed at. */
+  async #openBlockersOf(taskId: string): Promise<readonly { id: string; type: string; summary: string; resolver: string }[]> {
+    const subject = { kind: "task", id: taskId };
+    const found = await Promise.all(BLOCKER_TYPES.map(async (type) => await this.#deps.blockers.openFor(type, subject).catch((): undefined => undefined)));
+    return found.filter((b) => b !== undefined)
+      .sort((x, y) => (x.openedAt === y.openedAt ? (x.id < y.id ? -1 : x.id > y.id ? 1 : 0) : x.openedAt < y.openedAt ? -1 : 1))
+      .map((b) => ({ id: b.id, type: b.type, summary: b.summary, resolver: b.resolver }));
   }
 
   async #pin(b: DispatchBody): Promise<number | undefined> {
