@@ -496,6 +496,19 @@ export class ProjectResourceService {
   }
 
   /**
+   * Where a task's checkout is, from records alone (card L04d: the dependency probe a resume check runs needs the directory, and
+   * nothing else). Like `dispatchCheckout` it takes no caller's rights, is for code that builds the services, reads only and never
+   * writes or pins. `undefined` when the task is gone, names no repository, or its repository is not bound to the project.
+   * `paths` is the project's scope in it (none: all of it), so a probe looks only where the project may.
+   */
+  async checkoutLocation(taskId: string): Promise<{ readonly root: string; readonly paths: readonly string[] } | undefined> {
+    const task = (await this.#runner.get("task", checkTaskId(taskId)))?.body as unknown as TaskBody | undefined;
+    if (task === undefined || task.repositoryId === undefined) return undefined;
+    const bound = (await this.#resourcesOf(task.projectId, true)).find((r) => r.body.repositoryId === task.repositoryId && r.body.state === "bound");
+    return bound === undefined ? undefined : { root: bound.body.locator, paths: bound.body.scope.paths };
+  }
+
+  /**
    * The dispatcher's step (card P01): a task that names a repository is pinned to the binding and location version it has now, the moment its work is about to start (`pin: true`; before that the call only looks, so a waiting task holds nothing), and every later dispatch must find the
    * same checkout. It takes no caller's rights: only code that builds the services can run it (the dispatcher acts as the controller, whose service principal holds no `assignment.manage`), and it writes
    * only the pin. `none` for a task that names no repository (nothing to bind), `unbound` or `changed` with the reason when the work must not start.

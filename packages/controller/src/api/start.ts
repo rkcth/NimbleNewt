@@ -70,11 +70,11 @@ import { ContextBranchService } from "../branches/index.js";
 import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
 import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
-import { ContinuationService, ResumeCheckService, ResumeSettingsService, controllerResumePorts } from "../continuation/index.js";
-import { DependencyService } from "../dependencies/index.js";
+import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
+import { DependencyService, checkoutDependencyObserver, locallyPlaced, resumeProbeEnabled } from "../dependencies/index.js";
 import { ActivityService, ReplayLimitsService, ReplayService } from "../activity/index.js";
 import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
-import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, type LocalWork } from "../lifecycle/index.js";
+import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
@@ -106,6 +106,22 @@ export interface StartOptions {
    * without it every change is treated as relevant and the owner decides), and extra `missingContext` / `uncertainEffects` checks. Each must be repeatable.
    */
   readonly resume?: Partial<ResumePorts>;
+  /**
+   * The reviewer agent for a checked resume (card L04d): a model client and the routes it may use, tried in order. Without one the
+   * controller treats every change as relevant, so every changed resume waits for the owner; with one, a change the reviewer judges
+   * not to matter is committed without the owner. It is told the changes, the task's title and the next step its continuation
+   * recorded, each quoted as data (`tellTask: false` leaves the last two out). An explicit `resume.review` wins over this.
+   */
+  readonly resumeReview?: { readonly model: ResumeReviewModel; readonly routes: ResumeReviewRoutes; readonly tellTask?: boolean };
+  /**
+   * Whether a checked resume may look at the task's own checkout to see how its recorded files and directories are now (card L04d),
+   * instead of leaving every one of them `unknown`. Default: yes. `false` turns the reading off, `{ maxEntries, maxBytes }` bounds it
+   * tighter. A probe reads nothing outside the checkout the task's records name, and reports only what it really read. An explicit
+   * `resume.observe` wins over this. With remote hosts (`dispatch.remote.hosts`) the default is off: the resumed attempt's host is
+   * chosen after the check, and this machine's disk says nothing about another's. Given explicitly there, a task last placed on a
+   * remote host (or never placed) is still not probed, so its files stay `unknown` unless the host's own `resume.observe` answers.
+   */
+  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number; readonly maxTotalBytes?: number; readonly timeoutMs?: number };
   /**
    * Moving the controller database to another one from chat (card F04e). The databases a transfer may go to are named here by the host (a PostgreSQL address holds a password, so it is never typed in chat); with none given
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
@@ -648,6 +664,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     };
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork ?? hostLocalWork(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }, {
       descendants: (taskId) => swarmDescendantsInfo(storage, taskId),
+      // A Stop of an agent, a team or the installation walks the children of every task it covers, the links read once for the lot (card L02e).
+      descendantsOf: (taskIds) => swarmDescendantsOf(storage, taskIds),
       // Like `swarm.cancel`: the owner, or whoever holds the budget of the child's parent; or whoever may control the child's own scope.
       mayControl: stopMayControl,
       agentJobs: async (_by) => {
@@ -736,7 +754,39 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         return false;
       },
     };
-    const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: contextDependencies, blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage, options.resume),
+    // The two ports of a checked resume that were only stand-ins (card L04d): what the recorded files and directories look like here
+    // now, read from the checkout the task's repository is bound at before the attempt it checks starts, and a reviewer agent's reasoned verdict on each
+    // change. Whatever the host supplies outright for either port is used instead of these.
+    const RESUME_READER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
+    const remoteHostIds: ReadonlySet<string> = new Set((options.dispatch?.remote?.hosts ?? []).map((h) => h.hostId));
+    const resumeProbe = !resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) || options.resume?.observe !== undefined ? undefined : checkoutDependencyObserver({
+      manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId),
+      // A task placed on a remote host works on that host's disk, not this one: nothing here is evidence about it (and a task never
+      // placed, in an installation with remote hosts, may be about to go to one). Left unobserved, so the owner decides.
+      locate: locallyPlaced(remoteHostIds, async (taskId) => {
+        const placed = (await storage.getAggregate({ kind: "task-placement", id: taskId }))?.body as { hostId?: unknown } | undefined;
+        return typeof placed?.hostId === "string" ? placed.hostId : undefined;
+      }, async (taskId) => await resources.checkoutLocation(taskId)),
+      ...(typeof options.resumeProbe === "object" ? options.resumeProbe : {}),
+      onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
+    });
+    const reviewer = options.resumeReview === undefined || options.resume?.review !== undefined ? undefined : new ResumeReviewer(options.resumeReview.model, {
+      routes: options.resumeReview.routes,
+      ...(options.resumeReview.tellTask === false ? {} : {
+        task: async (taskId: string) => {
+          const task = await projects.getTask(taskId);
+          const latest = await continuations.latest(RESUME_READER, taskId).catch(() => undefined);
+          return task === undefined && latest === undefined ? undefined : { ...(task === undefined ? {} : { title: task.title }), ...(latest === undefined ? {} : { nextStep: latest.continuation.nextStep }) };
+        },
+      }),
+      onFailure: (route, detail) => { options.onInternalError?.(new Error(`the resume reviewer on ${route}: ${detail}`)); },
+    });
+    const resumePorts: Partial<ResumePorts> = {
+      ...(resumeProbe === undefined ? {} : { observe: resumeProbe }),
+      ...(reviewer === undefined ? {} : { review: (request) => reviewer.review(request) }),
+      ...options.resume,
+    };
+    const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: contextDependencies, blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage, resumePorts),
       // The owner's decline releases the task while the held attempt is still its active one, and closes the dispatcher's notice that it is held (card L04c).
       release: async (by, taskId, attemptId) => {
         const a = await assignments.getAssignment(taskId);
@@ -885,7 +935,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     activationLive = activation;
     // An interrupted switch is resolved before anything is served: to the old release or the new, from what the launcher's pointer says.
     if (activation !== undefined) { try { const r = await activation.recover(); if (r.resolved === "unresolved") (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))("release activation: an interrupted switch could not be resolved (the pointer names neither release); see release.status"); } catch (error) { (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))(`release activation: recovery failed: ${(error as Error).message.slice(0, 160)}`); } }
-    const api = new StateApi({ jobs, ...(stagedRestore === undefined ? {} : { backupRestore: stagedRestore }), ...(databaseTransfer === undefined ? {} : { databaseTransfer }), maintenanceHeld: () => (barrier.held ? (barrier.state().reason ?? "starting") : undefined), streamSettings, contextRouteSettings, ...(activation === undefined ? {} : { activation }), maintenance, serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, catalogPolicy, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops, settings: swarmLimits }), swarmLimits, capacityQuotas: capacityAdmission, status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, replay, replayLimits, resumes, continuations: continuationOps, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size), readRouteArchive: async (by, taskId, digest) => dispatch?.readRouteArchive(by, taskId, digest) }, handoffNotes: { read: async (by, noteId) => dispatch?.readHandoffNote(by, noteId) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ jobs, ...(stagedRestore === undefined ? {} : { backupRestore: stagedRestore }), ...(databaseTransfer === undefined ? {} : { databaseTransfer }), maintenanceHeld: () => (barrier.held ? (barrier.state().reason ?? "starting") : undefined), streamSettings, contextRouteSettings, ...(activation === undefined ? {} : { activation }), maintenance, serviceOps, ...(checked === undefined ? {} : { taskArtifacts: TaskArtifactPublisher.withEpoch(storage, epoch, checked) }), retention, retentionSettings, acceptance, reconnect, coverage, coverageSettings, quietHostSettings, catalogPolicy, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, capacityLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: releaseService, responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops, settings: swarmLimits }), swarmLimits, capacityQuotas: capacityAdmission, status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, replay, replayLimits, resumes, continuations: continuationOps, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size), readRouteArchive: async (by, taskId, digest) => dispatch?.readRouteArchive(by, taskId, digest), readNoteArchive: async (by, taskId, digest) => dispatch?.readNoteArchive(by, taskId, digest) }, handoffNotes: { read: async (by, noteId) => dispatch?.readHandoffNote(by, noteId) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

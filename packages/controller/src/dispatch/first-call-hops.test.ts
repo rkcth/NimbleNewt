@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { ContextEnforcementService, DeskService, HistoryService, RetrievalService, contextBudget, handoffFromFacts, tokensOf } from "../context/index.js";
+import { ContextEnforcementService, DeskService, HistoryService, NOTE_ARCHIVE_READ, RetrievalService, contextBudget, handoffFromFacts, handoffNote, tokensOf } from "../context/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { HandoffService, StopService, controllerHandoffSources, type StopPorts } from "../lifecycle/index.js";
 import type { JsonObject } from "../storage/types.js";
@@ -332,9 +332,19 @@ test("a route whose window the controller does not know is checked anyway: a fir
   assert.equal((await table.context!.resume({ attemptId: "att-2", taskId: "tsk-1", route: "offtable/none" } as never, 500)).resume, true, "a conversation that fits the table's window is resumed");
 });
 
-test("the controller's hand-off note that does not fit names where its whole text is kept", { todo: "C07p: context/budget.ts:178 cuts the controller's hand-off note at its tail ([… hand-off cut at N characters]) and keeps no original" }, () => {
+// Card C07p (this was C07l's finding 3, todo until this card landed): a hand-off note too long to keep whole keeps the newest of what it has to say, says what went out, and names where the whole text is kept.
+// Composed without an archive the note says plainly that the rest cannot be read, because naming a read that answers nothing would be worse than saying so; the note the controller writes over a dispatch does
+// name the archive (`api/start.ts`), and `api/start-note-archive.test.ts` follows that pointer through the state API and reads the whole text back.
+test("the controller's hand-off note that does not fit names where its whole text is kept", () => {
   const effects = Array.from({ length: 200 }, (_, i) => ({ id: `eff-${i}`, state: "unknown", summary: `effect ${i} on the fixtures` }));
-  const note = handoffFromFacts({ task: "Ship the importer", endedBecause: "lost", effects, artifacts: [], lastKnownState: "running", nextStep: "LAST-LINE" });
-  assert.ok(note.length <= 4000);
-  assert.match(note, /archive|hof-[a-z2-7]{20}|spl-[a-z2-7]{20}/, "the cut note does not say where the rest is kept");
+  const facts = { task: "Ship the importer", endedBecause: "lost", effects, artifacts: [], lastKnownState: "running", nextStep: "LAST-LINE" };
+  const kept = handoffFromFacts(facts);
+  assert.ok(kept.length <= 4000, `the note is ${kept.length} characters`);
+  assert.match(kept, /LAST-LINE/, "the newest thing the note has to say went out first");
+  assert.match(kept, /left out \(\d+ characters\)/, "the note does not say how much of it went out");
+  assert.match(kept, /cannot be read/, "a note with no archive named lets the reader believe the rest is kept somewhere");
+  const pointer = handoffNote(facts, 4000, { readWith: NOTE_ARCHIVE_READ });
+  assert.ok(pointer.cut && pointer.text.length <= 4000, `the note that names an archive is ${pointer.text.length} characters`);
+  assert.ok(pointer.text.includes(`archived for this task as ${pointer.digest} \u2014 read it with ${NOTE_ARCHIVE_READ}`), pointer.text);
+  assert.equal(pointer.whole.split("\n").length, 5 + 200, "the whole text the archive is to hold is not the whole note");
 });

@@ -1618,6 +1618,20 @@ for (const backend of backends) {
     const many = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines.map((l) => l.text);
     assert.equal(many.length, 1 + 20 + 1);
     assert.equal(many.at(-1), "5 more attempt(s) are not listed.");
+    // A scope with no request of its own is answered from the wider one whose stop reaches it, and the lines say whose figures these are (card L02e).
+    answer = { intentId: "stp-9", mode: "stop", phase: "done", endingRan: true, spent: 2_500_000, unpaid: false, attempts: [], requestedAt: "2026-10-28T10:00:00.000Z", through: { kind: "agent", id: "agt-b" } };
+    const wider = (await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!;
+    cited(wider.lines);
+    assert.deepEqual(wider.lines[0]!.cites, [{ kind: "stop", id: "stp-9" }, { kind: "task", id: t.id }, { kind: "agent", id: "agt-b" }], "the answer cites the request, the scope asked about and the scope it came from");
+    assert.deepEqual(wider.lines.map((l) => l.text), [
+      `Nothing was asked for task ${t.id} itself: this is the stop of agent agt-b, asked 2026-10-28T10:00:00.000Z, which reaches it. Every figure is that scope's, not task ${t.id} alone.`,
+      "The stop of agent agt-b is done. Its cleanup budget window (a wait on a blocked preparation starts it again) has used 2.5 (budget currency), with no limit set; the cost of ending the work is charged on top.",
+      "No attempt with a charged cleanup cost is recorded on this request.",
+    ]);
+    // The scope the answer came through is record text too: control characters never reach the line raw.
+    answer = { ...answer, through: { kind: "task", id: "task-x\u001b[31mparent" } };
+    assert.match((await status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "agent", scopeId: "agt-b" }))!.lines[0]!.text, /the stop of task task-x\\u001b\[31mparent, asked/);
+    answer = { ...answer, through: undefined };
     answer = undefined;
     assert.match((await status.ask(c.owner, { kind: "stop_cleanup", taskId: t.id }))!.lines[0]!.text, /was requested for task .* itself/);
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
@@ -1647,9 +1661,9 @@ for (const backend of backends) {
     const task = { kind: "task", id: "task-aaaaaaaaaaaaaaaaaaaa" };
     // Nothing recorded for exactly this scope: only the wider scopes that exist for its kind are named.
     answer = undefined;
-    assert.match(await head(task), /itself; one made through a wider scope \(its agent, a team above that agent, a parent task in its swarm, or the whole installation\) is read by naming that scope\.$/);
-    assert.match(await head({ kind: "agent", id: "agt-a" }), /itself; one made through a wider scope \(its team, a team above that, or the whole installation\) is read/);
-    assert.match(await head({ kind: "team", id: "tm-a" }), /itself; one made through a wider scope \(a team above it or the whole installation\) is read/);
+    assert.match(await head(task), /itself, nor through a wider scope \(its agent, a team above that agent, a parent task in its swarm, or the whole installation\)\.$/, "a task with no request of its own, and none above it either");
+    assert.match(await head({ kind: "agent", id: "agt-a" }), /itself, nor through a wider scope \(its team, a team above that, or the whole installation\)\.$/);
+    assert.match(await head({ kind: "team", id: "tm-a" }), /itself, nor through a wider scope \(a team above it or the whole installation\)\.$/);
     assert.equal(await head({ kind: "installation", id: "installation" }), "No Suspend or Stop of the installation was requested.");
     // Mode and phase: the window sentence and the "ending on top" clause.
     for (const kind of ["task", "agent", "team", "installation"]) for (const mode of ["suspend", "stop", "force-stop"]) for (const phase of ["preparing", "blocked", "prepared", "terminating", "done", "recovery-required", "cancelled"]) {

@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **243 of 348 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **246 of 357 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -107,11 +107,11 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
-| Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
+| Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 40% | 8 of 20 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 78% | 26 of 33 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 29 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 65% | 13 of 20 |
@@ -170,7 +170,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 </details>
 
 <details>
-<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓▓▓▓▓░░░░ 8 of 11</summary>
+<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓░░░░░░░░ 8 of 20</summary>
 
 The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap.
 
@@ -184,7 +184,16 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 - [x] **C06b** · P27 · Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
 - [ ] **G10** · P27 · Benchmark native backend caching and branch markers _(needs C06)_
 - [ ] **G09** · P30 · Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
+- [ ] **W01** · P33 · Measure how often Pi agents finish their work: a completion eval bench with a recorded baseline _(needs H12k, C06b)_
+- [ ] **W02** · P34 · Tell how a Pi turn ended, from the worker to the dispatcher _(needs W01)_
+- [ ] **W03** · P35 · A natural stop is not success: end the attempt stopped early and readmit it _(needs W02)_
+- [ ] **W04** · P35 · Continue a turn that stops early, a bounded number of times _(needs W02)_
 - [ ] **G11** · P36 · Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
+- [ ] **W05** · P36 · Check work.end done against the task contract before calling it success _(needs W03, W04)_
+- [ ] **W06** · P36 · Give every Pi agent a completion-rules section of its system prompt _(needs W04, C06b)_
+- [ ] **W07** · P36 · Set a length and reasoning budget per route profile _(needs W04, R01)_
+- [ ] **W08** · P37 · Show the owner how each attempt ended _(needs W03, W04, W05, U05)_
+- [ ] **W09** · P38 · Pass the completion gates on the real worker and on a Radiance route before release _(needs W01, W05, W06, W07, W08)_
 
 </details>
 
@@ -274,7 +283,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓░░░ 26 of 33</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 29 of 33</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -303,10 +312,10 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C07l** · P34 · Extend the 50-hand-off test to the first call, the stored conversation and the resume note _(needs C07h)_
 - [x] **C09e** · P34 · Record activity: approvals, messages, meetings, chat _(needs C09d)_
 - [ ] **C07k** · P35 · Summarise accumulated decisions so a hand-off package stops growing with the number of hand-offs _(needs C07j)_
-- [ ] **C07m** · P35 · Give the next agent its hand-off: the first call names the package, the controller's hand-off note and the open blockers _(needs C07l)_
-- [ ] **C07n** · P35 · Check the first call on a route whose window the controller does not know _(needs C07l)_
+- [x] **C07m** · P35 · Give the next agent its hand-off: the first call names the package, the controller's hand-off note and the open blockers _(needs C07l)_
+- [x] **C07n** · P35 · Check the first call on a route whose window the controller does not know _(needs C07l)_
 - [ ] **C07o** · P35 · Check the first call and the stored conversation for attempts on remote worker hosts _(needs C07l)_
-- [ ] **C07p** · P35 · Mark and keep what is cut from an attempt's hand-off note and resume note _(needs C07l)_
+- [x] **C07p** · P35 · Mark and keep what is cut from an attempt's hand-off note and resume note _(needs C07l)_
 - [ ] **C07q** · P35 · Use the controller's summariser for compaction and keep the compaction lineage bounded _(needs C07l)_
 - [x] **C09f** · P35 · Record activity: approvals, messages, artifact versions, chat _(needs C09e)_
 - [x] **C09g** · P36 · Record activity: artifact versions, chat, explanation index _(needs C09f)_
@@ -650,7 +659,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09)_
 
 </details>
 

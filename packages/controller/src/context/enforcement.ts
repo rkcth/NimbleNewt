@@ -9,7 +9,7 @@ import { redactText } from "../security/redact.js";
 import { quotedLine } from "../decisions/records.js";
 import { sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { classifyFailure, contextBudget, tokensOf, handoffFromFacts, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
+import { classifyFailure, contextBudget, tokensOf, handoffNote, NOTE_ARCHIVE_READ, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
 import { admitFirstCall, boundedSummarise, calibratedCharsPerToken, reviewRouteChange, SUMMARY_DEFAULTS, type FirstCallDecision, type FirstCall, type SummariseAttempt, type SummariseLimits, type Summariser } from "./dispatch.js";
 import type { RetrievalService, SourceRef } from "./retrieval.js";
 import { DEFAULT_ROUTE_FLOOR_CHARS, type RouteSettingsEffective } from "./route-settings.js";
@@ -125,6 +125,10 @@ export const PROMPT_NOTE_RESERVE_CHARS = 2000;
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
 interface SpillBody { /** An outside server's text: read only by those who may use MCP in the project, and framed as data when paged out. */ readonly untrusted?: boolean; readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
+/** The whole text of a note that was cut to fit (card C07p), kept under the digest the cut names; `what` says which note it was, in the controller's words. */
+interface NoteArchiveBody { readonly taskId: string; readonly projectId: string; readonly attemptId?: string; readonly what: string; readonly digest: string; readonly text: string; readonly writtenBy: string }
+/** The shape of a note's whole-text digest, as `cutNote` writes it and its marker names it. */
+const NOTE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 export interface EnforcementOptions extends RunnerOptions {
   /** Context-window overrides for the budgets (shares, characters per token); validated by `contextBudget`. */
@@ -350,15 +354,15 @@ export class ContextEnforcementService {
           // Another first call wrote the figure at the same moment: read it again and add ours to it. Anything else (including a command that conflicts with itself, which no retry changes) is reported, not hidden, and never fails the admission.
           // Two creations of the record at once make the loser's `command_conflict` ("already exists"): that one is a race and is retried. The same command ID used for another payload (the record was there when this try began) cannot succeed on a retry.
           if (error instanceof DomainError && (error.code === "stale_revision" || (error.code === "command_conflict" && creating))) continue;
-          this.#reportFixedError(error);
+          this.#reportFault(error);
           return;
         }
       }
-      this.#reportFixedError(new Error(`the figure of route ${m.route} could not be kept: other first calls kept changing it`));
-    } catch (error) { this.#reportFixedError(error); /* best effort: the figure is an aid for later route changes, never a condition of this call */ }
+      this.#reportFault(new Error(`the figure of route ${m.route} could not be kept: other first calls kept changing it`));
+    } catch (error) { this.#reportFault(error); /* best effort: the figure is an aid for later route changes, never a condition of this call */ }
   }
   /** At most once a minute, so a store that refuses every write is one line, not one per admission. */
-  #reportFixedError(error: unknown): void {
+  #reportFault(error: unknown): void {
     if (this.#onError === undefined) return;
     const now = Date.parse(this.#runner.now());
     if (Number.isFinite(now) && this.#lastFixedError !== 0 && now - this.#lastFixedError < 60_000) return;
@@ -876,6 +880,57 @@ export class ContextEnforcementService {
     try { return { ...page(b.remainder, index, size), tool: b.tool, ...(b.untrusted === true ? { untrusted: true as const } : {}) }; } catch (error) { if (error instanceof RangeError) return invalid("index", error.message); throw error; }
   }
 
+  // ---- the whole text of a note that was cut (card C07p) -------------------------------------------------------------
+
+  /**
+   * Keeps the whole text of a note that was cut to fit (a hand-off note, the note saying how the calls that waited for approval were
+   * decided), so the marker the cut leaves in the note can name where the rest is read. The digest is checked against the text, so a note
+   * never sends anyone to an archive that does not hold exactly what it promised. The controller's gate, like the other context records:
+   * whoever works on the task reads an archive, nobody outside it writes one. Repeating it for the same task and digest keeps one copy.
+   */
+  async archiveNote(principal: Principal, command: { taskId: string; attemptId?: string; what: string; digest: string; text: string }): Promise<{ id: string; digest: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "what", "digest", "text"]);
+    const taskId = checkTaskId(command.taskId);
+    const attemptId = command.attemptId === undefined ? undefined : key("attemptId", command.attemptId);
+    const what = text(command.what, "what", { min: 1, max: 200 });
+    const whole = text(command.text, "text", { min: 1, max: ENFORCEMENT_LIMITS.archiveChars, multiline: true });
+    if (typeof command.digest !== "string" || !NOTE_DIGEST.test(command.digest)) invalid("digest", "must be the sha256: digest of the whole text");
+    // Not a truncation and not a look-alike: the text under this digest must hash to it, or the note's marker would be a false promise.
+    if (command.digest !== `sha256:${sha256(whole)}`) throw new DomainError("invalid_command", "digest: is not the digest of this text", { field: "digest" });
+    const projectId = await this.#dispatch(principal, taskId);
+    const ref: AggregateRef = { kind: "ctx-note-archive", id: derivedId("ctx", `${taskId}\0note\0${command.digest}`) };
+    if ((await this.#runner.get(ref.kind, ref.id)) !== undefined) return { id: ref.id, digest: command.digest, replayed: true };
+    const body: NoteArchiveBody = { taskId, projectId, ...(attemptId === undefined ? {} : { attemptId }), what, digest: command.digest, text: whole, writtenBy: principal.id };
+    try {
+      await this.#runner.command("context.note-archive", { commandId: `ctx-not-${ref.id.slice(4)}`, actor: principal.id }, async () => ({
+        payload: { taskId, attemptId: attemptId ?? null, digest: command.digest, what },
+        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { chars: whole.length } }),
+      }));
+    } catch (error) {
+      // Another writer of the same note got there first: the text is the same, and so is the record.
+      if (!(error instanceof DomainError) || error.code !== "command_conflict" || (await this.#runner.get(ref.kind, ref.id)) === undefined) throw error;
+      return { id: ref.id, digest: command.digest, replayed: true };
+    }
+    return { id: ref.id, digest: command.digest, replayed: false };
+  }
+
+  /**
+   * The whole text of a note cut to fit, by the digest its marker names (card C07p). The same gate as reading the note itself - whoever may
+   * work on the task - and a text it may not show reads the same as one that is not there.
+   */
+  async noteArchive(principal: Principal, command: { taskId: string; digest: string }): Promise<{ taskId: string; attemptId?: string; what: string; digest: string; text: string } | undefined> {
+    onlyKnown(command, ["taskId", "digest"]);
+    const taskId = checkTaskId(command.taskId);
+    if ((await this.#task(principal, taskId, true)) === undefined) return undefined;
+    if (typeof command.digest !== "string" || !NOTE_DIGEST.test(command.digest)) return undefined;
+    const found = await this.#runner.get("ctx-note-archive", derivedId("ctx", `${taskId}\0note\0${command.digest}`));
+    if (found === undefined) return undefined;
+    const b = found.body as unknown as NoteArchiveBody;
+    // Only what the operation documents: the archive's project and who wrote it stay in the record.
+    if (b.taskId !== taskId || b.digest !== command.digest) return undefined;
+    return { taskId: b.taskId, ...(b.attemptId === undefined ? {} : { attemptId: b.attemptId }), what: b.what, digest: b.digest, text: b.text };
+  }
+
   // ---- hand-off ----------------------------------------------------------------------------------------------------------
 
   /** The attempt's own hand-off. If the controller already wrote one for this attempt, both are kept and the attempt's own becomes the task's latest. */
@@ -890,6 +945,8 @@ export class ContextEnforcementService {
   /**
    * Called when an attempt ends. If the attempt left a hand-off, that one is returned; otherwise the controller writes one from the facts the dispatcher can read (the effect ledger, artifacts, the
    * checkpoint and the last known state), credentials removed, and attaches it to the task. A crash after a confirmed effect and before the attempt's own hand-off therefore still yields one.
+   * A note that does not fit keeps its newest entries and says where the rest of itself is kept: the whole text is archived **before** the note is stored, so the marker it carries is true. When the archive
+   * cannot be written the note is stored anyway - without a pointer it cannot honour - and the fault is reported.
    */
   async ensureHandoff(principal: Principal, command: { taskId: string; attemptId: string; endedBecause: string }, facts: (taskId: string, attemptId: string) => Promise<HandoffFacts>): Promise<{ id: string; source: "attempt" | "controller"; text: string }> {
     onlyKnown(command, ["taskId", "attemptId", "endedBecause"]);
@@ -900,7 +957,18 @@ export class ContextEnforcementService {
       const existing = await this.#runner.get("ctx-handoff", handoffId(taskId, attemptId, source));
       if (existing !== undefined) return { id: existing.id, source, text: (existing.body as unknown as HandoffBody).text };
     }
-    const written = handoffFromFacts({ ...(await facts(taskId, attemptId)), endedBecause: ended }, ENFORCEMENT_LIMITS.handoff);
+    const given = { ...(await facts(taskId, attemptId)), endedBecause: ended };
+    const note = handoffNote(given, ENFORCEMENT_LIMITS.handoff, { readWith: NOTE_ARCHIVE_READ });
+    let written = note.text;
+    if (note.cut) {
+      // The marker the cut leaves names this archive, so the whole text is kept first and the note is stored after it.
+      try { await this.archiveNote(principal, { taskId, attemptId, what: `the controller's hand-off note for attempt ${attemptId}`, digest: note.digest, text: note.whole }); }
+      catch (error) {
+        // It could not be kept: the note must not promise to say where it is. It says plainly that the rest cannot be read, and the hand-off is written anyway.
+        this.#reportFault(error);
+        written = handoffNote(given, ENFORCEMENT_LIMITS.handoff).text;
+      }
+    }
     const id = await this.#writeHandoff(principal, { taskId, projectId, attemptId, source: "controller", text: written, endedBecause: ended });
     const b = (await this.#runner.get("ctx-handoff", id))!.body as unknown as HandoffBody;
     return { id, source: b.source, text: b.text };

@@ -652,6 +652,38 @@ for (const backend of backends) {
     void tasks;
   });
 
+  suite("an attempt woken for twenty calls that waited is told how every one was decided, not only the first few (card C07p)", async (c) => {
+    // The finding: the wake-up note was one line cut at 500 characters, which is fewer than four verdicts. An attempt whose calls filled more than that came back knowing nothing about the later ones —
+    // and nothing said anything was missing. Every verdict now has a line of its own, and the note is given room enough to carry all of them.
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    const { attemptId } = await c.task("push a lot", ann);
+    const woke = attemptId!;
+    const calls: { operationId: string; reviewId: string }[] = [];
+    c.worker.script = async ({ order, gateway }) => {
+      if (order.resumeNote !== undefined) return { status: "completed", text: "resumed" };
+      for (let i = 0; i < 20; i++) {
+        const result = await gateway.call({ callId: `push${i}`, tool: { name: "git-push", version: "1" }, args: { b: `b${i}` } }, { kind: "effect", effectKind: "git-push", target: `repo${i}`, input: {}, bridge: { idempotent: true, execute: async () => ({}) } });
+        calls.push(result as unknown as { operationId: string; reviewId: string });
+      }
+      return { status: "completed", text: "waiting", checkpoint: { saved: woke } };
+    };
+    await c.run();
+    assert.equal(calls.length, 20);
+    for (let i = 0; i < calls.length; i++) {
+      const review = (await c.reviews.get(c.owner, calls[i]!.reviewId))!;
+      await c.reviews.decide(c.owner, { commandId: `dec${i}`, requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+    }
+    const report = await c.run();
+    assert.equal(report.approvals.filter((a) => a.verdict === "approved").length, 20, "every parked call was decided in the one tick");
+    await c.run();
+    const note = c.worker.starts.filter((o) => o.attemptId === woke).at(-1)!.resumeNote ?? "";
+    assert.ok(note.length > 500, `the note is ${note.length} characters, so this test would pass with the old 500-character cut`);
+    for (const call of calls) assert.ok(note.includes(call.operationId), `the note does not say what happened to call ${call.operationId}: ${note}`);
+    assert.deepEqual(note.split("\n").slice(1), calls.map((call) => `- call ${call.operationId} was approved`), "every verdict is there, one to a line, oldest first");
+    assert.ok(!note.includes("[") && !note.includes("]"), `the note carries a bracket, which would close the block the worker puts it in: ${note}`);
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "succeeded");
+  });
+
   suite("a call the policy sends to the owner is not cleared by an agent reviewer's approval; the owner's approval lets the same call run once", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
     await c.task("push", ann);
