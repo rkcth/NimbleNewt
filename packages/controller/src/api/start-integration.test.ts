@@ -65,7 +65,7 @@ test("integration policy: a project gets the installation default or the profile
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
-test("in chat, how finished work lands is shown first and applies on the owner's word; main-automatic only on the owner's own words; project.create carries the section (card P08b)", async () => {
+test("in chat, how finished work lands is shown first and applies on the owner's word; main-automatic is a proposal that says what it does and is applied only on confirmation; project.create carries the section (card P08b)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-integration-chat-"));
   const say: Record<string, unknown[]> = {};
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) } });
@@ -84,19 +84,23 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "do that", basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     assert.equal(await landing(), "integration-branch");
-    // main-automatic is only set when the owner's own words say it.
+    // Nothing about landing is read out of the owner's wording: any sentence yields the same shown proposal, and the confirmation of it is the consent.
     const vague = "make Garden's landing as fast as it can be";
-    const refused = await turn("m3", vague, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: vague, basis: "owner" }]);
-    assert.notEqual(refused[0].status, "proposed", JSON.stringify(refused));
-    assert.equal(await landing(), "integration-branch");
-    const plain = "land Garden's finished work on main-automatic from now on";
+    const shownAuto = await turn("m3", vague, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: vague, basis: "owner" }]);
+    assert.equal(shownAuto[0].status, "proposed", JSON.stringify(shownAuto));
+    assert.match((shownAuto[0].preview ?? []).join(" "), /no human step/, "the proposal says what the landing would do");
+    assert.equal(await landing(), "integration-branch", "a proposal changes nothing on its own, whatever the sentence was");
+    const plain = "from now on Garden's finished work should just get itself onto main once the checks pass";
     const ok = await turn("m4", plain, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: plain, basis: "owner" }]);
     assert.equal(ok[0].status, "proposed", JSON.stringify(ok));
     // A new project can be drafted with the section; an agent cannot send it.
-    // The words check: negations and look-alikes do not count; the clause must be affirmative.
+    // No wording is a gate any more: a denial, a negation or a look-alike sentence is shown as a proposal like any other and applied only if the owner confirms that one.
     for (const [i, no] of ["never land Garden's work on main automatically", "do not make it main-automatic", "Garden's landing should remain automatic", "the domain automatically renews"].entries()) {
       const out = await turn(`neg${i}`, no, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: no, basis: "owner" }]);
-      assert.notEqual(out[0].status, "proposed", no);
+      assert.ok(["proposed", "asked", "ignored", "refused"].includes(out[0].status), `${no}: ${JSON.stringify(out)}`);
+      assert.notEqual(out[0].status, "applied", `${no} is never applied on the spot: ${JSON.stringify(out)}`);
+      assert.equal(await landing(), "integration-branch", `${no} changes nothing until the owner confirms a shown proposal`);
+      if (out[0].status === "proposed") await turn(`negx${i}`, "no, drop that", [{ kind: "discard_proposal", proposalId: out[0].proposalId, evidence: "drop that", basis: "owner" }]);
     }
     // A project is not made when its integration section cannot be set; and the section takes only its own four fields.
     const before = (await call("project.list", {})).result.items.length;
