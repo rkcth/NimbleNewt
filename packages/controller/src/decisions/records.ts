@@ -278,7 +278,7 @@ export function startupItems(context: DecisionContext): StartupItem[] {
 }
 
 /** How many of the owner's items a compaction of the model process keeps, and how much of each (card C07q): the same 12 as the controller's own compaction pins. */
-export const COMPACTION_KEEP = { items: 12, chars: 200 } as const;
+export const COMPACTION_KEEP = { items: 12, chars: 200, /** The longest line as written (ID, quotes and escapes included): the worker channel's `CHANNEL_KEEP.line`, which refuses the whole start message past it. */ line: 600 } as const;
 /**
  * The owner's decisions given to the model process's own compaction (card C07q). The process compacts its conversation itself (Pi's `beforeCompact` hook, with the extractive summary), so the controller's
  * summariser, which pins decisions by reference, never sees that text. Instead the process is handed, when it starts, the owner's current items for its task (decisions, gates, goals, permissions and
@@ -286,12 +286,21 @@ export const COMPACTION_KEEP = { items: 12, chars: 200 } as const;
  * how to read the current ones whole, so a later correction is never hidden by an older line. `undefined` when the owner has decided nothing for the task.
  */
 export function compactionKeep(context: DecisionContext): { readonly note: string; readonly lines: readonly string[] } | undefined {
-  const items = startupItems(context).filter((i) => i.kind !== "decision");
+  // An unresolved conflict and a gate say what must not be done, so they come before the other items when there are more than are kept (review).
+  const rank = (i: StartupItem): number => context.disputes.some((d) => d.id === i.id) ? 0 : context.gates.some((g) => g.id === i.id) ? 1 : 2;
+  const items = startupItems(context).filter((i) => i.kind !== "decision").map((i, n) => ({ i, n })).sort((a, b) => rank(a.i) - rank(b.i) || a.n - b.n).map((x) => x.i);
   if (items.length === 0) return undefined;
-  const cut = (text: string): string => { const chars = Array.from(text.replace(/\s+/g, " ").trim()); return chars.length > COMPACTION_KEEP.chars ? `${chars.slice(0, COMPACTION_KEEP.chars - 3).join("")}...` : chars.join(""); };
+  // Cut by characters, then shorter still while the quoted line is past the channel's bound: an escape writes one character as up to twelve (review: a line past the bound failed every launch of the task).
+  const line = (id: string, text: string): string => {
+    const chars = Array.from(text.replace(/\s+/g, " ").trim());
+    for (let n = Math.min(chars.length, COMPACTION_KEEP.chars); ; n = Math.floor(n * 0.8)) {
+      const out = `${id}: ${quotedLine(n < chars.length ? `${chars.slice(0, Math.max(0, n - 3)).join("")}...` : chars.join(""))}`;
+      if (out.length <= COMPACTION_KEEP.line || n === 0) return out;
+    }
+  };
   const kept = items.slice(0, COMPACTION_KEEP.items);
   const more = items.length - kept.length;
-  const lines = kept.map((i) => `${i.id}: ${quotedLine(cut(i.text))}`);
+  const lines = kept.map((i) => line(i.id, i.text));
   const note = `The owner's decisions for this task, kept through this compaction as they stood when this process started (decision version ${context.version}), each cut to ${COMPACTION_KEEP.chars} characters${more > 0 ? `; ${more} more are not listed` : ""}. A later correction replaces any of them: read the current ones whole with the state API query decision.context, giving this task's project and task ID.`;
   return { note, lines };
 }

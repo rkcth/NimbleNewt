@@ -43,3 +43,25 @@ test("a format character above the BMP is escaped as both halves of its surrogat
     assert.equal(JSON.parse(line), `a${ch}b`, `the escaped line round-trips to the words it quotes: ${line}`);
   }
 });
+
+// Card C07q review: the lines given to the model process's own compaction go through the worker channel, which refuses the whole start message when one line is past 600 characters. A wording whose
+// characters are escaped (here a family emoji, whose joiners are format characters written as six characters each) must be cut further, never fail the launch; and a conflict or a gate is never the one left out.
+test("a compaction keep line stays inside the channel's bound however its wording is escaped, and a conflict and a gate come first", async () => {
+  const { compactionKeep, COMPACTION_KEEP } = await import("./records.js");
+  const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f466);
+  const decision = (n: number, wording: string, category = "decision") => ({ id: `dec-${String(n).padStart(20, "a")}`, recordedAt: `2026-01-01T00:00:${String(n).padStart(2, "0")}Z`, state: "active", wording, category, topic: `topic ${n}`, version: 1, statement: "s" });
+  const one = compactionKeep({ projectId: "p", version: 3, decisions: [decision(1, family.repeat(40))], goals: [], permissions: [], gates: [], disputes: [], questions: [] } as never)!;
+  assert.equal(COMPACTION_KEEP.line, 600);
+  assert.ok(one.lines[0]!.length <= 600, `the line is ${one.lines[0]!.length} characters`);
+  assert.ok(JSON.parse(one.lines[0]!.slice(one.lines[0]!.indexOf(": ") + 2)).endsWith("..."), "the line is still one quoted string, marked as cut");
+  assert.ok(compactionKeep({ projectId: "p", version: 3, decisions: [decision(1, String.fromCodePoint(0x200b).repeat(500))], goals: [], permissions: [], gates: [], disputes: [], questions: [] } as never)!.lines[0]!.length <= 600);
+  const many = Array.from({ length: 14 }, (_, n) => decision(n + 1, `decision ${n + 1}`));
+  const dispute = { id: "dsp-aaaaaaaaaaaaaaaaaaaa", topic: "deploy", members: ["dec-x", "dec-y"], openedAt: "2026-01-02T00:00:00Z", projectId: "p", state: "open" };
+  const gate = decision(40, "plan only", "gate");
+  const kept = compactionKeep({ projectId: "p", version: 3, decisions: many, goals: [], permissions: [], gates: [gate], disputes: [dispute], questions: [] } as never)!;
+  assert.equal(kept.lines.length, 12);
+  assert.ok(kept.lines[0]!.startsWith("dsp-aaaaaaaaaaaaaaaaaaaa: "), "the unresolved conflict is kept first");
+  assert.ok(kept.lines[1]!.startsWith(`${gate.id}: `), "then the gate");
+  assert.ok(kept.lines[2]!.startsWith(`${many[0]!.id}: `), "then the other items in their order");
+  assert.match(kept.note, /4 more are not listed/);
+});
