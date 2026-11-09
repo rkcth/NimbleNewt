@@ -739,22 +739,18 @@ export class ChatService {
       for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
       if (intent.op === "grant.create") {
         const scope = args["project"];
-        // The chat gives a right only in one plain form, so nothing can limit, negate or change it unseen: "give <principal> the <action> right everywhere permanently" (or in <project ID>). Every word that is not one of those, or filler from a short fixed list, refuses the message; the reason recorded with the right is the owner's message itself.
-        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "the chat gives rights with no time limit; for a limited right use the grant.create operation with expiresAt");
-        const FILL = new Set(["please", "give", "grant", "allow", "let", "the", "right", "permission", "access", "to", "everywhere", "permanently", "in", "all", "every", "projects", "project"]);
-        let rest = words.toLowerCase();
-        for (const v of [args["grantee"], args["action"], scope]) if (typeof v === "string" && v !== "*") rest = rest.split(v.toLowerCase()).join(" ");
-        const leftover = rest.split(/[\s,;.!?:]+/).filter((w) => w.length > 0 && w !== "*" && !FILL.has(w));
-        if (leftover.length > 0) return refuse("unsupported_value", `"${leftover[0]!.slice(0, 40)}" is not understood in a request for a right. Say only: give <who> the <action> right everywhere permanently (a limited right uses the grant.create operation).`);
-        if (!/\bpermanently\b/i.test(words)) return refuse("unsupported_value", "say that the right is permanent: give <who> the <action> right everywhere permanently");
+        // A right given in chat has no end and is always a proposal (`grant.*` is shown first in every profile). Its consequence (no end; every project when the scope is `*`) is stated on the proposal
+        // line itself (`describe`), and the owner's confirmation of that shown proposal is the consent: nothing here reads the owner's wording for "permanently" or "everywhere", and nothing tells them
+        // what to say. A negated, limited or conditional sentence the interpreter read as a plain grant is still only shown, and the owner's no ends it. The reason recorded is the owner's message itself.
+        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "a right given in chat has no end date, so a right that ends or starts later was not drawn up here; it can be made through the grant.create operation with its dates");
         args["basis"] = `owner chat: ${words}`.slice(0, 200);
-        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(words)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
+        if (scope === "*") { /* every project: the proposal says so */ }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
           const found = await this.#projectByIntent(token, scope, undefined);
           if (!found.ok) return found;
           labels[found.id] = found.name;
-        } else return refuse("invalid_command", "which project? Name its ID, or say everywhere.");
+        } else return refuse("invalid_command", "Which project should this right cover, or should it cover every project?");
       }
     }
 

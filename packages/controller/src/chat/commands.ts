@@ -512,7 +512,7 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : "";
+  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? ` (${typeof args["expiresAt"] === "string" ? `ends ${args["expiresAt"]}` : "no end: it never runs out and stays until you revoke it"}${args["project"] === "*" ? "; everywhere: it covers every project, including ones made later" : ""})` : "";
   const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
