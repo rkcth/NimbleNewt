@@ -52,13 +52,18 @@ const SPECS: readonly Spec[] = [
   { op: "tool.describe", description: "Fetch what a catalogue tool or skill is for: purpose, input and output schemas, access it asks for, limits and instructions.", parameters: obj({ tool: text("the canonical name, such as toolbox.run-tests"), version: text("major.minor.patch; the latest live version when omitted") }, ["tool"]) },
   { op: "tool.invoke", description: "Run a catalogue tool at an exact version with structured input that matches its schema. The controller checks the arguments, your permissions, the budget, the host and revocation, and may ask for approval first; if it says awaiting-approval, make the same call again later with the same input.", parameters: obj({ tool: text("the canonical name"), version: text("major.minor.patch; the latest live version when omitted"), input: json("the arguments, as the tool's input schema says") }, ["tool"]) },
   { op: "tool.register", description: "Register a script as a tool in your own namespace from two of your accepted desk records: the instructions and the executable.", parameters: obj({ name: text("the short name"), kind: text("tool or skill"), version: text("major.minor.patch, higher than any before"), manifest: json("the manifest: purpose, input and output schemas, entry point, interpreter, os, arch, dependencies, requested access, limits, cancellation, recovery"), instructionsRecordId: text("desk record ID"), executableRecordId: text("desk record ID") }, ["name", "kind", "version", "manifest", "instructionsRecordId"]) },
+  { op: "work.end", description: "End your attempt: result done (default), partial, blocked or abandoned; submit true also offers your committed changes for landing. Make it your last call.", parameters: obj({ submit: Type.Boolean(), result: text("done, partial, blocked or abandoned"), note: text("up to 1,000 characters"), message: text("up to 2,000 characters for your supervisor") }) },
 ];
 
 /** The wire name of an operation: `nimblenewt__desk-read`. */
 export const bridgeToolName = (op: string): string => wireName(`nimblenewt.${op.replace(".", "-")}`);
 export const BRIDGE_TOOL_NAMES: readonly string[] = Object.freeze(SPECS.map((s) => bridgeToolName(s.op)));
+/** The bridge tool an agent ends its attempt with (`work.end`, card H12n); the worker reads a turn that called it successfully as one that ended normally (card W02). */
+export const WORK_END_TOOL = bridgeToolName("work.end");
+/** How the bridge renders a refusal as the tool's output (the model reads it; Pi records the call as run). */
+export const BRIDGE_REFUSED_PREFIX = "refused (";
 
-const render = (reply: BridgeReply): string => (reply.ok ? JSON.stringify(reply.result) : `refused (${reply.code}): ${reply.message}`);
+const render = (reply: BridgeReply): string => (reply.ok ? JSON.stringify(reply.result) : `${BRIDGE_REFUSED_PREFIX}${reply.code}): ${reply.message}`);
 
 /** One snapshot of the catalogue's declarations: what a request in flight was shown. Frozen. */
 export interface Declarations { readonly revision: string; readonly tools: readonly { readonly name: string; readonly kind: string; readonly version: string }[]; readonly complete: boolean }

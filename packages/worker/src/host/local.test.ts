@@ -316,3 +316,61 @@ test("L02d review: a process name (the program's own choice) is quoted in what t
 });
 
 test.after(() => { rmSync(root, { recursive: true, force: true }); void dirname; });
+
+// Card W02: the host carries how a turn ended. A process the test plays answers the start, the run and the checkpoint the host asks for; what its result says (or does not say) is what the host passes on.
+function scriptedProcess(result: FromChild) {
+  const written: ToChild[] = [];
+  const launcher = {
+    launch: async (request: LaunchRequest): Promise<SandboxRun> => {
+      let finish!: (r: RunResult) => void;
+      const ended = new Promise<RunResult>((ok) => { finish = ok; });
+      const send = (m: FromChild): void => { setImmediate(() => request.stream!.onStdout(Buffer.from(encodeMessage(m)))); };
+      return {
+        result: ended, kill: () => finish({ exitCode: null, signal: null, timedOut: false, killed: true, stdout: "", stderr: "", stdoutTruncated: false } as RunResult), endInput: () => undefined,
+        write: (text: string) => {
+          for (const m of text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as ToChild)) {
+            written.push(m);
+            if (m.t === "start") send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars: 10, systemPromptChars: 0 });
+            else if (m.t === "run") send(result);
+            else if (m.t === "checkpoint") send({ t: "checkpoint.ok", id: m.id, checkpoint: { n: 1 }, contextTokens: 5 });
+            else if (m.t === "close") finish({ exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "", stderr: "", stdoutTruncated: false } as RunResult);
+          }
+          return Promise.resolve();
+        },
+      } as unknown as SandboxRun;
+    },
+  };
+  return { launcher, written };
+}
+
+test("every turn result from the host carries an end kind: the process's own, unknown when an older process says none, and unknown for a turn that failed (card W02)", async () => {
+  const run = async (result: FromChild) => {
+    const f = scriptedProcess(result);
+    const p = localWorkerParts<unknown>({
+      launcher: f.launcher as never, app, protectedPaths: [], workspace: () => work, requireEnforced: false,
+      model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }),
+      namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+    });
+    const o = order([]);
+    const session = await p.sandbox.open(o.recipe, o);
+    try {
+      const runtime = await p.runtimes.open(o, {}, undefined);
+      const out = await runtime.run("go", "req-1");
+      await runtime.close();
+      return out;
+    } finally { await session.close(); }
+  };
+  const classified = await run({ t: "result", status: "completed", text: "Now let me run the tests:", endKind: "announced-step-without-tool-call", visibleChars: 25 });
+  assert.equal(classified.endKind, "announced-step-without-tool-call");
+  assert.equal(classified.visibleChars, 25);
+  assert.equal(classified.text, "Now let me run the tests:");
+  const older = await run({ t: "result", status: "completed", text: "all done" });
+  assert.equal(older.endKind, "unknown", "a worker from before W02 says nothing: unknown, never normal");
+  assert.equal(older.visibleChars, undefined);
+  // A line from a newer worker with a kind this host does not know is read as unknown too (the channel leaves it out).
+  const newer = await run({ t: "result", status: "completed", text: "x", endKind: "some-new-kind" as never });
+  assert.equal(newer.endKind, "unknown");
+  const failed = await run({ t: "result", status: "failed", error: "the model did not answer" });
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.endKind, "unknown");
+});

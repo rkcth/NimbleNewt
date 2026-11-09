@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { BridgeReplyMessage, ChannelContext, ChannelModel, JsonValue } from "@nimblenewt/contracts";
+import { endKindOf, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
@@ -35,6 +35,13 @@ export interface HostTurnResult {
   readonly error?: string;
   readonly checkpoint?: JsonObj;
   readonly usage?: { readonly turnSeq?: number; readonly cache?: CacheFigures };
+  /**
+   * How the turn ended (card W02), as the worker process classified its last reply; `unknown` when it did not say (a worker from before W02, a turn that failed or was cancelled, a process that ended). Never defaulted to `normal`.
+   * Recorded on the attempt; nothing acts on it yet (W03).
+   */
+  readonly endKind: HostEndKind;
+  /** The length of the last reply's visible text (trimmed), when the process said. */
+  readonly visibleChars?: number;
 }
 export interface CacheFigures { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
 
@@ -437,7 +444,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         async run(content, requestId) {
           let result;
           try { result = await process.run(requestId, content); } catch (error) {
-            const failed = { status: "failed" as const, error: String((error as Error)?.message ?? error).slice(0, 2000) };
+            const failed = { status: "failed" as const, error: String((error as Error)?.message ?? error).slice(0, 2000), endKind: "unknown" as const };
             // The model calls a turn made before its process ended were real work: their cache figures are reported with the failure (card H12e), under a number of their own, or they would be lost with the attempt.
             // That holds for a process this host closed on purpose too (a stop, a restart for a recipe change): a restart that fails ends the attempt with this result, so figures left in the attempt's cache would never be taken.
             // After a restart that succeeds the local worker adds them to the continued turn's figures (the same number: the continued turn starts from the checkpoint's), and the cache hands each figure out once, so nothing is counted twice.
@@ -451,7 +458,9 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           const figures = await cache?.takeUsage?.().catch(() => undefined);
           let checkpoint: JsonObj | undefined;
           try { checkpoint = wrapCheckpoint(await process.checkpoint()); } catch { checkpoint = undefined; }
-          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) } };
+          // Only a completed turn has an ending to classify; a worker that says nothing (one from before W02) is read as unknown, never as normal.
+          const endKind = result.status === "completed" ? endKindOf(result.endKind) : "unknown";
+          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) }, endKind, ...(result.status === "completed" && result.visibleChars !== undefined ? { visibleChars: result.visibleChars } : {}) };
         },
         async checkpoint() {
           try { return wrapCheckpoint(await process.checkpoint()); } catch (error) {

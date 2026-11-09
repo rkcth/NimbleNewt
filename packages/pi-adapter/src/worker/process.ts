@@ -8,6 +8,7 @@ import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
 import { volatileContext } from "../prompt-layout.js";
 import { processClock } from "./clock.js";
+import { classifyTurnEnd } from "./end-kind.js";
 import { relayFetch } from "./relay-fetch.js";
 
 /**
@@ -120,6 +121,15 @@ async function contextTokens(adapter: PiAdapter): Promise<number | undefined> {
     for (const e of entries) if (e.head !== undefined) from = e.head;
     return Math.ceil(entries.reduce((n, e) => n + (e.id >= from ? e.text.length : 0), 0) / 3);
   } catch { return undefined; }
+}
+
+/** Pi's stop reason of the conversation's last assistant reply (the turn's answer once it completed); undefined when it cannot be read. */
+async function lastStopReason(adapter: PiAdapter): Promise<string | undefined> {
+  try {
+    const entries = await adapter.root().transcript();
+    for (let i = entries.length - 1; i >= 0; i--) if (entries[i]!.role === "assistant") return entries[i]!.stopReason;
+  } catch { /* not known: classified from the text alone */ }
+  return undefined;
 }
 
 /** Runs the process until the host closes it or the input ends. Resolves when everything is released. */
@@ -247,7 +257,11 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: shown === "" ? content : `${content}\n\n${volatileContext(shown)}` });
       const result = await handle.result();
       if (dog !== undefined && !dog.productive) send({ t: "result", status: "failed", error: `lease lost (${dog.reason}): the turn was stopped` });
-      else if (result.status === "completed") send({ t: "result", status: "completed", text: result.text });
+      else if (result.status === "completed") {
+        // How the turn ended (card W02): told with the result, so the controller can tell a full report from a reply cut off at the output limit, one with nothing visible, or a stop without work.end.
+        const ending = classifyTurnEnd({ stopReason: await lastStopReason(adapter), visibleText: result.text, toolCalls: result.toolCalls });
+        send({ t: "result", status: "completed", text: result.text, endKind: ending.endKind, visibleChars: ending.visibleChars });
+      }
       else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled" });
       else send({ t: "result", status: "failed", error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {

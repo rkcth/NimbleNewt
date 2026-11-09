@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { LeaseWatchdog, LineDecoder, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { createOfflineModels } from "../testing/offline.js";
+import { WORK_END_TOOL } from "../bridge.js";
 import { runWorker, type WorkerHooks } from "./process.js";
 
 const start: ChannelStart = {
@@ -70,7 +71,7 @@ test("the process starts on the host's word, runs the turn, reaches the bridge o
   assert.match(bridge.request.callId, /^h:[0-9a-f]{40}$/, "a provider call ID the controller would refuse is replaced by a digest of itself");
   h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa" } } } });
   const result = await h.next("result");
-  assert.deepEqual(result, { t: "result", status: "completed", text: "hello from the agent" });
+  assert.deepEqual(result, { t: "result", status: "completed", text: "hello from the agent", endKind: "no-work-end", visibleChars: 20 });
   h.send({ t: "checkpoint", id: 7 });
   const cp = await h.next("checkpoint.ok");
   assert.equal(cp.id, 7);
@@ -509,4 +510,49 @@ test("H08b: a turn that ignores the abort is ended inside the grace: closing the
   h.end();
   await h.done;
   release();
+});
+
+test("each completed turn carries how it ended (card W02): a length stop, a thinking-only reply, a stop without work.end, an announced step with no tool call, and a turn ended with work.end", async () => {
+  const cases: { name: string; replies: ReturnType<typeof fauxAssistantMessage>[]; endKind: string; visibleChars: number }[] = [
+    { name: "length", replies: [fauxAssistantMessage("The report so far: step one is", { stopReason: "length" })], endKind: "length", visibleChars: 30 },
+    { name: "thinking only", replies: [fauxAssistantMessage([fauxThinking("I should look at the parser next.")])], endKind: "empty-visible-text", visibleChars: 0 },
+    { name: "no work.end", replies: [fauxAssistantMessage("The parser is fixed and the tests pass.")], endKind: "no-work-end", visibleChars: 39 },
+    { name: "announced step", replies: [fauxAssistantMessage([fauxThinking("tests next"), fauxText("I fixed the parser. Now let me run the tests:")])], endKind: "announced-step-without-tool-call", visibleChars: 45 },
+    { name: "work.end", replies: [fauxAssistantMessage(fauxToolCall(WORK_END_TOOL, { result: "done", note: "parser fixed" }, { id: "we-1" }), { stopReason: "toolUse" }), fauxAssistantMessage("Ended: the parser is fixed.")], endKind: "normal", visibleChars: 27 },
+  ];
+  for (const c of cases) {
+    const { offline, hooks } = scripted();
+    offline.faux.setResponses(c.replies);
+    const h = host(hooks);
+    h.send({ t: "start", v: 1, start: offlineStart });
+    await h.next("ready");
+    h.send({ t: "run", requestId: "req-1", content: "fix the parser" });
+    if (c.endKind === "normal") {
+      const bridge = await h.next("bridge");
+      assert.equal(bridge.request.op, "work.end", c.name);
+      assert.deepEqual(bridge.request.args, { result: "done", note: "parser fixed" });
+      h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: true, result: { item: { state: "requested" } } } });
+    }
+    const result = await h.next("result");
+    assert.equal(result.status, "completed", `${c.name}: ${JSON.stringify(result)}`);
+    assert.equal(result.endKind, c.endKind, c.name);
+    assert.equal(result.visibleChars, c.visibleChars, c.name);
+    h.send({ t: "close" });
+    await h.done;
+  }
+});
+
+test("a work.end the controller refused is not an ending: the turn that stops after it is a stop without work.end (card W02)", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage(fauxToolCall(WORK_END_TOOL, { result: "done" }, { id: "we-1" }), { stopReason: "toolUse" }), fauxAssistantMessage("I am done.")]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "finish" });
+  const bridge = await h.next("bridge");
+  h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: false, code: "paused", message: "the task is paused" } });
+  const result = await h.next("result");
+  assert.equal(result.endKind, "no-work-end");
+  h.send({ t: "close" });
+  await h.done;
 });

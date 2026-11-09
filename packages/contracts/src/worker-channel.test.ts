@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
+import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
 
 const start: ChannelStart = {
   attemptId: "att-1", agentId: "agent:ann", namespaceId: "abcdef0123456789", credential: "tok", storeDir: "/home/agent/pi", relayBase: "http://relay.invalid",
@@ -17,7 +17,7 @@ test("every message of both directions survives a round trip through the line co
   const fromChild: FromChild[] = [
     { t: "ready", v: 1 }, { t: "bridge", id: 1, token: "tok", request: { op: "desk.read", callId: "c1", args: { recordId: "x" } } }, { t: "bridge", id: 2, token: "tok", request: { op: "task.get", callId: "c2" } },
     { t: "fetch", id: 9, url: "http://relay.invalid/m0/v1/chat/completions", method: "POST", headers: [["accept", "*/*"]], body: Buffer.from("{}").toString("base64") }, { t: "fetch", id: 10, url: "http://relay.invalid/m0/x", method: "GET", headers: [] },
-    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
+    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "completed", text: "ok", endKind: "no-work-end", visibleChars: 2 }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
   ];
   const decoder = new LineDecoder();
   for (const m of toChild) assert.deepEqual(parseToChild(decoder.push(encodeMessage(m))[0]), m);
@@ -84,4 +84,14 @@ test("a start may say the controller reviewed the unfinished work of an earlier 
   for (const recover of [{}, { reason: "" }, { reason: 5 }, { reason: "x".repeat(301) }, [], "yes"]) {
     assert.throws(() => parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, recover } }))), ChannelError, JSON.stringify(recover));
   }
+});
+
+test("a turn's end kind (card W02): each known kind passes, one this side does not know is left out (read as unknown, never normal), and the visible length is a whole number", () => {
+  for (const endKind of TURN_END_KINDS) assert.deepEqual(parseFromChild({ t: "result", status: "completed", text: "x", endKind, visibleChars: 1 }), { t: "result", status: "completed", text: "x", endKind, visibleChars: 1 });
+  assert.deepEqual(parseFromChild({ t: "result", status: "completed", text: "x", endKind: "finished-nicely" }), { t: "result", status: "completed", text: "x" });
+  assert.deepEqual(parseFromChild({ t: "result", status: "completed", text: "x", endKind: "unknown" }), { t: "result", status: "completed", text: "x" });
+  for (const bad of [{ endKind: 5 }, { visibleChars: -1 }, { visibleChars: 1.5 }, { visibleChars: "3" }]) assert.throws(() => parseFromChild({ t: "result", status: "completed", ...bad }), ChannelError, JSON.stringify(bad));
+  assert.equal(endKindOf(undefined), "unknown");
+  assert.equal(endKindOf("Normal"), "unknown");
+  assert.equal(endKindOf("normal"), "normal");
 });
