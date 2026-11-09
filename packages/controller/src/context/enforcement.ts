@@ -125,6 +125,10 @@ export const PROMPT_NOTE_RESERVE_CHARS = 2000;
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
 interface SpillBody { /** An outside server's text: read only by those who may use MCP in the project, and framed as data when paged out. */ readonly untrusted?: boolean; readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
+/** The whole text of a note that was cut to fit (card C07p), kept under the digest the cut names; `what` says which note it was, in the controller's words. */
+interface NoteArchiveBody { readonly taskId: string; readonly projectId: string; readonly attemptId?: string; readonly what: string; readonly digest: string; readonly text: string; readonly writtenBy: string }
+/** The shape of a note's whole-text digest, as `cutNote` writes it and its marker names it. */
+const NOTE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 export interface EnforcementOptions extends RunnerOptions {
   /** Context-window overrides for the budgets (shares, characters per token); validated by `contextBudget`. */
@@ -874,6 +878,57 @@ export class ContextEnforcementService {
     // An outside server's answer is read only by those who could have been given it: the owner and those who may use MCP in the project.
     if (b.untrusted === true && principal.kind !== "owner" && !allows(principal, "mcp.use", b.projectId)) return undefined;
     try { return { ...page(b.remainder, index, size), tool: b.tool, ...(b.untrusted === true ? { untrusted: true as const } : {}) }; } catch (error) { if (error instanceof RangeError) return invalid("index", error.message); throw error; }
+  }
+
+  // ---- the whole text of a note that was cut (card C07p) -------------------------------------------------------------
+
+  /**
+   * Keeps the whole text of a note that was cut to fit (a hand-off note, the note saying how the calls that waited for approval were
+   * decided), so the marker the cut leaves in the note can name where the rest is read. The digest is checked against the text, so a note
+   * never sends anyone to an archive that does not hold exactly what it promised. The controller's gate, like the other context records:
+   * whoever works on the task reads an archive, nobody outside it writes one. Repeating it for the same task and digest keeps one copy.
+   */
+  async archiveNote(principal: Principal, command: { taskId: string; attemptId?: string; what: string; digest: string; text: string }): Promise<{ id: string; digest: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "what", "digest", "text"]);
+    const taskId = checkTaskId(command.taskId);
+    const attemptId = command.attemptId === undefined ? undefined : key("attemptId", command.attemptId);
+    const what = text(command.what, "what", { min: 1, max: 200 });
+    const whole = text(command.text, "text", { min: 1, max: ENFORCEMENT_LIMITS.archiveChars, multiline: true });
+    if (typeof command.digest !== "string" || !NOTE_DIGEST.test(command.digest)) invalid("digest", "must be the sha256: digest of the whole text");
+    // Not a truncation and not a look-alike: the text under this digest must hash to it, or the note's marker would be a false promise.
+    if (command.digest !== `sha256:${sha256(whole)}`) throw new DomainError("invalid_command", "digest: is not the digest of this text", { field: "digest" });
+    const projectId = await this.#dispatch(principal, taskId);
+    const ref: AggregateRef = { kind: "ctx-note-archive", id: derivedId("ctx", `${taskId}\0note\0${command.digest}`) };
+    if ((await this.#runner.get(ref.kind, ref.id)) !== undefined) return { id: ref.id, digest: command.digest, replayed: true };
+    const body: NoteArchiveBody = { taskId, projectId, ...(attemptId === undefined ? {} : { attemptId }), what, digest: command.digest, text: whole, writtenBy: principal.id };
+    try {
+      await this.#runner.command("context.note-archive", { commandId: `ctx-not-${ref.id.slice(4)}`, actor: principal.id }, async () => ({
+        payload: { taskId, attemptId: attemptId ?? null, digest: command.digest, what },
+        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { chars: whole.length } }),
+      }));
+    } catch (error) {
+      // Another writer of the same note got there first: the text is the same, and so is the record.
+      if (!(error instanceof DomainError) || error.code !== "command_conflict" || (await this.#runner.get(ref.kind, ref.id)) === undefined) throw error;
+      return { id: ref.id, digest: command.digest, replayed: true };
+    }
+    return { id: ref.id, digest: command.digest, replayed: false };
+  }
+
+  /**
+   * The whole text of a note cut to fit, by the digest its marker names (card C07p). The same gate as reading the note itself - whoever may
+   * work on the task - and a text it may not show reads the same as one that is not there.
+   */
+  async noteArchive(principal: Principal, command: { taskId: string; digest: string }): Promise<{ taskId: string; attemptId?: string; what: string; digest: string; text: string } | undefined> {
+    onlyKnown(command, ["taskId", "digest"]);
+    const taskId = checkTaskId(command.taskId);
+    if ((await this.#task(principal, taskId, true)) === undefined) return undefined;
+    if (typeof command.digest !== "string" || !NOTE_DIGEST.test(command.digest)) return undefined;
+    const found = await this.#runner.get("ctx-note-archive", derivedId("ctx", `${taskId}\0note\0${command.digest}`));
+    if (found === undefined) return undefined;
+    const b = found.body as unknown as NoteArchiveBody;
+    // Only what the operation documents: the archive's project and who wrote it stay in the record.
+    if (b.taskId !== taskId || b.digest !== command.digest) return undefined;
+    return { taskId: b.taskId, ...(b.attemptId === undefined ? {} : { attemptId: b.attemptId }), what: b.what, digest: b.digest, text: b.text };
   }
 
   // ---- hand-off ----------------------------------------------------------------------------------------------------------

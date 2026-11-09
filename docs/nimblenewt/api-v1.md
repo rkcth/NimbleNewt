@@ -55,6 +55,17 @@ Arguments:
 
 Result: `{ item: { itemId, text, digest } }`.
 
+#### `context.note-archive.read`
+
+The whole text of a note that was cut to fit its limit - a hand-off note, or the note telling an attempt how the calls that waited for approval were decided. The cut note names the digest of its whole text and this operation. Needs the right to work on the task the note belongs to; anyone else gets not found.
+
+Arguments:
+
+- `taskId`: the task the note belongs to
+- `digest`: the digest the cut note names (`sha256:…`)
+
+Result: `{ item: { taskId, attemptId?, what, digest, text } }`: `what` says which note this was, `text` is its whole text as written, credentials removed.
+
 #### `context.handoff.read`
 
 One hand-off note of a task: what the attempt before yours wrote when it ended, or what the controller wrote for it from the records (the first call of the attempt that follows names the note's ID, `hof-…`, and this reads it). Needs the right to work on the task; a note you may not read and one that does not exist read the same.

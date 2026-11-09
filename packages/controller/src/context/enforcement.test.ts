@@ -6,7 +6,7 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextEnforcementService, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
+import { ContextEnforcementService, NOTE_ARCHIVE_READ, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, handoffNote, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
 
 after(stopServer);
 
@@ -24,6 +24,8 @@ const writes = (route: string, out: string, calls?: { n: number }): Summariser =
 const WINDOW = 131_072;
 const MATERIAL = "The agents discussed the database at length. ".repeat(200);
 const summary = (r: CompactionOutcome): Extract<CompactionOutcome, { kind: "summary" }> => { assert.equal(r.kind, "summary", JSON.stringify(r)); return r as never; };
+/** The digest a cut note names, and the ID its whole text is kept under. */
+const dig = (s: string): string => `sha256:${createHash("sha256").update(s).digest("hex")}`;
 
 for (const backend of backends) {
   interface Ctx {
@@ -829,6 +831,44 @@ for (const backend of backends) {
     await refuses("not_found", () => enf.latestHandoffFor(owner, "task-aaaaaaaaaaaaaaaaaaaa"), (e) => assert.ok(e.message.length > 0));
   });
 
+  suite("a note cut to fit keeps its whole text where its own marker says, and only the task's readers get it back (C07p)", async ({ enf, owner, host, ann, eve, t, t2 }) => {
+    const effects = Array.from({ length: 200 }, (_, i) => ({ id: `eff-${String(i).padStart(3, "0")}`, state: "confirmed", summary: `effect ${i} on the fixtures` }));
+    const note = handoffNote({ task: "Ship the importer", endedBecause: "the worker stopped beating", effects, artifacts: [{ id: "art-1", title: "notes" }], lastKnownState: "running", nextStep: "tell the owner" }, 1_200, { readWith: NOTE_ARCHIVE_READ });
+    assert.equal(note.cut, true, "the note was not cut, so there is nothing to keep");
+    // The note says where the rest of itself is: the digest, and the operation that answers with it.
+    assert.ok(note.text.includes(NOTE_ARCHIVE_READ) && note.text.includes(note.digest), note.text.split("\n").at(-1)!);
+    const kept = await enf.archiveNote(owner, { taskId: t, attemptId: "att-1", what: "the controller's hand-off note for attempt att-1", digest: note.digest, text: note.whole });
+    assert.deepEqual([kept.replayed, kept.digest], [false, note.digest]);
+    const back = await enf.noteArchive(owner, { taskId: t, digest: note.digest });
+    assert.deepEqual([back!.taskId, back!.attemptId, back!.what, back!.digest, back!.text], [t, "att-1", "the controller's hand-off note for attempt att-1", note.digest, note.whole], "the whole text, exactly as the marker promised");
+    assert.deepEqual(Object.keys(back!).sort(), ["attemptId", "digest", "taskId", "text", "what"], "the archive reads with the documented fields only");
+    // What comes back is what the note named: a reader who checks the digest finds the promise kept.
+    assert.equal(dig(back!.text), note.digest);
+    assert.ok(back!.text.includes("eff-000 ") && !note.text.includes("eff-000 "), "the archived text holds the lines the cut left out");
+    // Whoever may work on the task reads it; anyone else reads it as nothing, and so does a digest nobody kept.
+    assert.notEqual(await enf.noteArchive(ann, { taskId: t, digest: note.digest }), undefined, "an agent that works on the task reads the whole note");
+    assert.equal(await enf.noteArchive(eve, { taskId: t, digest: note.digest }), undefined, "an agent of another project reads nothing");
+    assert.equal(await enf.noteArchive(owner, { taskId: t2, digest: note.digest }), undefined, "one task's archive is not another task's");
+    assert.equal(await enf.noteArchive(owner, { taskId: t, digest: `sha256:${"0".repeat(64)}` }), undefined, "a digest nobody kept reads as nothing");
+    assert.equal(await enf.noteArchive(owner, { taskId: t, digest: "not a digest" }), undefined);
+    // The text kept is the text the digest names: no near-miss, no truncated copy pretending to be the whole.
+    await refuses("invalid_command", () => enf.archiveNote(owner, { taskId: t, what: "x", digest: note.digest, text: `${note.whole} and a word more` }), (e) => assert.match(e.message, /digest/));
+    await refuses("invalid_command", () => enf.archiveNote(owner, { taskId: t, what: "x", digest: `sha256:${"0".repeat(64)}`, text: note.whole }), (e) => assert.match(e.message, /digest/));
+    await refuses("invalid_command", () => enf.archiveNote(owner, { taskId: t, what: "x", digest: "sha256:deadbeef", text: note.whole }), (e) => assert.match(e.message, /digest/));
+    await refuses("invalid_command", () => enf.archiveNote(owner, { taskId: t, what: "x", digest: note.digest, text: "" }));
+    await refuses("invalid_command", () => enf.archiveNote(owner, { taskId: t, attemptId: "att 1", what: "x", digest: note.digest, text: note.whole }));
+    await refuses("invalid_command", () => enf.archiveNote(owner, { taskId: t, what: "x", digest: note.digest, text: note.whole, extra: 1 } as never));
+    // Writing one is the controller's job, not an agent's; the host carrying the attempt may do it.
+    await refuses("forbidden", () => enf.archiveNote(ann, { taskId: t, what: "an agent's own note", digest: note.digest, text: note.whole }));
+    // The same note again (a retry after a crash, or the dispatcher ticking twice) keeps one copy under the same ID.
+    const again = await enf.archiveNote(owner, { taskId: t, attemptId: "att-1", what: "the controller's hand-off note for attempt att-1", digest: note.digest, text: note.whole });
+    assert.deepEqual([again.id, again.replayed], [kept.id, true]);
+    // The same text of another task is its own record, readable under its own task only.
+    const elsewhere = await enf.archiveNote(host, { taskId: t2, what: "the parked-call verdicts", digest: note.digest, text: note.whole });
+    assert.notEqual(elsewhere.id, kept.id, "the archive is keyed by the task as well as the text");
+    assert.equal((await enf.noteArchive(owner, { taskId: t2, digest: note.digest }))!.what, "the parked-call verdicts");
+  });
+
   suite("the dispatcher's methods are for the owner, hosts and services, never an agent; reading and the attempt's own hand-off stay open to whoever may work on the task", async ({ enf, owner, host, ann, ben, eve, t, setup, note }) => {
     const call = { systemPromptChars: 100, toolSchemaChars: 100, startupTokens: 100, replyReserveTokens: 100 };
     const src = await note(ann, "d", "x");
@@ -845,6 +885,8 @@ for (const backend of backends) {
       ["ensureHandoff", (p) => enf.ensureHandoff(p, { taskId: t, attemptId: "x", endedBecause: "e" }, async () => { throw new Error("must not be asked"); })],
       // Card C07m: reading the task's latest hand-off note to tell a new attempt about it is the dispatcher's gate, the same one that writes the note.
       ["latestHandoffFor", (p) => enf.latestHandoffFor(p, t)],
+      // Card C07p: keeping the whole text of a note that was cut is the controller's, whoever reads it is whoever may work on the task.
+      ["archiveNote", (p) => enf.archiveNote(p, { taskId: t, what: "a note cut to fit", digest: dig("whole note"), text: "whole note" })],
     ];
     // An agent is refused by every one of them, even with attempt.work and desk grants on the task's project (ann and ben) and with none (eve).
     for (const who of [ann, ben, eve]) for (const [name, run] of gated) await refuses("forbidden", () => run(who), (e) => assert.match(e.message, /not the dispatcher/, name));

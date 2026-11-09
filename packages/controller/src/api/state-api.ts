@@ -216,7 +216,7 @@ export interface StateApiDeps {
   readonly commands?: CommandService;
 
   /** When present, the rest of a tool result cut to the window can be read in pages through the API (card C07d). */
-  readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>; /** The full text of an item cut when a task moved to a smaller route (card C07f). */ readonly readRouteArchive?: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined> };
+  readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>; /** The full text of an item cut when a task moved to a smaller route (card C07f). */ readonly readRouteArchive?: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined>; /** The whole text of a note cut to fit, by the digest its marker names (card C07p). */ readonly readNoteArchive?: (by: Principal, taskId: string, digest: string) => Promise<{ taskId: string; attemptId?: string; what: string; digest: string; text: string } | undefined> };
   /** When present, a hand-off note named in an attempt's first call can be read through the API (card C07m). */
   readonly handoffNotes?: { readonly read: (by: Principal, noteId: string) => Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined> };
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */

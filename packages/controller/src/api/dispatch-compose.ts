@@ -183,6 +183,8 @@ export interface DispatchHandle {
   readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>;
   /** The full text of an item cut when a task moved to a smaller route (card C07f), for someone who may work on the task. */
   readonly readRouteArchive: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined>;
+  /** The whole text of a note that was cut to fit, by the digest its marker names (card C07p), for someone who may work on the task. */
+  readonly readNoteArchive: (by: Principal, taskId: string, digest: string) => Promise<{ taskId: string; attemptId?: string; what: string; digest: string; text: string } | undefined>;
   /** One hand-off note of a task, by the ID its next attempt's first call names (card C07m), for someone who may work on the task. */
   readonly readHandoffNote: (by: Principal, noteId: string) => Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined>;
   /** Charges time that is not a model call (a review, a job) to a task, as the dispatcher does; the commandId makes a repeat count once (card R05f). */
@@ -686,6 +688,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         return { text: found.untrusted === true ? framedMcp(found.tool ?? "mcp", found.text, undefined, true) : found.text, ...(found.next === undefined ? {} : { next: found.next }) };
       },
       readRouteArchive: (by, taskId, digest) => context.routeArchive(by, { taskId, digest }),
+      readNoteArchive: (by, taskId, digest) => context.noteArchive(by, { taskId, digest }),
       readHandoffNote: (by, noteId) => context.readHandoff(by, noteId),
       principal,
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
