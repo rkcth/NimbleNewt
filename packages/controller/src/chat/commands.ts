@@ -278,14 +278,23 @@ export function grantDateInWords(value: unknown, ownText: string): string | unde
   // value like "0" cannot be "said" by any message that happens to hold the digit.
   const given = value.toLowerCase().trim();
   if (/\d{4}-\d{2}-\d{2}/.test(given) && own.includes(given)) return iso;
-  const [year, month, day] = [when.getUTCFullYear(), when.getUTCMonth() + 1, when.getUTCDate()];
+  // The day is the one on the calendar where the moment was written: an end of "Nov 30" written as 2026-11-30T23:59-08:00 is Dec 1 in UTC, and the owner's day is still the 30th. The UTC day is
+  // accepted too (a moment written in UTC, or one the owner wrote that way). The moment recorded and shown is the same either way.
+  const written = /^(\d{4})-(\d{2})-(\d{2})(?:[t ]|$)/.exec(given);
+  const days: { year: number; month: number; day: number; text: string }[] = [{ year: when.getUTCFullYear(), month: when.getUTCMonth() + 1, day: when.getUTCDate(), text: iso.slice(0, 10) }];
+  if (written !== null && written[0].slice(0, 10) !== iso.slice(0, 10)) days.push({ year: Number(written[1]), month: Number(written[2]), day: Number(written[3]), text: written[0].slice(0, 10) });
+  return days.some((d) => dayInWords(d, own)) ? iso : undefined;
+}
+
+/** Whether the owner's words (lowercased, padded) name this calendar day: see `grantDateInWords`. */
+function dayInWords({ year, month, day, text }: { year: number; month: number; day: number; text: string }, own: string): boolean {
   // 2026-11-30, on its own or followed by a time (`wholeWord` will not match a day running straight into a `T`).
-  if (wholeWord(own, iso.slice(0, 10)) || new RegExp(`${iso.slice(0, 10)}[t ]\\d{1,2}:\\d{2}`, "i").test(own)) return iso;
+  if (wholeWord(own, text) || new RegExp(`${text}[t ]\\d{1,2}:\\d{2}`, "i").test(own)) return true;
   // A slashed or dashed numeric day, read either way round; the shown moment is what the owner confirms.
   for (const m of own.matchAll(/(?:^|[^0-9])(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})(?:[^0-9]|$)/g)) {
     const [a, b] = [Number(m[1]), Number(m[2])];
     if (Number(m[3]!.length === 2 ? `20${m[3]}` : m[3]) !== year) continue;
-    if ((a === day && b === month) || (a === month && b === day)) return iso;
+    if ((a === day && b === month) || (a === month && b === day)) return true;
   }
   // A written month with a day, in either order, with the year when the owner wrote one (26 and 2026 both count as their own spelling).
   const names = Object.keys(MONTH_WORDS).sort((x, y) => y.length - x.length).join("|");
@@ -299,9 +308,9 @@ export function grantDateInWords(value: unknown, ownText: string): string | unde
   };
   const dayFirst = new RegExp(`(?:^|[^0-9])(\\d{1,2})${ordinal}(?:\\s+of)?\\s+(${names})${yearSaid}(?:[^0-9a-z]|$)`, "g");
   const monthFirst = new RegExp(`(?:^|[^a-z])(${names})\\s+(\\d{1,2})${ordinal}${yearSaid}(?:[^0-9a-z]|$)`, "g");
-  for (const m of own.matchAll(dayFirst)) if (Number(m[1]) === day && MONTH_WORDS[m[2]!] === month && sameYear(m)) return iso;
-  for (const m of own.matchAll(monthFirst)) if (Number(m[2]) === day && MONTH_WORDS[m[1]!] === month && sameYear(m)) return iso;
-  return undefined;
+  for (const m of own.matchAll(dayFirst)) if (Number(m[1]) === day && MONTH_WORDS[m[2]!] === month && sameYear(m)) return true;
+  for (const m of own.matchAll(monthFirst)) if (Number(m[2]) === day && MONTH_WORDS[m[1]!] === month && sameYear(m)) return true;
+  return false;
 }
 
 export function acceptedArgs(op: string): readonly string[] | undefined {

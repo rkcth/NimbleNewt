@@ -261,11 +261,11 @@ test("the owner grants and revokes rights through the state API and through the 
     await call(boot.token, "grant.revoke", { grantId: withEnd[0].id, expectedRevision: withEnd[0].revision, reason: "test done" }, "rg2");
 
     // Both days in one ordinary sentence, the second spelled out: the line says when it ends and when it starts, before any name.
-    const window = "from 2026-12-01 until 20 December 2026 let service:scanner do recovery.stall-scan in every project";
-    const windowed = await turn("c3l", window, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", project: "*", notBefore: "2026-12-01T00:00:00.000Z", expiresAt: "2026-12-20T00:00:00.000Z" } }, window)]);
+    const window = "from 2030-12-01 until 20 December 2030 let service:scanner do recovery.stall-scan in every project";
+    const windowed = await turn("c3l", window, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", project: "*", notBefore: "2030-12-01T00:00:00.000Z", expiresAt: "2030-12-20T00:00:00.000Z" } }, window)]);
     assert.equal(windowed[0]!.status, "proposed", JSON.stringify(windowed));
     const windowLine = (windowed[0]!.preview ?? []).join(" ");
-    assert.match(windowLine, /ends 2026-12-20T00:00:00\.000Z; starts 2026-12-01T00:00:00\.000Z/, windowLine);
+    assert.match(windowLine, /ends 2030-12-20T00:00:00\.000Z; starts 2030-12-01T00:00:00\.000Z/, windowLine);
     assert.equal(await activeNow(), held, "a shown window grants nothing");
 
     // A day the message does not give is not the chat's to choose: nothing is drawn up, and what is missing is asked for in a plain question.
@@ -289,6 +289,12 @@ test("the owner grants and revokes rights through the state API and through the 
     assert.equal(past[0]!.status, "refused", JSON.stringify(past));
     assert.equal(past[0]!.proposalId, undefined, "nothing is proposed");
     assert.match(past[0]!.message ?? "", /already passed.*\?$/, String(past[0]!.message));
+    assert.equal(await activeNow(), held);
+    // The owner's day in the owner's own time: late on Nov 30 at a western offset is Dec 1 in UTC, and is still the day they named. It is drawn up, recorded in UTC and shown that way.
+    const western = "give service:scanner the recovery.stall-scan right everywhere until Nov 30 2030";
+    const local = await turn("c3p", western, [owner({ op: "grant.create", args: { ...args, expiresAt: "2030-11-30T23:59:00-08:00" } }, western)]);
+    assert.equal(local[0]!.status, "proposed", JSON.stringify(local));
+    assert.match((local[0]!.preview ?? []).join(" "), /ends 2030-12-01T07:59:00\.000Z/);
     assert.equal(await activeNow(), held);
     // A sentence-ending full stop is not part of the word.
     const stop = "give service:scanner the recovery.stall-scan right everywhere permanently.";

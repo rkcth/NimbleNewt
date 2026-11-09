@@ -55,3 +55,14 @@ test("something that is not a moment at all is refused, not guessed at", () => {
     assert.equal(grantDateInWords(value, "let it run until 2026-11-30"), undefined, JSON.stringify(value));
   }
 });
+
+test("the owner's day is the one on the calendar where the moment was written: an end late on Nov 30 at a western offset is Dec 1 in UTC, and is still the owner's Nov 30", () => {
+  // Late on the 30th in California is the 1st in UTC; early on the 30th in Tokyo is the 29th in UTC. Either is the owner's own day, recorded in UTC.
+  assert.equal(grantDateInWords("2026-11-30T23:59-08:00", "let the scanner approve things until Nov 30"), "2026-12-01T07:59:00.000Z");
+  assert.equal(grantDateInWords("2026-11-30T00:00+09:00", "from 30 November the scanner may approve things"), "2026-11-29T15:00:00.000Z");
+  assert.equal(grantDateInWords("2026-11-30T23:59:59-05:00", "until 2026-11-30, let the scanner approve things"), "2026-12-01T04:59:59.000Z");
+  // The UTC day still counts, and a day neither reading gives is still refused.
+  assert.equal(grantDateInWords("2026-11-30T23:59-08:00", "until December 1st"), "2026-12-01T07:59:00.000Z");
+  assert.equal(grantDateInWords("2026-11-30T23:59-08:00", "until November 29"), undefined);
+  assert.equal(grantDateInWords("2026-12-02T23:59-08:00", "until Nov 30"), undefined);
+});

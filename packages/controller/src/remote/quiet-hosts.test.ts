@@ -203,7 +203,12 @@ for (const backend of backends) {
       assert.deepEqual(await damaged.effective(), { graceHours: 12, autoMove: false, recoverMinutes: 10, noticeHours: 6 });
       assert.deepEqual(told.length, 1);
       // Fixing the damaged setting by naming only the grace period must not turn automatic moves back on: autoMove has to be stated.
-      await refuses("invalid_command", () => w.settings.change(c.owner, { commandId: "d1", graceHours: 6 }), (e) => assert.equal(e.field, "autoMove"));
+      await refuses("invalid_command", () => w.settings.change(c.owner, { commandId: "d1", graceHours: 6 }), (e) => {
+        assert.equal(e.field, "autoMove");
+        // Reachable from chat: it asks the question, it does not give the owner a form of words to type.
+        assert.match(e.message, /Should automatic moves be on or off\?$/);
+        assert.doesNotMatch(e.message, /\bsay\b|autoMove true/i, e.message);
+      });
       await refuses("invalid_command", () => w.settings.change(c.owner, { commandId: "d1b", graceHours: 6, autoMove: null }), (e) => assert.equal(e.field, "autoMove"));
       assert.equal((await w.settings.get(c.owner)).damaged, true);
     } finally { c.storage.getAggregate = real; }

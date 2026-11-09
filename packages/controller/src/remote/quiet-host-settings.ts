@@ -85,7 +85,7 @@ export class QuietHostSettingsService {
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the quiet-host setting is at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
         // A damaged earlier record is replaced, not merged: only valid figures are kept, and automatic moves stay off until the owner says what they want.
         const damaged = current !== undefined && damagedBody(current.body);
-        if (damaged && typeof command.autoMove !== "boolean") throw new DomainError("invalid_command", "autoMove: the stored setting is damaged and automatic moves are off; say autoMove true or false together with the change", { field: "autoMove" });
+        if (damaged && typeof command.autoMove !== "boolean") throw new DomainError("invalid_command", "autoMove: the stored setting is damaged, so automatic moves are off and nothing was changed: whether work should move by itself has to be settled in the same change. Should automatic moves be on or off?", { field: "autoMove" });
         const before = current?.body as unknown as QuietHostSettingsBody | undefined;
         const isObject = before !== null && typeof before === "object" && !Array.isArray(before);
         const merged: Partial<Record<NumberKey, number>> = {};
