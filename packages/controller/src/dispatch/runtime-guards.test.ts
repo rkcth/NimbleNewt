@@ -10,6 +10,7 @@ import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { LocalWorker, type AttemptRuntime } from "./local-worker.js";
+import type { RouteResolver } from "./dispatcher.js";
 import { controllerGuards } from "./runtime-guards.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
@@ -144,6 +145,85 @@ for (const backend of backends) {
       const open = await w.blockers.openFor("context_overflow", { kind: "task", id: taskId });
       assert.ok(open !== undefined, "the owner can see why");
       void ({} as JsonObject);
+    } finally { await store.close(); }
+  });
+
+  // Card C07n: a route the host gives no window for. It is checked against the routing table's figure when there is one, and refused with a blocker when there is neither; it is never admitted unchecked.
+  test(`${backend.name}: a route with no window anywhere sends nothing and opens one blocker naming the route and where its window is set; the routing table's figure is used when the host's does not know the route`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      await w.principals.enroll(w.owner, { commandId: "eh", kind: "host", name: "local", grants: [] });
+      const self = await w.principals.authenticate((await w.principals.issueCredential(w.owner, "host:local")).token);
+      await w.admission.setCapacity({ commandId: "cap2", actor: w.owner.id, host: "host:local", capacity: { cpus: 4, memoryMb: 8192 } });
+      const histories = HistoryService.withEpoch(w.storage, w.epoch, w.options);
+      const desks = DeskService.withEpoch(w.storage, w.epoch, w.options);
+      const retrieval = RetrievalService.withEpoch(w.storage, w.epoch, desks, histories, w.options);
+      const enforcement = ContextEnforcementService.withEpoch(w.storage, w.epoch, { blockers: w.blockers, retrieval }, w.options);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { attemptId, taskId } = await w.task("t", ann);
+      let ran = false;
+      const big = { systemPromptChars: 3_000_000, toolSchemaChars: 0, startupTokens: 0, replyReserveTokens: 500 };
+      const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] } as never;
+      const host = (guards: ReturnType<typeof controllerGuards>): LocalWorker => new LocalWorker({
+        hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "v", capabilities: () => CAPS, guards: { context: guards.context! },
+        sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
+        runtimes: { open: async () => ({ firstCall: () => big, run: async () => { ran = true; return { status: "completed" as const }; }, checkpoint: async () => ({}), close: async () => undefined }) },
+      });
+      const onRoute = (name: string): RouteResolver => async (a) => { const r = await w.deps.route(a); return "route" in r ? { ...r, route: name } : r; };
+      // Neither the host nor the routing table says a window for the route: nothing is sent, the attempt fails with the route named, and one blocker tells the owner what to set.
+      const blind = controllerGuards({ context: enforcement, pause: w.pauses, messages: undefined as never, system: w.dispatcherPrincipal, agent: async (o) => w.credentials.authenticate(o.credential), assignee: (o) => w.credentials.agentOf(w.dispatcherPrincipal, o.attemptId), window: () => undefined });
+      const blindHost = host(blind);
+      await blindHost.register(w.hosts, self);
+      const first = w.restart({ workers: [blindHost], route: onRoute("unknown/model") });
+      await first.tick();
+      await first.idle();
+      assert.equal(ran, false, "a call of a million tokens on a route of unknown window was sent");
+      assert.match((await first.get(w.owner, attemptId!))!.outcome?.summary ?? "", /unknown\/model.*set its window/s, (await first.get(w.owner, attemptId!))!.outcome?.summary);
+      const blockers = (await store.storage.listAggregates("blocker", { limit: 50 })).map((b) => b.body as unknown as { type: string; state: string; summary: string });
+      const open = blockers.filter((b) => b.type === "context_overflow" && b.state === "open");
+      assert.equal(open.length, 1, JSON.stringify(blockers));
+      assert.match(open[0]!.summary, /unknown\/model/, "the blocker does not name the route");
+      assert.match(open[0]!.summary, /contextTokens/, "the blocker does not say where the window is set");
+      assert.deepEqual((await store.storage.listAggregates("ctx-admission", { limit: 10 })).length, 0, "nothing was measured: the call was refused for want of a window, not judged against one");
+      // A stored conversation of that route is not resumed either, and the same task is not blocked twice.
+      const resumed = await blind.context!.resume({ attemptId, taskId, route: "unknown/model" } as never, 100);
+      assert.equal(resumed.resume, false, "the stored conversation was resumed on a route with no known window");
+      assert.equal(blockers.filter((b) => b.type === "context_overflow").length, 1, JSON.stringify(blockers));
+      // The routing table knows the route although the host's map does not: the call is judged against the table's figure, which an unchecked admission never records.
+      const judged = controllerGuards({
+        context: enforcement, pause: w.pauses, messages: undefined as never, system: w.dispatcherPrincipal, agent: async (o) => w.credentials.authenticate(o.credential), assignee: (o) => w.credentials.agentOf(w.dispatcherPrincipal, o.attemptId),
+        window: () => undefined, routeWindow: (order) => (order.route === "table/model" ? 4096 : undefined),
+      });
+      const route = onRoute("table/model");
+      const over = await w.task("u", ann);
+      const sized = new LocalWorker({
+        hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "v2", capabilities: () => CAPS, guards: { context: judged.context! },
+        sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
+        runtimes: { open: async () => ({ firstCall: () => ({ systemPromptChars: 3000, toolSchemaChars: 6000, startupTokens: 400, replyReserveTokens: 500 }), run: async () => ({ status: "completed" as const }), checkpoint: async () => ({}), close: async () => undefined }) },
+      });
+      const second = w.restart({ workers: [sized], route });
+      await second.tick();
+      await second.idle();
+      const records = (await store.storage.listAggregates("ctx-admission", { limit: 10 })).map((a) => { const b = a.body as unknown as { route: string; routeName?: string; window: number; admit: boolean }; return [b.routeName ?? b.route, b.window, b.admit]; });
+      assert.deepEqual(records, [["table/model", 4096, false]], "the first call was not judged against the routing table's figure");
+      assert.equal((await second.get(w.owner, over.attemptId!))!.outcome?.status, "failed");
+      // A first call that fits the table's figure goes out, and the stored conversation is judged on it too: resumed within the resume share, left behind over it.
+      const fits = await w.task("v", ann);
+      const roomy = new LocalWorker({
+        hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "v3", capabilities: () => CAPS, guards: { context: judged.context! },
+        sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
+        runtimes: { open: async () => ({ firstCall: () => ({ systemPromptChars: 1000, toolSchemaChars: 1000, startupTokens: 100, replyReserveTokens: 200 }), run: async () => { ran = true; return { status: "completed" as const }; }, checkpoint: async () => ({}), close: async () => undefined }) },
+      });
+      const third = w.restart({ workers: [roomy], route });
+      await third.tick();
+      await third.idle();
+      assert.equal(ran, true, "a first call that fits the routing table's window was not sent");
+      assert.equal((await third.get(w.owner, fits.attemptId!))!.outcome?.status, "succeeded");
+      assert.equal((await judged.context!.resume({ attemptId: fits.attemptId!, taskId: fits.taskId, route: "table/model" } as never, 100)).resume, true, "a conversation within the resume share of the table's window was not resumed");
+      const overShare = await judged.context!.resume({ attemptId: fits.attemptId!, taskId: fits.taskId, route: "table/model" } as never, 30_000);
+      assert.equal(overShare.resume, false, "a conversation over the resume share of the table's window was resumed");
+      assert.match(overShare.reason, /30000 tokens, over 2457 \(60% of this model's 4096\)/, overShare.reason);
     } finally { await store.close(); }
   });
 }
