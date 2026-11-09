@@ -443,27 +443,33 @@ export class ChatService {
         // a bigger word names nothing. Nothing is invented: one answer decides, several ask which, none says what is not called that; an ID the
         // owner gave is used as given, and the words are the chat's own field, never sent to the status service (which takes IDs and refuses an unknown key).
         if (request["kind"] === "stop_cleanup") {
+          // An ID the owner wrote decides, and nothing here overwrites it: words beside it are dropped, as a task title beside an ID is. An ID only the interpreter
+          // offered beside a name does not outweigh the owner's words: it is dropped and the name is looked up in what the owner said. The status service takes IDs only, so the words never leave the chat.
+          // (The interpreter speaks the flat form only; the nested `scope` is the API's and comes as it came.)
+          const offeredId = request["scopeId"];
+          const hasName = typeof request["scopeName"] === "string" && (request["scopeName"] as string).trim() !== "";
+          if (offeredId !== undefined && request["scope"] === undefined && hasName && !(typeof offeredId === "string" && wholeWord(words, offeredId))) delete request["scopeId"];
           const declared = request["scopeKind"];
-          // An ID the owner gave decides, and nothing here overwrites it: words beside it are dropped, as a task title beside an ID is. The status service takes IDs only, so the words never leave the chat.
           const bare = request["scope"] === undefined && request["scopeId"] === undefined;
-          const given = bare && typeof request["scopeName"] === "string" ? (request["scopeName"] as string).trim() : "";
+          const given = bare && hasName ? (request["scopeName"] as string).trim() : "";
           const named = given === "" ? undefined : given;
           if (declared === "installation" && bare) request["scopeId"] = "installation"; // the whole installation has the one ID: nothing to look up, nothing to choose
           else if (named !== undefined && declared !== undefined && declared !== "agent" && declared !== "team" && declared !== "task") {
             push({ i, kind: "refused", code: "invalid_command", message: `a stop is read for a task, an agent, a team or the whole installation, not for ${quotedText(String(declared), 40)}. Which did you mean?` });
             continue;
-          } else if (named !== undefined && (declared === undefined || declared === "agent" || declared === "team")) {
+          } else if ((named !== undefined && declared === undefined) || (bare && (declared === "agent" || declared === "team"))) {
             const what = declared === undefined ? "agent or team" : declared;
             const plural = declared === undefined ? "agents or teams" : `${declared}s`;
             // With no kind said the message is read against both lists; only a name standing as a whole word of the owner's message counts, whatever the interpreter offered for it.
             const all = await this.#scopeCandidates(token, declared === undefined ? ["agent", "team"] : [declared]);
-            const found = all.filter((c) => wholeWord(words, c.name));
+            const found = all.filter((c) => nameInWords(words, c.name));
+            const calledThat = named === undefined ? "by a name in your message" : quotedText(named, 80);
             if (found.length === 0) {
-              push({ i, kind: "refused", code: "not_found", message: all.length === 0 ? `no ${what} of this installation is called ${quotedText(named, 80)} and this installation has no ${plural} at all. Did you mean a task or the whole installation?`
-                : `no ${what} of this installation is called ${quotedText(named, 80)}. Here they are: ${titleList(all.map((c) => c.name))}. Which did you mean?` });
+              push({ i, kind: "refused", code: "not_found", message: all.length === 0 ? `no ${what} of this installation is called ${calledThat} and this installation has no ${plural} at all. Did you mean a task or the whole installation?`
+                : `no ${what} of this installation is called ${calledThat}. Here they are: ${titleList(all.map((c) => c.name))}. Which did you mean?` });
               continue;
             }
-            if (found.length > 1) { push({ i, kind: "asked", question: `More than one ${what} here answers to the name in your message. Which did you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((f) => `${quotedText(f.name, 60)} (${f.kind})`) }); continue; }
+            if (found.length > 1) { push({ i, kind: "asked", question: `More than one ${what} here answers to the name in your message. Which did you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((f) => `${f.id}: ${quotedText(f.name, 60)} (${f.kind})`) }); continue; }
             request["scopeKind"] = found[0]!.kind;
             request["scopeId"] = found[0]!.id;
           } else if (declared === "task" && bare) {
@@ -2092,6 +2098,10 @@ function meetingsNamed(words: string, items: readonly Record<string, unknown>[],
 
 /** The title a stand-up meeting is shown by: its stand-up's title now, else the title the meeting was made with. */
 const shownTitle = (m: Record<string, unknown>, titleOf: ReadonlyMap<string, string>): string => titleOf.get(String(m["scheduleId"])) ?? String(m["title"]);
+
+/** Whether a name an agent or a team goes by stands as a whole word of the owner's message: `wholeWord`'s rule, and no letter, digit or mark of any script touches it either (Ann is not in Jóann, Bob is not in Bobé). */
+const nameInWords = (text: string, name: string): boolean => wholeWord(text, name)
+  && new RegExp(`(?<![\\p{L}\\p{N}\\p{M}])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}\\p{M}])`, "iu").test(text);
 
 /** A few things the owner is being told about, as one phrase: `x`, `x and y`, `x, y and z`; a long list is cut with a count. Each is quoted, because a title like this was written by whoever set it up. */
 const titleList = (titles: readonly string[]): string => {

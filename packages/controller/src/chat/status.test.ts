@@ -186,7 +186,7 @@ for (const backend of backends) {
     assert.equal(asked.length, 2, "nothing is read until the owner says which");
     const two = (await chat.submit(w.ownerToken, { messageId: "m-4", text: "what did stopping bob cost in total" })).outcomes[0]!;
     assert.equal(two.status, "asked", JSON.stringify(two));
-    assert.deepEqual(two.options, [`"Bob" (agent)`, `"Bob" (team)`]);
+    assert.deepEqual(two.options, [`${bob}: "Bob" (agent)`, `${teamOfBob}: "Bob" (team)`]);
     assert.match(two.question!, /agent or team/);
     assert.equal(asked.length, 2, "an ambiguous name reads nothing");
     // The owner answers by saying which kind was meant: the same name read against the teams only is the team.
@@ -226,6 +226,46 @@ for (const backend of backends) {
     assert.ok(!/[\u202e\u0085]/u.test(text), "no raw override or C1 control reaches the owner");
     assert.ok(text.includes("\\u202e") && text.includes("\\u0085"), "the name is shown escaped, quotes and all");
     assert.equal(asked.length, 0, "neither question read a stop");
+  });
+
+  suite("the owner's words decide over an ID the interpreter offered, a name beside an accented letter is no whole word, and two of the same name are told apart by ID (card L02e leftover, review)", async (w, script) => {
+    const bob = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Bob" })).id;
+    const ann = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Ann" })).id;
+    const asked: unknown[] = [];
+    const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, stops: stopSpend(asked) }, options);
+    const chat = w.chat({ status });
+    const said = (text: string, request: Record<string, unknown>): void => { script[text] = [ask(request, text)]; };
+    // The interpreter put Ann's ID beside the name the owner said: the owner never wrote that ID, so the name in their words decides.
+    said("what did stopping bob cost", { kind: "stop_cleanup", scopeKind: "agent", scopeId: ann, scopeName: "bob" });
+    // An ID the owner did write is still used as given.
+    said(`what did stopping ${ann} cost`, { kind: "stop_cleanup", scopeKind: "agent", scopeId: ann, scopeName: "bob" });
+    // The kind said and no name field: the owner's message still names the agent.
+    said("tell me what stopping the agent bob cost", { kind: "stop_cleanup", scopeKind: "agent" });
+    for (const [idx, [text, scope]] of ([
+      ["what did stopping bob cost", { kind: "agent", id: bob }],
+      [`what did stopping ${ann} cost`, { kind: "agent", id: ann }],
+      ["tell me what stopping the agent bob cost", { kind: "agent", id: bob }],
+    ] as [string, unknown][]).entries()) {
+      const r = await chat.submit(w.ownerToken, { messageId: `m-${String(idx)}`, text });
+      assert.equal(r.outcomes[0]!.status, "answered", `${text}: ${JSON.stringify(r.outcomes)}`);
+      assert.deepEqual(asked.at(-1), scope, text);
+    }
+    // Ann inside Jóann, or Bob inside Bobé, is part of a bigger word even though the letter beside it is not plain ASCII.
+    const before = asked.length;
+    said("what did stopping jóann cost", { kind: "stop_cleanup", scopeKind: "agent", scopeName: "jóann" });
+    said("what did stopping bobé cost", { kind: "stop_cleanup", scopeKind: "agent", scopeName: "bobé" });
+    for (const [idx, text] of ["what did stopping jóann cost", "what did stopping bobé cost"].entries()) {
+      const o = (await chat.submit(w.ownerToken, { messageId: `u-${String(idx)}`, text })).outcomes[0]!;
+      assert.deepEqual([o.status, o.code], ["refused", "not_found"], `${text}: ${JSON.stringify(o)}`);
+    }
+    assert.equal(asked.length, before, "a name inside a bigger word reads nothing");
+    // Two agents with one name: each option carries the agent's ID, so the owner can say which.
+    const bob2 = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Bob" })).id;
+    said("what did stopping bob cost then", { kind: "stop_cleanup", scopeKind: "agent", scopeName: "bob" });
+    const twin = (await chat.submit(w.ownerToken, { messageId: "m-twin", text: "what did stopping bob cost then" })).outcomes[0]!;
+    assert.equal(twin.status, "asked", JSON.stringify(twin));
+    assert.equal(new Set(twin.options).size, 2, "the two options differ");
+    assert.ok(twin.options!.some((o) => o.includes(bob)) && twin.options!.some((o) => o.includes(bob2)), JSON.stringify(twin.options));
   });
 
   suite("an agent name in a place with no agents and no teams at all says there is nothing to name (card L02e leftover)", async (w, script) => {
