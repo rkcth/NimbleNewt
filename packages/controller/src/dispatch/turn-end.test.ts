@@ -43,3 +43,29 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+// W02 review: the agent's own ending (`work.end`) is completed by the controller's sweep, which can end the attempt while the turn still runs; the turn is then stopped before it can say how it ended. The attempt ended as the agent meant
+// it to, so it is recorded `normal`, not left without an ending.
+for (const backend of backends) {
+  test(`${backend.name}: an attempt the agent's own ending finished while its turn still ran is recorded as ended normally`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      let started!: () => void;
+      const running = new Promise<void>((ok) => { started = ok; });
+      w.worker.script = async () => { started(); await new Promise(() => undefined); return { status: "completed" }; };
+      const { attemptId } = await w.task("ended by the agent", ann);
+      await w.heartbeatHost();
+      await w.dispatcher.tick();
+      await running;
+      assert.equal(await w.dispatcher.finishWith(w.owner, attemptId!, { result: "done", note: "parser fixed" }), true);
+      await w.dispatcher.idle();
+      const d = (await w.dispatcher.get(w.owner, attemptId!))!;
+      assert.equal(d.state, "finished");
+      assert.equal(d.outcome?.status, "succeeded");
+      assert.equal(d.turnEnd?.endKind, "normal");
+      assert.equal(d.turnEnd?.visibleChars, undefined, "the turn said nothing, so no length is recorded");
+    } finally { await store.close(); }
+  });
+}

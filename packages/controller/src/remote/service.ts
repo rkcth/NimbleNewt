@@ -4,7 +4,7 @@ import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
-import type { ToolCallRequest, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
+import { turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { mergeChanges } from "../domain/changes.js";
@@ -1777,12 +1777,17 @@ function checkEnforcement(value: unknown): ContractEnforcement[] {
 function checkResult(value: unknown): StoredResult {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("result", "must be an object");
   const r = value as Record<string, unknown>;
-  onlyKnown(r, ["status", "text", "error", "checkpoint", "usage"]);
+  onlyKnown(r, ["status", "text", "error", "checkpoint", "usage", "endKind", "visibleChars"]);
   if (r["status"] !== "completed" && r["status"] !== "failed" && r["status"] !== "cancelled") invalid("result.status", "must be completed, failed or cancelled");
   const clip = (v: unknown, field: string): string | undefined => (v === undefined ? undefined : redactText(text(v, field, { min: 0, max: 100_000, multiline: true })).slice(0, REMOTE_LIMITS.text));
   const t = clip(r["text"], "result.text");
   const e = clip(r["error"], "result.error");
-  return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }) };
+  // How the turn ended (card W02; W02 review): a host that says it is carried, one this controller does not know is left out (read as unknown, never normal), and only a completed turn has one.
+  const kind = r["endKind"] === undefined ? undefined : turnEndKindOf(text(r["endKind"], "result.endKind", { min: 1, max: 60 }));
+  const visible = r["visibleChars"];
+  if (visible !== undefined && !(Number.isSafeInteger(visible) && (visible as number) >= 0)) invalid("result.visibleChars", "must be a whole number of at least 0");
+  const ending = r["status"] !== "completed" ? {} : { ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visible === undefined ? {} : { visibleChars: visible as number }) };
+  return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }), ...ending };
 }
 
 /** The events a worker sends for a piece of a reply: a short list of known shapes, nothing else. */

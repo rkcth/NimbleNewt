@@ -341,6 +341,8 @@ export class DispatcherService {
   readonly #path: ToolPath;
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
+  /** Numbers each write of this dispatcher (W02 review): two writes in this process that read one revision must not share a command either, or the second is taken for a replay of the first and dropped. */
+  #updateSeq = 0;
   /** Usage reports made per attempt by this dispatcher, so two turns with identical figures are two records. */
   readonly #usageSeq = new Map<string, number>();
   /** How each attempt's last turn ended (card W02), held from the turn's result until the write that ends or parks the attempt records it. */
@@ -805,7 +807,7 @@ export class DispatcherService {
     await this.#controlled(by, attemptId);
     if (end.confirm !== undefined && !(await end.confirm())) return false;
     const summary = `ended by the agent: ${end.result}${end.note === undefined ? "" : `: ${end.note}`}${end.submissionId === undefined ? "" : ` (submission ${end.submissionId})`}`;
-    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false, skipHook: true, ...(end.result === "partial" ? { partial: true } : {}) });
+    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false, skipHook: true, agentEnded: true, ...(end.result === "partial" ? { partial: true } : {}) });
     return true;
   }
 
@@ -1030,7 +1032,7 @@ export class DispatcherService {
       const next = withSlotSpans(d.body, mutate(d.body), this.#runner.now());
       const ref: AggregateRef = { kind: DISPATCH_KIND, id: d.aggregate.id };
       try {
-        await this.#runner.command("dispatch.update", { commandId: `dpa-up:${attemptId}:${d.revision}:${this.#instance}`, actor: DISPATCHER_ACTOR }, async () => ({
+        await this.#runner.command("dispatch.update", { commandId: `dpa-up:${attemptId}:${d.revision}:${this.#instance}:${++this.#updateSeq}`, actor: DISPATCHER_ACTOR }, async () => ({
           payload: { attemptId, revision: d.revision },
           build: async () => ({ ref, creates: false, changes: mergeChanges([{ type: "update", ref, expectedRevision: d.revision, body: next as unknown as JsonObject }, ...more]), detail: { attemptId, state: next.state } }),
         }));
@@ -2102,7 +2104,7 @@ export class DispatcherService {
     this.#endedRunning.add(run);
   }
 
-  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean; agentEnded?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
     // Two paths can end the same attempt at once (the worker's result, the lease scan, a stop): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
     // The end is registered synchronously, before the end hook is awaited, so a second end that comes while the hook runs joins it.
@@ -2126,7 +2128,7 @@ export class DispatcherService {
     return clean === "" ? `the attempt ${outcome}` : clean;
   }
 
-  async #endHooked(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+  async #endHooked(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean; agentEnded?: boolean }): Promise<{ readmitted?: string }> {
     if (this.#endHook !== undefined && options.skipHook !== true) {
       const hook = this.#endHook;
       this.#inHook.add(attemptId);
@@ -2149,7 +2151,7 @@ export class DispatcherService {
     return this.#endInner(attemptId, outcome, this.#cleanSummary(outcome, summary), options);
   }
 
-  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; partial?: boolean; agentEnded?: boolean }): Promise<{ readmitted?: string }> {
     const d = await this.#load(attemptId);
     if (d === undefined || d.body.state === "finished") return {};
     const live = this.#live.get(attemptId);
@@ -2198,7 +2200,9 @@ export class DispatcherService {
       return Object.keys(late).length === 0 ? undefined : late;
     };
     let settleLate: string | undefined;
-    const turnEnd = this.#takeTurnEnd(attemptId);
+    // The agent's own ending (`work.end`, completed by the sweep while the turn still ran) stops the turn before it can say how it ended: the attempt ended as the agent meant it to, so it is recorded `normal` (W02 review).
+    const held = this.#takeTurnEnd(attemptId);
+    const turnEnd = held.turnEnd === undefined && options.agentEnded === true ? { turnEnd: { endKind: "normal" as const, at: this.#runner.now() } } : held;
     const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), ...turnEnd, state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
       async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
     if (settleLate !== undefined && finished.reservationId === settleLate) { const { releasingId: _r, ...rest } = finished; void _r; await this.#settleReservation(rest, options.lost === true, `:${settleLate}`); }

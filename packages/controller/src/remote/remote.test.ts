@@ -59,6 +59,22 @@ for (const backend of backends) {
     await wireRefuses("fenced", () => attempt.heartbeat(), 409);
   });
 
+  suite("W02 review: a remote host's result may say how the turn ended; the attempt records it, a kind this controller does not know is unknown, and a bad length is refused", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1);
+    await wireRefuses("invalid_command", () => attempt.complete({ status: "completed", text: "x", endKind: "normal", visibleChars: -1 }), 400);
+    const stored = await attempt.complete({ status: "completed", text: "Now let me run the tests:", endKind: "announced-step-without-tool-call", visibleChars: 25 });
+    assert.deepEqual(stored, { status: "completed", text: "Now let me run the tests:", endKind: "announced-step-without-tool-call", visibleChars: 25 });
+    await c.current.idle();
+    const d = (await c.current.get(c.owner, attemptId))!;
+    assert.equal(d.outcome!.status, "succeeded");
+    assert.deepEqual([d.turnEnd?.endKind, d.turnEnd?.visibleChars], ["announced-step-without-tool-call", 25]);
+    const second = await c.started(r1, "t2");
+    assert.deepEqual(await second.attempt.complete({ status: "completed", text: "y", endKind: "finished-nicely" as never }), { status: "completed", text: "y" }, "a kind this controller does not know is left out");
+    await c.current.idle();
+    assert.equal((await c.current.get(c.owner, second.attemptId))!.turnEnd?.endKind, "unknown");
+  });
+
   suite("only the owner and the dispatcher place, move, end and steer attempts; a host, an agent or a client cannot, and none can read the records", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, order } = await c.started(r1);
