@@ -206,6 +206,9 @@ test("a platform the owner ruled out names nothing, and so does the ordinary wor
   assert.equal(saysPlatform(sticker, "os", "linux"), true, "the os of the same message is still the owner's own");
   assert.equal(saysPlatform(sticker, "arch", "x64"), true, "and so is its chip");
   assert.equal(saysPlatform("authorize host:rig for release tests on my mac", "os", "darwin"), true, "\"my mac\" with no address after it still means macOS");
+  // Named once and denied once in the same message: it counts where the owner said it, and the denial only reaches as far as its own clause.
+  assert.equal(saysPlatform("not the mac; authorize host:rig for release tests on my mac", "os", "darwin"), true, "denied in one clause, named in the next");
+  assert.equal(saysPlatform("linux, not windows; the mac mini is the one", "os", "darwin"), true, "a denial in an earlier clause does not reach into this one");
 });
 
 test("an ID the owner wrote with markdown, a colon or trailing punctuation is still their own whole word, and a longer or joined name still is not", () => {
