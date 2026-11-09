@@ -17,7 +17,7 @@ import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -622,7 +622,23 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }), ...(i.options.remote.settleMs === undefined ? {} : { settleMs: i.options.remote.settleMs }) });
       // The owner's limits and best-effort setting reach a remote worker in the dispatch contract, read afresh at every start (card H12a).
       const ownerPolicy = { limits: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), bestEffort: async () => (i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed()) };
-      for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, { ...h, ownerPolicy }));
+      for (const h of i.options.remote.hosts) {
+        // Card C07o: a remote host's first call and stored conversation are judged by the controller before the order is offered, with the local worker's guards (C07b, C07n): the host's stated window first, the routing
+        // table's `contextTokens` second, and a route neither states refused with a blocker. A table that cannot be read refuses the call as unchecked (the error reaches the guards, as for the local host).
+        const hostWindow = (order: WorkOrder): number | undefined => { try { return h.window?.(order); } catch { return undefined; } };
+        const routeWindow = async (order: WorkOrder): Promise<number | undefined> => (await i.routing.get())?.routes[order.route]?.contextTokens;
+        const guards = controllerGuards({
+          context, pause: pauses, messages, system: principal,
+          agent: (order) => i.taskCredentials.authenticate(order.credential),
+          assignee: (order) => i.taskCredentials.agentOf(principal, order.attemptId),
+          window: hostWindow, routeWindow, storedTokens: checkpointStoredTokens,
+          // No remote operation reports the provider's input count, so no admitted round is kept waiting for one.
+          confirms: false,
+        }).context!;
+        // The first call as the controller can know it before the host's process is up, measured against the same window the guards judge it by.
+        const firstCall = estimatedFirstCall(context, async (order) => usableWindow(hostWindow(order)) ?? usableWindow(await routeWindow(order)));
+        workers.push(new RemoteWorkerHost(h.hostId, remote, principal, { ...h, ownerPolicy, context: { guards, firstCall }, onGuardError: h.onGuardError ?? ((_attemptId, _what, error) => i.onError?.(error)) }));
+      }
       if (i.quietHosts !== undefined) {
         const r = remote;
         quiet.service = QuietHostService.withEpoch(storage, epoch, {

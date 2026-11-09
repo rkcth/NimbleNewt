@@ -21,7 +21,7 @@ test("the composed controller places an attempt on a remote host over its own tr
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
+      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
     },
   });
   try {
@@ -102,7 +102,7 @@ test("a host that cannot meet the attempt's requirements is not given it: the re
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi", isolation: ["firecracker"] }) }] },
+      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi", isolation: ["firecracker"] }) }] },
     },
   });
   try {

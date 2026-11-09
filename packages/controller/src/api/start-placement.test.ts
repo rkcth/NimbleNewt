@@ -25,7 +25,7 @@ test("local-only data goes to the hosts the approval profile and the owner's set
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "local-only", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: ["pc", "laptop", "rented"].map((n) => ({ hostId: `host:${n}`, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "local-only" as const, harness: "pi" }) })) },
+      remote: { blobDirectory: join(d, "blobs"), hosts: ["pc", "laptop", "rented"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "local-only" as const, harness: "pi" }) })) },
     },
   });
   try {

@@ -29,7 +29,7 @@ test("distributed capacity through the composed controller (card H10): the owner
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:pc", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
+      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:pc", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
     },
   });
   try {

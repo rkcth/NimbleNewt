@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { resumeDecision } from "../context/budget.js";
+import { resumeDecision, tokensOf } from "../context/budget.js";
+import type { FirstCall } from "../context/dispatch.js";
 import { contextRouteKey, type ContextEnforcementService } from "../context/index.js";
 import { routeNamed } from "../context/enforcement.js";
 import type { PauseService } from "../lifecycle/index.js";
@@ -36,7 +37,15 @@ export interface GuardBinding {
   readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
   /** Card C07g: the route's fixed part measured by the worker's process, and the owner's context built again with it (the composer binds the context and decision services). */
   readonly rebuildView?: NonNullable<RuntimeGuards["context"]>["rebuildView"];
+  /**
+   * Whether the host reports the provider's input count for an admitted first call (`confirm`). Default true. False for a remote host (card C07o review): no remote operation reports the count, so the admitted round is
+   * not kept for a `confirm` that never comes (one map entry per remote attempt for the controller's lifetime otherwise).
+   */
+  readonly confirms?: boolean;
 }
+
+/** The most admitted rounds kept for `confirm` at once; the oldest is forgotten past it (an attempt whose host never confirmed: it lost its process, or was refused after admission). Its usage is then not calibrated. */
+export const KEPT_ROUNDS = 10_000;
 
 const MESSAGE_LIMIT = 20;
 
@@ -56,6 +65,21 @@ function framed(id: string, sender: string, purpose: string, text: string): stri
 export const usableWindow = (w: unknown): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
 
 export const unknownWindowReason = (route: string): string => `route ${routeNamed(route)} has no context window the controller knows (its host states none for it and the routing table gives it no contextTokens); set its window before work runs on it`;
+
+/**
+ * Card C07o: the first call of an attempt as the controller can know it before a remote host's process is up — the text the host is given and the stored conversation it carries, plus the route's fixed part (system prompt
+ * and tool schemas) as first calls on the route measured it. A route nobody has measured counts no fixed part: it is not refused on a guess (as at a route move, C07f). The figures are passed as tokens, with no system-prompt
+ * or tool-schema characters, so this estimate is never kept as a measurement of the route. No reply reserve: the controller does not know the host's model settings. With no window the guards refuse the call before the
+ * estimate is used, so it is all zeros.
+ */
+export function estimatedFirstCall(context: Pick<ContextEnforcementService, "budget" | "fixedPartOf">, windowOf: (order: WorkOrder) => Promise<number | undefined>): (order: WorkOrder, text: string, storedTokens: number) => Promise<FirstCall> {
+  return async (order, text, storedTokens) => {
+    const window = usableWindow(await windowOf(order));
+    if (window === undefined) return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: 0, replyReserveTokens: 0 };
+    const fixed = await context.fixedPartOf(order.route, window, order.harness);
+    return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: tokensOf(text.length, context.budget(window)) + storedTokens + (fixed?.tokens ?? 0), replyReserveTokens: 0 };
+  };
+}
 
 export function controllerGuards(binding: GuardBinding): RuntimeGuards {
   const { context, pause, messages } = binding;
@@ -90,7 +114,12 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
         // Card C07n: a route of unknown window is never admitted unchecked. A compaction cannot make a window known, so this refusal says it is final.
         if (window === undefined) return await refuseUnknownWindow(order, "first call");
         const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: contextRouteKey(order.route), ...(order.route.length <= 500 ? { routeName: order.route } : {}), ...(order.harness === undefined ? {} : { harness: order.harness }), call, ...(retry === true ? { retry: true } : {}) });
-        if (decision.admit) rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
+        if (decision.admit && binding.confirms !== false) {
+          // Kept for this attempt's `confirm`, newest last; bounded, so attempts whose confirm never comes cannot grow it for the controller's lifetime.
+          rounds.delete(order.attemptId);
+          rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
+          while (rounds.size > KEPT_ROUNDS) rounds.delete(rounds.keys().next().value!);
+        }
         return { admit: decision.admit, reasons: decision.reasons };
       },
       async confirm(order, usage) {
