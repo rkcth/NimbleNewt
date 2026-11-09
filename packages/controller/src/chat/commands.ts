@@ -251,6 +251,58 @@ export function durationInWords(seconds: number, text: string): boolean {
   return false;
 }
 
+/** The month names an owner may write for a date, abbreviations included because people write `Nov 30`. */
+const MONTH_WORDS: Readonly<Record<string, number>> = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4, may: 5, jun: 6, june: 6,
+  jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+/** The two times of a right. They are checked by `grantDateInWords` (a day the owner named, not the exact characters of an ISO moment), so `foreignValue` is told to leave them alone. */
+export const GRANT_DATE_KEYS: ReadonlySet<string> = new Set(["notBefore", "expiresAt"]);
+
+/**
+ * The moment a right starts or ends, when the owner's own words give that day (card U03e). What counts as their day: the moment as written (what `foreignValue` looks for in every other text of a
+ * command), an ISO day `2026-11-30` (alone or with a time after it), a slashed `30/11/2026` or `11/30/26` — both readings of the pair count, and the moment the proposal shows settles which one the
+ * owner meant — or a written day and month (`30 November`, `November 30th`, `the 30th of Nov 2026`), with the year they wrote when they wrote one. "the end of the month", "a few more days" and "when
+ * the audit is done" name no day the controller can check, so they give no date: the day would be the model's, and the right is not drawn up. The time of day is the interpreter's reading of the day
+ * the owner named and is shown on the proposal line the owner confirms. Returns the moment in the UTC form the state API records, or undefined when the words do not give it.
+ */
+export function grantDateInWords(value: unknown, ownText: string): string | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return undefined;
+  const when = new Date(ms);
+  const iso = when.toISOString();
+  const own = ` ${ownText.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim()} `;
+  // What the interpreter wrote, standing in the owner's message: the search `foreignValue` makes for every other text of a command. Only a moment that carries a calendar date is searched for, so a
+  // value like "0" cannot be "said" by any message that happens to hold the digit.
+  const given = value.toLowerCase().trim();
+  if (/\d{4}-\d{2}-\d{2}/.test(given) && own.includes(given)) return iso;
+  const [year, month, day] = [when.getUTCFullYear(), when.getUTCMonth() + 1, when.getUTCDate()];
+  // 2026-11-30, on its own or followed by a time (`wholeWord` will not match a day running straight into a `T`).
+  if (wholeWord(own, iso.slice(0, 10)) || new RegExp(`${iso.slice(0, 10)}[t ]\\d{1,2}:\\d{2}`, "i").test(own)) return iso;
+  // A slashed or dashed numeric day, read either way round; the shown moment is what the owner confirms.
+  for (const m of own.matchAll(/(?:^|[^0-9])(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})(?:[^0-9]|$)/g)) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (Number(m[3]!.length === 2 ? `20${m[3]}` : m[3]) !== year) continue;
+    if ((a === day && b === month) || (a === month && b === day)) return iso;
+  }
+  // A written month with a day, in either order, with the year when the owner wrote one (26 and 2026 both count as their own spelling).
+  const names = Object.keys(MONTH_WORDS).sort((x, y) => y.length - x.length).join("|");
+  const ordinal = "(?:st|nd|rd|th)?";
+  const yearSaid = "(?:,?\\s+(?<year>\\d{4}|\\d{2}))?";
+  const sameYear = (m: RegExpMatchArray): boolean => {
+    const written = m.groups?.["year"];
+    if (written === undefined) return true;
+    const n = written.length === 2 ? (Number(written) < 70 ? 2000 + Number(written) : 1900 + Number(written)) : Number(written);
+    return n === year;
+  };
+  const dayFirst = new RegExp(`(?:^|[^0-9])(\\d{1,2})${ordinal}(?:\\s+of)?\\s+(${names})${yearSaid}(?:[^0-9a-z]|$)`, "g");
+  const monthFirst = new RegExp(`(?:^|[^a-z])(${names})\\s+(\\d{1,2})${ordinal}${yearSaid}(?:[^0-9a-z]|$)`, "g");
+  for (const m of own.matchAll(dayFirst)) if (Number(m[1]) === day && MONTH_WORDS[m[2]!] === month && sameYear(m)) return iso;
+  for (const m of own.matchAll(monthFirst)) if (Number(m[2]) === day && MONTH_WORDS[m[1]!] === month && sameYear(m)) return iso;
+  return undefined;
+}
+
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
@@ -590,12 +642,24 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? ` (${typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : "no end: it never runs out and stays until you revoke it"}${args["project"] === "*" ? "; everywhere: it covers every project, including ones made later" : typeof args["project"] === "string" ? `; only in ${labels[args["project"]] === undefined ? short(args["project"]) : quotedText(labels[args["project"]], 60)}` : ""})` : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
+  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? grantMeaning(args, labels) : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
   // The verb is this file's own wording; an operation the table does not know is whoever called this saying an operation name, so even that is escaped.
   const line = `${short(spec?.verb ?? op)}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
   return line.length > room ? `${cutAt(line, room - 3)}...` : line;
+}
+
+/**
+ * When a right is alive and how far it reaches, said before the names so a cut line still shows them. Neither is read out of the owner's wording: the two times are the ones their own words gave
+ * (`grantDateInWords`, checked in the chat) or none, and with none the line says the right never runs out. A date is the owner's own text and goes through `short`, once, like every other value here.
+ */
+function grantMeaning(args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
+  const end = typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : "no end: it never runs out and stays until you revoke it";
+  const start = typeof args["notBefore"] === "string" ? `; starts ${short(args["notBefore"])}` : "";
+  const scope = args["project"];
+  const reach = scope === "*" ? "; everywhere: it covers every project, including ones made later" : typeof scope === "string" ? `; only in ${labels[scope] === undefined ? short(scope) : quotedText(labels[scope], 60)}` : "";
+  return ` (${end}${start}${reach})`;
 }
 
 /**

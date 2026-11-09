@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { wholeWord, platformsNamed, platformChoices, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -529,7 +529,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long running work may go on, in your own words." }); continue; }
@@ -760,10 +760,20 @@ export class ChatService {
       }
       if (intent.op === "grant.create") {
         const scope = args["project"];
-        // A right given in chat has no end and is always a proposal (`grant.*` is shown first in every profile). Its consequence (no end; every project when the scope is `*`) is stated on the proposal
-        // line itself (`describe`), and the owner's confirmation of that shown proposal is the consent: nothing here reads the owner's wording for "permanently" or "everywhere", and nothing tells them
-        // what to say. A negated, limited or conditional sentence the interpreter read as a plain grant is still only shown, and the owner's no ends it. The reason recorded is the owner's message itself.
-        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "a right given in chat has no end date, so a right that ends or starts later was not drawn up here; it can be made through the grant.create operation with its dates");
+        // A right given in chat is always a proposal (`grant.*` is shown first in every profile). Its consequence — when it starts, when it ends, how far it reaches — is stated on the proposal line
+        // itself (`describe`), and the owner's confirmation of that shown proposal is the consent: nothing here reads the owner's wording for "permanently" or "everywhere", and nothing tells them
+        // what to say. A negated or conditional sentence the interpreter read as a plain grant is still only shown, and the owner's no ends it. The reason recorded is the owner's message itself.
+        // The two times are values like every other text of the command, so they are the owner's or nobody's: the day must be one their own words give (`grantDateInWords` — the same rule `foreignValue`
+        // applies to the rest of the command, read for the day rather than for the exact characters of an ISO moment). The time of day on that day is the interpreter's reading, and the line the owner
+        // confirms shows the whole moment, so nothing is settled behind their back.
+        for (const [key, what] of [["notBefore", "starts"], ["expiresAt", "ends"]] as const) {
+          if (args[key] === undefined) continue;
+          const when = grantDateInWords(args[key], words);
+          if (when === undefined) return refuse("unsupported_value", `The day the right ${what} is not a day your message gives, so nothing was drawn up. Which day should it ${what}?`);
+          args[key] = when;
+        }
+        // A right that would end before it ever starts is not a right: said here, rather than proposing something the records refuse when it is confirmed.
+        if (typeof args["notBefore"] === "string" && typeof args["expiresAt"] === "string" && args["expiresAt"] <= args["notBefore"]) return refuse("invalid_command", "That right would be over before it began, so nothing was drawn up: it would start and end on the same moment.");
         args["basis"] = `owner chat: ${words}`.slice(0, 200);
         if (scope === "*") { /* every project: the proposal says so */ }
         else if (typeof scope === "string" && named !== undefined) { /* resolved from the name the owner said, above */ }
