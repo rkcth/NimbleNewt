@@ -756,7 +756,8 @@ export class StandupService {
           const lo = Math.max(Date.parse(span.from), from), hi = Math.min(end, to);
           if (hi > lo) held += hi - lo;
         }
-        if (held > 0 && typeof d.slotSpansCut === "string" && Date.parse(d.slotSpansCut) > from) trimmed++;
+        // Runs let go (or run before the sink) that ended inside the period are said to be missing, even when what is kept holds no time in it: that attempt's time in the period is then missing altogether.
+        if (typeof d.slotSpansCut === "string" && Date.parse(d.slotSpansCut) > from) trimmed++;
       } else {
         if (typeof d.startedAt !== "string" || d.state === "waiting") return;
         const begin = Date.parse(d.startedAt);

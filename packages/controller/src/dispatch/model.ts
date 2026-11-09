@@ -177,20 +177,26 @@ export const DISPATCHER_ACTOR = "dispatcher";
 /**
  * The usage sink (card M03h): `next` with its slot spans brought up to date for the move from `prev`. Entering `running` opens a span at `now`; leaving it closes the open one at `now`; any other move leaves the spans
  * as they are, so a repeat of the same rewrite (the dispatcher's `mutate` is replayed on its own result) adds nothing. Spans past the bound are let go oldest first and the cut remembered.
+ * A run that leaves `running` after its lease ran out (its worker or controller was gone and the attempt is ended as lost, perhaps hours later when a controller comes back) is closed when the lease ran out,
+ * not when the loss was noticed. A span never opens before the end of the one before it (a clock set back), so spans do not overlap. A record that ran before the sink and opens its first span now has
+ * runs that are not on record: its cut is set, so the review says so rather than counting only the newer runs as the whole.
  */
 export function withSlotSpans(prev: DispatchBody, next: DispatchBody, now: string): DispatchBody {
   const was = prev.state === "running", is = next.state === "running";
   if (was === is) return next;
   const spans = [...(next.slotSpans ?? prev.slotSpans ?? [])];
+  let cut = next.slotSpansCut ?? prev.slotSpansCut;
   if (is) {
-    if (spans.length > 0 && spans[spans.length - 1]!.to === undefined) return next; // already open
-    spans.push({ from: now });
+    const last = spans[spans.length - 1];
+    if (last !== undefined && last.to === undefined) return next; // already open
+    if (last === undefined && prev.slotSpans === undefined && prev.startedAt !== undefined && cut === undefined) cut = prev.lastHeartbeatAt ?? now; // it ran before the sink
+    spans.push({ from: last?.to !== undefined && last.to > now ? last.to : now });
   } else {
     const last = spans[spans.length - 1];
     if (last === undefined || last.to !== undefined) return next; // a run from before the sink: nothing to close
-    spans[spans.length - 1] = { from: last.from, to: now < last.from ? last.from : now };
+    const lapsed = prev.lease !== undefined && prev.lease.until < now ? prev.lease.until : now;
+    spans[spans.length - 1] = { from: last.from, to: lapsed < last.from ? last.from : lapsed };
   }
-  let cut = next.slotSpansCut ?? prev.slotSpansCut;
   while (spans.length > DISPATCH_LIMITS.slotSpans) { const gone = spans.shift()!; cut = gone.to ?? gone.from; }
   return { ...next, slotSpans: spans, ...(cut === undefined ? {} : { slotSpansCut: cut }) };
 }

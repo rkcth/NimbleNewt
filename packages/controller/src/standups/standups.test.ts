@@ -510,6 +510,11 @@ for (const backend of backends) {
     const slot4 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
     // P: 3 h + 1 h + 1 h (04:00 to the review at 05:00) = 5 h; PC 3 h: 3 / 8 = 38%.
     assert.match(slot4, /actual PC share 38% \(worker-slot time of 5 attempts; 1 older record that parked or were placed again is not counted, as its run time is not recorded; the earliest runs of 1 attempt are no longer on record\)/);
+    // A record that ran before the sink inside the period and has just opened its first span holds no recorded time in the period yet; its missing runs are still said to be missing.
+    at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-new", { attemptId: "att-slot-new", taskId: pcWork, projectId: proj, state: "running", startedAt: "2026-10-20T09:00:00.000Z", claimedAt: "2026-10-20T09:00:00.000Z", slotSpansCut: "2026-10-20T12:00:00.000Z", slotSpans: [{ from: "2026-10-21T05:00:00.000Z" }] });
+    at("2026-10-21T05:00:00.000Z");
+    const slot5 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
+    assert.match(slot5, /actual PC share 38% \(worker-slot time of 5 attempts; 1 older record that parked or were placed again is not counted, as its run time is not recorded; the earliest runs of 2 attempts are no longer on record\)/);
     // With the owner's allocation and a measured use and a window, the lines say so.
     const rich = c.make({ allocation: async () => ({ floor: 10, target: 20, ceiling: 30 }), usage: async () => ({ pcShare: 18, basis: "worker-slot time" }), improvementWindow: async () => "2026-11-02T09:00:00.000Z" });
     const r = (await rich.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");

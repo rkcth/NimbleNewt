@@ -1667,6 +1667,24 @@ for (const backend of backends) {
     assert.equal(held, 2 * 10_000, "the two runs, not the wait between them");
   });
 
+  suite("the usage sink (card M03h): an attempt lost with its controller is closed when its lease ran out, not hours later when a new controller notices", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    c.worker.script = () => new Promise<never>(() => undefined); // a turn that never ends
+    await c.dispatcher.tick();
+    const running = (await c.dispatcher.get(c.owner, attemptId!))!;
+    assert.equal(running.state, "running");
+    const lapse = running.lease!.until;
+    // The controller dies; a new one starts eight hours later and ends the attempt as lost.
+    c.clock.advance(8 * 3_600_000);
+    const second = c.restart({}, {});
+    const report = await second.tick();
+    assert.deepEqual(report.lost, [attemptId]);
+    const ended = (await second.get(c.owner, attemptId!))!;
+    assert.equal(ended.state, "finished");
+    assert.deepEqual(ended.slotSpans, [{ from: running.slotSpans![0]!.from, to: lapse }], "the eight hours nobody ran it are in no span");
+  });
+
   suite("a decision-revision refusal is cleared by the worker through the gateway (a remote-shaped one too), and the local worker does it by itself after refreshing the agent's context", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.task("t", ann);
