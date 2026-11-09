@@ -3126,7 +3126,7 @@ Arguments:
 - `checkpoint`: { conversationId, at, digest, runtime: { name, version }, format }
 - `durable`: { verified, error? }: the host's durability check
 - `continuation`: { artifacts, decisions, pendingEffects: [{ effectId, state }], budget: { spent, remaining, unit }, nextStep }
-- `manifest`: { summaryLineage, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }
+- `manifest`: { summaryLineage, summaryLineageEarlier?, sourceRanges, compression, branches, messageCursor, routingRevision, environmentRevision, adapter }: summaryLineage (oldest first, up to 10,000 record IDs) keeps its newest 200; the older ones are folded into summaryLineageEarlier { count, digest, through }, which a host may also pass as the controller's compaction records give it
 - `nonCheckpointableTools`: [{ name, reason }]
 - `scratchRecords`: desk record IDs of the run's agent in the task's project
 - `credentialRefs`: names of secrets, never values

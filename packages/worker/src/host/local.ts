@@ -212,8 +212,8 @@ export interface LocalHostOptions<Call> {
   readonly relay: (order: HostOrder, request: RelayRequest) => Promise<RelayResponse>;
   /** The cache key and retention for the attempt's route, and the figures since the last look (reported with each turn). */
   readonly cache?: (order: HostOrder) => Promise<{ readonly key?: string; readonly retention?: "none" | "short" | "long"; takeUsage?(): Promise<CacheFigures | undefined> }> | { readonly key?: string; readonly retention?: "none" | "short" | "long"; takeUsage?(): Promise<CacheFigures | undefined> };
-  /** The context limits for the process (card C07b): stream timeout and retries, tool output limits, and how a compaction is done when the model has no room. */
-  readonly context?: (order: HostOrder) => ChannelContext | undefined;
+  /** The context limits for the process (card C07b): stream timeout and retries, tool output limits, and how a compaction is done when the model has no room (with the owner's decisions it keeps, card C07q). Read once per process start. */
+  readonly context?: (order: HostOrder) => ChannelContext | undefined | Promise<ChannelContext | undefined>;
   /** What to put before the agent after the owner's decisions changed. */
   readonly refreshText?: (order: HostOrder) => Promise<string> | string;
   /** Whether a limit the host cannot enforce in full refuses the launch (default true, as for scripts). Used when `bestEffort` is not given. */
@@ -412,12 +412,13 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       }
       entry.process = process;
       try {
+        const channelContext = await options.context?.(order);
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
           storeDir: hostPaths ? join(entry.workspace.home, "pi") : `${GUEST.home}/pi`, model, ...(recovery === undefined ? {} : { recover: recovery }), relayBase: options.relayBase ?? RELAY_BASE,
           // The lease goes as the duration the controller meant (card H08b): the process counts it on its own monotonic clock, so a wrong clock in or beside the sandbox changes nothing.
           ...(lease === undefined ? {} : { lease: { leaseMs: Math.max(1000, Math.min(3_600_000, Math.floor(lease.leaseMs))), graceMs: options.leaseGraceMs ?? LEASE_GRACE_MS } }),
-          ...(options.context?.(order) === undefined ? {} : { context: options.context(order)! }),
+          ...(channelContext === undefined ? {} : { context: channelContext }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
       } catch (error) {

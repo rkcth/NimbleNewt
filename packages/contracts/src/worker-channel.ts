@@ -42,8 +42,10 @@ export interface ChannelContext {
   /**
    * Compaction through Pi's `beforeCompact` hook: `timeoutMs` is the hook's own short ceiling; `extractive` makes the process write the summary itself (the start and the end of what is replaced, cut to a bound) instead of asking the model that is already
    * out of room. Without `extractive` Pi's own summariser runs.
+   * `keep` (card C07q): the owner's decisions for the task as the controller had them when the process started (a note saying what they are and how to read the current ones, then one line each, the owner's wording quoted); the process
+   * adds them to every summary it writes, so a compaction never drops them. At most `CHANNEL_KEEP.lines` lines of `CHANNEL_KEEP.line` characters.
    */
-  readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive" };
+  readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; readonly keep?: { readonly note: string; readonly lines: readonly string[] } };
 }
 
 export interface ChannelStart {
@@ -163,15 +165,23 @@ const bounded = (o: Obj, k: string, min: number, max: number): number | undefine
   const v = int(o, k);
   return v >= min && v <= max ? v : fail(`${k}: must be between ${min} and ${max}`);
 };
+/** The bounds of the owner's decisions a process keeps through its compactions (card C07q). */
+export const CHANNEL_KEEP = { lines: 12, line: 600, note: 1000 } as const;
+function parseKeep(o: Obj): { readonly note: string; readonly lines: readonly string[] } {
+  const lines = o["lines"];
+  if (!Array.isArray(lines) || lines.length > CHANNEL_KEEP.lines || lines.some((l) => typeof l !== "string" || l.length > CHANNEL_KEEP.line || /[\r\n]/.test(l))) return fail(`compaction.keep.lines: at most ${CHANNEL_KEEP.lines} single lines of ${CHANNEL_KEEP.line} characters`);
+  return { note: str(o, "note", CHANNEL_KEEP.note), lines: lines as string[] };
+}
 function parseContext(o: Obj): ChannelContext {
   const compaction = o["compaction"] === undefined ? undefined : obj(o, "compaction");
+  const keep = compaction?.["keep"] === undefined ? undefined : parseKeep(obj(compaction, "keep"));
   const timeoutMs = compaction === undefined ? undefined : bounded(compaction, "timeoutMs", 1000, 600_000);
   const fallback = compaction === undefined ? undefined : optStr(compaction, "fallback", 20);
   if (fallback !== undefined && fallback !== "extractive") fail("compaction.fallback: extractive");
   const out = { streamTimeoutMs: bounded(o, "streamTimeoutMs", 1000, 3_600_000), streamMaxRetries: bounded(o, "streamMaxRetries", 0, 10), toolOutputBytes: bounded(o, "toolOutputBytes", 1000, 10_000_000), toolOutputLines: bounded(o, "toolOutputLines", 10, 100_000) };
   return {
     ...Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)),
-    ...(compaction === undefined ? {} : { compaction: { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(fallback === undefined ? {} : { fallback: "extractive" as const }) } }),
+    ...(compaction === undefined ? {} : { compaction: { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(fallback === undefined ? {} : { fallback: "extractive" as const }), ...(keep === undefined ? {} : { keep }) } }),
   };
 }
 

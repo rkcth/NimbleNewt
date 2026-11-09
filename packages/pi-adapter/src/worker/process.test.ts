@@ -287,6 +287,27 @@ test("the host's context limits reach Pi's policy; the extractive fallback never
   for (const bad of [{ streamTimeoutMs: 5 }, { streamMaxRetries: 99 }, { toolOutputBytes: -1 }, { compaction: { fallback: "model" } }, { compaction: { timeoutMs: 1 } }]) assert.throws(() => parseToChild(JSON.parse(line(bad))), /./, JSON.stringify(bad));
 });
 
+test("the owner's decisions the controller gave the process are written after every summary it makes, whatever the extract cut, and bounded on the channel (card C07q)", async () => {
+  const { contextPolicyOf } = await import("./process.js");
+  const keep = { note: "The owner's decisions for this task (decision version 4). Read the current ones with decision.context.", lines: ["dec-aaaaaaaaaaaaaaaaaaaa: \"[AUTHORITATIVE] Only raised beds\"", "dec-bbbbbbbbbbbbbbbbbbbb: \"[AUTHORITATIVE] Never water at noon\""] };
+  const policy = contextPolicyOf({ compaction: { fallback: "extractive", keep } })!;
+  // The decisions sat in the middle of the replaced messages, where the extract cuts: they are still in the summary, after it, every time it compacts.
+  const text = `START ${"x".repeat(20_000)} the owner said only raised beds ${"y".repeat(20_000)} END`;
+  for (let round = 0; round < 3; round++) {
+    const summary = ((await policy.beforeCompact!({ key: `k${round}`, reason: "overflow", text, messageCount: 40, signal: new AbortController().signal })) as { summary: string }).summary;
+    assert.ok(summary.endsWith(`${keep.note}\n- ${keep.lines[0]}\n- ${keep.lines[1]}`), summary.slice(-400));
+    assert.ok(summary.length < 7000 + 1000, `still bounded (${summary.length})`);
+  }
+  // Nothing given, nothing added.
+  const plain = ((await contextPolicyOf({ compaction: { fallback: "extractive" } })!.beforeCompact!({ key: "k", reason: "overflow", text: "short", messageCount: 1, signal: new AbortController().signal })) as { summary: string }).summary;
+  assert.equal(plain.includes("owner's decisions"), false);
+  // On the channel: kept as given, and bounded (at most 12 single lines).
+  const line = (context: unknown): string => JSON.stringify({ t: "start", v: 1, start: { ...start, context } });
+  const parsed = parseToChild(JSON.parse(line({ compaction: { fallback: "extractive", keep } }))) as { start: { context?: { compaction?: { keep?: unknown } } } };
+  assert.deepEqual(parsed.start.context?.compaction?.keep, keep);
+  for (const bad of [{ note: "n", lines: Array.from({ length: 13 }, () => "x") }, { note: "n", lines: ["two\nlines"] }, { note: "n", lines: ["x".repeat(601)] }, { lines: [] }, { note: "n", lines: "x" }]) assert.throws(() => parseToChild(JSON.parse(line({ compaction: { fallback: "extractive", keep: bad } }))), /./, JSON.stringify(bad));
+});
+
 /** A clock the test moves (card H08b): `sleep` moves wall time only. */
 function fakeClock() {
   const c = { m: 1000, w: 1_700_000_000_000 };

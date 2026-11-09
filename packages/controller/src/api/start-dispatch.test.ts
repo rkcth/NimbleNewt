@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DecisionService } from "../decisions/index.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -170,7 +171,7 @@ test("a dispatcher the owner disables while the controller runs is noticed on th
 test("start binds the controller's services to the local worker's guards, offers the quiesce coordinator, and reaches remote MCP servers only at checked public addresses (card H12k)", async () => {
   const d = dir();
   const timer = new ManualTimer();
-  const built: { guards: RuntimeGuards }[] = [];
+  const built: { guards: RuntimeGuards; context: (order: never) => Promise<{ compaction?: { keep?: { note: string; lines: readonly string[] } } } | undefined> }[] = [];
   const worker = { hostId: "host:w1" } as unknown as WorkerHost;
   let answer: string[] | string[][] = ["10.0.0.5"];
   let lookups = 0;
@@ -178,7 +179,7 @@ test("start binds the controller's services to the local worker's guards, offers
   let gated = false;
   const c = await open(join(d, "c.sqlite"), {
     harnesses: [PI],
-    dispatch: { timer, manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); const limits = services.context({ route: "x" } as never); const relay = services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, { forAttempt: (a: { onFirstUsage?: unknown }) => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error(String(typeof a.onFirstUsage)); } }) } as never);
+    dispatch: { timer, manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => { closed++; }, build: async (services) => { built.push(services); const limits = await services.context({ route: "x", projectId: "prj-aaaaaaaaaaaaaaaaaaaa", taskId: "tsk-aaaaaaaaaaaaaaaaaaaa" } as never); const relay = services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, { forAttempt: (a: { onFirstUsage?: unknown }) => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error(String(typeof a.onFirstUsage)); } }) } as never);
           assert.equal(services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, {} as never), relay, "one relay for every call of an attempt");
           assert.ok(limits !== undefined && (limits.toolOutputBytes ?? 0) > 0 && limits.compaction?.fallback === "extractive", "the composer gives the host the context limits of the window"); return worker; } }, mcp: { resolve: async () => { lookups++; return Array.isArray(answer[0]) ? (answer as string[][])[Math.min(lookups, answer.length) - 1]! : (answer as string[]); }, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
   });
@@ -192,6 +193,16 @@ test("start binds the controller's services to the local worker's guards, offers
     // A remote server the owner approved is reached through the guard: a private answer is refused, a public one gives the checked address.
     const owner = await c.services.principals.authenticate((await c.services.principals.bootstrapOwner({ name: "rob" })).token);
     const project = (await c.services.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    // Card C07q: the process compacts its conversation itself, so the composer gives it the owner's decisions for the task to keep through every compaction, the wording quoted, with the way to read the current ones.
+    const task = (await c.services.projects.createTask({ commandId: "t-keep", actor: owner.id, projectId: project, title: "keep decisions" })).id;
+    const order = { route: "x", projectId: project, taskId: task } as never;
+    assert.equal((await built[0]!.context(order))?.compaction?.keep, undefined, "nothing decided, nothing kept");
+    const rec = await DecisionService.withEpoch(c.storage, c.epoch, {}).record(owner, { commandId: "d-keep", projectId: project, category: "decision", topic: "beds", statement: "Raised beds only", wording: "Only raised beds\nin the garden, \"final\"", source: { channel: "direct" }, basedOn: 0 } as never) as { recorded: boolean; id: string };
+    assert.equal(rec.recorded, true);
+    const keep = (await built[0]!.context(order))?.compaction?.keep;
+    assert.equal(keep?.lines.length, 1);
+    assert.ok(keep!.lines[0]!.startsWith(`${rec.id}: "[AUTHORITATIVE] Only raised beds in the garden, \\"final\\"`), keep!.lines[0]);
+    assert.match(keep!.note, /decision version \d+.*decision\.context/);
     const mcp = c.dispatch.mcp!;
     const server = (await mcp.service.register(owner, { commandId: "m1", name: "docs", mode: "remote", transport: "streamable-http", protocolRevision: "2025-06-18", sdk: { name: "@modelcontextprotocol/sdk", version: "1.12.0" }, remote: { url: "https://mcp.example.com/v1", credentialRef: "docs.token", scopes: ["docs:read"] }, audience: [project], allowed: { tools: ["search"] } } as never)).id;
     await assert.rejects(mcp.connector.connect(server, async () => "connected"), /internal address/);
