@@ -734,33 +734,51 @@ export class StandupService {
   }
 
   /**
-   * The use of worker slots in the period, from the dispatcher's own records (card M03h): for each attempt of the project that ran in the period, the time it held a slot (from its start to its recorded end; to the end of
-   * the period while it still runs), cut to the period and added up by the class of its task. An attempt that gave its place back and asked for it again (parked and resumed, or placed more than once) keeps its first start,
-   * so its record cannot tell run time from waiting time; those attempts are left out of the share and counted in the basis, rather than counted as if they had run the whole time. No attempt that can be measured in the
-   * period: nothing is measured and the review counts tasks. A cut scan marks the review partial, as the other figures.
+   * The use of worker slots in the period, from the dispatcher's own records (card M03h): for each attempt of the project that held a slot in the period, the time it held one, cut to the period and added up by the
+   * class of its task. The dispatcher records one slot span per run (`slotSpans`, opened when the attempt starts running and closed when it parks, waits or finishes), so an attempt that parked for an approval and
+   * went on counts its runs and not its waiting; a span still open counts to the end of the period while the attempt runs, and to its last heartbeat otherwise. A record from before the spans counts from its start
+   * to its recorded end, except one that gave its place back and asked for it again (parked and resumed, or placed more than once): its first start would count the waiting as running, so it is left out and
+   * counted in the basis. A record whose oldest spans were let go and whose cut falls inside the period is counted on what it keeps and said to be. No measurable time in the period: nothing is measured and the
+   * review counts tasks. A cut scan marks the review partial, as the other figures.
    */
   async #slotUsage(projectId: string, since: string, until: string, facts: { partial: boolean }): Promise<{ pcShare: number; basis: string } | undefined> {
     const from = Date.parse(since), to = Date.parse(until);
     const sums = { P: 0, PC: 0 };
     const classes = new Map<string, "P" | "PC">();
-    let attempts = 0, left = 0;
+    let attempts = 0, left = 0, trimmed = 0;
     await this.#scan(DISPATCH_KIND, facts, async (a) => {
       const d = a.body as unknown as DispatchBody;
-      if (d.projectId !== projectId || typeof d.startedAt !== "string") return;
-      if (d.state === "waiting") return;
-      const begin = Date.parse(d.startedAt);
-      const end = d.state === "running" ? to : d.state === "finished" ? Date.parse(d.outcome?.at ?? a.updatedAt) : Date.parse(d.lastHeartbeatAt ?? a.updatedAt);
-      const lo = Math.max(begin, from), hi = Math.min(end, to);
-      if (!(hi > lo)) return; // it did not hold a slot in the period
-      if (d.state === "parked" || (d.requests ?? 0) > 1 || (d.resumedFor?.length ?? 0) > 0) { left++; return; }
+      if (d.projectId !== projectId) return;
+      let held = 0;
+      if (Array.isArray(d.slotSpans)) {
+        for (const span of d.slotSpans) {
+          const end = span.to !== undefined ? Date.parse(span.to) : d.state === "running" ? to : Date.parse(d.lastHeartbeatAt ?? a.updatedAt);
+          const lo = Math.max(Date.parse(span.from), from), hi = Math.min(end, to);
+          if (hi > lo) held += hi - lo;
+        }
+        if (held > 0 && typeof d.slotSpansCut === "string" && Date.parse(d.slotSpansCut) > from) trimmed++;
+      } else {
+        if (typeof d.startedAt !== "string" || d.state === "waiting") return;
+        const begin = Date.parse(d.startedAt);
+        const end = d.state === "running" ? to : d.state === "finished" ? Date.parse(d.outcome?.at ?? a.updatedAt) : Date.parse(d.lastHeartbeatAt ?? a.updatedAt);
+        const lo = Math.max(begin, from), hi = Math.min(end, to);
+        if (!(hi > lo)) return; // it did not hold a slot in the period
+        if (d.state === "parked" || (d.requests ?? 0) > 1 || (d.resumedFor?.length ?? 0) > 0) { left++; return; }
+        held = hi - lo;
+      }
+      if (!(held > 0)) return;
       let workClass = classes.get(d.taskId);
       if (workClass === undefined) { workClass = await this.#classOf(d.taskId); classes.set(d.taskId, workClass); }
-      sums[workClass] += hi - lo;
+      sums[workClass] += held;
       attempts++;
     });
     const total = sums.P + sums.PC;
     if (total === 0) return undefined;
-    return { pcShare: Math.round((sums.PC / total) * 100), basis: `worker-slot time of ${attempts} attempt${attempts === 1 ? "" : "s"}${left === 0 ? "" : `; ${left} that parked or were placed again are not counted, as their run time is not recorded`}` };
+    const notes = [
+      ...(left === 0 ? [] : [`${left} older record${left === 1 ? "" : "s"} that parked or were placed again ${left === 1 ? "is" : "are"} not counted, as ${left === 1 ? "its" : "their"} run time is not recorded`]),
+      ...(trimmed === 0 ? [] : [`the earliest runs of ${trimmed} attempt${trimmed === 1 ? " are" : "s are"} no longer on record`]),
+    ];
+    return { pcShare: Math.round((sums.PC / total) * 100), basis: `worker-slot time of ${attempts} attempt${attempts === 1 ? "" : "s"}${notes.map((n) => `; ${n}`).join("")}` };
   }
 
   async #classOf(taskId: string): Promise<"P" | "PC"> {
@@ -864,7 +882,7 @@ export class StandupService {
     const byCount = classed.length === 0 ? undefined : Math.round((classed.filter((t) => t.workClass === "PC").length / classed.length) * 100);
     const measured = this.#options.usage === undefined ? await this.#slotUsage(projectId, since, until, facts).catch(() => undefined) : await this.#options.usage(projectId, since, until).catch(() => undefined);
     const planned = allocation === undefined || (allocation.floor === undefined && allocation.target === undefined && allocation.ceiling === undefined) ? "no P/PC allocation is set" : `planned PC share: floor ${allocation.floor ?? "-"}%, target ${allocation.target ?? "-"}%, ceiling ${allocation.ceiling ?? "-"}%`;
-    const actual = measured !== undefined ? `actual PC share ${measured.pcShare}% (${cut(measured.basis, 100)})` : byCount !== undefined ? `actual PC share ${byCount}% by count of tasks worked on or finished (worker-slot time is not measured here, so this is only a rough guide)` : "nothing was worked on or finished in the period";
+    const actual = measured !== undefined ? `actual PC share ${measured.pcShare}% (${cut(measured.basis, 240)})` : byCount !== undefined ? `actual PC share ${byCount}% by count of tasks worked on or finished (worker-slot time is not measured here, so this is only a rough guide)` : "nothing was worked on or finished in the period";
     lines.push({ text: `Allocation against use: ${planned}; ${actual}.`, cites: [project] });
     const pcDeferred = blockedPC.length + deferred.length;
     lines.push({

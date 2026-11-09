@@ -1631,6 +1631,42 @@ for (const backend of backends) {
     assert.deepEqual(c.worker.starts[1]!.resumeFrom, { saved: true });
   });
 
+  suite("the usage sink (card M03h): an attempt that parks for an approval and goes on records one slot span per run, closed when it parks and when it finishes, and its wait is in no span", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    await c.task("push", ann);
+    const log = { applied: 0, reconciled: 0 };
+    let runs = 0;
+    let reviewId = "";
+    c.worker.script = async ({ gateway }) => {
+      c.clock.advance(10_000); // each run holds its slot for ten seconds
+      if (++runs === 2) return { status: "completed", text: "resumed" };
+      reviewId = ((await gateway.call(effectCall("push1", pushBridge(log)), { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: pushBridge(log) })) as { reviewId: string }).reviewId;
+      return { status: "completed", text: "waiting", checkpoint: { saved: true } };
+    };
+    await c.dispatcher.tick();
+    await c.dispatcher.idle();
+    const attemptId = c.worker.starts[0]!.attemptId;
+    const parked = (await c.dispatcher.get(c.owner, attemptId))!;
+    assert.equal(parked.state, "parked");
+    assert.equal(parked.slotSpans?.length, 1, JSON.stringify(parked.slotSpans));
+    assert.ok(parked.slotSpans![0]!.to !== undefined, "the span is closed when the attempt parks");
+    assert.equal(Date.parse(parked.slotSpans![0]!.to!) - Date.parse(parked.slotSpans![0]!.from), 10_000);
+    c.clock.advance(30_000); // thirty seconds waiting for the approval (short enough that the worker host stays fresh)
+    const review = (await c.reviews.get(c.owner, reviewId))!;
+    await c.reviews.decide(c.owner, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+    await c.dispatcher.tick(); await c.dispatcher.idle();
+    await c.dispatcher.tick(); await c.dispatcher.idle();
+    assert.equal(c.worker.starts.length, 2, "the attempt went on");
+    const done = (await c.dispatcher.get(c.owner, attemptId))!;
+    assert.equal(done.state, "finished");
+    assert.equal(done.slotSpans?.length, 2, JSON.stringify(done.slotSpans));
+    const [first, second] = done.slotSpans!;
+    assert.ok(second!.to !== undefined, "the span is closed when the attempt finishes");
+    assert.ok(Date.parse(second!.from) - Date.parse(first!.to!) >= 30_000, "the wait for the approval lies between the spans");
+    const held = done.slotSpans!.reduce((sum, x) => sum + Date.parse(x.to!) - Date.parse(x.from), 0);
+    assert.equal(held, 2 * 10_000, "the two runs, not the wait between them");
+  });
+
   suite("a decision-revision refusal is cleared by the worker through the gateway (a remote-shaped one too), and the local worker does it by itself after refreshing the agent's context", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.task("t", ann);
