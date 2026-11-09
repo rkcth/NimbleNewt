@@ -1,4 +1,5 @@
 import { OPERATION_BY_NAME } from "../api/operations.js";
+import { quoted as quotedText } from "../status/explain.js";
 import { CHAT_LIMITS } from "./interpreter.js";
 
 /**
@@ -479,8 +480,16 @@ export function hasRefMarker(value: unknown): boolean {
   return false;
 }
 
-/** Characters that could break a proposal line or disguise it: line breaks become a space, and controls, separators, invisible format characters (bidirectional overrides, zero-width characters, tags) and half surrogate pairs are written as escapes, so a value (model text above all) can never start a second line or reorder what the owner reads. */
+/**
+ * Characters that could break a proposal line or disguise it: line breaks become a space, and controls, separators, invisible format characters (bidirectional overrides, zero-width characters, tags) and half surrogate pairs are written as escapes, so a value (model text above all) can never start a second line or reorder what the owner reads.
+ * `short` is the escaping helper for a value shown bare (`landing=main-automatic`) and `quotedText` (card U09, `status/explain.ts`) the one for text shown between quotes (a record's name, the owner's own alternative); every text a proposal line prints goes through exactly one of them, never raw and never both.
+ */
 const UNSHOWN = /^(?:[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]|\p{Cf})$/u;
+/** How much of a name from the records one proposal line shows, after escaping: as much as the whole line has room for, because the chat builds some labels out of several fields of a record (a maintenance request names its package, version, site and source in that order) and what it put first must not be hidden by the quotation's own bound. The line's own cut is what trims. */
+const NAME_LIMIT = CHAT_LIMITS.line;
+/** How much of the owner's own alternative, and of its topic, the line shows: the same bounds the chat accepts them within, so what is shown whole is what would be recorded. */
+const ALTERNATIVE_LIMIT = 150;
+const ALTERNATIVE_TOPIC_LIMIT = 80;
 /** Cut to at most `max` UTF-16 units without splitting a surrogate pair, so a cut never leaves half a character on the line. */
 const cutAt = (text: string, max: number): string => (text.length <= max ? text : text.slice(0, /[\ud800-\udbff]/.test(text.charAt(max - 1)) ? max - 1 : max));
 const short = (value: unknown): string => {
@@ -511,7 +520,7 @@ export function landingOf(args: Readonly<Record<string, unknown>>): string | und
   return typeof value === "string" ? value : undefined;
 }
 
-/** What a landing change means for the owner's work, said on the proposal line before the fields it sets. */
+/** What a landing change means for the owner's work, said on the proposal line before the fields it sets. The sentences are the controller's own; only an unknown landing name is foreign, and it is escaped. */
 function landingMeaning(op: string, args: Readonly<Record<string, unknown>>): string {
   const landing = landingOf(args);
   if (landing === undefined) return "";
@@ -521,7 +530,12 @@ function landingMeaning(op: string, args: Readonly<Record<string, unknown>>): st
   return ` (from now on, ${means})`;
 }
 
-/** One plain line saying what a command will do, for the owner to read before it happens. Built from the typed command, never from model text. */
+/**
+ * One plain line saying what a command will do, for the owner to read before it happens. Built from the typed command, never from model text.
+ * Everything on it that someone else wrote — a label from a record (a task's title, a project's or stand-up's name, an agent's name, a decision's wording, a maintenance request's description, all of them text an agent wrote when it made the record),
+ * an alternative in the owner's words the interpreter carried, an end time, even an argument's own name and an unknown operation — is shown through an escaping helper (`short` bare, `quotedText` between quotes), so no newline, line or paragraph separator,
+ * C0/C1 control, invisible format character or lone surrogate in that text can start a second line, reorder what is read, or close a quotation. Nothing is escaped twice: a name is escaped here, once, and nowhere else on its way to the owner.
+ */
 export function describe(op: string, args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
   const spec = CHAT_OPS[op];
   const parts: string[] = [];
@@ -532,10 +546,10 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
     if (key === "expectedRevision" || key === "expectedVersion") continue;
     // The binding an approval carries is the chat's own reading of the gate, and the owner is shown those failures in plain words beside the proposal line; the raw argument names and attempt list are not shown again here.
     if (op === "release.approve" && (key === "acknowledgeFlaky" || key === "expectedFailures")) continue;
-    // The owner's own alternative is shown as the words they will have recorded and the topic they go under, never as the record's fields.
+    // The owner's own alternative is shown as the words they will have recorded and the topic they go under, never as the record's fields. Both are quoted, so neither can carry the line into a second one; an alternative missing either is refused long before this line is drawn up.
     if (op === "meeting.record.owner-respond" && key === "alternative" && value !== null && typeof value === "object") {
       const alt = value as Record<string, unknown>;
-      parts.push(`alternative="${String(alt["statement"])}" on topic "${String(alt["topic"])}"`);
+      parts.push(`alternative=${quotedText(String(alt["statement"] ?? ""), ALTERNATIVE_LIMIT)} on topic ${quotedText(String(alt["topic"] ?? ""), ALTERNATIVE_TOPIC_LIMIT)}`);
       continue;
     }
     // A new project's integration section is shown as the settings it holds, not as a JSON blob the owner has to decode.
@@ -543,13 +557,15 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
       parts.push(Object.entries(value as Record<string, unknown>).map(([k, v]) => `${short(k)}=${short(Array.isArray(v) ? v.map((x) => String(x)).join("+") : v)}`).join(", "));
       continue;
     }
+    // A label is a record's own text (an agent wrote it when it made the record), so it is quoted the way a status answer quotes it; the argument's name is the interpreter's word and is escaped the same way.
     const label = typeof value === "string" ? labels[value] : undefined;
-    parts.push(`${key}=${label === undefined ? short(value) : `"${label}"`}`);
+    parts.push(`${short(key)}=${label === undefined ? short(value) : quotedText(label, NAME_LIMIT)}`);
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
-  const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
+  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${short(args["expiresAt"])})` : " (permanent: no end time)") : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
+  // The verb is this file's own wording; an operation the table does not know is whoever called this saying an operation name, so even that is escaped.
+  const line = `${short(spec?.verb ?? op)}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
   return line.length > room ? `${cutAt(line, room - 3)}...` : line;
