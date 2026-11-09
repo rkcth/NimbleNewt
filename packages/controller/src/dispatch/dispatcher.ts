@@ -1953,7 +1953,8 @@ export class DispatcherService {
    * itself is never copied into the prompt (it grows with every hand-off, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
    */
   async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<string> {
-    const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((): undefined => undefined);
+    // Best effort in the plain sense: a read that fails is left out of the paragraph and reported, never guessed at, and never stops the attempt from starting.
+    const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
     const context = this.#deps.context;
     const [handedIn, note, blockers] = await Promise.all([
       this.#deps.handedIn === undefined ? Promise.resolve(undefined) : missing(this.#deps.handedIn(b.taskId)),
