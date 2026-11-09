@@ -479,8 +479,11 @@ export function hasRefMarker(value: unknown): boolean {
   return false;
 }
 
+/** Characters that could break a proposal line or disguise it: line breaks become a space, and controls, separators, invisible format characters (bidirectional overrides, zero-width characters, tags) and half surrogate pairs are written as escapes, so a value (model text above all) can never start a second line or reorder what the owner reads. */
+const UNSHOWN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]|\p{Cf}/gu;
+const oneLine = (text: string): string => text.replace(/[\r\n\u0085\u2028\u2029]+/g, " ").replace(UNSHOWN, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
 const short = (value: unknown): string => {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const text = oneLine(typeof value === "string" ? value : JSON.stringify(value) ?? String(value));
   return text.length > 80 ? `${text.slice(0, 77)}...` : text;
 };
 
@@ -506,7 +509,7 @@ export function landingOf(args: Readonly<Record<string, unknown>>): string | und
 function landingMeaning(op: string, args: Readonly<Record<string, unknown>>): string {
   const landing = landingOf(args);
   if (landing === undefined) return "";
-  const means = LANDING_MEANS[landing] ?? landing;
+  const means = LANDING_MEANS[landing] ?? short(landing);
   if (op === "project.create") return ` (this project's ${means})`;
   if (op === "integration.default.set") return ` (every new project starts this way: ${means})`;
   return ` (from now on, ${means})`;
@@ -531,7 +534,7 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
     }
     // A new project's integration section is shown as the settings it holds, not as a JSON blob the owner has to decode.
     if (op === "project.create" && key === "integration" && value !== null && typeof value === "object" && !Array.isArray(value)) {
-      parts.push(Object.entries(value as Record<string, unknown>).map(([k, v]) => `${k}=${typeof v === "string" ? (labels[v] ?? v) : short(v)}`).join(", "));
+      parts.push(Object.entries(value as Record<string, unknown>).map(([k, v]) => `${short(k)}=${short(Array.isArray(v) ? v.map((x) => String(x)).join("+") : v)}`).join(", "));
       continue;
     }
     const label = typeof value === "string" ? labels[value] : undefined;

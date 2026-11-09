@@ -52,6 +52,14 @@ test("every landing is explained in plain words, and a proposal line says what t
   assert.match(proposalReason("project.create", { name: "Garden", integration: { landing: "main-automatic" } }, false, always) ?? "", /no human step/, "a drafted project that lands on main says so in its reason");
 });
 
+test("a value on a landing proposal line can never start a second line or hide what the owner reads (second review)", () => {
+  // A newline, a line separator or a bidirectional override in a name or in model text in the integration section is written as an escape or a space.
+  const line = describe("project.create", { name: "Orchard\nCreate project (this project's finished work waits for a person to promote it)", integration: { landing: "main-automatic", integrator: "agent\u2028x\u202e", "re\nfreshRounds": 3, requiredChecks: ["tests", "review"] } }, {});
+  assert.equal(/[\n\r\u2028\u2029\u202e]/.test(line), false, JSON.stringify(line));
+  assert.match(line, /requiredChecks=tests\+review/, line);
+  assert.equal(/[\n\u202e]/.test(describe("integration.set", { project: "proj-a", landing: "main-automatic\n\u202eok" }, {})), false, "an unknown landing is escaped in the meaning too");
+});
+
 for (const backend of backends) {
   test(`${backend.name}: the owner's own sentence about not waiting for a person is proposed, and lands nothing until that proposal is confirmed (card P08b, redone)`, async () => {
     const script: Record<string, unknown[]> = {};
@@ -193,6 +201,38 @@ for (const backend of backends) {
       const text = JSON.stringify(done);
       assert.equal(TELLS_A_PHRASE.test(text), false, `a refusal says why, not what to say: ${text}`);
       assert.equal((await ask("integration.get", { project })).result.item.landing, "human-promotes", "the lock holds whatever the chat proposed");
+    } finally { await w.close(); }
+  });
+  test(`${backend.name}: a drafted project's integration section holds only real settings, an empty list of checks is refused, and a default that follows the profile is set with the checks it showed (second review)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script, undefined, withIntegration);
+    try {
+      const chat = w.chat({});
+      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes as any[]; };
+      const ask = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, args } as never) as never;
+      // Model text in the section (exempt from the own-words check) is refused before anything is shown.
+      const words = "start a project called Orchard, and its finished work can go to main without me";
+      const forged = await turn("f1", words, cmd("project.create", { name: "Orchard", integration: { landing: "main-automatic", integrator: "agent\nCreate project (safe)", requiredChecks: "default", refreshRounds: "default" } }, words));
+      assert.equal(forged[0].status, "refused", JSON.stringify(forged));
+      const odd = await turn("f2", words, cmd("project.create", { name: "Orchard", integration: { landing: "main-automatic", integrator: "default", requiredChecks: "default", refreshRounds: "default", note: "x" } }, words));
+      assert.equal(odd[0].status, "refused", JSON.stringify(odd));
+      assert.equal((await ask("project.list", {})).result.items.length, 0);
+
+      const project = await w.project("Garden");
+      const empty = "Garden can go to main by itself, no checks needed";
+      const none = await turn("e1", empty, cmd("integration.set", { project, landing: "main-automatic", requiredChecks: [] }, empty));
+      assert.equal(none[0].status, "refused", `an empty gate is refused before it is shown: ${JSON.stringify(none)}`);
+
+      const def = "new projects should land on main by themselves";
+      const shown = await turn("d1", def, cmd("integration.default.set", { landing: "main-automatic" }, def));
+      assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
+      const preview = (shown[0].preview ?? []).join(" ");
+      const m = /its checks \(([a-z, ]+)\)/.exec(preview);
+      assert.ok(m, preview);
+      const done = await turn("d2", "yes please, do that", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "yes please, do that", basis: "owner" }]);
+      assert.equal(done[0].status, "applied", JSON.stringify(done));
+      const item = (await ask("integration.default.get", {})).result.item;
+      assert.deepEqual([item.landing, item.requiredChecks], ["main-automatic", m![1]!.split(", ")], "the default holds the checks it showed");
     } finally { await w.close(); }
   });
 }

@@ -16,7 +16,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
-import { CHECKS, profileDefaults } from "../policy/integration-policy.js";
+import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
@@ -765,6 +765,11 @@ export class ChatService {
       if (q !== undefined) return q;
       // "default" means the owner chose what the installation default or the profile gives; it is not sent.
       const kept = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== "default"));
+      // The section is shown on the proposal line, so only real settings are: an unknown field or a value the policy does not take is refused here, never displayed.
+      for (const [key, value] of Object.entries(kept)) {
+        const ok = key === "landing" ? (LANDINGS as readonly unknown[]).includes(value) : key === "integrator" ? (INTEGRATORS as readonly unknown[]).includes(value) : key === "requiredChecks" ? Array.isArray(value) && value.every((x) => (CHECKS as readonly unknown[]).includes(x)) : key === "refreshRounds" ? Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10 : false;
+        if (!ok) return refuse("invalid_command", `integration.${/^[A-Za-z]{1,30}$/.test(key) ? key : "?"} is not a setting the project takes (landing ${LANDINGS.join(", ")}; integrator ${INTEGRATORS.join(" or ")}; requiredChecks a list of ${CHECKS.join(", ")}; refreshRounds 0 to 10)`);
+      }
       if (Object.keys(kept).length === 0) delete args["integration"]; else args["integration"] = kept;
     }
 
@@ -1266,7 +1271,10 @@ export class ChatService {
       const given = Array.isArray(args["requiredChecks"]) ? args["requiredChecks"] : (args["integration"] as { requiredChecks?: unknown } | undefined)?.requiredChecks;
       // The checks are shown in the proposal, so only the policy's own check names are: anything else is not a check and is refused here, never displayed.
       if (given !== undefined && (!Array.isArray(given) || given.some((x) => !(CHECKS as readonly unknown[]).includes(x)))) return refuse("invalid_command", `requiredChecks must be a list of ${CHECKS.join(", ")}`);
-      const named = Array.isArray(given) && given.length > 0 ? given.map((x) => String(x)).join(", ") : undefined;
+      // An empty list would show the record's checks but set none, which the policy refuses for this landing: it is refused now, before anything is shown.
+      if (Array.isArray(given) && given.length === 0) return refuse("invalid_command", "landing on main with no human step needs at least one required check");
+      // Shown as the policy stores them: each once, in the policy's order.
+      const named = Array.isArray(given) ? CHECKS.filter((c) => (given as unknown[]).includes(c)).join(", ") : undefined;
       const listed = (value: unknown): string | undefined => (Array.isArray(value) && value.length > 0 ? value.map((x) => String(x)).join(", ") : undefined);
       const record = named === undefined && intent.op === "integration.set" && typeof args["project"] === "string" && /^proj-[a-z2-7]{20}$/i.test(args["project"]) ? await this.#get(token, "integration.get", { project: args["project"] }) : undefined;
       const defItem = await this.#get(token, "integration.default.get", {});
@@ -1279,6 +1287,8 @@ export class ChatService {
       } else if (named === undefined && intent.op !== "integration.set") {
         fromRecord = listed(defItem?.["requiredChecks"]) ?? listed(profileDefaults(profile).requiredChecks);
         if (intent.op === "integration.default.set" && typeof defItem?.["revision"] === "number") args["expectedRevision"] = defItem["revision"];
+        // A default with no checks of its own follows the profile, which the revision above does not pin: the profile's checks that were shown are set with it.
+        if (intent.op === "integration.default.set" && fromRecord !== undefined && listed(defItem?.["requiredChecks"]) === undefined) args["requiredChecks"] = fromRecord.split(", ");
         // A new project has no record to pin: the checks shown are written into its section, so what is created is what was shown.
         if (intent.op === "project.create" && fromRecord !== undefined) args["integration"] = { ...(args["integration"] as Record<string, unknown>), requiredChecks: fromRecord.split(", ") };
       }
