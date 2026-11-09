@@ -17,8 +17,10 @@ const linux = { os: "linux" as const, arch: "x64" as const };
 test("the release status view answers through startController: the gate per platform, the attempts newest first, the staging line, and nothing at all to a worker", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-release-view-"));
   const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4 });
+  // The controller is closed whatever the assertions do, so a failing check leaves no open database behind (card X09b part 2 review 2, item 6).
+  let c!: Awaited<ReturnType<typeof open>>;
   try {
-    const c = await open();
+    c = await open();
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const rob = await c.services.principals.authenticate(boot.token);
     await c.services.principals.enroll(rob, { commandId: "e1", kind: "agent", name: "tester", grants: [{ action: "release.report", project: "*" }] });
@@ -71,6 +73,8 @@ test("the release status view answers through startController: the gate per plat
     const missing = await call(boot.token, "status.ask", { request: { kind: "release", candidateId: "rcn-not-a-candidate" } });
     assert.equal(missing.ok, false);
     assert.equal(missing.error.code, "not_found");
-    await c.close();
-  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally {
+    await c?.close();
+    rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 });

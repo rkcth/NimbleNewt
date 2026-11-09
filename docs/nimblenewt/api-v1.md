@@ -5429,14 +5429,14 @@ Result: `{ candidateId, replayed }`.
 
 #### `release.host`
 
-Owner only: allows (or with active=false stops allowing) a host to run destructive release tests for one platform. A machine used for production work is not authorized by that.
+Owner only: allows (or with active=false stops allowing) a host to run destructive release tests for one platform. A machine used for production work is not authorized by that. Authorizing names the platform; withdrawing may leave `os` and `arch` out and takes the machine off the release machines whatever platform it stood for.
 
 Arguments:
 
 - `hostId`: the host
-- `os`: linux, darwin or win32
-- `arch`: x64 or arm64
-- `active` (optional): false to withdraw
+- `os` (optional): linux, darwin or win32 — with `arch`, the platform the host is authorized for; both may be left out only with `active: false`
+- `arch` (optional): x64 or arm64, with `os`
+- `active` (optional): false to withdraw (then `os` and `arch` may be left out)
 - `commandId`: required
 
 Result: `{ ok }`.
@@ -5559,12 +5559,13 @@ Result: `{ revision }`.
 
 #### `release.approve`
 
-Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A platform that passed only after a failed attempt is shown as flaky in `release.gate`, and is approved only with `acknowledgeFlaky` true. A worker cannot.
+Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A platform that passed only after a failed attempt is shown as flaky in `release.gate`, and is approved only with `acknowledgeFlaky` true, said by the owner in their own words. A worker cannot.
 
 Arguments:
 
 - `candidateId`: the candidate
 - `acknowledgeFlaky` (optional): true to approve a release in which a platform passed only after earlier failures
+- `expectedFailures` (optional): the attempt IDs `release.gate` listed as earlier failures when this approval was drawn up (the chat fills them from its own reading of the gate); refused if the gate's earlier failures are not exactly these, so a gate that changed while the owner was asked is never approved behind their back
 - `commandId`: required
 
 Result: `{ ok }`.
