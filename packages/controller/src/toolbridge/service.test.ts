@@ -485,6 +485,9 @@ for (const backend of backends) {
       const again = good(await send("desk.write", { kind: "note", title: "mine", body: "text", visibility: "shared", status: "accepted" }, "w1"));
       out["write-again"] = { ok: true, result: { same: w["id"] === again["id"], replayed: again["replayed"] as boolean } };
       out["read"] = await send("desk.read", { recordId: w["id"] as string }, "r1");
+      // Card W02: the agent ends its attempt through the bridge; the attempt is the one the request came through, never one it names.
+      out["workend-named"] = await send("work.end", { attemptId: "att-other", result: "done" }, "we0");
+      out["workend"] = await send("work.end", { result: "partial", note: "two beds left" }, "we1");
       // The step is best effort: an activity record that fails never changes the answer of the write.
       const failing = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async () => { throw new Error("activity down"); } });
       out["failing"] = await failing.handle(order.credential, gateway, { op: "desk.write", callId: "w9", args: { kind: "note", title: "still", body: "written", visibility: "shared", status: "accepted" } });
@@ -501,7 +504,15 @@ for (const backend of backends) {
     assert.equal(bad(out["artifact"]!).code, "invalid_command", "an artifact for a task the caller names is not accepted (the attempt's task is the one)");
     good(out["artifact2"]!);
     const calls = seen.state as { token: string; raw: { op: string; commandId?: string; args: { taskId: string; name?: string; files?: unknown } } }[];
-    assert.deepEqual(calls.map((x) => [x.raw.op, x.raw.args.taskId]), [["task.update", taskId], ["task.transition", taskId], ["task.get", taskId], ["artifact.publish", taskId]]);
+    assert.deepEqual(calls.slice(0, 4).map((x) => [x.raw.op, x.raw.args.taskId]), [["task.update", taskId], ["task.transition", taskId], ["task.get", taskId], ["artifact.publish", taskId]]);
+    assert.equal(bad(out["workend-named"]!).code, "invalid_command", "work.end names no attempt: it ends the one the request came through");
+    good(out["workend"]!);
+    const ending = calls.filter((x) => x.raw.op === "work.end");
+    assert.equal(ending.length, 1);
+    assert.deepEqual(ending[0]!.raw, { v: 1, op: "work.end", commandId: ending[0]!.raw.commandId, args: { result: "partial", note: "two beds left", attemptId: (ending[0]!.raw.args as unknown as { attemptId: string }).attemptId } });
+    assert.match((ending[0]!.raw.args as unknown as { attemptId: string }).attemptId, /\S/);
+    assert.match(ending[0]!.raw.commandId!, /^bridge:[^:]+:we1$/);
+    assert.equal(ending[0]!.token, calls[0]!.token, "with the worker's own task credential");
     assert.deepEqual(calls[3]!.raw, { v: 1, op: "artifact.publish", commandId: calls[3]!.raw.commandId, args: { name: "Findings", files: [{ path: "notes.md", text: "# n" }], taskId } }, "the publication goes through the API as the worker's credential, for the attempt's own task");
     assert.match(calls[3]!.raw.commandId!, /^bridge:[^:]+:a1$/, "its command ID derives from the attempt and call, so asking again publishes once");
     assert.equal((calls[3] as { token: string }).token, calls[0]!.token, "with the worker's own task credential");

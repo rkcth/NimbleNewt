@@ -41,7 +41,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { sealContract } from "../remote/contract.js";
-import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork } from "./ports.js";
+import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
@@ -2028,6 +2028,11 @@ export class DispatcherService {
             await this.#update(attemptId, (b) => ({ ...b, usageError: why })).catch(() => undefined);
           });
         }
+        // How the turn ended (card W02) is recorded on the attempt before anything else is decided; it decides nothing yet (W03). A result that says no kind (an older or remote worker) is recorded as unknown, never as normal.
+        // A record that cannot be written leaves the end as it was: the outcome below does not depend on it.
+        const endKind = turnEndKindOf(result.endKind);
+        const visibleChars = Number.isSafeInteger(result.visibleChars) && result.visibleChars! >= 0 ? result.visibleChars : undefined;
+        await this.#update(attemptId, (b) => (b.state !== "running" ? b : { ...b, turnEnd: { endKind, ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now() } })).catch((error: unknown) => { if (isDomainError(error, "stale_epoch")) throw error; this.#options.onError?.(error); });
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
