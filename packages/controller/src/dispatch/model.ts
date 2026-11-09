@@ -119,7 +119,7 @@ export interface DispatchBody {
   /**
    * When the attempt held a worker slot (card M03h, the usage sink): one span per run, opened when the record turns `running` and closed when it leaves `running` (it parks, waits after a controller shutdown, or
    * finishes), stamped by the dispatcher's clock in the same commit. A resumed attempt therefore has one span per run, and its waiting between them is not counted. The newest `DISPATCH_LIMITS.slotSpans` are kept;
-   * `slotSpansCut` is the end of the newest span let go, so a reader knows that runs before it are no longer on record. Absent on records from before this field.
+   * `slotSpansCut` is the end of the newest span let go (for a record that ran before this field and resumed after it, its last heartbeat), so a reader knows that runs before it are not on record. Absent on records from before this field.
    */
   readonly slotSpans?: readonly { readonly from: string; readonly to?: string }[];
   readonly slotSpansCut?: string;

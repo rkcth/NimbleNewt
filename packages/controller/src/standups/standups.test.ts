@@ -496,25 +496,25 @@ for (const backend of backends) {
     at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-parked", { attemptId: "att-slot-parked", taskId: pcWork, projectId: proj, state: "finished", startedAt: "2026-10-20T08:00:00.000Z", claimedAt: "2026-10-20T08:00:00.000Z", requests: 2, outcome: { status: "succeeded", summary: "done", at: "2026-10-20T19:00:00.000Z" } });
     at("2026-10-21T05:00:00.000Z");
     const slot2 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
-    assert.match(slot2, /actual PC share 25% \(worker-slot time of 3 attempts; 1 older record that parked or were placed again is not counted/);
+    assert.match(slot2, /actual PC share 25% \(worker-slot time of 3 attempts; 1 older record that parked or was placed again is not counted/);
     // The usage sink (card M03h): a record with slot spans counts its runs, not the time it waited between them. This PC attempt ran 09:00-10:00, parked for an approval until 16:00 and ran 16:00-17:00:
     // 2 hours of PC time, not the 8 from its first start to its end.
     at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-spans", { attemptId: "att-slot-spans", taskId: pcWork, projectId: proj, state: "finished", startedAt: "2026-10-20T09:00:00.000Z", claimedAt: "2026-10-20T09:00:00.000Z", requests: 2, resumedFor: ["op-1"], slotSpans: [{ from: "2026-10-20T09:00:00.000Z", to: "2026-10-20T10:00:00.000Z" }, { from: "2026-10-20T16:00:00.000Z", to: "2026-10-20T17:00:00.000Z" }], outcome: { status: "succeeded", summary: "done", at: "2026-10-20T17:00:00.000Z" } });
     at("2026-10-21T05:00:00.000Z");
     const slot3 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
     // P: 2 h + 1 h = 3 h; PC: 1 h + 2 h (the spans, not the 8 hours from the first start to the end) = 3 h; the older parked record is still left out.
-    assert.match(slot3, /actual PC share 50% \(worker-slot time of 4 attempts; 1 older record that parked or were placed again is not counted/);
+    assert.match(slot3, /actual PC share 50% \(worker-slot time of 4 attempts; 1 older record that parked or was placed again is not counted/);
     // A record whose oldest spans were let go inside the period counts what it keeps and says so; a span before the period and one that is still open on a running attempt are cut to the period.
     at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-cut", { attemptId: "att-slot-cut", taskId: pExport, projectId: proj, state: "running", startedAt: "2026-10-19T09:00:00.000Z", claimedAt: "2026-10-19T09:00:00.000Z", slotSpansCut: "2026-10-20T08:00:00.000Z", slotSpans: [{ from: "2026-10-20T09:00:00.000Z", to: "2026-10-20T10:00:00.000Z" }, { from: "2026-10-21T04:00:00.000Z" }] });
     at("2026-10-21T05:00:00.000Z");
     const slot4 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
     // P: 3 h + 1 h + 1 h (04:00 to the review at 05:00) = 5 h; PC 3 h: 3 / 8 = 38%.
-    assert.match(slot4, /actual PC share 38% \(worker-slot time of 5 attempts; 1 older record that parked or were placed again is not counted, as its run time is not recorded; the earliest runs of 1 attempt are no longer on record\)/);
+    assert.match(slot4, /actual PC share 38% \(worker-slot time of 5 attempts; 1 older record that parked or was placed again is not counted, as its run time is not recorded; the earliest runs of 1 attempt are not on record\)/);
     // A record that ran before the sink inside the period and has just opened its first span holds no recorded time in the period yet; its missing runs are still said to be missing.
     at("2026-10-20T20:00:00.000Z"); await c.put("dispatch", "att-slot-new", { attemptId: "att-slot-new", taskId: pcWork, projectId: proj, state: "running", startedAt: "2026-10-20T09:00:00.000Z", claimedAt: "2026-10-20T09:00:00.000Z", slotSpansCut: "2026-10-20T12:00:00.000Z", slotSpans: [{ from: "2026-10-21T05:00:00.000Z" }] });
     at("2026-10-21T05:00:00.000Z");
     const slot5 = (await c.make({}).prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
-    assert.match(slot5, /actual PC share 38% \(worker-slot time of 5 attempts; 1 older record that parked or were placed again is not counted, as its run time is not recorded; the earliest runs of 2 attempts are no longer on record\)/);
+    assert.match(slot5, /actual PC share 38% \(worker-slot time of 5 attempts; 1 older record that parked or was placed again is not counted, as its run time is not recorded; the earliest runs of 2 attempts are not on record\)/);
     // With the owner's allocation and a measured use and a window, the lines say so.
     const rich = c.make({ allocation: async () => ({ floor: 10, target: 20, ceiling: 30 }), usage: async () => ({ pcShare: 18, basis: "worker-slot time" }), improvementWindow: async () => "2026-11-02T09:00:00.000Z" });
     const r = (await rich.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");

@@ -776,8 +776,8 @@ export class StandupService {
     const total = sums.P + sums.PC;
     if (total === 0) return undefined;
     const notes = [
-      ...(left === 0 ? [] : [`${left} older record${left === 1 ? "" : "s"} that parked or were placed again ${left === 1 ? "is" : "are"} not counted, as ${left === 1 ? "its" : "their"} run time is not recorded`]),
-      ...(trimmed === 0 ? [] : [`the earliest runs of ${trimmed} attempt${trimmed === 1 ? " are" : "s are"} no longer on record`]),
+      ...(left === 0 ? [] : [`${left} older record${left === 1 ? "" : "s"} that parked or ${left === 1 ? "was" : "were"} placed again ${left === 1 ? "is" : "are"} not counted, as ${left === 1 ? "its" : "their"} run time is not recorded`]),
+      ...(trimmed === 0 ? [] : [`the earliest runs of ${trimmed} attempt${trimmed === 1 ? " are" : "s are"} not on record`]),
     ];
     return { pcShare: Math.round((sums.PC / total) * 100), basis: `worker-slot time of ${attempts} attempt${attempts === 1 ? "" : "s"}${notes.map((n) => `; ${n}`).join("")}` };
   }
