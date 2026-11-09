@@ -742,8 +742,22 @@ export class ChatService {
 
     // A right is only what the owner said: the principal, the action, the grant and the scope must each appear in the message as a whole word, never as a part of a longer one.
     if (intent.op.startsWith("grant.")) {
-      if (args["projectName"] !== undefined || args["projectId"] !== undefined) return refuse("invalid_command", "a right names its scope as `project`: a project ID, or * for everywhere");
+      if (args["projectId"] !== undefined) return refuse("invalid_command", "projectId is not an argument of a right; its scope is `project`");
       for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
+      // A project the owner named by its name (already checked above to be in their own words) is the right's scope: the project with exactly that name, or a question when several have it.
+      // A name and a different `project` together are two scopes, and which one the owner meant is asked rather than picked.
+      const named = args["projectName"];
+      delete args["projectName"];
+      if (named !== undefined && intent.op !== "grant.create") return refuse("invalid_command", "projectName is not an argument of this operation");
+      if (named !== undefined) {
+        if (typeof named !== "string") return refuse("invalid_command", "projectName must be text");
+        if (!wholeWord(words, named.trim())) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Which project should this right cover?");
+        const found = await this.#projectByIntent(token, undefined, named);
+        if (!found.ok) return found.kind === "ask" ? { ok: false, kind: "ask", question: found.question, options: found.options } : found;
+        if (args["project"] !== undefined && args["project"] !== found.id) return { ok: false, kind: "ask", question: `Should this right cover only "${found.name.slice(0, 80)}", or ${args["project"] === "*" ? "every project" : "another project"}?`, options: [] };
+        args["project"] = found.id;
+        labels[found.id] = found.name;
+      }
       if (intent.op === "grant.create") {
         const scope = args["project"];
         // A right given in chat has no end and is always a proposal (`grant.*` is shown first in every profile). Its consequence (no end; every project when the scope is `*`) is stated on the proposal
@@ -752,6 +766,7 @@ export class ChatService {
         if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "a right given in chat has no end date, so a right that ends or starts later was not drawn up here; it can be made through the grant.create operation with its dates");
         args["basis"] = `owner chat: ${words}`.slice(0, 200);
         if (scope === "*") { /* every project: the proposal says so */ }
+        else if (typeof scope === "string" && named !== undefined) { /* resolved from the name the owner said, above */ }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
           const found = await this.#projectByIntent(token, scope, undefined);

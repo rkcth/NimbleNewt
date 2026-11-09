@@ -216,7 +216,29 @@ test("the owner grants and revokes rights through the state API and through the 
     const prefix = await turn("c3b", "give service:scanner the recovery.stall-scan right everywhere to run stall detection", [owner({ op: "grant.create", args: { ...args, grantee: "service:scan" } }, text)]);
     assert.equal(prefix[0]!.status, "refused", JSON.stringify(prefix));
     const named = await turn("c3d", "give service:scanner the recovery.stall-scan right permanently", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give service:scanner the recovery.stall-scan right permanently")]);
-    assert.equal(named[0]!.status, "refused", "the scope is `project`, not a name the chat would drop");
+    assert.equal(named[0]!.status, "refused", "a project name the owner never said is not used");
+    // A project named in ordinary words is the right's scope: the proposal says it reaches that one project (before the names), never every project.
+    const garden = (await call(boot.token, "project.create", { name: "Garden" }, "pg1")).result.id as string;
+    const inGarden = "The scanner keeps stalling in Garden. Let service:scanner do recovery.stall-scan there from now on.";
+    const scoped = await turn("c3g", inGarden, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", projectName: "Garden" } }, inGarden)]);
+    assert.equal(scoped[0]!.status, "proposed", JSON.stringify(scoped));
+    const scopedLine = (scoped[0]!.preview ?? []).join(" ");
+    assert.match(scopedLine, /^Grant right \(no end: it never runs out and stays until you revoke it; only in "Garden"\)/, scopedLine);
+    assert.doesNotMatch(scopedLine, /everywhere|every project/);
+    assert.equal(await activeNow(), held, "a proposal grants nothing");
+    const gardenDone = await turn("c3g-ok", "yes, go ahead", [{ kind: "apply_proposal", proposalId: scoped[0]!.proposalId, evidence: "go ahead", basis: "owner" }]);
+    assert.equal(gardenDone[0]!.status, "applied", JSON.stringify(gardenDone));
+    const gardenGrant = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string; project: string }) => g.state === "active" && g.project === garden);
+    assert.equal(gardenGrant.length, 1, "the right reaches that one project");
+    await call(boot.token, "grant.revoke", { grantId: gardenGrant[0].id, expectedRevision: gardenGrant[0].revision, reason: "test done" }, "rg1");
+    // A name that is only part of a longer word the owner said is not their project.
+    const longer = "Let service:scanner do recovery.stall-scan in Gardening from now on.";
+    const part = await turn("c3k", longer, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", projectName: "Garden" } }, longer)]);
+    assert.equal(part[0]!.status, "refused", JSON.stringify(part));
+    // A name and a different scope together are two scopes: which one is asked, nothing is drawn up.
+    const both = await turn("c3j", inGarden, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan", projectName: "Garden", project: "*" } }, inGarden)]);
+    assert.equal(both[0]!.status, "asked", JSON.stringify(both));
+    assert.match(both[0]!.question ?? "", /only "Garden", or every project\?/);
     // No scope at all is asked as a plain question, not a sentence to say.
     const noProject = "let service:scanner do recovery.stall-scan";
     const asked = await turn("c3h", noProject, [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.stall-scan" } }, noProject)]);
