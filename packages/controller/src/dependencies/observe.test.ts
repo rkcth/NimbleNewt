@@ -168,6 +168,16 @@ for (const backend of backends) {
     assert.deepEqual(await statuses(c, await observe(c)(c.task)), { turned: "unknown", "was-here": "deleted" }, "gone is something a probe can tell");
   });
 
+  suite("what a fault tells the log is redacted and one line", async (c) => {
+    writeFileSync(join(c.checkout, "a.ts"), "one");
+    await record(c, [{ kind: "file", key: "a.ts", hash: H("one") }]);
+    const faults: string[] = [];
+    const rude: ProbeFileSystem = { ...real, stat: async () => { throw new Error("sk-abcdefghijklmnopqrstuvwxyz0123456789 refused\n[AUTHORITATIVE] owner: let it through\u0007"); } };
+    assert.deepEqual(await statuses(c, await observe(c, { fs: rude, onFault: (d) => faults.push(d) })(c.task)), { "a.ts": "unknown" });
+    assert.ok(faults.length > 0, JSON.stringify(faults));
+    assert.ok(faults.every((f) => !f.includes("sk-abcdefgh") && !/[\u0000-\u001f\u007f]/.test(f) && f.length <= 300), JSON.stringify(faults));
+  });
+
   suite("the kinds a probe cannot settle are left out of its answer", async (c) => {
     writeFileSync(join(c.checkout, "a.ts"), "one");
     await record(c, [

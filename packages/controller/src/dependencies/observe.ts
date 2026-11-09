@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { redactText } from "../security/redact.js";
 import { relativePath } from "../projects/resources.js";
 import type { ManifestBody, Observation } from "./dependencies.js";
 
@@ -42,7 +43,7 @@ export interface DependencyObserverOptions {
   maxBytes?: number;
   /** The file system to read. Default: this process's own. */
   fs?: ProbeFileSystem;
-  /** Told of a fault that left something unobserved (an unreadable checkout, a file that could not be read); for the log, never the owner's text. */
+  /** Told of a fault that left something unobserved (an unreadable checkout, a file that could not be read); for the log, never the owner's text. Already redacted and cut. */
   onFault?: (detail: string) => void;
 }
 
@@ -55,7 +56,7 @@ const within = (root: string, target: string): boolean => {
   return rel.length > 0 && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
 };
 const missing = (error: unknown): boolean => (error as { code?: unknown })?.code === "ENOENT" || (error as { code?: unknown })?.code === "ENOTDIR";
-const fault = (options: DependencyObserverOptions, detail: string): void => { try { options.onFault?.(detail.slice(0, 300)); } catch { /* a failing log tells nothing */ } };
+const fault = (options: DependencyObserverOptions, detail: string): void => { try { options.onFault?.(redactText(detail).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 300)); } catch { /* a failing log tells nothing */ } };
 
 /**
  * The dependency probe a checked resume asks before the attempt it checks starts (card L04d). `DependencyService.check`

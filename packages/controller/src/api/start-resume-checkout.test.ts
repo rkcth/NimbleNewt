@@ -92,11 +92,11 @@ for (const store of stores) {
     const w = await begin(store, {});
     try {
       w.write("src/a.ts", "one");
-      assert.equal((await w.record([{ kind: "file", key: "src/a.ts", hash: sha("one") }], "d1")).ok, true);
+      assert.equal((await w.record([{ kind: "file", key: "src/a.ts", hash: sha("one") }, { kind: "directory", key: "src", members: ["a.ts"] }], "d1")).ok, true);
       const started = await w.start("r1");
       assert.ok(started.ok, JSON.stringify(started));
       const check = started.result.item;
-      assert.deepEqual([check.phase, check.delta.changed.length, check.delta.unchanged], ["ready", 0, 1], "the file was looked at, not left unknown");
+      assert.deepEqual([check.phase, check.delta.changed.length, check.delta.unchanged], ["ready", 0, 2], "the file was hashed and the directory listed: both were looked at, not left unknown");
       assert.equal(await w.lines(w.owner), "Nothing is waiting for you.", "nothing waited for the owner");
       // The agent being resumed commits it itself: no owner decision was needed.
       assert.equal((await w.call(w.ann, "resume.commit", { checkId: check.id }, "c1")).result.item.phase, "done");
@@ -114,11 +114,14 @@ for (const store of stores) {
         { kind: "file", key: "src/gone.ts", hash: sha("was here") },
         { kind: "file", key: "../outside.txt", hash: sha("gone") },
         { kind: "file", key: "/etc/hostname", hash: sha("whatever") },
+        { kind: "directory", key: "src", members: ["a.ts", "gone.ts"] },
       ], "d1");
       assert.ok(recorded.ok, JSON.stringify(recorded));
       const check = (await w.start("r1")).result.item;
       const byKey = Object.fromEntries((check.delta.changed as { key: string; status: string; detail: string }[]).map((x) => [x.key, x]));
       assert.equal(byKey["src/a.ts"]?.status, "changed", "the file's content differs from what was recorded");
+      assert.equal(byKey.src?.status, "changed", "a member of the recorded listing is not there any more");
+      assert.equal(byKey.src?.detail, "gone: gone.ts", "and which one is said");
       assert.equal(byKey["src/gone.ts"]?.status, "deleted", "it is not there any more");
       assert.equal(byKey["../outside.txt"]?.status, "unknown", "nothing outside the checkout is looked at, so nothing is claimed");
       assert.equal(byKey["/etc/hostname"]?.status, "unknown", "an absolute key is not read either");
