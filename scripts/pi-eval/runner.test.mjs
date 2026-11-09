@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { git, prepareCheckout, runOne, calibrateOne, foreignPaths } from "./lib/runner.mjs";
+import { git, prepareCheckout, runOne, calibrateOne, foreignPaths, killProcessesInSync } from "./lib/runner.mjs";
+import { spawn } from "node:child_process";
+import { symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadTaskset } from "./lib/taskset.mjs";
 
@@ -141,4 +143,29 @@ test("tool calls that name another checkout, the results or the home directory a
   assert.deepEqual(foreignPaths([cmd("ls ~/.claude/projects")], { ownDir: own, watched }), [join(homedir(), ".claude/projects")]);
   assert.deepEqual(foreignPaths([cmd("ls /srv")], { ownDir: own, watched }), ["/srv"]);
   assert.deepEqual(foreignPaths([cmd("ls /usr/bin /tmp/x")], { ownDir: own, watched }), []);
+});
+
+test("only processes inside the checkout are stopped: not a sibling whose name starts the same, matched through a symlinked root", { skip: process.platform !== "linux" }, async () => {
+  const realWork = join(root, "real-work");
+  const a = join(realWork, "eval-a"), ab = join(realWork, "eval-ab");
+  mkdirSync(join(a, "sub"), { recursive: true }); mkdirSync(ab, { recursive: true });
+  const link = join(root, "link-work");
+  symlinkSync(realWork, link);
+  const sleeper = (cwd) => { const c = spawn("sleep", ["30"], { cwd, stdio: "ignore", detached: true }); c.unref(); return c; };
+  const inA = sleeper(join(a, "sub")), inAb = sleeper(ab);
+  await new Promise((res) => setTimeout(res, 100));
+  try {
+    const killed = killProcessesInSync(join(link, "eval-a")); // named through the symlink, as a --work-root may be
+    assert.deepEqual(killed, [inA.pid]);
+    assert.doesNotThrow(() => process.kill(inAb.pid, 0), "the sibling's process is untouched");
+    assert.deepEqual(killProcessesInSync("/"), [], "the filesystem root is never a checkout");
+  } finally { try { process.kill(inAb.pid, "SIGKILL"); } catch { /* gone */ } try { process.kill(inA.pid, "SIGKILL"); } catch { /* gone */ } }
+});
+
+test("a sibling checkout whose name starts like the run's own is foreign; a variant name that is not a plain name is refused", () => {
+  const own = "/srv/code/worktrees-pi/eval-work/eval-x";
+  assert.deepEqual(foreignPaths([JSON.stringify({ command: "cat /srv/code/worktrees-pi/eval-work/eval-xy/a.ts" })], { ownDir: own, watched: ["/srv/code/worktrees-pi"] }), ["/srv/code/worktrees-pi/eval-work/eval-xy/a.ts"]);
+  const bad = join(root, "bad-taskset.json");
+  writeFileSync(bad, readFileSync(set.file, "utf8").replace('"A":', '"../../x":'));
+  assert.throws(() => loadTaskset(bad), /variant "..\/..\/x": name must be/);
 });

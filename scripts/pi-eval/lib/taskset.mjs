@@ -14,6 +14,8 @@ export function loadTaskset(file) {
   const d = raw.defaults ?? {};
   if (!raw.agent || typeof raw.agent.provider !== "string" || typeof raw.agent.model !== "string") problems.push("agent.provider and agent.model are required");
   if (!raw.variants || typeof raw.variants !== "object") problems.push("variants is required");
+  // A variant name is part of each run's checkout directory name, so it must be a plain name.
+  for (const k of Object.keys(raw.variants ?? {})) if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,20}$/.test(k)) problems.push(`variant ${JSON.stringify(k)}: name must be letters, digits and dashes`);
   const seen = new Set();
   const tasks = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t, i) => {
     const where = `tasks[${i}] (${t?.id ?? "?"})`;

@@ -16,9 +16,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendJsonl, calibrateOne, runOne } from "./lib/runner.mjs";
+import { appendJsonl, calibrateOne, killProcessesInSync, runOne } from "./lib/runner.mjs";
 import { renderReport } from "./lib/stats.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
 
@@ -80,8 +80,11 @@ async function main() {
   };
   for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => {
     for (const c of children) { if (c.exitCode !== null || c.signalCode !== null) continue; try { process.kill(-c.pid, "SIGTERM"); } catch { try { c.kill(); } catch { /* gone */ } } }
-    // An interrupted batch leaves no checkout behind (each holds a copy of node_modules), unless --keep.
-    if (!ctx.keep) for (const d of activeDirs) { try { rmSync(d, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } }
+    // Pi's bash tools run in process groups of their own: stop whatever still works in an active checkout too.
+    for (const d of activeDirs) { try { killProcessesInSync(d); } catch { /* best effort */ } }
+    // An interrupted batch leaves no checkout behind (each holds a copy of node_modules), unless --keep. Only directories
+    // the runner made directly under the work root are removed (rm does not follow symlinks inside them).
+    if (!ctx.keep) for (const d of activeDirs) { if (dirname(d) !== workRoot || !basename(d).startsWith("eval-")) continue; try { rmSync(d, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } }
     process.exit(130);
   });
 

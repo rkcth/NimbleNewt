@@ -49,8 +49,10 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
 
 Throwaway checkouts are `/srv/code/worktrees-pi/eval-work/eval-<runId>` (`--work-root` / `PI_EVAL_WORK_ROOT`), in a
 directory of their own so the agent's parent directory is not the one holding the merged worktrees. Each is removed after
-its run, and on Ctrl-C (`--keep` keeps them). Any process still working in a checkout when the agent ends (Pi starts its
-bash tools in their own process groups, so a hung test or a background server survives the group stop) is killed first.
+its run, and on Ctrl-C (`--keep` keeps them; calibration checkouts are `eval-calibrate-<task>-<pid>`). On Linux, any
+process whose working directory is still inside a checkout when the agent ends, the run ends or Ctrl-C arrives (Pi starts
+its bash tools in their own process groups, so a hung test or a background server survives the group stop) is killed
+first; a process that `cd`s elsewhere is not seen, and on other systems only the agent's own process group is stopped.
 
 ## What a run does
 
@@ -77,7 +79,9 @@ bash tools in their own process groups, so a hung test or a background server su
    - **stopped-early**: the agent stopped while working: unchecked PLAN.md steps, a thinking-only reply after tool calls,
      an announced next step, a reply that does not claim to be done, or a log that ends without `agent_end`.
    - **wrong** (false done): the last reply says it is done and the hidden tests fail. A report that says what is not
-     done ("could not complete", "still fails", "remaining work", "incomplete") is not a done claim; a closing "Let me
+     done ("could not complete", "still fails", "remaining work", "incomplete") is not a done claim ("no remaining
+     failures", "nothing left to do" do not count as saying so). A report that describes the old state with a negation
+     ("the tests were not passing before") also reads as not done, so `wrong` can undercount; a closing "Let me
      know ..." is a sign-off, not an announced step. Only the first and last 600 characters of the report are read.
    - **unclassified**: anything the rules above do not cover; the gate requires none.
 

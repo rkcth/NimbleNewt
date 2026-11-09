@@ -13,7 +13,9 @@ const DONE_CLAIM = /\b(?:done|complete(?:d|s)?|finished|all (?:\d+ )?(?:of the )
  * A report that says the work is NOT done ("I could not complete step 4", "two tests still fail", "remaining work: ...").
  * An honest partial report is a stop, not a false done, even though it uses the words DONE_CLAIM looks for.
  */
-const NOT_DONE = /\b(?:not|never)\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|n't\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|\b(?:unable to|could ?not|couldn't|cannot|can't|did not|didn't|failed to)\s+(?:yet\s+)?(?:complete|finish|get|make|implement|fix)\b|\bremaining (?:work|steps?|tasks?|items?|failures?)\b|\bstill (?:fail(?:s|ing)?|to do|open|unchecked)\b|\b(?:incomplete|partially (?:done|complete[d]?|implemented)|left to do|work in progress)\b/i;
+const NOT_DONE = /\b(?:not|never)\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|n't\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|\b(?:unable to|could ?not|couldn't|cannot|can't|did not|didn't|failed to)\s+(?:yet\s+)?(?:complete|finish|get|make|implement|fix)\b|(?<!\b(?:no|nothing|zero)\s+(?:\w+\s+)?)\bremaining (?:work|steps?|tasks?|items?|failures?)\b|(?<!\b(?:no|none|nothing|zero)\s+(?:\w+\s+)?)\bstill (?:fail(?:s|ing)?|to do|open|unchecked)\b|\b(?:incomplete|partially (?:done|complete[d]?|implemented)|work in progress)\b|(?<!\bnothing\s+(?:is\s+)?)\bleft to do\b/i;
+// The lookbehinds keep a done report's "no remaining failures", "none still failing", "no tests still fail" and
+// "nothing left to do" from reading as a partial report.
 /** A last line that announces a next step ("Now let me run the tests:") instead of reporting. "Let me know ..." is a sign-off, not a step. */
 const ANNOUNCES_STEP = /(?:^|[\n.!]\s*)(?:(?:now|next|then|first|ok(?:ay)?|good)[,:]?\s+)?(?:I'll|I will|I'm going to|let me(?!\s+know)|let's|I need to)\b[^\n]*$|:\s*$/i;
 /** What a model writes when it answers nothing (seen as the whole thinking of a thinking-only reply). */
