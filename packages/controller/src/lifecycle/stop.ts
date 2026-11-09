@@ -8,6 +8,8 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { PauseScope, PauseService } from "./pause.js";
+import { PAUSE_LIMITS } from "./pause.js";
+import { assignmentIdOf, generationIdOf, type AssignmentBody } from "../domain/assignment-model.js";
 
 /** `suspend` stops at a durable checkpoint; `stop` goes on to end execution; `force-stop` skips preparation. */
 export type StopMode = "suspend" | "stop" | "force-stop";
@@ -220,7 +222,8 @@ export class StopService {
     const existing = id === undefined ? undefined : await this.#runner.get(KIND, id);
     if (existing === undefined || TERMINAL.includes((existing.body as unknown as StopIntentBody).phase)) {
       id = derivedId("stp", scopedCommandId(by.id, command.commandId));
-      await this.#create(by, command.commandId, id, scope, target.projectId, "force-stop", reason);
+      // The pause the Force Stop holds by is recorded like a request's, so once the scope is resumed and merely paused again the finished Force Stop no longer holds swarm children (`holding`; second review of card L02e).
+      await this.#create(by, command.commandId, id, scope, target.projectId, "force-stop", reason, (await this.#pauses.gate(by, scope))?.requestId);
     } else {
       const ref: AggregateRef = { kind: FORCE_REF, id: mine };
       await this.#runner.command("stop.force-ref", { commandId: `stop-fref-${mine.slice(4)}`, actor: by.id }, async () => ({ payload: { intentId: id! }, build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { intentId: id! } }], detail: {} }) }));
@@ -402,14 +405,23 @@ export class StopService {
 
   /**
    * What the latest suspension or stop of a scope has spent on cleanup, for the owner to read (card L02d): the figure the request counted, what the runtime reported and the budgets were charged for each attempt the
-   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass that went stale is not in it), not the full cost.
+   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist). When nothing was asked for
+   * exactly this scope, the latest request made for a scope that covers it is answered instead (card L02e): a task is covered by its agent, a team above that agent, a swarm parent or the installation, an agent by its team and
+   * the installation, a team by a team above it and the installation; the answer then carries `through`, naming that scope, and its figures are the whole wider scope's. `undefined` when no request was made for the scope or
+   * for any scope above it, or the asker may control none of them. `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass
+   * that went stale is not in it), not the full cost.
    */
-  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; /** The request was made for this wider scope, which covers the one asked about (card L02e); every figure here is that scope's, not only the asked scope's. */ through?: { kind: string; id: string }; /** When that request was asked for. */ requestedAt?: string; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
     // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
     await this.#pauses.authorizeControl(viewer, scope);
-    const id = await this.#activeId(scope);
-    const found = id === undefined ? undefined : (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
+    const ownId = await this.#activeId(scope);
+    const mine = ownId === undefined ? undefined : await this.#runner.get(KIND, ownId);
+    // Nothing was asked for this scope itself: a stop of a scope above it reached it too, so that request's cleanup is what the owner is asking about (card L02e).
+    const above = mine === undefined ? await this.#coveringRequest(viewer, scope) : undefined;
+    const id = ownId ?? above?.id;
+    const found = (mine?.body ?? above?.body) as unknown as StopIntentBody | undefined;
     if (found === undefined || id === undefined) return undefined;
+    const through = mine === undefined && above !== undefined ? above.through : undefined;
     const attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] = [];
     // A figure the request's own pass could not record elsewhere is its debt too.
     let ownPending = (found.owed?.length ?? 0) > 0;
@@ -447,7 +459,61 @@ export class StopService {
     // Only a request this build marked (`ended`) or one an open entry lists has its mark cleared by a sweep (see `sweep`); an older record's mark on no entry is kept for good.
     const scanCut = !complete;
     const markKept = marked && !ownPending && !scanCut && found.ended !== true && !listed;
-    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
+    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, requestedAt: found.requestedAt, ...(through === undefined ? {} : { through }), ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
+  }
+
+  /**
+   * The scopes whose stop reaches this one, besides the scope itself: those above it (a task's assignee agent and the teams above that, an agent's teams, a team's parent teams) and, for a task, its swarm parents, whose
+   * Stop ends the children's work (card L02e). The whole installation comes last, since it covers everything and explains least. Cycles and over-long chains end the walks; nothing is listed twice.
+   */
+  async #covering(scope: PauseScope): Promise<PauseScope[]> {
+    const here = scopeKey(scope);
+    const near: PauseScope[] = [];
+    const whole: PauseScope[] = [];
+    const seen = new Set<string>([here]);
+    const add = (s: PauseScope): void => { const k = scopeKey(s); if (k === here || seen.has(k)) return; seen.add(k); (s.kind === "installation" ? whole : near).push(s); };
+    for (const s of await this.#pauses.chain(scope)) add(s);
+    for (let at = scope.kind === "task" ? scope.id : undefined, hops = 0; at !== undefined && hops < PAUSE_LIMITS.chain; hops++) {
+      const up = ((await this.#runner.get("swarm-link", at))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
+      if (typeof up !== "string") break;
+      if (seen.has(scopeKey({ kind: "task", id: up }))) break;
+      add({ kind: "task", id: up });
+      at = up;
+    }
+    return [...near, ...whole];
+  }
+
+  /** The latest request made for any scope that covers this one; a request on a scope the asker may not control is not shown to them at all, and is not even said to exist. */
+  async #coveringRequest(viewer: Principal, scope: PauseScope): Promise<{ id: string; body: StopIntentBody; through: { kind: string; id: string } } | undefined> {
+    let best: { id: string; body: StopIntentBody; through: { kind: string; id: string }; at: number } | undefined;
+    // A request made before the asked scope existed did not reach it (a task created after the installation was stopped and resumed), nor did an agent's or team's request made before the task was given to that agent
+    // (review of card L02e): such a request is not this scope's answer.
+    const createdAt = async (kind: string, id: string): Promise<number | undefined> => { const at = (await this.#runner.get(kind, id))?.createdAt; return at === undefined ? undefined : Date.parse(at); };
+    const born = scope.kind === "installation" ? undefined : await createdAt(scope.kind, scope.id);
+    let given: number | undefined;
+    if (scope.kind === "task") {
+      const asg = (await this.#runner.get("assignment", assignmentIdOf(scope.id)))?.body as unknown as AssignmentBody | undefined;
+      if (asg !== undefined && asg.generation > 0) given = await createdAt("assignment-generation", generationIdOf(scope.id, asg.generation));
+    }
+    for (const s of await this.#covering(scope)) {
+      const id = await this.#activeId(s);
+      if (id === undefined) continue;
+      const rec = await this.#runner.get(KIND, id);
+      if (rec === undefined) continue;
+      const asked = Date.parse((rec.body as unknown as StopIntentBody).requestedAt);
+      if (born !== undefined && asked < born) continue;
+      if (given !== undefined && (s.kind === "agent" || s.kind === "team") && asked < given) continue;
+      try { await this.#pauses.authorizeControl(viewer, s); } catch (error) {
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) continue;
+        throw error;
+      }
+      const body = rec.body as unknown as StopIntentBody;
+      // The newest request wins; on equal times the nearest scope, which is the one looked at first, is kept.
+      const at = Date.parse(body.requestedAt);
+      if (best !== undefined && !(at > best.at)) continue;
+      best = { id, body, at, through: { kind: s.kind, id: s.id } };
+    }
+    return best;
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
@@ -471,7 +537,7 @@ export class StopService {
     return [...b.history, { phase, at: this.#runner.now(), by, note }].slice(-STOP_LIMITS.history);
   }
 
-  async #create(by: Principal, commandId: unknown, id: string, scope: PauseScope, projectId: string | undefined, mode: StopMode, reason: string): Promise<void> {
+  async #create(by: Principal, commandId: unknown, id: string, scope: PauseScope, projectId: string | undefined, mode: StopMode, reason: string, gateRequestId?: string): Promise<void> {
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("stp", scopeKey(scope)) };
     await this.#runner.command("stop.request", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { scope: scope as unknown as JsonObject, mode, reason },
@@ -479,7 +545,7 @@ export class StopService {
         const at = this.#runner.now();
         const active = await this.#runner.get(ACTIVE, activeRef.id);
         const ref: AggregateRef = { kind: KIND, id };
-        const body: StopIntentBody = { scope, ...(projectId === undefined ? {} : { projectId }), mode, phase: "terminating", requestedBy: by.id, requestedAt: at, reason, deadlineAt: at, spent: 0, backupUsed: false, inventory: [], history: [{ phase: "terminating", at, by: by.id, note: `${mode} requested` }] };
+        const body: StopIntentBody = { scope, ...(projectId === undefined ? {} : { projectId }), mode, phase: "terminating", ...(gateRequestId === undefined ? {} : { gateRequestId }), requestedBy: by.id, requestedAt: at, reason, deadlineAt: at, spent: 0, backupUsed: false, inventory: [], history: [{ phase: "terminating", at, by: by.id, note: `${mode} requested` }] };
         const pointer = clean({ intentId: id });
         return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, active === undefined ? { type: "create", ref: activeRef, body: pointer } : { type: "update", ref: activeRef, expectedRevision: active.revision, body: pointer }], detail: { scope: scope as unknown as JsonObject, mode } };
       },
@@ -689,10 +755,17 @@ export class StopService {
   /**
    * Makes the charges that failed or were cut short by a crash, for any request (a sweep does this, so a charge that could not be made at the time is retried later). When every charge a finished request was waiting on is made, the
    * request's "cleanup spend not charged" mark is taken off its outcome.
+   *
+   * The window matters: a sweep reads `RETRY_PAGES` x 100 open entries and the rest wait for a later sweep. An entry whose charge is made and whose wanted figure is charged has nothing left to pay, so it is taken off the index
+   * even while a request it lists has not finished (card L02e): that request has no debt on it, and when it settles with the "not charged" mark the sweep clears the mark once no entry lists it (`#payOwed`). Kept on the index only
+   * for a request the sweep could not pay, one whose record it could not read, one that still owes a figure of its own, or one some entry past the cut lists: otherwise entries that stay only for an unfinished request would fill
+   * every window and keep a later unpaid charge from ever being reached.
    */
   async #retryCharges(by: Principal): Promise<void> {
     const cleared = new Set<string>();
     const stuck = new Set<string>();
+    // Requests listed on a settled entry that have not finished yet: nothing to pay for them there, so they hold nothing back (see above).
+    const live = new Set<string>();
     // Requests an entry past the cut lists: their marks are kept (that entry was not paid by this sweep), but the paid entries in the window that list them are still taken off (see below).
     const pastCut = new Set<string>();
     const finished: { attemptId: string; revision: number }[] = [];
@@ -732,7 +805,9 @@ export class StopService {
       // A request that has not finished has no outcome to clear yet (its mark may still be written): it stays listed. Nor is a request cleared while it still owes a figure of its own (`owed`): its mark stays until
       // `#payOwed` has charged that too, and it stays listed here. A clear that fails is tried again by the next sweep.
       const x0 = (await this.#runner.get(KIND, intentId))?.body as unknown as StopIntentBody | undefined;
-      if (x0 === undefined || !TERMINAL.includes(x0.phase) || (x0.owed?.length ?? 0) > 0) { stuck.add(intentId); continue; }
+      if (x0 === undefined || (x0.owed?.length ?? 0) > 0) { stuck.add(intentId); continue; }
+      // Not finished: it has no mark to clear and nothing left on a settled entry, so it does not hold that entry (its own note, when it writes one, puts the entry back).
+      if (!TERMINAL.includes(x0.phase)) { live.add(intentId); continue; }
       let owes = false;
       const wrote = await this.#update(intentId, (x) => {
         owes = (x.owed?.length ?? 0) > 0;
@@ -745,7 +820,8 @@ export class StopService {
       const now = await this.#runner.get(OPEN, f.attemptId);
       const charge = (await this.#runner.get(CHARGE, f.attemptId))?.body as unknown as ChargeBody | undefined;
       const wants = (now?.body as unknown as OpenBody | undefined)?.want;
-      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some((i) => stuck.has(i) || !cleared.has(i)) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
+      const holds = (i: string): boolean => stuck.has(i) || (!cleared.has(i) && !live.has(i));
+      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some(holds) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
       await this.#runner.command("stop.charge-index-drop", { commandId: `stop-drop-${f.attemptId}-${now.revision}`.slice(0, 200), actor: "system" }, async () => ({
         payload: { attemptId: f.attemptId, revision: now.revision },
         build: async () => ({ ref: { kind: OPEN, id: f.attemptId }, creates: false, changes: [{ type: "delete", ref: { kind: OPEN, id: f.attemptId }, expectedRevision: now.revision }], detail: { attemptId: f.attemptId } }),
@@ -756,22 +832,27 @@ export class StopService {
   /**
    * Whether a Stop or Suspend of this task is in force: its request is not cancelled and the task is still paused. The dispatcher asks it for the swarm ancestors of a task before it starts an attempt, so a child of a stopped
    * task is not started again while the parent's stop holds (card L02d). Resuming the parent, or cancelling the request, lets go.
+   * With `wider`, a Stop or Suspend of a scope above the task (its agent, a team above that, the installation) whose pause blocks the task holds too: such a Stop ends the work of the task's swarm children (card L02e), so the
+   * dispatcher must not start them again either (review of card L02e). Without it only the task's own request counts (`swarm.cancel` carries on the child's own Stop).
    */
-  async holding(taskId: string, child?: string): Promise<{ intentId: string; mode: StopMode; requestedBy: string } | undefined> {
-    const scope: PauseScope = { kind: "task", id: taskId };
-    const id = await this.#activeId(scope);
-    const found = id === undefined ? undefined : await this.#runner.get(KIND, id);
-    if (id === undefined || found === undefined) return undefined;
-    const b = found.body as unknown as StopIntentBody;
-    if (b.phase === "cancelled") return undefined;
-    // The request must be the cause of the gate as it stands now: a Stop or Suspend that finished, followed by a resume, does not hold when the task is merely paused again.
-    const gate = await this.#pauses.gateState(scope);
-    if (gate === undefined || gate.intent !== "pause" || (b.gateRequestId !== undefined && gate.requestId !== b.gateRequestId)) return undefined;
+  async holding(taskId: string, child?: string, options?: { readonly wider?: boolean }): Promise<{ intentId: string; mode: StopMode; requestedBy: string } | undefined> {
+    const own: PauseScope = { kind: "task", id: taskId };
     const guard = await this.#pauses.guard(taskId);
-    if (!guard.blockedBy.some((s) => s.kind === "task" && s.id === taskId)) return undefined;
-    // A child the one who asked may not control is not held by their stop.
-    if (child !== undefined && this.#mayHold !== undefined && !(await this.#mayHold(b.requestedBy, child).catch(() => false))) return undefined;
-    return { intentId: id, mode: b.mode, requestedBy: b.requestedBy };
+    const scopes = options?.wider === true ? guard.blockedBy : guard.blockedBy.filter((s) => s.kind === "task" && s.id === taskId);
+    for (const scope of scopes) {
+      const id = await this.#activeId(scope.kind === "task" && scope.id === taskId ? own : scope);
+      const found = id === undefined ? undefined : await this.#runner.get(KIND, id);
+      if (id === undefined || found === undefined) continue;
+      const b = found.body as unknown as StopIntentBody;
+      if (b.phase === "cancelled") continue;
+      // The request must be the cause of the gate as it stands now: a Stop or Suspend that finished, followed by a resume, does not hold when the scope is merely paused again.
+      const gate = await this.#pauses.gateState(scope);
+      if (gate === undefined || gate.intent !== "pause" || (b.gateRequestId !== undefined && gate.requestId !== b.gateRequestId)) continue;
+      // A child the one who asked may not control is not held by their stop.
+      if (child !== undefined && this.#mayHold !== undefined && !(await this.#mayHold(b.requestedBy, child).catch(() => false))) continue;
+      return { intentId: id, mode: b.mode, requestedBy: b.requestedBy };
+    }
+    return undefined;
   }
 
   /**

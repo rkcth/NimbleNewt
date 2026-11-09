@@ -47,7 +47,8 @@ export async function agentsUnder(storage: Pick<ControllerStorage, "listAggregat
  * What only the runtime knows (card L02d): the local processes an attempt started and the work it delegated to children, each running, asked to stop and not stopped ("uncooperative", so Force Stop is offered), or of unknown state; and what the cleanup cost.
  * The controller keeps no registry of either, so a runtime that reports them passes this in; without it the inventory simply does not list them (nothing is claimed about what is not known).
  */
-export async function swarmDescendantsInfo(storage: Pick<ControllerStorage, "listAggregates">, taskId: string, max = 200): Promise<{ ids: string[]; truncated: boolean }> {
+/** The swarm links read once: every task with the child tasks that hang below it. `truncated`: there are more links than were read. */
+async function childIndexOf(storage: Pick<ControllerStorage, "listAggregates">): Promise<{ children: Map<string, string[]>; truncated: boolean }> {
   const page = 500;
   const children = new Map<string, string[]>();
   let truncated = false;
@@ -58,12 +59,28 @@ export async function swarmDescendantsInfo(storage: Pick<ControllerStorage, "lis
     for (const l of chunk) { after = l.id; const parent = (l.body as unknown as { parentTaskId?: string }).parentTaskId; if (typeof parent === "string") children.set(parent, [...(children.get(parent) ?? []), l.id]); }
     if (chunk.length < page) break;
   }
-  // Deepest first, each task once (a link cycle cannot loop), at most `max`.
+  return { children, truncated };
+}
+
+/** The tasks below `roots`, deepest first, each task once (a link cycle cannot loop), at most `max`; the roots themselves are never among them. */
+function tasksBelow(children: ReadonlyMap<string, readonly string[]>, roots: readonly string[], max: number, cut: boolean): { ids: string[]; truncated: boolean } {
+  let truncated = cut;
   const out: string[] = [];
-  const seen = new Set<string>([taskId]);
+  const seen = new Set<string>(roots);
   const visit = (id: string): void => { for (const c of children.get(id) ?? []) { if (seen.has(c)) continue; if (out.length >= max) { truncated = true; continue; } seen.add(c); visit(c); out.push(c); } };
-  visit(taskId);
+  for (const root of roots) visit(root);
   return { ids: out, truncated };
+}
+
+export async function swarmDescendantsInfo(storage: Pick<ControllerStorage, "listAggregates">, taskId: string, max = 200): Promise<{ ids: string[]; truncated: boolean }> {
+  const index = await childIndexOf(storage);
+  return tasksBelow(index.children, [taskId], max, index.truncated);
+}
+
+/** The swarm descendants of several tasks at once, deduplicated: a Stop of an agent, a team or the installation wants the children of every task it covers (card L02e). */
+export async function swarmDescendantsOf(storage: Pick<ControllerStorage, "listAggregates">, taskIds: readonly string[], max = 200): Promise<{ ids: string[]; truncated: boolean }> {
+  const index = await childIndexOf(storage);
+  return tasksBelow(index.children, taskIds, max, index.truncated);
 }
 
 export async function swarmDescendants(storage: Pick<ControllerStorage, "listAggregates">, taskId: string, max = 200): Promise<string[]> { return (await swarmDescendantsInfo(storage, taskId, max)).ids; }
@@ -93,6 +110,8 @@ type JobRow = { readonly ownerUnknown?: boolean; readonly id: string; readonly s
 export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly JobRow[]>, local?: LocalWork, ending?: { dropEnding(attemptId: string, why: "owner_stop" | "emergency_stop", reason: string): Promise<unknown> }, more?: {
   /** The tasks spawned (directly or not) by a task, deepest first: a Stop of the task ends their work too (card L02d). `truncated`: there are more than were returned (the stop says so as an unknown item). */
   readonly descendants?: (taskId: string) => Promise<{ readonly ids: readonly string[]; readonly truncated: boolean }>;
+  /** The tasks spawned below any of these tasks at once, for a Stop of an agent, a team or the installation, which covers many tasks (card L02e). Absent: the single-task walk is used for each root. */
+  readonly descendantsOf?: (taskIds: readonly string[]) => Promise<{ readonly ids: readonly string[]; readonly truncated: boolean }>;
   /** Whether the one who advances the stop may end the work of this child task (the owner, or whoever holds its parent's budget, like `swarm.cancel`). Absent: every child. A child they may not control is listed as unresolved, not stopped. */
   readonly mayControl?: (by: Principal, taskId: string) => Promise<boolean>;
   /** Every unfinished job on any task, to find an agent's jobs also on a task with no live attempt (the owner of a job is the agent of its attempt). */
@@ -102,9 +121,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   /** Charges cleanup spend to a task's budget. */
   readonly charge?: (by: Principal, charge: { commandId: string; taskId: string; agentId?: string; costMicros: number; computeMs: number }) => Promise<unknown>;
 }): StopPorts {
-  /** What one port call has already looked up (the swarm walk reads every link, so it is done once per call, not once per use). */
-  interface Look { readonly descendants: Map<string, { ids: readonly string[]; truncated: boolean }>; readonly agents: Map<string, string | undefined> }
-  const look = (): Look => ({ descendants: new Map(), agents: new Map() });
+  /** What one port call has already looked up (the swarm walk reads every link, so it is done once per call, not once per use). Per scope: `own` the tasks of the scope itself, `kids` the tasks spawned below them, `truncated` that the walk was cut, `attempts` every attempt seen for the scope (its own tasks' and their children's). */
+  interface Look { readonly descendants: Map<string, { ids: readonly string[]; truncated: boolean }>; readonly agents: Map<string, string | undefined>; readonly scopes: Map<string, { own: Set<string>; kids: Set<string>; truncated: boolean; attempts: string[] }> }
+  const look = (): Look => ({ descendants: new Map(), agents: new Map(), scopes: new Map() });
   const kids = async (l: Look, taskId: string): Promise<{ ids: readonly string[]; truncated: boolean }> => {
     const had = l.descendants.get(taskId);
     if (had !== undefined) return had;
@@ -112,6 +131,18 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     l.descendants.set(taskId, got);
     return got;
   };
+  /** The tasks below several roots at once: a hook that walks them together is used when there is one (the link index is read once for the lot), otherwise each root is walked on its own. */
+  const kidsOf = async (roots: readonly string[]): Promise<{ ids: readonly string[]; truncated: boolean }> => {
+    if (roots.length === 0) return { ids: [], truncated: false };
+    if (more?.descendantsOf !== undefined) return await more.descendantsOf(roots);
+    if (more?.descendants === undefined) return { ids: [], truncated: false };
+    const ids: string[] = [];
+    let truncated = false;
+    for (const root of roots) { const got = await more.descendants(root); truncated = truncated || got.truncated; for (const id of got.ids) if (!ids.includes(id)) ids.push(id); }
+    return { ids, truncated };
+  };
+  /** Whether this runtime walks the swarm at all. */
+  const walks = () => more?.descendants !== undefined || more?.descendantsOf !== undefined;
   const agentOfAttempt = async (l: Look, attemptId: string): Promise<string | undefined> => {
     if (l.agents.has(attemptId)) return l.agents.get(attemptId);
     const h = dispatch();
@@ -119,22 +150,41 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     l.agents.set(attemptId, agent);
     return agent;
   };
-  const attemptsOf = async (scope: PauseScope, l: Look = look()): Promise<string[]> => {
-    const h = dispatch();
+  /**
+   * What a scope covers: `own` the tasks of the scope itself (a task is itself; a wider scope's tasks are those its attempts run), `kids` the tasks spawned below them (a Stop of an agent, a team or the installation reaches
+   * their work as a task's own Stop does, card L02e), `truncated` that the walk was cut, and `attempts` every live attempt of either. Read once per port call.
+   */
+  const resolveScope = async (scope: PauseScope, l: Look): Promise<{ own: Set<string>; kids: Set<string>; truncated: boolean; attempts: string[] }> => {
+    const key = `${scope.kind}:${scope.id}`;
+    const had = l.scopes.get(key);
+    if (had !== undefined) return had;
     // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
-    if (h === undefined) { if (runtime() === "none") return []; throw new Error("the dispatcher is not running, so what is running cannot be known"); }
-    if (scope.kind === "task") {
-      // The work of the task's swarm children is part of the task's: a Stop of the task ends it too (the children are listed as `child` items).
-      const out = new Set<string>(await h.dispatcher.liveAttemptsOf(h.principal, { taskId: scope.id }));
-      for (const child of (await kids(l, scope.id)).ids) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { taskId: child })) out.add(id);
-      return [...out];
+    const h = dispatch();
+    if (h === undefined) {
+      if (runtime() !== "none") throw new Error("the dispatcher is not running, so what is running cannot be known");
+      const nothing = { own: new Set<string>(), kids: new Set<string>(), truncated: false, attempts: [] };
+      l.scopes.set(key, nothing);
+      return nothing;
     }
-    if (scope.kind === "agent") return h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(scope.id) });
-    if (members === undefined) throw new Error(`a ${scope.kind} scope is not resolved to attempts by this runtime yet`);
-    const out = new Set<string>();
-    for (const agentId of await members(scope)) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) })) out.add(id);
-    return [...out];
+    let mine: string[] = [];
+    if (scope.kind === "task") mine = await h.dispatcher.liveAttemptsOf(h.principal, { taskId: scope.id });
+    else if (scope.kind === "agent") mine = await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(scope.id) });
+    else {
+      if (members === undefined) throw new Error(`a ${scope.kind} scope is not resolved to attempts by this runtime yet`);
+      for (const agentId of await members(scope)) mine.push(...await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) }));
+    }
+    // The tasks the scope's own attempts run: a wider scope is named by its agent, team or the installation, so its tasks are known only from what runs for them.
+    const own = new Set<string>(scope.kind === "task" ? [scope.id] : []);
+    for (const id of mine) { const t = (await h.dispatcher.get(h.principal, id))?.taskId; if (t !== undefined) own.add(t); }
+    const walked = scope.kind === "task" ? await kids(l, scope.id) : await kidsOf([...own]);
+    const childTasks = new Set<string>(walked.ids);
+    const out = new Set<string>(mine);
+    for (const child of childTasks) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { taskId: child })) out.add(id);
+    const resolved = { own, kids: childTasks, truncated: walked.truncated, attempts: [...out] };
+    l.scopes.set(key, resolved);
+    return resolved;
   };
+  const attemptsOf = async (scope: PauseScope, l: Look = look()): Promise<string[]> => (await resolveScope(scope, l)).attempts;
   // The attempts seen for a scope, so a process of one that ended during preparation is still asked about when the stop ends.
   const seen = new Map<string, Set<string>>();
   const localOf = async (attempts: readonly string[], scope: PauseScope, lookOnly = false): Promise<InventoryItem[]> => {
@@ -158,6 +208,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     const h = dispatch();
     if (jobs === undefined || h === undefined) return { rows: [], incomplete: false };
     const rows = new Map<string, JobRow & { taskId: string }>();
+    const covered = await resolveScope(scope, l);
     let incomplete = false;
     if (scope.kind !== "task" && more?.agentJobs !== undefined) {
       const owners = new Set<string>(scope.kind === "agent" ? [principalForm(scope.id)] : (await (members?.(scope) ?? Promise.resolve([]))).map(principalForm));
@@ -171,10 +222,12 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         const owner = await agentOfAttempt(l, j.attemptId);
         if (owner !== undefined && owners.has(owner)) rows.set(j.id, j);
       }
+      // A child task of the scope is the scope's work too (card L02e): its jobs are listed, and asked only of someone who may control that child (see `askJobs`).
+      for (const taskId of covered.kids) for (const job of await jobs(h.principal, taskId)) rows.set(job.id, { ...job, taskId });
       return { rows: [...rows.values()], incomplete };
     }
-    const tasks = new Set<string>();
-    if (scope.kind === "task") { tasks.add(scope.id); const k = await kids(l, scope.id); for (const child of k.ids) tasks.add(child); }
+    const tasks = new Set<string>(covered.own);
+    for (const child of covered.kids) tasks.add(child);
     for (const attemptId of attempts) { const taskId = (await h.dispatcher.get(h.principal, attemptId))?.taskId; if (taskId !== undefined) tasks.add(taskId); }
     for (const taskId of tasks) for (const job of await jobs(h.principal, taskId)) rows.set(job.id, { ...job, taskId });
     return { rows: [...rows.values()], incomplete };
@@ -182,12 +235,13 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   const inFlight = async (attempts: readonly string[], scope: PauseScope, l: Look, lookOnly = false): Promise<InventoryItem[]> => {
     const localItems = await localOf(attempts, scope, lookOnly);
     const h = dispatch();
+    const covered = await resolveScope(scope, l);
     const out: InventoryItem[] = [];
     // More descendants than the walk returns, or links it did not read: what is beyond is not known, and the stop says so.
-    if (scope.kind === "task" && (await kids(l, scope.id)).truncated) out.push({ kind: "child", ref: "swarm:descendants-truncated", state: "unknown" });
+    if (walks() && covered.truncated) out.push({ kind: "child", ref: "swarm:descendants-truncated", state: "unknown" });
     for (const attemptId of attempts) {
-      // Work of a swarm child of the task is delegated work (card L02d): listed while its attempt has not ended.
-      if (scope.kind === "task" && h !== undefined && more?.descendants !== undefined) { const a = await h.dispatcher.get(h.principal, attemptId); if (a !== undefined && a.taskId !== scope.id && a.state !== "finished") out.push({ kind: "child", ref: attemptId.slice(0, 120), state: "running" }); }
+      // Work of a swarm child of the scope is delegated work (cards L02d, L02e): listed while its attempt has not ended.
+      if (walks() && h !== undefined) { const a = await h.dispatcher.get(h.principal, attemptId); if (a !== undefined && covered.kids.has(a.taskId) && a.state !== "finished") out.push({ kind: "child", ref: attemptId.slice(0, 120), state: "running" }); }
       for (const op of (await h?.dispatcher.operations(h.principal, attemptId)) ?? []) if (!TERMINAL.has(op.state)) out.push({ kind: "foreground", ref: `${attemptId}/${op.callId}`.slice(0, 120), state: "running" });
     }
     // The task's background jobs (card L02c): a running one is counted, one asked to stop that has not is "uncooperative" (Force Stop is offered for it), and one whose outcome is not known is "unknown".
@@ -219,8 +273,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       if (!["admitted", "dispatched", "running"].includes(job.state) && !(force && job.state === "cancellation_requested")) continue;
       // A job whose owner is not known (no attempt) is ended only at the owner's own stop.
       if (job.ownerUnknown === true && by.kind !== "owner") { unresolved.push(`job ${job.id}: not stopped, its owner is not known and ${by.id} is not the owner`.slice(0, 120)); continue; }
-      // A job of a swarm child is a child's work: ended only by someone who may control the child.
-      if (scope.kind === "task" && job.taskId !== scope.id && more.mayControl !== undefined) {
+      // A job of a swarm child is a child's work, whoever the scope was stopped for: ended only by someone who may control the child (cards L02d, L02e).
+      const childTasks = (await resolveScope(scope, l)).kids;
+      if (childTasks.has(job.taskId) && more.mayControl !== undefined) {
         if (!verdict.has(job.taskId)) verdict.set(job.taskId, await more.mayControl(by, job.taskId).catch(() => false));
         if (verdict.get(job.taskId) !== true) { unresolved.push(`job ${job.id}: not stopped, ${by.id} may not control its task`.slice(0, 120)); continue; }
       }
@@ -229,15 +284,16 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     return unresolved;
   };
   /** The attempts of the scope the asker may end the work of: all of the scope's own, and a swarm child's only for someone who may control the child (the others are returned as `denied`, with their task). */
-  const controllable = async (by: Principal, attempts: readonly string[], scope: PauseScope): Promise<{ allowed: string[]; deniedTasks: Set<string> }> => {
+  const controllable = async (by: Principal, attempts: readonly string[], scope: PauseScope, l: Look): Promise<{ allowed: string[]; deniedTasks: Set<string> }> => {
     const h = dispatch();
     const deniedTasks = new Set<string>();
-    if (scope.kind !== "task" || more?.mayControl === undefined || h === undefined) return { allowed: [...attempts], deniedTasks };
-    const verdict = new Map<string, boolean>([[scope.id, true]]);
+    const childTasks = (await resolveScope(scope, l)).kids;
+    if (childTasks.size === 0 || more?.mayControl === undefined || h === undefined) return { allowed: [...attempts], deniedTasks };
+    const verdict = new Map<string, boolean>();
     const allowed: string[] = [];
     for (const id of attempts) {
       const taskId = (await h.dispatcher.get(h.principal, id))?.taskId;
-      if (taskId === undefined) { allowed.push(id); continue; }
+      if (taskId === undefined || !childTasks.has(taskId)) { allowed.push(id); continue; }
       if (!verdict.has(taskId)) verdict.set(taskId, await more.mayControl(by, taskId).catch(() => false));
       if (verdict.get(taskId)) allowed.push(id); else deniedTasks.add(taskId);
     }
@@ -259,7 +315,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       await more.charge!(h.principal, { commandId: c.commandId, taskId: attempt.taskId, agentId: attempt.agentId, costMicros: c.costMicros, computeMs: c.computeMs });
     } }),
     // The stop is recorded: the agent's ending is dropped now (the owner's stop wins), so nothing in preparation can complete it (card H12n). A swarm child the asker may not control keeps its ending.
-    begin: async (scope, options) => { if (ending === undefined) return; const { allowed } = await controllable(options.by, await attemptsOf(scope), scope); for (const id of allowed) await ending.dropEnding(id, options.force ? "emergency_stop" : "owner_stop", options.force ? "force stop" : "stop requested"); },
+    begin: async (scope, options) => { if (ending === undefined) return; const l = look(); const { allowed } = await controllable(options.by, await attemptsOf(scope, l), scope, l); for (const id of allowed) await ending.dropEnding(id, options.force ? "emergency_stop" : "owner_stop", options.force ? "force stop" : "stop requested"); },
     attempts: (scope) => [...(seen.get(`${scope.kind}:${scope.id}`) ?? [])],
     remember: (scope, attempts) => { if (attempts.length === 0) return; const key = `${scope.kind}:${scope.id}`; const all = seen.get(key) ?? new Set<string>(); for (const a of attempts) all.add(a); seen.set(key, all); },
     unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" || members !== undefined ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
@@ -269,7 +325,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const h = dispatch();
       const l = look();
       const attempts = await attemptsOf(scope, l);
-      const { allowed } = await controllable(options.by, attempts, scope);
+      const { allowed } = await controllable(options.by, attempts, scope, l);
       // A worker still coming up when the wait ran out (card H12q) is not a failed cleanup: it is frozen, and it is listed as a process still running. A Suspend waits for it like any other running work (the next pass
       // looks again, and the deadline blocks it as usual); a Stop does not wait for processes in preparation, and its ending stops the worker that came up.
       const starting: InventoryItem[] = [];
@@ -290,7 +346,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const l = look();
       const all = await attemptsOf(scope, l);
       // Only the attempts the asker may control are quiesced and checkpointed (a swarm child they may not touch is left alone; terminate names it as unresolved).
-      const attempts = options?.by === undefined ? all : (await controllable(options.by, all, scope)).allowed;
+      const attempts = options?.by === undefined ? all : (await controllable(options.by, all, scope, l)).allowed;
       // A Stop asks the task's background jobs to stop before the checkpoint is taken (preparation does not wait for them), so the checkpoint is of a state they are changing as little as they can. A Suspend leaves jobs running:
       // its checkpoint is taken while they run, and whatever they produce after it is not in it. The ending step asks again and escalates.
       if (options?.mode === "stop" && options.by !== undefined) await askJobs(scope, all, l, options.by, false).catch(() => undefined);
@@ -318,7 +374,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const h = dispatch();
       const l = look();
       const attempts = await attemptsOf(scope, l);
-      const { allowed, deniedTasks } = await controllable(options.by, attempts, scope);
+      const { allowed, deniedTasks } = await controllable(options.by, attempts, scope, l);
       const unresolved: string[] = [];
       // A swarm child the one who stops may not control is not stopped, and is named.
       for (const taskId of deniedTasks) unresolved.push(`child ${taskId}: not stopped, ${options.by.id} may not control it`.slice(0, 120));
@@ -334,7 +390,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       // who may control the child. A failure is not reported as such: the look below names whatever is still there.
       if (options.force && local?.end !== undefined) {
         const every = [...new Set([...(seen.get(`${scope.kind}:${scope.id}`) ?? []), ...attempts])];
-        const mine = every.length === 0 ? [] : (await controllable(options.by, every, scope)).allowed;
+        const mine = every.length === 0 ? [] : (await controllable(options.by, every, scope, l)).allowed;
         if (mine.length > 0) await local.end(mine).catch(() => undefined);
       }
       // A job whose outcome is not known, or that was asked to stop and has not, is named as unresolved too.

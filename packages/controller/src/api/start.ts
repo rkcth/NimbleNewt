@@ -74,7 +74,7 @@ import { ContinuationService, ResumeCheckService, ResumeSettingsService, control
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService, ReplayLimitsService, ReplayService } from "../activity/index.js";
 import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
-import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, type LocalWork } from "../lifecycle/index.js";
+import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
@@ -648,6 +648,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     };
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork ?? hostLocalWork(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }, {
       descendants: (taskId) => swarmDescendantsInfo(storage, taskId),
+      // A Stop of an agent, a team or the installation walks the children of every task it covers, the links read once for the lot (card L02e).
+      descendantsOf: (taskIds) => swarmDescendantsOf(storage, taskIds),
       // Like `swarm.cancel`: the owner, or whoever holds the budget of the child's parent; or whoever may control the child's own scope.
       mayControl: stopMayControl,
       agentJobs: async (_by) => {

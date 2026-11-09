@@ -211,8 +211,14 @@ test("seeded random sequences of suspend, stop, force, wait, restart, resume, sw
         const v = await stops.cleanupSpend(owner, scope).catch(() => undefined);
         if (v === undefined) continue;
         const lines = (await status.stopCleanupLines(owner, { scope }))!.lines.map((l) => l.text);
-        const head = lines[0]!;
         const stored = (await runner.get("stop-intent", v.intentId))!.body as Record<string, any>;
+        // The answer may come from a request made for a wider scope whose stop reaches this one; the first line then says so and the sentence about the request is the next (card L02e).
+        const askedOf = stored["scope"] as { kind: string; id: string };
+        const cameThrough = askedOf.kind !== scope.kind || askedOf.id !== scope.id;
+        if (cameThrough !== (v.through !== undefined)) record("through-mismatch", `${scope.kind} after ${op}: the view says ${JSON.stringify(v.through)}, the request ${v.intentId} is for ${JSON.stringify(askedOf)}`);
+        const said = lines[0]!;
+        if (cameThrough && !(said.startsWith(`Nothing was asked for ${scope.kind} ${scope.id} itself: this is the `) && said.includes(", which reaches it. Every figure is that scope's, not ") && said.endsWith(`${scope.kind} ${scope.id} alone.`))) record("through-not-told", `${scope.kind} after ${op}: ${said}`);
+        const head = cameThrough ? lines[1]! : lines[0]!;
         const fact = requested.get(v.intentId);
         const pure = forcedPure.has(v.intentId);
         const where = `${scope.kind} after ${op}: ${head}`;

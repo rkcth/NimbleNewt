@@ -684,6 +684,12 @@ export class PauseService implements PauseGuard, PauseLookup {
     return found === undefined ? undefined : view<PauseGateBody>(found);
   }
 
+  /**
+   * The scope and every scope above it, nearest first, ending with the installation: a lifecycle request made for one of these covers the ones below it (card L02e, for the stop view of a task stopped through its agent).
+   * Read only, with no viewer check like `gateState` — what the caller may see is decided by the service that asks.
+   */
+  chain(scope: PauseScope): Promise<readonly PauseScope[]> { return this.#chain(checkScope(scope)); }
+
   /** The paused gates that apply to a task, nearest first. A task the caller may not read reads like a missing one. */
   async status(viewer: Principal, taskId: string): Promise<PauseStatus | undefined> {
     const id = checkTaskId(taskId);

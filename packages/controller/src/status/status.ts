@@ -221,7 +221,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   failed_event: { keys: ["handlingId"], about: "one failed event in detail" },
   timeline: { keys: ["projectId", "agent", "since", "limit"], about: "a project's timeline, or one agent's (since: a time with its zone such as 2026-11-01T08:00:00Z, or a date meaning midnight UTC)" },
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
-  stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task; or scopeKind task, agent, team or installation with the scopeId, which must be an ID, not a name)" },
+  stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task; or scopeKind task, agent, team or installation with the scopeId, which must be an ID, not a name); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   handoff_archive: { keys: ["taskId|taskTitle", "section", "archiveId", "from"], about: "the whole text of a hand-off package section that was cut to fit, as the source gave it (credentials removed): name the task (its latest hand-off, going on or finished) and the section (brief, completedWork, drafts, ...), or the archive ID a cut marker names; from is the line to read on from, as the previous answer says" },
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
@@ -1029,7 +1029,7 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
-  /** What a Suspend or Stop has spent on cleanup, as charged to the budgets (card L02d). A task (`taskId`) or a scope (`scope: { kind, id }`, or flat as `scopeKind` and `scopeId`, the form chat uses) is named; a scope with no request of its own gets one line saying so; one the asker may not control reads as nothing. */
+  /** What a Suspend or Stop has spent on cleanup, as charged to the budgets (card L02d). A task (`taskId`) or a scope (`scope: { kind, id }`, or flat as `scopeKind` and `scopeId`, the form chat uses) is named; a scope with no request of its own is answered from the nearest wider scope whose request reaches it (its agent, a team above that, a parent task of its swarm or the installation), and the lines say whose request it is; a scope with no request at all gets one line saying so; one the asker may not control reads as nothing. */
   async stopCleanupLines(by: Principal, asked: { readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.stops === undefined) return undefined;
     // The scope comes nested (`scope`) or flat (`scopeKind` and `scopeId`, the form chat uses); not both, and a flat one needs both parts.
@@ -1053,7 +1053,7 @@ export class StatusService {
     if (r === undefined) {
       // Only what is true for the kind: a task can be stopped through its agent, a team above that agent, a parent task of its swarm or the installation; an agent through its team, a team above that or the installation; a team through a team above it or the installation; the installation through nothing.
       const wider = scope.kind === "task" ? " (its agent, a team above that agent, a parent task in its swarm, or the whole installation)" : scope.kind === "agent" ? " (its team, a team above that, or the whole installation)" : scope.kind === "team" ? " (a team above it or the whole installation)" : undefined;
-      return { observedAt: at, lines: [line(wider === undefined ? "No Suspend or Stop of the installation was requested." : `No Suspend or Stop was requested for ${scope.kind} ${shown(scope.id, 80)} itself; one made through a wider scope${wider} is read by naming that scope.`, where)] };
+      return { observedAt: at, lines: [line(wider === undefined ? "No Suspend or Stop of the installation was requested." : `No Suspend or Stop was requested for ${scope.kind} ${shown(scope.id, 80)} itself, nor through a wider scope${wider}.`, where)] };
     }
     const money = (micros: number): string => (micros / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, ".0");
     const used = `${money(r.spent)} (budget currency)${r.spendBudget === undefined ? ", with no limit set" : `, against a limit of ${money(r.spendBudget)}`}`;
@@ -1064,7 +1064,10 @@ export class StatusService {
     const onTop = r.mode !== "stop" ? "" : ranEnding ? "; the cost of ending the work is charged on top" : live ? "; the cost of ending the work, when it runs, is charged on top" : "";
     const forceTail = ranEnding ? "what ending the work cost is charged to the attempts below" : live ? "what ending the work costs, when it runs, is charged to the attempts below" : "no ending of the work is recorded";
     const reuseTail = r.mode !== "stop" ? "" : ranEnding ? "; the cost of ending the work is in them too" : live ? "; the cost of ending the work, when it runs, is added to them" : "";
-    const name = `${scope.kind} ${shown(scope.id, 80)}`;
+    // The request the answer comes from may be one made for a scope above the one asked about, whose stop reaches it (card L02e): the figures are that scope's.
+    const through = r.through;
+    const askedName = `${scope.kind} ${shown(scope.id, 80)}`;
+    const name = through === undefined ? askedName : through.kind === "installation" ? "the whole installation" : `${through.kind} ${shown(through.id, 80)}`;
     let head: string;
     if (r.mode === "force-stop") {
       head = r.reusedCheckpoint ? `The force stop of ${name} is ${r.phase}. Its preparation was the checkpoint of an earlier Suspend (that cost is in the attempt totals below); ${forceTail}.`
@@ -1072,7 +1075,9 @@ export class StatusService {
           : `The force stop of ${name} is ${r.phase}. Its last cleanup budget window before the Force Stop (a wait on a blocked preparation starts it again) used ${used}; ${forceTail}.`;
     } else if (r.reusedCheckpoint) head = `The ${r.mode} of ${name} is ${r.phase}. This Stop reused the checkpoint of the earlier Suspend; that preparation's cost is in the attempt totals below${reuseTail}.`;
     else head = `The ${r.mode} of ${name} is ${r.phase}. Its cleanup budget window (a wait on a blocked preparation starts it again) has used ${used}${onTop}.`;
-    const lines: Line[] = [line(head, cite("stop", r.intentId), where)];
+    const lines: Line[] = [];
+    if (through !== undefined) lines.push(line(`Nothing was asked for ${askedName} itself: this is the ${r.mode} of ${name}${r.requestedAt === undefined ? "" : `, asked ${shown(r.requestedAt, 60)}`}, which reaches it. Every figure is that scope's, not ${askedName} alone.`, cite("stop", r.intentId), where, cite(through.kind, through.id)));
+    lines.push(line(head, cite("stop", r.intentId), where));
     for (const a of r.attempts.slice(0, 20)) lines.push(line(`Attempt ${shown(a.attemptId, 80)}: ${money(a.costMicros)} and ${a.computeMs} ms of compute charged to its task's budget in all (every stop of it counted once)${a.pending ? "; a further charge is still being made" : ""}.`, cite("stop", r.intentId)));
     if (r.attempts.length > 20) lines.push(line(`${r.attempts.length - 20} more attempt(s) are not listed.`, cite("stop", r.intentId)));
     if (r.attempts.length === 0) lines.push(line("No attempt with a charged cleanup cost is recorded on this request.", cite("stop", r.intentId)));
