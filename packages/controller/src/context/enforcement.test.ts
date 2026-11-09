@@ -796,7 +796,7 @@ for (const backend of backends) {
     assert.equal(h.source, "controller");
     assert.match(h.text, /git-merge origin\/main/);
     assert.match(h.text, /\[confirmed\]/);
-    assert.match(h.text, /art-1 merge report/);
+    assert.match(h.text, /- artifact art-1 "merge report"/, "the artifact is named, its title quoted on the entry's own line");
     assert.match(h.text, /the attempt died after the merge/);
     assert.ok(!h.text.includes("ghp_abcdefgh"), "credentials are removed");
     // Again (a restart, or the dispatcher retrying): the same hand-off, and the facts are not asked for again.
