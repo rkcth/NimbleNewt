@@ -820,6 +820,13 @@ for (const backend of backends) {
     await enf.recordHandoff(ann, { taskId: t2, attemptId: "att-2", text: "own first" });
     await enf.ensureHandoff(owner, { taskId: t2, attemptId: "att-2", endedBecause: "ended" }, facts);
     assert.equal((await enf.latestHandoff(owner, t2))!.text, "own first");
+    // Card C07m's two reads: the task's latest note as the record the next attempt is pointed at, and one note by its ID.
+    assert.deepEqual(await enf.latestHandoffFor(owner, t), { id: late.id, attemptId: "att-1", source: "attempt" }, "the read names the note the next attempt's first call points at");
+    const whole = (await enf.readHandoff(owner, h.id))!;
+    assert.deepEqual([whole.id, whole.taskId, whole.attemptId, whole.source, whole.text], [h.id, t, "att-1", "controller", h.text], "the whole note as written, credentials removed");
+    assert.equal(await enf.readHandoff(owner, "ctx-handoff-bbbbbbbbbbbbbbbbbbbb"), undefined, "a note that is not there reads as nothing");
+    assert.equal(await enf.readHandoff(owner, "hof-notanote"), undefined, "an ID that is not a hand-off note's reads as nothing");
+    await refuses("not_found", () => enf.latestHandoffFor(owner, "task-aaaaaaaaaaaaaaaaaaaa"), (e) => assert.ok(e.message.length > 0));
   });
 
   suite("the dispatcher's methods are for the owner, hosts and services, never an agent; reading and the attempt's own hand-off stay open to whoever may work on the task", async ({ enf, owner, host, ann, ben, eve, t, setup, note }) => {
@@ -836,6 +843,8 @@ for (const backend of backends) {
       ["resetOverflow", (p) => enf.resetOverflow(p, { taskId: t, attemptId: "x" })],
       ["limitTool", (p) => enf.limitTool(p, { taskId: t, callId: "c", tool: "bash", window: WINDOW, output: { text: "x" } })],
       ["ensureHandoff", (p) => enf.ensureHandoff(p, { taskId: t, attemptId: "x", endedBecause: "e" }, async () => { throw new Error("must not be asked"); })],
+      // Card C07m: reading the task's latest hand-off note to tell a new attempt about it is the dispatcher's gate, the same one that writes the note.
+      ["latestHandoffFor", (p) => enf.latestHandoffFor(p, t)],
     ];
     // An agent is refused by every one of them, even with attempt.work and desk grants on the task's project (ann and ben) and with none (eve).
     for (const who of [ann, ben, eve]) for (const [name, run] of gated) await refuses("forbidden", () => run(who), (e) => assert.match(e.message, /not the dispatcher/, name));
@@ -848,6 +857,11 @@ for (const backend of backends) {
     assert.equal((await enf.latestHandoff(ann, t))!.text, "own");
     assert.equal(await enf.latestHandoff(eve, t), undefined);
     assert.equal(await enf.latestCompaction(ben, t), undefined);
+    // Card C07m's reads follow the same rule: whoever may work on the task is given the note its next attempt was pointed at, and anyone else gets nothing.
+    const noteId = (await enf.latestHandoff(ann, t))!.id;
+    assert.equal((await enf.readHandoff(ben, noteId))!.text, "own");
+    assert.equal((await enf.latestHandoffFor(host, t))!.id, noteId, "the dispatcher and a host read the task's latest note: the gate that writes it is the gate that reads it");
+    assert.equal(await enf.readHandoff(eve, noteId), undefined, "someone who may not see the task reads the note as nothing");
     assert.deepEqual(await enf.keptDecisions(ben, t), []);
     await refuses("forbidden", () => enf.recordHandoff(eve, { taskId: t, attemptId: "x", text: "no" }));
     await refuses("invalid_command", () => enf.admit(owner, { taskId: t, attemptId: "bad id", window: WINDOW, call }));

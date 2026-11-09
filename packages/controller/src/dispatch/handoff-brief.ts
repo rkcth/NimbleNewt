@@ -12,6 +12,9 @@ import { quoted } from "../status/explain.js";
  *
  * Every text a person or an agent wrote (a blocker's summary, who may resolve it) goes through `quoted` (one line, credentials removed, controls and separators escaped) and then through `bracketless`, so no text
  * can close this paragraph or start a line of its own inside it. Record IDs and blocker types are checked against their shape and quoted if they do not match it.
+ *
+ * Naming a read gives no right to it: `handoff.get` answers whoever holds the task's hand-off rights (the owner, and whoever the owner gave them to), `context.handoff.read` whoever may work on the task; anyone else gets
+ * the same refusal they would get from the operation itself. What every agent that works on the task can read is the note — the controller's account of the same hand-off, kept under the task.
  */
 
 /** How much of the hand-off a first call is told about. The whole paragraph is bounded by `chars`, so the call's size does not depend on how much the controller has to say. */

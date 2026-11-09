@@ -766,4 +766,21 @@ for (const backend of backends) {
     assert.deepEqual([...(await c.handoffs.marks(c.owner, { taskId: c.task })).marks].sort(), ["alpha", "bravo", "charlie", "delta", "dsk-0001"]);
     await refuses("not_found", () => c.handoffs.marks(c.ann, { taskId: c.task }));
   });
+
+  suite("the controller reads a task's latest hand-off as the record its next attempt is pointed at, never as the package (card C07m)", async (c) => {
+    assert.deepEqual(await c.handoffs.latestForTask(c.task), undefined, "a task that was never handed over has nothing to name");
+    const first = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "A is going on leave" });
+    // A hand-off that has not moved the task yet is still the task's latest: the dispatcher's own check (it was handed to *this* agent, and the task really moved) decides whether to name it.
+    assert.deepEqual(await c.handoffs.latestForTask(c.task), { id: first.id, phase: "ready", from: c.a, to: c.b }, "a hand-off that is only prepared is named as such, with nothing of the package");
+    const done = await c.handoffs.complete(c.mgr, { commandId: cid("h"), handoffId: first.id });
+    assert.equal(done.phase, "transferred");
+    assert.deepEqual(await c.handoffs.latestForTask(c.task), { id: first.id, phase: "transferred", from: c.a, to: c.b });
+    // The task goes back the next way: the newer hand-off is the one named, and the older one is not.
+    const back = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.a, reason: "A is back" });
+    await c.handoffs.complete(c.mgr, { commandId: cid("h"), handoffId: back.id });
+    const latest = await c.handoffs.latestForTask(c.task);
+    assert.deepEqual([latest?.id, latest?.phase, latest?.to], [back.id, "transferred", c.a]);
+    assert.deepEqual(Object.keys(latest!).sort(), ["from", "id", "phase", "to"], "the read answers the record, not its sections");
+    await refuses("invalid_command", () => c.handoffs.latestForTask("not a task id"));
+  });
 }
