@@ -437,7 +437,7 @@ export class PolicyEditService {
     } catch (error) {
       if (!(error instanceof DomainError) || error.code === "unavailable" || error.code === "stale_epoch" || error.code === "fenced" || error.code === "effect_uncertain") throw error;
       const stale = error.code === "stale_revision" || error.code === "command_conflict";
-      const failure = { code: stale ? "stale_revision" : error.code, message: stale ? "The policy changed since you were shown this edit, so nothing was applied. Say it again to see it against the policy as it is now." : error.message };
+      const failure = { code: stale ? "stale_revision" : error.code, message: stale ? "The policy changed since you were shown this edit, so nothing was applied. Ask again and you will see it against the policy as it stands now." : error.message };
       const ended = await this.#move(owner.id, id, `${id}-end`, ["applying"], (b) => ({ ...b, status: stale ? "stale" : "refused", failure, refusal: failure }));
       if (ended.body.status === "applied") return { editId: id, status: "applied", replayed: true, applied: ended.body.applied ?? [] };
       return { editId: id, status: ended.body.status, replayed: false, applied: [], failure };

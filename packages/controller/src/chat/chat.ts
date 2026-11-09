@@ -435,7 +435,7 @@ export class ChatService {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
         if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "timeline"].includes(String(request["kind"]))) {
-          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
         // A task's activity, explanations, replay, hand-off or stop cleanup is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
@@ -443,7 +443,7 @@ export class ChatService {
         if (request["kind"] === "stop_cleanup" && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
         if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
         if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
-          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           const wanted = request["taskTitle"];
           const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
           // One exact match decides. Several, or only partial matches, are listed and the owner is asked; nothing is read until the owner says which.
@@ -465,7 +465,7 @@ export class ChatService {
           delete request["agentName"];
           if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) { push({ i, kind: "refused", code: "invalid_command", message: "meetingTopic and agentName must be text" }); continue; }
           if (request["occurrenceId"] === undefined) {
-            if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+            if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
             const recent = await this.#get(token, "standup.recent", { projectId: currentFocus.projectId, limit: 50 });
             const all = (recent?.["items"] as Record<string, unknown>[] | undefined) ?? [];
             const words = typeof topic === "string" ? topic : "";
@@ -499,7 +499,7 @@ export class ChatService {
         let target: string | undefined;
         if (intent.action === "answer" || intent.action === "decompose" || intent.action === "assign") {
           const found = intent.projectId === undefined && intent.projectName === undefined ? (currentFocus.projectId === undefined ? undefined : { ok: true as const, id: currentFocus.projectId, name: currentFocus.projectName ?? "" }) : await this.#projectByIntent(token, intent.projectId, intent.projectName);
-          if (found === undefined) { const ask = await this.#askProject(); push(ask.ok ? { i, kind: "refused", code: "invalid_command", message: "Say which project you mean." } : askOrRefuse(i, ask, n)); continue; }
+          if (found === undefined) { const ask = await this.#askProject(); push(ask.ok ? { i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" } : askOrRefuse(i, ask, n)); continue; }
           if (!found.ok) { push(askOrRefuse(i, found, n)); continue; }
           target = found.id;
           projectId = found.id;
@@ -2019,7 +2019,7 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
         for (const l of o.lines ?? []) lines.push(`${l.text} [${l.cites.map((c) => `${c.kind} ${c.id}`).join(", ")}]`);
         if (o.moreLines !== undefined) lines.push(`${o.moreLines} more line${o.moreLines === 1 ? "" : "s"} not shown; ask for a narrower view.`);
         break;
-      case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId}: say to apply it, or to discard it.` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
+      case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId} waits for your word: apply it, or discard it?` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Apply it, or discard it?`); break;
       case "applied":
         if (!(o.op === "decision.record" && o.shown !== undefined)) lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
         // A captured or corrected agenda topic is shown as it now reads, so the owner can check it.
