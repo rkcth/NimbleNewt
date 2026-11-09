@@ -2090,6 +2090,20 @@ export function defineStopTests(backendName: string): void {
       assert.equal(await c.stops.holding(c.task), undefined, "the finished stop is not the cause of this pause");
     });
 
+    suite("a Force Stop that was resumed does not hold when its scope is merely paused again: its own, or an agent's through a wider look (second review of card L02e)", async (c) => {
+      const agent = { kind: "agent", id: c.agentA } as const;
+      const forced = await c.stops.force(c.owner, { commandId: cid("f"), scope: agent, reason: "on fire" });
+      assert.equal((await c.stops.holding(c.task, "child-y", { wider: true }))?.intentId, forced.intentId, "held while the force stop's own pause stands");
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: agent, reason: "back" });
+      await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: agent, reason: "just a pause" });
+      assert.equal(await c.stops.holding(c.task, "child-y", { wider: true }), undefined, "the finished force stop is not the cause of this pause");
+      const own = await c.stops.force(c.owner, { commandId: cid("f2"), scope: scopeOf(c.task), reason: "on fire" });
+      assert.equal((await c.stops.holding(c.task))?.intentId, own.intentId);
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "back" });
+      await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: scopeOf(c.task), reason: "just a pause" });
+      assert.equal(await c.stops.holding(c.task), undefined, "nor is the task's own finished force stop");
+    });
+
     suite("a stop does not hold a child its requester may not control (card L02d review)", async (c) => {
       const stop = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
       await c.stops.advance(c.owner, { intentId: stop.intentId });

@@ -222,7 +222,8 @@ export class StopService {
     const existing = id === undefined ? undefined : await this.#runner.get(KIND, id);
     if (existing === undefined || TERMINAL.includes((existing.body as unknown as StopIntentBody).phase)) {
       id = derivedId("stp", scopedCommandId(by.id, command.commandId));
-      await this.#create(by, command.commandId, id, scope, target.projectId, "force-stop", reason);
+      // The pause the Force Stop holds by is recorded like a request's, so once the scope is resumed and merely paused again the finished Force Stop no longer holds swarm children (`holding`; second review of card L02e).
+      await this.#create(by, command.commandId, id, scope, target.projectId, "force-stop", reason, (await this.#pauses.gate(by, scope))?.requestId);
     } else {
       const ref: AggregateRef = { kind: FORCE_REF, id: mine };
       await this.#runner.command("stop.force-ref", { commandId: `stop-fref-${mine.slice(4)}`, actor: by.id }, async () => ({ payload: { intentId: id! }, build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { intentId: id! } }], detail: {} }) }));
@@ -536,7 +537,7 @@ export class StopService {
     return [...b.history, { phase, at: this.#runner.now(), by, note }].slice(-STOP_LIMITS.history);
   }
 
-  async #create(by: Principal, commandId: unknown, id: string, scope: PauseScope, projectId: string | undefined, mode: StopMode, reason: string): Promise<void> {
+  async #create(by: Principal, commandId: unknown, id: string, scope: PauseScope, projectId: string | undefined, mode: StopMode, reason: string, gateRequestId?: string): Promise<void> {
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("stp", scopeKey(scope)) };
     await this.#runner.command("stop.request", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { scope: scope as unknown as JsonObject, mode, reason },
@@ -544,7 +545,7 @@ export class StopService {
         const at = this.#runner.now();
         const active = await this.#runner.get(ACTIVE, activeRef.id);
         const ref: AggregateRef = { kind: KIND, id };
-        const body: StopIntentBody = { scope, ...(projectId === undefined ? {} : { projectId }), mode, phase: "terminating", requestedBy: by.id, requestedAt: at, reason, deadlineAt: at, spent: 0, backupUsed: false, inventory: [], history: [{ phase: "terminating", at, by: by.id, note: `${mode} requested` }] };
+        const body: StopIntentBody = { scope, ...(projectId === undefined ? {} : { projectId }), mode, phase: "terminating", ...(gateRequestId === undefined ? {} : { gateRequestId }), requestedBy: by.id, requestedAt: at, reason, deadlineAt: at, spent: 0, backupUsed: false, inventory: [], history: [{ phase: "terminating", at, by: by.id, note: `${mode} requested` }] };
         const pointer = clean({ intentId: id });
         return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, active === undefined ? { type: "create", ref: activeRef, body: pointer } : { type: "update", ref: activeRef, expectedRevision: active.revision, body: pointer }], detail: { scope: scope as unknown as JsonObject, mode } };
       },
