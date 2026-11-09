@@ -57,6 +57,8 @@ export function addEvent(s, e) {
         thinkingChars: thinking.trim().length,
         toolCallsInMessage: calls,
         // Bounded copies, enough to read the ending and to quote it in a report.
+        // A report often says "Done." first and lists tests last, so both ends are kept and read for a done claim.
+        visibleHead: visible.trim().slice(0, 600),
         visibleTail: visible.trim().slice(-600),
         thinkingTail: thinking.trim().slice(-300),
         errorMessage: typeof m.errorMessage === "string" ? m.errorMessage.slice(0, 300) : null,
@@ -110,7 +112,7 @@ export function endKindOf(summary) {
 }
 
 /** Whether the last visible text claims the work is done. */
-export const claimsDone = (summary) => summary.last !== null && summary.last.visibleChars > 0 && DONE_CLAIM.test(summary.last.visibleTail) && !ANNOUNCES_STEP.test(summary.last.visibleTail);
+export const claimsDone = (summary) => summary.last !== null && summary.last.visibleChars > 0 && (DONE_CLAIM.test(summary.last.visibleHead ?? "") || DONE_CLAIM.test(summary.last.visibleTail)) && !ANNOUNCES_STEP.test(summary.last.visibleTail);
 
 /**
  * Names a run's ending. Input:

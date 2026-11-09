@@ -104,3 +104,12 @@ test("PLAN.md checkboxes and node --test counts are read", () => {
   assert.deepEqual(testCounts("ℹ tests 3\nℹ pass 3\nℹ fail 0\n"), { tests: 3, pass: 3, fail: 0 });
   assert.deepEqual(testCounts("nothing"), { tests: null, pass: null, fail: null });
 });
+
+test("the W01 smoke run: a long report that opens with 'Done.' and lists tests last is a false done when a hidden test fails", async () => {
+  const s = await load("quote-lines-smoke-false-done.jsonl");
+  assert.equal(s.last.stopReason, "stop");
+  assert.ok(s.last.visibleChars > 0);
+  const r = classify({ summary: s, hidden: { ran: true, passed: false, tests: 154, pass: 153, fail: 1 }, changed: true });
+  assert.equal(r.outcome, "wrong", r.reason);
+  assert.equal(r.claimsDone, true);
+});
