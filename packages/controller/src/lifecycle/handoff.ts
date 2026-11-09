@@ -9,7 +9,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { cutSection, digestSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
+import { cutSection, digestSection, neutralise, safeSlice, summarised, wellFormed } from "./handoff-cut.js";
 import type { PauseScope, PauseService } from "./pause.js";
 import type { StopService } from "./stop.js";
 
@@ -130,7 +130,7 @@ const PRIVATE_SECTIONS: readonly string[] = ["drafts", "responsibilities"];
 const HEADED_SECTIONS: readonly string[] = ["brief", "responsibilities", "unfinishedWork"];
 /**
  * Sections that only grow across hand-offs (card C07k): the run's completed work lists every artifact and decision it recorded, so it gains entries at every hand-off. Past `HANDOFF_LIMITS.digestWhole`
- * entries it is summarised (its newest entries and the owner's marked ones whole, the older counted on a marker naming the archive of the whole section), so the package stays the same size however
+ * entries it is summarised (its newest entries, among them the newest of each kind, and the owner's marked ones whole, the older counted on a marker naming the archive of the whole section), so the package stays the same size however
  * many hand-offs the task has had.
  */
 const DIGESTED_SECTIONS: readonly string[] = ["completedWork"];
@@ -678,7 +678,7 @@ export class HandoffService {
       const original = wellFormed(redactText(value));
       const shown = original.split("\n").map(neutralise).join("\n");
       const digested = DIGESTED_SECTIONS.includes(name);
-      if (shown.length <= HANDOFF_LIMITS.section && !(digested && shown.split("\n").length > HANDOFF_LIMITS.digestWhole)) { sections[name] = shown; continue; }
+      if (shown.length <= HANDOFF_LIMITS.section && !(digested && summarised(shown, HANDOFF_LIMITS.digestWhole))) { sections[name] = shown; continue; }
       marks ??= await this.#marks(b.taskId);
       const archived = await this.#archive(handoffId, b, name, original);
       // A brief's title and the line saying what the responsibilities are and how to move them head their sections and stay with them; marks are looked for in the lines as the source wrote them.

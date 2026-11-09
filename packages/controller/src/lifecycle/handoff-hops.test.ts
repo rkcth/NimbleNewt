@@ -5,7 +5,7 @@ import { AssignmentService } from "../domain/assignments.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { CUT_MARKER, HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, PauseService, StopService, controllerHandoffSources, type StopPorts } from "./index.js";
+import { CUT_MARKER, HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, PauseService, StopService, controllerHandoffSources, summarised, type StopPorts } from "./index.js";
 
 /**
  * Card C07h: a task passed A to B to A about 50 times. At every hop the test records what the next agent is given (the package: its size by section, and what survives in it) using the real hand-off
@@ -173,6 +173,11 @@ for (const backend of backends) {
     for (const h of await run()) { const id = latestDiagnosis(h.hop); assert.ok(shown(h, id), `hop ${h.hop}: the most recent diagnosis (${id}) was cut`); assert.match(desk.get(id) ?? "", new RegExp(`^LATEST-DIAGNOSIS-${h.hop}:`), "the reference does not lead to this hop's diagnosis"); }
   });
 
+  // Review of card C07k: the completed work lists artifacts before decisions, so a digest of its newest lines alone left this hop's artifact out of view.
+  test(`${backend.name}: 50 hand-offs: the run's newest artifact is shown in every package`, async () => {
+    for (const h of await run()) assert.ok(shown(h, `Artifact: ${recordId(h.hop * 10 + 9)}`), `hop ${h.hop}: the newest artifact is only in the archive`);
+  });
+
   // Since card C07j a cut keeps the newest entries, so the early ones are found through the marker's archive: the check reads it back, as the next agent would.
   test(`${backend.name}: 50 hand-offs: the seeded early decision and early failure are still found after the last hop`, async () => {
     const last = (await run())[HOPS - 1]!;
@@ -189,7 +194,7 @@ for (const backend of backends) {
       for (const [name, text] of Object.entries(h.sections)) {
         const raw = h.raw[name] ?? "";
         // Since card C07k the completed work is also summarised past a fixed number of entries, under the same marker, so it is judged by its entries as well as its size.
-        const fits = raw.length <= HANDOFF_LIMITS.section && !(name === "completedWork" && raw.split("\n").length > HANDOFF_LIMITS.digestWhole);
+        const fits = raw.length <= HANDOFF_LIMITS.section && !(name === "completedWork" && summarised(raw, HANDOFF_LIMITS.digestWhole));
         if (fits) { assert.equal(text, raw, `hop ${h.hop}: ${name} fits and is given whole`); continue; }
         const m = /^\[cut: (\d+) of (\d+) entries, archive (\S+)\]/.exec(text);
         assert.ok(m !== null, `hop ${h.hop}: ${name} was cut with no marker`);

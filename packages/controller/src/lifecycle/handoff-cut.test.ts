@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CUT_MARKER, SHORTENED, cutSection, digestSection, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
+import { CUT_MARKER, SHORTENED, cutSection, digestSection, neutralise, safeSlice, summarised, wellFormed } from "./handoff-cut.js";
 
 // Card C07j: the cut of one hand-off section, on its own. The service tests (handoff.test.ts) check it with the archive in every store.
 const ARCHIVE = "hnd-abcdefghijklmnopqrst";
@@ -195,16 +195,47 @@ test("a digest gives a section of no more than its whole entries unchanged", () 
 });
 
 test("a digest keeps the newest entries whole and counts the older ones by kind on the cut marker, naming the archive", () => {
-  const all = work(2, 100);
+  const all = work(12, 100);
   const out = digestSection(all.join("\n"), 8, 4000, [], ARCHIVE);
   const lines = out.text.split("\n");
   const m = CUT_MARKER.exec(lines[0]!);
   assert.ok(m !== null, lines[0]);
-  assert.deepEqual([Number(m[1]), Number(m[2]), m[3]], [94, 102, ARCHIVE]);
-  assert.deepEqual(out.cut, { left: 94, total: 102 });
-  assert.match(lines[0]!, /92 decisions and 2 artifacts left out \(the owner's marked ones and the newest 8 are kept\)/);
+  assert.deepEqual([Number(m[1]), Number(m[2]), m[3]], [104, 112, ARCHIVE]);
+  assert.deepEqual(out.cut, { left: 104, total: 112 });
+  assert.match(lines[0]!, /93 decisions and 11 artifacts left out \(the owner's marked ones and the newest 8, among them the newest of each kind, are kept\)/);
   assert.match(lines[0]!, /handoff\.archive\.read \{ "archiveId": "hnd-abcdefghijklmnopqrst" \}/);
-  assert.deepEqual(lines.slice(1), all.slice(-8), "the newest eight entries, whole and in order");
+  assert.deepEqual(lines.slice(1), [all[11]!, ...all.slice(-7)], "the newest artifact and the newest seven decisions, whole and in order");
+});
+
+// Review of card C07k: the source lists every artifact before every decision, so the newest eight lines alone left out the run's newest artifact once it had recorded eight decisions.
+test("a digest keeps the run's newest artifact in view however many decisions follow it", () => {
+  for (const n of [8, 100]) {
+    const all = work(2, n);
+    const out = digestSection(all.join("\n"), 8, 4000, [], ARCHIVE);
+    assert.deepEqual(out.text.split("\n").slice(1), [all[1]!, ...all.slice(-7)]);
+    assert.match(out.text, new RegExp(`^\\[cut: ${n - 6} of ${n + 2} entries[^\\n]*: ${n - 7} decision${n - 7 === 1 ? "" : "s"} and 1 artifact left out`));
+  }
+  assert.equal(summarised(work(1, 7).join("\n"), 8), false);
+  assert.equal(summarised(work(1, 8).join("\n"), 8), true);
+});
+
+// Review of card C07k: each marked entry rendered the whole section again, so a long section under a mark that matches every entry took minutes (20000 entries: 75 s).
+test("a digest of a long section whose every entry is marked is quick and stays within the limit", { timeout: 30_000 }, () => {
+  const all = Array.from({ length: 50_000 }, (_, i) => `Decision: d${i}`);
+  const started = Date.now();
+  const out = digestSection(all.join("\n"), 8, 4000, ["decision"], ARCHIVE);
+  assert.ok(Date.now() - started < 10_000, `${Date.now() - started} ms`);
+  assert.ok(out.text.length <= 4000 && out.text.length > 3900, `${out.text.length}: the marked entries fill the room`);
+  const lines = out.text.split("\n");
+  assert.deepEqual(lines.slice(-8), all.slice(-8));
+  assert.equal(Number(CUT_MARKER.exec(lines[0]!)![1]), 50_000 - (lines.length - 1), "the marker counts what was left out");
+});
+
+test("a digest that keeps every older entry because each is marked says nothing was left out", () => {
+  const all = work(0, 10);
+  const out = digestSection(all.join("\n"), 8, 4000, ["dec-"], ARCHIVE);
+  assert.deepEqual(out.text.split("\n").slice(1), all);
+  assert.match(out.text, /^\[cut: 0 of 10 entries[^\n]*: no entry left out/);
 });
 
 test("a digest is the same size however long the section grows (the package stops growing with the hand-offs)", () => {
