@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { foreignValue, RELEASE_ID_KEYS, saysAcknowledgeFlaky, saysMainAutomatic, saysPlatform } from "./commands.js";
+import { foreignValue, platformsNamed, RELEASE_ID_KEYS, saysAcknowledgeFlaky, saysMainAutomatic, saysPlatform } from "./commands.js";
 
 /**
  * The owner's own words behind a flaky approval and behind a release ID (card X09b part 2 review). `acknowledgeFlaky` is a boolean, so `foreignValue` cannot see it: it needs its own word check, and a
@@ -190,6 +190,24 @@ test("the owner's natural spelling of a platform names it: linux-x64, my mac, wi
   assert.equal(saysPlatform("", "os", "linux"), false, "no words name nothing");
 });
 
+test("a platform the owner ruled out names nothing, and so does the ordinary word that happens to spell one (card X09b part 2 review 3, item D3)", () => {
+  // Ruled out: the words the owner denies with are the opposite of authorizing.
+  assert.equal(saysPlatform("let host:rig run release tests on linux x64, not the mac", "os", "darwin"), false, "\"not the mac\" rules mac out");
+  assert.equal(saysPlatform("let host:rig run release tests on linux, not x64", "arch", "x64"), false, "\"not x64\" rules the chip out");
+  assert.equal(saysPlatform("authorize host:rig for release tests on linux; no mac, no arm64", "os", "darwin"), false, "\"no mac\" rules mac out");
+  assert.equal(saysPlatform("authorize host:rig for release tests on linux x64; it isn't windows", "os", "win32"), false, "\"isn't windows\" rules windows out");
+  assert.equal(saysPlatform("authorize host:rig for release tests on linux x64, never windows", "os", "win32"), false, "\"never windows\" rules windows out");
+  assert.equal(saysPlatform("authorize host:rig for release tests on windows, not linux", "os", "win32"), true, "the platform the owner did say still counts beside the one they denied");
+  assert.equal(saysPlatform("let host:rig run release tests on linux x64, not the mac", "os", "linux"), true, "and the os of a denial-free phrase is still named");
+
+  // An ordinary word: an address is written down on a sticker, and it is not a macOS.
+  const sticker = "let host:box run release tests on linux x64, its MAC address is on the sticker";
+  assert.equal(saysPlatform(sticker, "os", "darwin"), false, "a MAC address is not macOS");
+  assert.equal(saysPlatform(sticker, "os", "linux"), true, "the os of the same message is still the owner's own");
+  assert.equal(saysPlatform(sticker, "arch", "x64"), true, "and so is its chip");
+  assert.equal(saysPlatform("authorize host:rig for release tests on my mac", "os", "darwin"), true, "\"my mac\" with no address after it still means macOS");
+});
+
 test("an ID the owner wrote with markdown, a colon or trailing punctuation is still their own whole word, and a longer or joined name still is not", () => {
   // What owners actually type around an ID: markdown bold and backticks, a label and colon before it, a quote, a bracket, a comma or a full stop after it (card X09b part 2 review 2, item 6).
   for (const text of ["approve **rcn-1a2b** now", "approve `rcn-1a2b` now", "candidate:rcn-1a2b", "approve rcn-1a2b: it is the one", "approve rcn-1a2b_ please", 'approve "rcn-1a2b" now', "approve rcn-1a2b, then tell me", "(rcn-1a2b) is the one", "approve rcn-1a2b."]) {
@@ -203,4 +221,16 @@ test("an ID the owner wrote with markdown, a colon or trailing punctuation is st
   assert.equal(foreignValue({ hostId: "host:rig" }, "authorize host:rig2 for release tests", "", RELEASE_ID_KEYS), "hostId", "host:rig2 is another machine");
   assert.equal(foreignValue({ hostId: "host:rig" }, "authorize host:rig_2 for release tests", "", RELEASE_ID_KEYS), "hostId", "an underscore with more after it joins the name");
   assert.equal(foreignValue({ attemptId: "rat-1a2b" }, "stop rat-1a2b: it is stuck", "", RELEASE_ID_KEYS), undefined, "a colon after an attempt ID is punctuation");
+});
+
+test("the platforms the owner's words name, so a message naming two of a kind can be asked about instead of guessed (card X09b part 2 review 3, item D3)", () => {
+  assert.deepEqual(platformsNamed("let host:rig run release tests on linux x64", "os"), ["linux"], "one os named");
+  assert.deepEqual(platformsNamed("let host:rig run release tests on linux x64", "arch"), ["x64"], "one chip named");
+  assert.deepEqual(platformsNamed("let host:box run release tests on linux x64, its MAC address is on the sticker", "os"), ["linux"], "the address on the sticker names no second os");
+  assert.deepEqual(platformsNamed("let host:rig run release tests on linux x64, not the mac", "os"), ["linux"], "the os the owner denied is not named");
+  // Two of a kind: the chat cannot tell which one the machine is authorized for, so it must ask rather than take the interpreter's.
+  assert.deepEqual(platformsNamed("let host:rig run release tests on linux arm64; the old one was x64", "arch").sort(), ["arm64", "x64"], "both chips the message mentions");
+  assert.deepEqual(platformsNamed("authorize host:rig for release tests, on mac or linux", "os").sort(), ["darwin", "linux"], "an owner torn between two systems");
+  // The order the choices are listed in is stable whatever order the owner wrote them in.
+  assert.deepEqual(platformsNamed("windows, not linux", "os"), ["win32"], "the denial leaves one");
 });

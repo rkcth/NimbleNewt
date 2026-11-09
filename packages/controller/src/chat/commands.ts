@@ -493,16 +493,42 @@ const PLATFORM_WORDS: Readonly<Record<"os" | "arch", Readonly<Record<string, rea
 /** A name standing on its own: what sits before and after it is not a letter or a digit, so a hyphen, slash, colon or underscore between two names does not join them into one. */
 const namedWord = (words: string, alias: string): boolean => new RegExp(`(?<![A-Za-z0-9])${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "i").test(words);
 
-/** Whether the owner's own words name this platform: `linux-x64` and `linux/x64` name both, a mac (or macOS) is darwin, windows is win32, x86_64 and amd64 are x64, and aarch64 is arm64. */
+/**
+ * How an owner takes a platform away rather than naming it (card X09b part 2 review 3, item D3): "linux x64, not the mac" says one os, and the mac in it is the one they refuse. A denial counts only
+ * within its own clause and within a few words of the name, so "linux, not windows; and the mac mini too" still names the mac.
+ */
+const DENIAL = /\b(?:not|no|never|neither|nor|except|without|instead of|other than|rather than|exclude[sd]?|excluding|avoid(?:s|d)?|cannot|can['’]?t|couldn['’]?t|shouldn['’]?t|wouldn['’]?t|won['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t)\b[^.!?;\n]{0,30}$/i;
+/** The ordinary words an alias also spells (D3): a MAC address is a number printed on a sticker and says nothing about what system a machine runs. */
+const ORDINARY_AFTER: Readonly<Record<string, readonly string[]>> = { mac: ["address", "addresses"] };
+
+/** Whether this alias stands in the owner's own words as a name of its own: not denied just before it, and not the ordinary word it also spells. */
+function namesPlatform(words: string, alias: string): boolean {
+  const re = new RegExp(`(?<![A-Za-z0-9])${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "gi");
+  for (let m = re.exec(words); m !== null; m = re.exec(words)) {
+    if (DENIAL.test(words.slice(Math.max(0, m.index - 60), m.index))) continue;
+    if ((ORDINARY_AFTER[alias.toLowerCase()] ?? []).some((after) => new RegExp(`^\\s+${after}\\b`, "i").test(words.slice(m.index + m[0].length)))) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Which platforms of this kind the owner's own words name (card X09b part 2 review 3, item D3), in the order the choices are written down: `linux-x64` and `linux/x64` name a linux and an x64, a mac (or
+ * macOS) is darwin, windows is win32, x86_64 and amd64 are x64, and aarch64 is arm64. A name the owner denied ("not the mac") and an ordinary word that merely spells one ("its MAC address") name nothing.
+ */
+export function platformsNamed(words: string, key: "os" | "arch"): string[] {
+  return Object.entries(PLATFORM_WORDS[key]).filter(([, aliases]) => aliases.some((alias) => namesPlatform(words, alias))).map(([value]) => value);
+}
+
+/** Whether the owner's own words name this platform by some spelling of it; naming more than one of the same kind is the message being ambiguous, which `platformsNamed` shows. */
 export function saysPlatform(words: string, key: "os" | "arch", value: string): boolean {
   const wanted = value.trim().toLowerCase();
-  return (PLATFORM_WORDS[key][wanted] ?? [wanted]).some((alias) => namedWord(words, alias));
+  return PLATFORM_WORDS[key][wanted] === undefined ? namedWord(words, wanted) : platformsNamed(words, key).includes(wanted);
 }
 
 /** Another platform of the same kind the owner did name — so a refusal can say what they said instead — or undefined when their message names none of that kind (then they are asked, not refused). */
 export function otherPlatform(words: string, key: "os" | "arch", value: string): string | undefined {
-  const wanted = value.trim().toLowerCase();
-  return Object.keys(PLATFORM_WORDS[key]).find((v) => v !== wanted && PLATFORM_WORDS[key]![v]!.some((alias) => namedWord(words, alias)));
+  return platformsNamed(words, key).find((v) => v !== value.trim().toLowerCase());
 }
 
 /** The platforms of this kind the operation accepts, as the choices to offer the owner. */
