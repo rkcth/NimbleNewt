@@ -5,7 +5,7 @@
 //   --tasks id,id        only these tasks            --variants A,B   which variants (C and D need W04 and are refused)
 //   --repeats N          runs per task and variant   --concurrency N  parallel runs (default 1, at most 3: Pi's limit on Radiance)
 //   --results DIR        where results go (default /srv/code/worktrees-pi/eval-results, or PI_EVAL_RESULTS)
-//   --work-root DIR      where throwaway checkouts go (default /srv/code/worktrees-pi, or PI_EVAL_WORK_ROOT)
+//   --work-root DIR      where throwaway checkouts go (default eval-work beside the results, or PI_EVAL_WORK_ROOT)
 //   --repo DIR           the repository that holds the base and solution commits (default: this checkout)
 //   --deps-from DIR      where node_modules are copied from (default: --repo)
 //   --agent CMD          the agent: a .mjs/.js file run with this Node, or an executable (default pi-agent.mjs)
@@ -14,7 +14,7 @@
 //   --calibrate          no agent: check each task's hidden tests fail at its base and pass at its solution
 //   --keep               keep the throwaway checkouts      --dry-run  print what would run
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,7 +50,8 @@ async function main() {
   const referenceDirs = [repo];
   try { referenceDirs.push(dirname(resolve(repo, execFileSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim()))); } catch { /* no git */ }
   const resultsDir = resolve(o.results ?? defaultRoot("PI_EVAL_RESULTS", "eval-results"));
-  const workRoot = resolve(o["work-root"] ?? (process.env.PI_EVAL_WORK_ROOT || dirname(resultsDir)));
+  // A directory of its own, so an agent that lists its parent sees other eval runs, not the worktrees holding merged solutions.
+  const workRoot = resolve(o["work-root"] ?? (process.env.PI_EVAL_WORK_ROOT || join(dirname(resultsDir), "eval-work")));
   const concurrency = Number(o.concurrency ?? 1);
   if (!(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= MAX_CONCURRENCY)) throw new Error(`--concurrency must be 1..${MAX_CONCURRENCY} (Radiance is shared; Pi's limit is ${MAX_CONCURRENCY})`);
   const only = o.tasks ? new Set(o.tasks.split(",")) : null;
@@ -71,12 +72,18 @@ async function main() {
   await mkdir(resultsDir, { recursive: true });
   await mkdir(workRoot, { recursive: true });
   const children = new Set();
+  const activeDirs = new Set();
   const ctx = {
-    set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: agentPath, batchId, benchCommit, children,
+    set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: agentPath, batchId, benchCommit, children, activeDirs,
     keep: o.flags.has("keep"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
     log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`),
   };
-  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { for (const c of children) { try { process.kill(-c.pid, "SIGTERM"); } catch { try { c.kill(); } catch { /* gone */ } } } process.exit(130); });
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => {
+    for (const c of children) { if (c.exitCode !== null || c.signalCode !== null) continue; try { process.kill(-c.pid, "SIGTERM"); } catch { try { c.kill(); } catch { /* gone */ } } }
+    // An interrupted batch leaves no checkout behind (each holds a copy of node_modules), unless --keep.
+    if (!ctx.keep) for (const d of activeDirs) { try { rmSync(d, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } }
+    process.exit(130);
+  });
 
   if (o.flags.has("calibrate")) {
     let ok = true;

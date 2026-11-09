@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { git, prepareCheckout, runOne, calibrateOne } from "./lib/runner.mjs";
+import { git, prepareCheckout, runOne, calibrateOne, foreignPaths } from "./lib/runner.mjs";
+import { homedir } from "node:os";
 import { loadTaskset } from "./lib/taskset.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -109,4 +110,35 @@ test("variants that need W04 are refused by the command, not run", () => {
   let code = 0;
   try { execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", set.file, "--repo", repo, "--variants", "C", "--results", join(root, "r2")], { stdio: "pipe" }); } catch (e) { code = e.status; }
   assert.equal(code, 2);
+});
+
+test("a solution that passes the hidden tests but does not build is not a finish", async () => {
+  const broken = { ...set.tasks[0], setup: { argv: ["node", "-e", "process.exit(2)"] } };
+  const r = await runOne(ctx("solve"), broken, "A", 1);
+  assert.equal(r.hidden.built, false);
+  assert.equal(r.hidden.passed, false);
+  assert.notEqual(r.outcome, "verified-finish");
+  assert.equal(r.outcome, "wrong", r.reason);
+});
+
+test("a process the agent left running in its checkout is stopped when the agent ends", { skip: process.platform !== "linux" }, async () => {
+  const pidFile = join(root, "straggler.pid");
+  const r = await runOne(ctx("straggler", { agentEnv: { STUB_AGENT_MODE: "straggler", STUB_AGENT_PID_FILE: pidFile } }), set.tasks[0], "A", 1);
+  assert.ok(r.stragglersKilled >= 1, JSON.stringify(r));
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) { try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 20)); } catch { alive = false; } }
+  assert.equal(alive, false, "the straggler is gone");
+});
+
+test("tool calls that name another checkout, the results or the home directory are flagged; the run's own checkout is not", () => {
+  const own = "/srv/code/worktrees-pi/eval-work/eval-x";
+  const watched = ["/srv/code/repos/nimblenewt", "/srv/code/repos", "/srv/code/worktrees-pi"];
+  const cmd = (command) => JSON.stringify({ command });
+  assert.deepEqual(foreignPaths([cmd(`cd ${own} && npx tsc --build`), cmd(`node --import file://${own}/scripts/offline-guard.mjs --test dist/a.test.js`), JSON.stringify({ path: `${own}/packages/x.ts`, content: "import a from '../b/c.js';" })], { ownDir: own, watched }), []);
+  assert.deepEqual(foreignPaths([cmd("cat /srv/code/worktrees-pi/c07m/packages/controller/src/x.test.ts")], { ownDir: own, watched }), ["/srv/code/worktrees-pi/c07m/packages/controller/src/x.test.ts"]);
+  assert.deepEqual(foreignPaths([JSON.stringify({ path: "/srv/code/repos/nimblenewt/README.md" })], { ownDir: own, watched }), ["/srv/code/repos/nimblenewt/README.md"]);
+  assert.deepEqual(foreignPaths([cmd("ls ~/.claude/projects")], { ownDir: own, watched }), [join(homedir(), ".claude/projects")]);
+  assert.deepEqual(foreignPaths([cmd("ls /srv")], { ownDir: own, watched }), ["/srv"]);
+  assert.deepEqual(foreignPaths([cmd("ls /usr/bin /tmp/x")], { ownDir: own, watched }), []);
 });

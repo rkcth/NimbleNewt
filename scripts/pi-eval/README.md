@@ -43,10 +43,14 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
   (provider, model, thinking), start and end time, wall time, exit code, timeout, **outcome** and the reason, the end kind,
   the last stop reason and visible characters, turns, tool calls, tokens, nudges (0 until W04), PLAN.md progress, commits
   ahead of the base, the diff stat, the hidden test counts, and whether a tool call named another checkout (contaminated).
-- `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`), the setup and hidden-test output, the diff stat.
+- `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`, stdout only), Pi's stderr (`pi-stderr.log`), the
+  setup and hidden-test output, the diff stat.
 - `<batchId>-report.md`: the report for that batch. `calibration.jsonl` and `calibration/<task>/`: calibration runs.
 
-Throwaway checkouts are `/srv/code/worktrees-pi/eval-<runId>` and are removed after each run (`--keep` keeps them).
+Throwaway checkouts are `/srv/code/worktrees-pi/eval-work/eval-<runId>` (`--work-root` / `PI_EVAL_WORK_ROOT`), in a
+directory of their own so the agent's parent directory is not the one holding the merged worktrees. Each is removed after
+its run, and on Ctrl-C (`--keep` keeps them). Any process still working in a checkout when the agent ends (Pi starts its
+bash tools in their own process groups, so a hung test or a background server survives the group stop) is killed first.
 
 ## What a run does
 
@@ -65,13 +69,16 @@ Throwaway checkouts are `/srv/code/worktrees-pi/eval-<runId>` and are removed af
    - **timeout**: stopped at the wall-clock limit.
    - **error**: no Pi session, a reply that ended in `error`/`aborted`, a non-zero exit before the run ended, or a bench
      error (a failed checkout, a leak).
-   - **verified-finish**: the hidden tests pass on a worktree the agent changed. (Passing on an unchanged worktree is an
-     error: the task is not calibrated.)
+   - **verified-finish**: the repository builds (`tsc --build` exits 0 with the hidden files in) and the hidden tests pass
+     on a worktree the agent changed. tsc emits despite type errors, so a passing test run on a failed build is not a
+     finish. (Passing on an unchanged worktree is an error: the task is not calibrated.)
    - **length**: the last reply stopped on `length`.
    - **empty**: no visible text, and either no work at all (no tool call) or "No response requested".
    - **stopped-early**: the agent stopped while working: unchecked PLAN.md steps, a thinking-only reply after tool calls,
      an announced next step, a reply that does not claim to be done, or a log that ends without `agent_end`.
-   - **wrong** (false done): the last reply says it is done and the hidden tests fail.
+   - **wrong** (false done): the last reply says it is done and the hidden tests fail. A report that says what is not
+     done ("could not complete", "still fails", "remaining work", "incomplete") is not a done claim; a closing "Let me
+     know ..." is a sign-off, not an announced step. Only the first and last 600 characters of the report are read.
    - **unclassified**: anything the rules above do not cover; the gate requires none.
 
 ## Variants
@@ -157,9 +164,16 @@ capture, hidden tests copied in and run, classification and the report. One run 
   found by reading the hidden tests' imports and the review commits, but only `quote-lines` was read test by test; a run
   that fails one hidden assertion on wording it could not have known counts as a non-finish. Read the hidden tests of the
   M and L tasks against their task texts before trusting their rates.
-- **Isolation is of the checkout, not the machine.** The agent's repository cannot reach the solution, but Pi can read
-  any file the user can, including other checkouts of this repository. Such a run is flagged `contaminated` when a tool
-  call names one (the reference checkout path, the solution's short SHA or the results directory); it is still scored.
+- **Isolation is of the checkout, not the machine.** The agent's repository cannot reach the solution, but Pi runs as the
+  same user and can read any file that user can: the other worktrees under `/srv/code/worktrees-pi` (several hold these
+  very cards' merged solutions), the reference checkout, `~/.claude` transcripts, earlier runs' artifacts, and a
+  concurrent run's checkout after its hidden tests were copied in. A bubblewrap sandbox would close this, but the
+  agent's own test runs need bubblewrap and AppArmor here refuses nested user namespaces, so the controller's
+  sandboxed tests could not run inside one; a separate Unix user would need root. What exists is detection: a run is
+  flagged `contaminated` (and `foreignPaths` lists up to 20) when a tool call's arguments name an absolute path under
+  the reference checkout, any directory holding a checkout, the results, or the home directory (except Pi's install),
+  or the solution's short SHA. It does not see a relative walk (`cat ../c07m/...`), a path built at run time, or a
+  search from `/`. Read flagged runs, and spot-check some unflagged finishes, before trusting a rate.
 - **Nudges and the W02 end kinds** come from the worker once W02/W04 exist; the bench reads the CLI log only, so
   `nudges` is 0 and `endKind` is the bench's own reading.
 - **Windows.** The runner and classifier are plain Node (no shell, `node:path`, `child.kill` where there are no process

@@ -9,8 +9,13 @@ export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "leng
 
 /** Words a final report uses when it says the work is done. Read only to tell a false done (`wrong`) from a stop mid-work; it never makes a run a finish. */
 const DONE_CLAIM = /\b(?:done|complete(?:d|s)?|finished|all (?:\d+ )?(?:of the )?(?:tests?|checks?|steps?) (?:now )?pass(?:ed|es)?|implemented|summary of (?:the )?(?:work|changes)|work is complete)\b/i;
-/** A last line that announces a next step ("Now let me run the tests:") instead of reporting. */
-const ANNOUNCES_STEP = /(?:^|[\n.!]\s*)(?:(?:now|next|then|first|ok(?:ay)?|good)[,:]?\s+)?(?:I'll|I will|I'm going to|let me|let's|I need to)\b[^\n]*$|:\s*$/i;
+/**
+ * A report that says the work is NOT done ("I could not complete step 4", "two tests still fail", "remaining work: ...").
+ * An honest partial report is a stop, not a false done, even though it uses the words DONE_CLAIM looks for.
+ */
+const NOT_DONE = /\b(?:not|never)\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|n't\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|\b(?:unable to|could ?not|couldn't|cannot|can't|did not|didn't|failed to)\s+(?:yet\s+)?(?:complete|finish|get|make|implement|fix)\b|\bremaining (?:work|steps?|tasks?|items?|failures?)\b|\bstill (?:fail(?:s|ing)?|to do|open|unchecked)\b|\b(?:incomplete|partially (?:done|complete[d]?|implemented)|left to do|work in progress)\b/i;
+/** A last line that announces a next step ("Now let me run the tests:") instead of reporting. "Let me know ..." is a sign-off, not a step. */
+const ANNOUNCES_STEP = /(?:^|[\n.!]\s*)(?:(?:now|next|then|first|ok(?:ay)?|good)[,:]?\s+)?(?:I'll|I will|I'm going to|let me(?!\s+know)|let's|I need to)\b[^\n]*$|:\s*$/i;
 /** What a model writes when it answers nothing (seen as the whole thinking of a thinking-only reply). */
 const NO_RESPONSE = /^\s*no response requested\.?\s*$/i;
 
@@ -112,7 +117,14 @@ export function endKindOf(summary) {
 }
 
 /** Whether the last visible text claims the work is done. */
-export const claimsDone = (summary) => summary.last !== null && summary.last.visibleChars > 0 && (DONE_CLAIM.test(summary.last.visibleHead ?? "") || DONE_CLAIM.test(summary.last.visibleTail)) && !ANNOUNCES_STEP.test(summary.last.visibleTail);
+export const claimsDone = (summary) => {
+  const last = summary.last;
+  if (last === null || last.visibleChars === 0) return false;
+  const head = last.visibleHead ?? "";
+  if (!(DONE_CLAIM.test(head) || DONE_CLAIM.test(last.visibleTail))) return false;
+  if (NOT_DONE.test(head) || NOT_DONE.test(last.visibleTail)) return false;
+  return !ANNOUNCES_STEP.test(last.visibleTail);
+};
 
 /**
  * Names a run's ending. Input:

@@ -52,8 +52,9 @@ test("the gates pass only at >=90% S, >=85% M, >=70% L, false done <=5% and no u
 test("the report has a table row per variant and size, each variant's gates and one result line", () => {
   const recs = [...runs("A", "S", { "verified-finish": 1, "stopped-early": 1 }), ...runs("B", "S", { "verified-finish": 2 })];
   const r = renderReport(recs);
-  assert.match(r.text, /\| A +\| S +\| 2 +\| 1 \(50\.0%\)/);
-  assert.match(r.text, /\| B +\| S +\| 2 +\| 2 \(100\.0%\)/);
+  assert.match(r.text, /\| A +\| S +\| 1 +\| 2 +\| 1 \(50\.0%\)/, "tasks, then runs");
+  assert.match(r.text, /\| B +\| S +\| 1 +\| 2 +\| 2 \(100\.0%\)/);
+  assert.match(r.text, /not independent samples/);
   assert.match(r.text, /## Variant A[\s\S]*FAIL: .*M: not measured/);
   assert.match(r.text, /RESULT: FAIL \(A fail, B fail\)$/);
   assert.equal(r.pass, false);

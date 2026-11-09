@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const [dir, promptFile, logFile] = process.argv.slice(2);
 if (!dir || !promptFile || !logFile) {
@@ -24,9 +24,12 @@ const bin = realpathSync(process.env.PI_EVAL_PI_BIN || join(homedir(), ".local",
 const prompt = readFileSync(promptFile, "utf8");
 
 const args = [bin, "-p", ...(sessionId ? ["--session-id", sessionId] : ["--no-session"]), "--no-approve", "--provider", provider, "--model", model, "--thinking", thinking, "--mode", "json", prompt];
+// stdout only in the JSON log: a warning on stderr written into it could split or swallow an event line.
 const log = openSync(logFile, "w");
-const child = spawn(process.execPath, args, { cwd: dir, stdio: ["ignore", log, log], env: { ...process.env, PI_OFFLINE: "1" } });
+const errLog = openSync(join(dirname(logFile), "pi-stderr.log"), "w");
+const child = spawn(process.execPath, args, { cwd: dir, stdio: ["ignore", log, errLog], env: { ...process.env, PI_OFFLINE: "1" } });
 closeSync(log);
+closeSync(errLog);
 // The runner stops the agent by signalling this process; pass it on so Pi is not left running.
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { try { child.kill(sig); } catch { /* already gone */ } });
 child.on("error", (e) => { process.stderr.write(`pi-agent: ${e.message}\n`); process.exit(127); });

@@ -7,8 +7,9 @@
 //   claims-done   says "Done. All tests pass." without changing anything.
 //   crash         starts a session and exits 3 mid-turn.
 //   hang          never ends (for the wall-clock timeout).
+//   straggler     starts a detached background process in the worktree (its PID in STUB_AGENT_PID_FILE), then reports.
 //   solve         copies STUB_AGENT_SOLUTION_DIR's files into the worktree, commits, and reports done (an honest agent).
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { cpSync, writeFileSync } from "node:fs";
 
 const [dir, , logFile] = process.argv.slice(2);
@@ -63,6 +64,14 @@ switch (mode) {
     flush();
     setInterval(() => {}, 1 << 30);
     break;
+  case "straggler": {
+    toolTurn("node server.js &");
+    const c = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: dir, detached: true, stdio: "ignore" });
+    c.unref();
+    writeFileSync(process.env.STUB_AGENT_PID_FILE, String(c.pid));
+    finalTurn([{ type: "text", text: "I started the server and stopped." }]);
+    break;
+  }
   case "solve": {
     toolTurn("ls");
     cpSync(process.env.STUB_AGENT_SOLUTION_DIR, dir, { recursive: true });

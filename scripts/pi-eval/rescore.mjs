@@ -4,7 +4,7 @@
 //   node scripts/pi-eval/rescore.mjs [--results DIR] [--write]
 // Without --write it prints the runs whose outcome would change. With --write it rewrites results.jsonl (the old file is
 // kept as results.jsonl.bak) with the new outcome, and the old one recorded as `rescoredFrom`.
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classify, summarizeLogFile } from "./lib/classify.mjs";
@@ -31,7 +31,9 @@ async function main(argv) {
   process.stdout.write(`${changed} of ${records.length} run(s) change\n`);
   if (argv.includes("--write") && changed > 0) {
     copyFileSync(file, `${file}.bak`);
-    writeFileSync(file, next.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    // Written beside and renamed over, so an interrupted rewrite never leaves a half file.
+    writeFileSync(`${file}.tmp`, next.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    renameSync(`${file}.tmp`, file);
     process.stdout.write(`rewrote ${file} (old copy ${file}.bak)\n`);
   }
   return 0;

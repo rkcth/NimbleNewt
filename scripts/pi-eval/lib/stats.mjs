@@ -31,9 +31,10 @@ export function aggregate(records) {
     const variant = String(r.variant ?? "?");
     const size = SIZES.includes(r.size) ? r.size : "?";
     const key = `${variant}\u0000${size}`;
-    if (!groups.has(key)) groups.set(key, { variant, size, n: 0, counts: emptyCounts(), wallMs: [] });
+    if (!groups.has(key)) groups.set(key, { variant, size, n: 0, tasks: new Set(), counts: emptyCounts(), wallMs: [] });
     const g = groups.get(key);
     g.n++;
+    g.tasks.add(String(r.taskId ?? "?"));
     g.counts[OUTCOMES.includes(r.outcome) ? r.outcome : "unclassified"]++;
     if (Number.isFinite(r.wallMs)) g.wallMs.push(r.wallMs);
   }
@@ -74,15 +75,16 @@ export const pct = (x) => (x === null || !Number.isFinite(x) ? "-" : `${(x * 100
 /** The whole report as text: one table of outcomes per variant and size, then each variant's gates and a pass/fail line. */
 export function renderReport(records, { title = "Pi completion bench" } = {}) {
   const groups = aggregate(records);
-  const cols = ["variant", "size", "runs", "verified", "95% CI", ...OUTCOMES.filter((o) => o !== "verified-finish"), "median wall"];
+  const cols = ["variant", "size", "tasks", "runs", "verified", "95% CI", ...OUTCOMES.filter((o) => o !== "verified-finish"), "median wall"];
   const rows = groups.map((g) => {
     const k = g.counts["verified-finish"];
     const w = wilson(k, g.n);
-    return [g.variant, g.size, String(g.n), `${k} (${pct(k / g.n)})`, `${pct(w.low)}-${pct(w.high)}`, ...OUTCOMES.filter((o) => o !== "verified-finish").map((o) => String(g.counts[o])), minutes(median(g.wallMs))];
+    return [g.variant, g.size, String(g.tasks.size), String(g.n), `${k} (${pct(k / g.n)})`, `${pct(w.low)}-${pct(w.high)}`, ...OUTCOMES.filter((o) => o !== "verified-finish").map((o) => String(g.counts[o])), minutes(median(g.wallMs))];
   });
   const widths = cols.map((c, i) => Math.max(c.length, ...rows.map((r) => r[i].length)));
   const fmt = (r) => `| ${r.map((x, i) => x.padEnd(widths[i])).join(" | ")} |`;
-  const out = [`# ${title}`, "", `${records.length} run(s)`, "", fmt(cols), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...rows.map(fmt), ""];
+  const out = [`# ${title}`, "", `${records.length} run(s)`, "", fmt(cols), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...rows.map(fmt), "",
+    "Repeats of one task are not independent samples: each interval treats every run as independent, so with few tasks per size it is narrower than the truth. A gate met on a handful of tasks is a first reading, not a proof.", ""];
   const variants = [...new Set(groups.map((g) => g.variant))];
   let allPass = variants.length > 0;
   for (const v of variants) {

@@ -5783,5 +5783,15 @@ What is left:
 - ASSUMPTION: c07m holds back `dispatch/handoff-brief.test.ts` from grading. It unit-tests the internal shape of a module the agent has to invent, and the card's own acceptance test (`first-call-hops.test.ts`) and the composed-controller tests still run.
 - ASSUMPTION: "empty" means no visible text and no work done (or "No response requested"). A thinking-only ending after tool calls is stopped-early (c07p), because the agent was mid-work and its next step is visible in its thinking.
 - ASSUMPTION: the gates are judged on the point rate, and the Wilson interval is shown beside it with a warning when it reaches below the gate. Requiring the lower bound to clear 90 % would need over 35 consecutive successes per size.
+
+W01 review (clean-context Opus, 2026-11-09). Fixed, each with a test that fails without the fix (31 bench tests pass):
+
+- A verified finish now needs the rebuild with the hidden files in to succeed. tsc emits despite type errors, so hidden tests could pass on code that does not typecheck, or on a stale dist file the agent built from its own test of the same name.
+- An honest partial report ("could not complete step 4", "still fails", "remaining work", "incomplete") is no longer read as a done claim, so it is stopped-early, not a false done (it inflated the false-done gate). A closing "Let me know if ..." is a sign-off, not an announced step (it hid false dones as stopped-early).
+- Pi's stderr goes to `pi-stderr.log`, no longer into the JSON log where a stray line could split or swallow an event.
+- Processes left running in the checkout when the agent ends are killed (Linux, by /proc cwd): Pi starts bash tools in their own process groups, so the group stop missed a hung test or a background server, which then kept writing into the checkout during grading and outlived the run.
+- Checkouts moved to `/srv/code/worktrees-pi/eval-work/`, so the agent's parent directory is not the one holding the merged worktrees; Ctrl-C removes active checkouts and stops setup and hidden-test runs too.
+- Contamination detection widened: any absolute path in a tool call under the reference checkout, a directory holding checkouts, the results or the home directory (except Pi's install) flags the run and is listed in `foreignPaths`. It is still detection, not isolation: relative walks, run-time paths and searches from `/` are not seen. A bubblewrap sandbox was ruled out because the controller's own tests need bubblewrap and AppArmor refuses nested user namespaces here.
+- The report shows tasks per size beside runs and says that repeats of one task are not independent samples. `rescore.mjs --write` writes a temporary file and renames it.
 - ASSUMPTION: the bench isolates the checkout, not the machine. Pi can read other checkouts, so a run whose tool calls name one (or the solution's short SHA or the results directory) is flagged `contaminated` and still scored.
 - ASSUMPTION: the bench's tests are not added to `npm test` (`scripts/*.test.mjs` only). They spawn git and child processes and take about 10 s, and the bench is an operator tool, not product code.

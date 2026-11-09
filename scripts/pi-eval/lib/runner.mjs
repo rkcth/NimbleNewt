@@ -4,8 +4,9 @@
 // child.kill() where process groups do not exist.
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, readdir, readFile, rm, writeFile, appendFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { cp, mkdir, readdir, readFile, readlink, rm, writeFile, appendFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
 import { expandArgv, renderPrompt } from "./taskset.mjs";
@@ -125,18 +126,66 @@ async function leakedHidden({ repo, solution, files, dir }) {
 }
 
 /** Builds, then runs the task's tests on the checkout. passed only on exit 0 with tests counted and none failing. */
-export async function runHiddenTests({ task, dir, artifacts }) {
+export async function runHiddenTests({ task, dir, artifacts, onSpawn }) {
   const worktreeUrl = pathToFileURL(dir).href;
   const started = Date.now();
   let setupCode = null;
   if (task.setup) {
-    const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: task.setup.env, timeoutMs: 20 * 60_000, outFile: join(artifacts, "hidden-setup.log") });
+    const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: task.setup.env, timeoutMs: 20 * 60_000, outFile: join(artifacts, "hidden-setup.log"), onSpawn });
     setupCode = s.code;
   }
   const t = task.test;
-  const r = await runCommand(expandArgv(t.argv, { worktree: dir, worktreeUrl, testFiles: task.testFiles }), { cwd: join(dir, ...(t.cwd ?? ".").split("/")), env: t.env, timeoutMs: (t.timeoutMinutes ?? 30) * 60_000, outFile: join(artifacts, "hidden-tests.log") });
+  const r = await runCommand(expandArgv(t.argv, { worktree: dir, worktreeUrl, testFiles: task.testFiles }), { cwd: join(dir, ...(t.cwd ?? ".").split("/")), env: t.env, timeoutMs: (t.timeoutMinutes ?? 30) * 60_000, outFile: join(artifacts, "hidden-tests.log"), onSpawn });
   const counts = testCounts(r.output);
-  return { ran: true, passed: r.code === 0 && !r.timedOut && (counts.tests ?? 0) > 0 && counts.fail === 0, exitCode: r.code, timedOut: r.timedOut, setupExitCode: setupCode, ...counts, durationMs: Date.now() - started };
+  // The build must succeed too: tsc emits despite type errors, and a hidden test file the agent's code does not typecheck
+  // against (or a stale dist file left by an agent-written test of the same name) must never count as a pass.
+  const built = setupCode === null || setupCode === 0;
+  return { ran: true, passed: built && r.code === 0 && !r.timedOut && (counts.tests ?? 0) > 0 && counts.fail === 0, built, exitCode: r.code, timedOut: r.timedOut, setupExitCode: setupCode, ...counts, durationMs: Date.now() - started };
+}
+
+/**
+ * Stops every process still working inside `dir` (Linux: read from /proc). Pi starts its bash tools in their own process
+ * groups, so stopping the agent's group can leave a hung test run or a background server behind; it must not keep writing
+ * into the checkout while the hidden tests run, nor outlive the run. Returns the PIDs signalled. Elsewhere a no-op.
+ */
+export async function killProcessesIn(dir) {
+  if (process.platform !== "linux") return [];
+  const root = resolve(dir);
+  const killed = [];
+  let pids = [];
+  try { pids = (await readdir("/proc")).filter((n) => /^\d+$/.test(n)); } catch { return killed; }
+  for (const pid of pids) {
+    if (Number(pid) === process.pid) continue;
+    let cwd;
+    try { cwd = await readlink(`/proc/${pid}/cwd`); } catch { continue; }
+    if (cwd === root || cwd.startsWith(root + sep)) { try { process.kill(Number(pid), "SIGKILL"); killed.push(Number(pid)); } catch { /* gone */ } }
+  }
+  return killed;
+}
+
+const ABS_PATH = /(?:~\/|\/)[A-Za-z0-9._@+~-][^\s"'`;|&<>(){}\\,]*/g;
+
+/**
+ * Absolute paths named in the agent's tool calls that lie where a solution can be: anywhere under the reference
+ * repository, its checkouts' parent directories, the results, or the user's home (transcripts, other tools' runs), other
+ * than the run's own checkout. Detection only: a path built at run time, a relative `../` walk or a search from `/`
+ * is not seen here.
+ */
+export function foreignPaths(commands, { ownDir, watched = [] }) {
+  const own = resolve(ownDir);
+  const home = homedir();
+  const roots = [...new Set([...watched, home].filter(Boolean).map((w) => resolve(w)))];
+  const found = new Set();
+  for (const c of commands) {
+    for (const m of String(c).matchAll(ABS_PATH)) {
+      const raw = m[0].replace(/[.:]+$/, "");
+      const p = raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
+      if (p === own || p.startsWith(own + "/")) continue;
+      if (p.startsWith(join(home, ".local", "pi-cli", "node_modules"))) continue; // Pi's own install
+      if (roots.some((r) => p === r || p.startsWith(r + "/")) || /^\/(?:srv|home|root)\/?$/.test(p)) found.add(p);
+    }
+  }
+  return [...found].slice(0, 20);
 }
 
 /** Whether the agent left anything: a commit past the base, or an uncommitted change. */
@@ -166,13 +215,14 @@ export async function runOne(ctx, task, variantName, repeat) {
     nudges: 0, artifacts,
   };
   const log = (m) => ctx.log?.(`[${runId}] ${m}`);
+  ctx.activeDirs?.add(dir);
   try {
     log(`preparing ${dir} at ${task.base.slice(0, 8)}`);
     await prepareCheckout({ repo: ctx.repo, commit: task.base, dir, copy: task.copy, depsFrom: ctx.depsFrom, forbidden: [task.solution] });
     const leaked = await leakedHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
     if (leaked.length > 0) throw new Error(`hidden files already present at the base: ${leaked.join(", ")}`);
     if (task.setup) {
-      const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl: pathToFileURL(dir).href }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: task.setup.env, timeoutMs: 20 * 60_000, outFile: join(artifacts, "setup.log") });
+      const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl: pathToFileURL(dir).href }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: task.setup.env, timeoutMs: 20 * 60_000, outFile: join(artifacts, "setup.log"), onSpawn: (child) => ctx.children?.add(child) });
       record.setupExitCode = s.code;
     }
     const template = await readFile(variant.promptPath, "utf8");
@@ -192,6 +242,8 @@ export async function runOne(ctx, task, variantName, repeat) {
     record.endedAt = new Date().toISOString();
     record.exitCode = a.code;
     record.timedOut = a.timedOut;
+    const stragglers = await killProcessesIn(dir);
+    if (stragglers.length > 0) record.stragglersKilled = stragglers.length;
     log(`agent ended after ${(record.wallMs / 60000).toFixed(1)} min (exit ${a.code}${a.timedOut ? ", timed out" : ""})`);
     const summary = await summarizeLogFile(logFile);
     const plan = existsSync(join(dir, "PLAN.md")) ? planProgress(readFileSync(join(dir, "PLAN.md"), "utf8")) : null;
@@ -199,19 +251,25 @@ export async function runOne(ctx, task, variantName, repeat) {
     await writeFile(join(artifacts, "diffstat.txt"), `${ch.fullStat}\n`);
     log("copying the hidden tests in and running them");
     await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
-    const hidden = await runHiddenTests({ task, dir, artifacts });
+    const hidden = await runHiddenTests({ task, dir, artifacts, onSpawn: (child) => ctx.children?.add(child) });
     const marks = [...(ctx.referenceDirs ?? [ctx.repo]), task.solution.slice(0, 8), ctx.resultsDir].filter(Boolean);
-    const contaminated = summary.toolCommands.some((c) => marks.some((m) => c.includes(m)));
+    // Watched roots: the reference checkouts, the directory that holds them (sibling worktrees carry merged solutions),
+    // the results, and the work root's siblings. The run's own checkout is never counted.
+    const watched = [...(ctx.referenceDirs ?? [ctx.repo]).flatMap((d) => [d, dirname(d)]), ctx.resultsDir, dirname(ctx.workRoot)].filter(Boolean);
+    const foreign = foreignPaths(summary.toolCommands, { ownDir: dir, watched });
+    const contaminated = foreign.length > 0 || summary.toolCommands.some((c) => marks.some((m) => c.includes(m)));
     const verdict = classify({ summary, hidden, plan, changed: ch.changed, timedOut: a.timedOut, exitCode: a.code });
     Object.assign(record, verdict, {
       stopReason: summary.last?.stopReason ?? null, visibleChars: summary.last?.visibleChars ?? 0, lastText: summary.last?.visibleTail.slice(-300) ?? "",
       turns: summary.turns, toolCalls: summary.toolCalls, tokens: summary.tokens, sessionId: summary.sessionId,
-      plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, contaminated,
+      plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, contaminated, foreignPaths: foreign,
     });
   } catch (e) {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
   } finally {
+    await killProcessesIn(dir).catch(() => {});
     if (!ctx.keep) await rm(dir, { recursive: true, force: true }).catch(() => {});
+    ctx.activeDirs?.delete(dir);
   }
   log(`=> ${record.outcome}: ${record.reason}`);
   return record;
