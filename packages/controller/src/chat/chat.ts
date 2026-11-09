@@ -461,15 +461,18 @@ export class ChatService {
             const what = declared === undefined ? "agent or team" : declared;
             const plural = declared === undefined ? "agents or teams" : `${declared}s`;
             // With no kind said the message is read against both lists; only a name standing as a whole word of the owner's message counts, whatever the interpreter offered for it.
-            const all = await this.#scopeCandidates(token, declared === undefined ? ["agent", "team"] : [declared]);
-            const found = all.filter((c) => nameInWords(words, c.name));
+            const { items: all, complete } = await this.#scopeCandidates(token, declared === undefined ? ["agent", "team"] : [declared]);
+            let found = namesMeant(words, all);
+            // Among the names the owner did write, the one the interpreter read as the name (when it is one of them) is meant: an agent called "the" beside the Alpha team the owner named is not.
+            if (named !== undefined && found.length > 1) { const same = found.filter((c) => sameName(c.name, named)); if (same.length > 0) found = same; }
             const calledThat = named === undefined ? "by a name in your message" : quotedText(named, 80);
             if (found.length === 0) {
-              push({ i, kind: "refused", code: "not_found", message: all.length === 0 ? `no ${what} of this installation is called ${calledThat} and this installation has no ${plural} at all. Did you mean a task or the whole installation?`
+              push({ i, kind: "refused", code: "not_found", message: !complete ? `no ${what} among the first ${String(all.length)} ${plural} of this installation is called ${calledThat}, and there are more than one look covers. Which did you mean? Give its ID to read it.`
+                : all.length === 0 ? `no ${what} of this installation is called ${calledThat} and this installation has no ${plural} at all. Did you mean a task or the whole installation?`
                 : `no ${what} of this installation is called ${calledThat}. Here they are: ${titleList(all.map((c) => c.name))}. Which did you mean?` });
               continue;
             }
-            if (found.length > 1) { push({ i, kind: "asked", question: `More than one ${what} here answers to the name in your message. Which did you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((f) => `${f.id}: ${quotedText(f.name, 60)} (${f.kind})`) }); continue; }
+            if (found.length > 1) { push({ i, kind: "asked", question: `More than one ${what} here answers to the name in your message${found.length > CHAT_LIMITS.options ? ` (${String(found.length)} of them; the first ${String(CHAT_LIMITS.options)} are shown)` : ""}. Which did you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((f) => `${f.id}: ${quotedText(f.name, 60)} (${f.kind})`) }); continue; }
             request["scopeKind"] = found[0]!.kind;
             request["scopeId"] = found[0]!.id;
           } else if (declared === "task" && bare) {
@@ -1558,16 +1561,20 @@ export class ChatService {
   }
 
   /** The installation's agents and teams as the owner can name them (card L02e leftover): the kind a lifecycle scope takes, the ID for that scope and the name it goes by. Retired agents are in: what the stop of one cost is a fair thing to ask afterwards. */
-  async #scopeCandidates(token: string, kinds: readonly ("agent" | "team")[]): Promise<{ kind: "agent" | "team"; id: string; name: string }[]> {
+  /** `complete` is false when a list was longer than the pages one look reads: a name not found then may still be there, and the owner is told so. */
+  async #scopeCandidates(token: string, kinds: readonly ("agent" | "team")[]): Promise<{ items: { kind: "agent" | "team"; id: string; name: string }[]; complete: boolean }> {
     const out: { kind: "agent" | "team"; id: string; name: string }[] = [];
+    let complete = true;
     for (const kind of kinds) {
-      for (const item of await this.#listAll(token, kind === "agent" ? "agent.list" : "team.list", {})) {
+      const listed = await this.#listPages(token, kind === "agent" ? "agent.list" : "team.list", {});
+      if (!listed.complete) complete = false;
+      for (const item of listed.items) {
         const name = String(kind === "agent" ? item["friendlyName"] ?? "" : item["name"] ?? "").trim();
         const id = String(item["id"] ?? "");
         if (name !== "" && id !== "") out.push({ kind, id, name });
       }
     }
-    return out;
+    return { items: out, complete };
   }
 
   /** The project's unbound resource bindings (the list operation takes no paging). */
@@ -1585,16 +1592,21 @@ export class ChatService {
 
   /** Every item of a list operation, bounded (five pages). */
   async #listAll(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+    return (await this.#listPages(token, op, args)).items;
+  }
+
+  /** `#listAll` that also says whether the list ended within the pages read (`complete`), or went on past them. */
+  async #listPages(token: string, op: string, args: Record<string, unknown>): Promise<{ items: Record<string, unknown>[]; complete: boolean }> {
     const items: Record<string, unknown>[] = [];
     let after: string | undefined;
     for (let page = 0; page < 5; page++) {
       const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args: { ...args, limit: 100, ...(after === undefined ? {} : { after }) } });
-      if (!response.ok) { if (response.error.code === "forbidden" || response.error.code === "not_found") return items; throw new DomainError("unavailable", response.error.message); }
+      if (!response.ok) { if (response.error.code === "forbidden" || response.error.code === "not_found") return { items, complete: true }; throw new DomainError("unavailable", response.error.message); }
       items.push(...((response.result["items"] ?? []) as Record<string, unknown>[]));
       after = response.result["next"] as string | undefined;
-      if (after === undefined) break;
+      if (after === undefined) return { items, complete: true };
     }
-    return items;
+    return { items, complete: false };
   }
 
   /** A read through the API: the item, or undefined when it is missing or not readable (the two read alike). */
@@ -2100,8 +2112,22 @@ function meetingsNamed(words: string, items: readonly Record<string, unknown>[],
 const shownTitle = (m: Record<string, unknown>, titleOf: ReadonlyMap<string, string>): string => titleOf.get(String(m["scheduleId"])) ?? String(m["title"]);
 
 /** Whether a name an agent or a team goes by stands as a whole word of the owner's message: `wholeWord`'s rule, and no letter, digit or mark of any script touches it either (Ann is not in Jóann, Bob is not in Bobé). */
-const nameInWords = (text: string, name: string): boolean => wholeWord(text, name)
-  && new RegExp(`(?<![\\p{L}\\p{N}\\p{M}])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}\\p{M}])`, "iu").test(text);
+/** Both sides are read in one Unicode form (NFC), so a name typed with a separate accent mark is the name stored with the accented letter. */
+const nameInWords = (text: string, name: string): boolean => { const t = text.normalize("NFC"); const n = name.normalize("NFC"); return wholeWord(t, n) && nameAt(n).test(t); };
+const nameAt = (name: string, flags = "iu"): RegExp => new RegExp(`(?<![\\p{L}\\p{N}\\p{M}])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}\\p{M}])`, flags);
+const sameName = (a: string, b: string): boolean => a.normalize("NFC").trim().toLowerCase() === b.normalize("NFC").trim().toLowerCase();
+/** The agents and teams whose name the owner's message names: a shorter name that the message has only inside a longer one also named (Bob inside "Bob Squad") is not named on its own. */
+const namesMeant = <T extends { name: string }>(text: string, all: readonly T[]): T[] => {
+  const found = all.filter((c) => nameInWords(text, c.name));
+  const t = text.normalize("NFC");
+  return found.filter((c) => {
+    const longer = found.filter((d) => d.name.normalize("NFC").length > c.name.normalize("NFC").length && nameAt(c.name.normalize("NFC")).test(d.name.normalize("NFC")));
+    if (longer.length === 0) return true;
+    // Blank out where the longer names stand; the shorter one counts only if it still stands somewhere else.
+    const rest = longer.reduce((acc, d) => acc.replace(nameAt(d.name.normalize("NFC"), "giu"), (m) => " ".repeat(m.length)), t);
+    return nameInWords(rest, c.name);
+  });
+};
 
 /** A few things the owner is being told about, as one phrase: `x`, `x and y`, `x, y and z`; a long list is cut with a count. Each is quoted, because a title like this was written by whoever set it up. */
 const titleList = (titles: readonly string[]): string => {

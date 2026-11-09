@@ -268,6 +268,54 @@ for (const backend of backends) {
     assert.ok(twin.options!.some((o) => o.includes(bob)) && twin.options!.some((o) => o.includes(bob2)), JSON.stringify(twin.options));
   });
 
+  suite("a longer name the owner wrote is not also a shorter one inside it, the interpreter's name picks among names the owner wrote, and an accent typed as a separate mark is the same name (card L02e leftover, second review)", async (w, script) => {
+    const bob = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Bob" })).id;
+    const squad = (await w.agents.createTeam(w.owner, { commandId: cid("tm"), name: "Bob Squad" })).id;
+    await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "the" });
+    const alpha = (await w.agents.createTeam(w.owner, { commandId: cid("tm"), name: "Alpha" })).id;
+    const jose = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Jos\u00e9" })).id;
+    const asked: unknown[] = [];
+    const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, stops: stopSpend(asked) }, options);
+    const chat = w.chat({ status });
+    const said = (text: string, request: Record<string, unknown>): void => { script[text] = [ask(request, text)]; };
+    const nfd = "what did stopping Jose\u0301 cost";
+    said("what did stopping Bob Squad cost", { kind: "stop_cleanup", scopeName: "Bob Squad" });
+    said("what did stopping bob cost and how is bob squad", { kind: "stop_cleanup", scopeName: "bob" });
+    said("what did stopping the Alpha team cost", { kind: "stop_cleanup", scopeName: "Alpha" });
+    said(nfd, { kind: "stop_cleanup", scopeKind: "agent", scopeName: "Jose\u0301" });
+    for (const [idx, [text, scope]] of ([
+      ["what did stopping Bob Squad cost", { kind: "team", id: squad }],
+      ["what did stopping the Alpha team cost", { kind: "team", id: alpha }],
+      [nfd, { kind: "agent", id: jose }],
+    ] as [string, unknown][]).entries()) {
+      const r = await chat.submit(w.ownerToken, { messageId: `m-${String(idx)}`, text });
+      assert.equal(r.outcomes[0]!.status, "answered", `${text}: ${JSON.stringify(r.outcomes)}`);
+      assert.deepEqual(asked.at(-1), scope, text);
+    }
+    // A name read that is none of the names the message holds picks nothing: an agent called "the" and the Alpha team are both named, and the owner is asked.
+    // Bob said on its own as well as inside Bob Squad still names Bob: the shorter name is dropped only where it stands inside the longer one.
+    const twice = (await chat.submit(w.ownerToken, { messageId: "m-twice", text: "what did stopping bob cost and how is bob squad" })).outcomes[0]!;
+    assert.equal(twice.status, "answered", JSON.stringify(twice));
+    assert.deepEqual(asked.at(-1), { kind: "agent", id: bob });
+    said("what did stopping the alpha thing cost", { kind: "stop_cleanup", scopeName: "alpha thing" });
+    const both = (await chat.submit(w.ownerToken, { messageId: "m-both", text: "what did stopping the alpha thing cost" })).outcomes[0]!;
+    assert.equal(both.status, "asked", JSON.stringify(both));
+  });
+
+  suite("past the pages one look reads, a name not found is said to be not among those read, never that nothing is called that (card L02e leftover, second review)", async (w, script) => {
+    for (let n = 0; n < 501; n++) await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: `Worker ${String(n)}` });
+    const asked: unknown[] = [];
+    const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, stops: stopSpend(asked) }, options);
+    const text = "what did stopping cyrus cost";
+    script[text] = [ask({ kind: "stop_cleanup", scopeKind: "agent", scopeName: "cyrus" }, text)];
+    const o = (await w.chat({ status }).submit(w.ownerToken, { messageId: "m-1", text })).outcomes[0]!;
+    assert.deepEqual([o.status, o.code], ["refused", "not_found"]);
+    assert.match(o.message!, /among the first 500 agents/);
+    assert.match(o.message!, /more than one look covers/);
+    assert.doesNotMatch(o.message!, /Here they are/);
+    assert.equal(asked.length, 0);
+  });
+
   suite("an agent name in a place with no agents and no teams at all says there is nothing to name (card L02e leftover)", async (w, script) => {
     const asked: unknown[] = [];
     const status = StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, waits: WaitService.withEpoch(w.world.storage, w.projects.epoch, w.assignments, options), blockers: BlockerService.withEpoch(w.world.storage, w.projects.epoch, options), contracts: w.contracts, stops: stopSpend(asked) }, options);
