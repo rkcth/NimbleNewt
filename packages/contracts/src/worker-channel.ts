@@ -16,6 +16,17 @@ export class ChannelError extends Error {
 
 type Obj = { readonly [key: string]: JsonValue };
 
+/**
+ * How a completed turn ended (card W02), as the worker process reads the turn's last reply: `length` (the reply hit the output limit; Pi answers on it as on a normal stop), `empty-visible-text` (the reply had no visible text: thinking only,
+ * or nothing), `no-work-end` (a natural stop without a `work.end` in the turn), `announced-step-without-tool-call` (the last text says it will do something next and no tool call follows) or `normal` (the turn ended with `work.end`).
+ */
+export const TURN_END_KINDS = ["length", "empty-visible-text", "no-work-end", "announced-step-without-tool-call", "normal"] as const;
+export type TurnEndKind = (typeof TURN_END_KINDS)[number];
+/** A turn's ending as the host and the controller read it: `unknown` when the worker did not say (an older worker, a turn that failed or was cancelled, a process that ended). Never read as `normal`. */
+export type HostEndKind = TurnEndKind | "unknown";
+/** The end kind a result says, or `unknown` when it says none or one this side does not know. */
+export const endKindOf = (value: unknown): HostEndKind => (typeof value === "string" && (TURN_END_KINDS as readonly string[]).includes(value) ? (value as TurnEndKind) : "unknown");
+
 /** The model the process is to use: the alias it addresses it by (a path segment of the relay's address), and what Pi needs to know about it. */
 export interface ChannelModel {
   /** The alias in the relay address: `<relayBase>/<alias>/...`. The host maps it to the real endpoint; the process never learns that. */
@@ -109,7 +120,8 @@ export type FromChild =
   | { readonly t: "bridge"; readonly id: number; readonly token: string; readonly request: { readonly op: string; readonly callId: string; readonly args?: Obj } }
   | { readonly t: "fetch"; readonly id: number; readonly url: string; readonly method: string; readonly headers: HeaderList; readonly body?: string }
   | { readonly t: "fetch.abort"; readonly id: number }
-  | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string }
+  /** `endKind` and `visibleChars` (card W02): how a completed turn ended and the length of its last reply's visible text (trimmed). A worker from before W02 sends neither: the host reads that as `unknown`. */
+  | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number }
   /** `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). */
   | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number }
   | { readonly t: "tell.ok"; readonly id: number }
@@ -214,7 +226,10 @@ export function parseFromChild(value: unknown): FromChild {
       const status = value["status"];
       if (status !== "completed" && status !== "failed" && status !== "cancelled") return fail("status: completed, failed or cancelled");
       const text = optStr(value, "text", 4_000_000); const error = optStr(value, "error", 10_000);
-      return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }) };
+      // An end kind this side does not know (a newer worker) is left out, so it reads as unknown, never as normal.
+      const kind = value["endKind"] === undefined ? undefined : endKindOf(optStr(value, "endKind", 60));
+      const visibleChars = value["visibleChars"] === undefined ? undefined : int(value, "visibleChars");
+      return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }), ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visibleChars === undefined ? {} : { visibleChars }) };
     }
     case "checkpoint.ok": {
       const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");

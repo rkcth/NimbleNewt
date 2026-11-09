@@ -41,7 +41,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { sealContract } from "../remote/contract.js";
-import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork } from "./ports.js";
+import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
@@ -341,8 +341,18 @@ export class DispatcherService {
   readonly #path: ToolPath;
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
+  /** Numbers each write of this dispatcher (W02 review): two writes in this process that read one revision must not share a command either, or the second is taken for a replay of the first and dropped. */
+  #updateSeq = 0;
   /** Usage reports made per attempt by this dispatcher, so two turns with identical figures are two records. */
   readonly #usageSeq = new Map<string, number>();
+  /** How each attempt's last turn ended (card W02), held from the turn's result until the write that ends or parks the attempt records it. */
+  readonly #turnEnds = new Map<string, NonNullable<DispatchBody["turnEnd"]>>();
+  /** The turn's ending held for `attemptId`, as fields for the record (taken: it is recorded once). */
+  #takeTurnEnd(attemptId: string): { turnEnd?: NonNullable<DispatchBody["turnEnd"]> } {
+    const te = this.#turnEnds.get(attemptId);
+    this.#turnEnds.delete(attemptId);
+    return te === undefined ? {} : { turnEnd: te };
+  }
   readonly #ending = new Set<Promise<unknown>>();
   #endHook: EndHook | undefined;
   #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean; readonly signal: AbortSignal }) => Promise<void>) | undefined;
@@ -797,7 +807,7 @@ export class DispatcherService {
     await this.#controlled(by, attemptId);
     if (end.confirm !== undefined && !(await end.confirm())) return false;
     const summary = `ended by the agent: ${end.result}${end.note === undefined ? "" : `: ${end.note}`}${end.submissionId === undefined ? "" : ` (submission ${end.submissionId})`}`;
-    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false, skipHook: true, ...(end.result === "partial" ? { partial: true } : {}) });
+    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false, skipHook: true, agentEnded: true, ...(end.result === "partial" ? { partial: true } : {}) });
     return true;
   }
 
@@ -1022,7 +1032,7 @@ export class DispatcherService {
       const next = withSlotSpans(d.body, mutate(d.body), this.#runner.now());
       const ref: AggregateRef = { kind: DISPATCH_KIND, id: d.aggregate.id };
       try {
-        await this.#runner.command("dispatch.update", { commandId: `dpa-up:${attemptId}:${d.revision}:${this.#instance}`, actor: DISPATCHER_ACTOR }, async () => ({
+        await this.#runner.command("dispatch.update", { commandId: `dpa-up:${attemptId}:${d.revision}:${this.#instance}:${++this.#updateSeq}`, actor: DISPATCHER_ACTOR }, async () => ({
           payload: { attemptId, revision: d.revision },
           build: async () => ({ ref, creates: false, changes: mergeChanges([{ type: "update", ref, expectedRevision: d.revision, body: next as unknown as JsonObject }, ...more]), detail: { attemptId, state: next.state } }),
         }));
@@ -2028,6 +2038,10 @@ export class DispatcherService {
             await this.#update(attemptId, (b) => ({ ...b, usageError: why })).catch(() => undefined);
           });
         }
+        // How the turn ended (card W02) goes on the attempt with the write that ends or parks it (no write of its own: two writes from one revision would share a command ID). It decides nothing yet (W03).
+        // A result that says no kind (an older or remote worker) is recorded as unknown, never as normal.
+        const visibleChars = Number.isSafeInteger(result.visibleChars) && result.visibleChars! >= 0 ? result.visibleChars : undefined;
+        this.#turnEnds.set(attemptId, { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now() });
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
@@ -2038,7 +2052,7 @@ export class DispatcherService {
       } catch (error) {
         // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
         if (isDomainError(error, "stale_epoch")) return;
-      }
+      } finally { this.#turnEnds.delete(attemptId); }
     })();
     const turn: Promise<void> = done.finally(() => { if (this.#live.get(attemptId)?.turn === turn) this.#live.delete(attemptId); });
     return turn;
@@ -2052,11 +2066,12 @@ export class DispatcherService {
     // The run on the route is over until the attempt goes on (card R04c): a later start begins a new model call.
     await this.#endCall(attemptId, "succeeded", "the turn ended with calls waiting for an approval");
     this.#path.forget(attemptId, b.parked);
+    const turnEnd = this.#takeTurnEnd(attemptId);
     if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-yield:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "every call of the attempt waits for an approval" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#update(attemptId, (x) => {
       const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
       // The attempt goes on where it was: the native store of its conversation is owned by that host.
-      return { ...rest, state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
+      return { ...rest, ...turnEnd, state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
     });
   }
 
@@ -2089,7 +2104,7 @@ export class DispatcherService {
     this.#endedRunning.add(run);
   }
 
-  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean; agentEnded?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
     // Two paths can end the same attempt at once (the worker's result, the lease scan, a stop): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
     // The end is registered synchronously, before the end hook is awaited, so a second end that comes while the hook runs joins it.
@@ -2113,7 +2128,7 @@ export class DispatcherService {
     return clean === "" ? `the attempt ${outcome}` : clean;
   }
 
-  async #endHooked(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+  async #endHooked(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean; agentEnded?: boolean }): Promise<{ readmitted?: string }> {
     if (this.#endHook !== undefined && options.skipHook !== true) {
       const hook = this.#endHook;
       this.#inHook.add(attemptId);
@@ -2136,7 +2151,7 @@ export class DispatcherService {
     return this.#endInner(attemptId, outcome, this.#cleanSummary(outcome, summary), options);
   }
 
-  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; partial?: boolean; agentEnded?: boolean }): Promise<{ readmitted?: string }> {
     const d = await this.#load(attemptId);
     if (d === undefined || d.body.state === "finished") return {};
     const live = this.#live.get(attemptId);
@@ -2185,7 +2200,10 @@ export class DispatcherService {
       return Object.keys(late).length === 0 ? undefined : late;
     };
     let settleLate: string | undefined;
-    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
+    // The agent's own ending (`work.end`, completed by the sweep while the turn still ran) stops the turn before it can say how it ended: the attempt ended as the agent meant it to, so it is recorded `normal` (W02 review).
+    const held = this.#takeTurnEnd(attemptId);
+    const turnEnd = held.turnEnd === undefined && options.agentEnded === true ? { turnEnd: { endKind: "normal" as const, at: this.#runner.now() } } : held;
+    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), ...turnEnd, state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
       async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
     if (settleLate !== undefined && finished.reservationId === settleLate) { const { releasingId: _r, ...rest } = finished; void _r; await this.#settleReservation(rest, options.lost === true, `:${settleLate}`); }
     // A worker registered while this end was running (its start answered after the end began) is let go too.

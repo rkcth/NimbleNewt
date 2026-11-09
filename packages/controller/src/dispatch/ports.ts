@@ -74,8 +74,20 @@ export interface WorkOrder {
   readonly contract?: DispatchContract;
 }
 
+/**
+ * How a turn ended (card W02), as the worker classified its last reply: the worker channel's kinds (`@nimblenewt/contracts` `TURN_END_KINDS`, restated: the controller does not depend on the contracts package) and `unknown` for a worker
+ * that did not say. A result without one, or with one not listed here, is read as `unknown`, never as `normal`.
+ */
+export const TURN_END_KINDS = ["length", "empty-visible-text", "no-work-end", "announced-step-without-tool-call", "normal", "unknown"] as const;
+export type TurnEndKind = (typeof TURN_END_KINDS)[number];
+export const turnEndKindOf = (value: unknown): TurnEndKind => (typeof value === "string" && (TURN_END_KINDS as readonly string[]).includes(value) ? (value as TurnEndKind) : "unknown");
+
 export interface WorkerTurnResult {
   readonly status: "completed" | "failed" | "cancelled";
+  /** How the turn ended (card W02). Absent (a worker from before W02, a remote worker that does not say): `unknown`. */
+  readonly endKind?: TurnEndKind;
+  /** The length of the last reply's visible text (trimmed), when the worker said. */
+  readonly visibleChars?: number;
   readonly text?: string;
   readonly error?: string;
   /** The conversation checkpoint at the end of the turn (opaque to the controller). */

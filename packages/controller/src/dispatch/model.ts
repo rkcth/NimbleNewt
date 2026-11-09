@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
+import type { TurnEndKind } from "./ports.js";
 
 /**
  * The records of the dispatcher (card H12). A dispatch record is the controller's claim on one attempt: who runs it, on which host, under which route, harness, policy, decision and environment
@@ -111,6 +112,11 @@ export interface DispatchBody {
   readonly recipeRevision?: string;
   /** The recipe the attempt runs with now (reach and limits, as the dispatcher last stated them): every start, resume, move and restart builds its recipe from this, never from the defaults. */
   readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number } };
+  /**
+   * How the attempt's last turn ended (card W02): the worker's classification of its last reply (`unknown` when the worker did not say), the length of that reply's visible text when it said, and when the dispatcher recorded it.
+   * Recorded only: the attempt's outcome does not depend on it yet (W03 acts on it).
+   */
+  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string };
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;
   /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */

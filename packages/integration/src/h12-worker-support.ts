@@ -17,8 +17,8 @@ export const loopbackFetch: typeof globalThis.fetch = (input, init) => new Promi
   req.end(init?.body === undefined ? undefined : Buffer.from(init.body as Buffer));
 });
 
-/** A model endpoint that plays the given replies in order: a reply is a tool call or a text. */
-export async function endpoint(replies: ({ call: { name: string; args: object } } | { text: string })[]): Promise<{ server: Server; url: string; seen: Seen[] }> {
+/** A model endpoint that plays the given replies in order: a reply is a tool call, a text (ended `stop`, or `length` when `finish` says so), or thinking only with no visible text (card W02). */
+export async function endpoint(replies: ({ call: { name: string; args: object } } | { text: string; finish?: "stop" | "length" } | { thinking: string })[]): Promise<{ server: Server; url: string; seen: Seen[] }> {
   const seen: Seen[] = [];
   let at = 0;
   const server = createServer((req: IncomingMessage, res) => {
@@ -32,9 +32,12 @@ export async function endpoint(replies: ({ call: { name: string; args: object } 
       if ("call" in reply) {
         res.write(sse({ role: "assistant", tool_calls: [{ index: 0, id: `call_${at}`, type: "function", function: { name: reply.call.name, arguments: JSON.stringify(reply.call.args) } }] }, null));
         res.write(sse({}, "tool_calls", usage));
+      } else if ("thinking" in reply) {
+        res.write(sse({ role: "assistant", reasoning_content: reply.thinking }, null));
+        res.write(sse({}, "stop", usage));
       } else {
         res.write(sse({ role: "assistant", content: reply.text }, null));
-        res.write(sse({}, "stop", usage));
+        res.write(sse({}, reply.finish ?? "stop", usage));
       }
       res.end("data: [DONE]\n\n");
     });

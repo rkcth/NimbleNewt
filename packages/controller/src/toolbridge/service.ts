@@ -34,7 +34,7 @@ import { checkValue, schemaProblems } from "./schema.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -300,6 +300,7 @@ export class ToolExecutionService {
             case "job.start": response = await this.#jobStart(context, gateway, args); break;
             case "job.status": case "job.output": response = await this.#jobRead(context, request.op as BridgeOperation, args); break;
             case "job.cancel": response = await this.#jobCancel(context, args); break;
+            case "work.end": response = await this.#workEnd(token, context, args); break;
           }
         }
       } finally {
@@ -446,6 +447,17 @@ export class ToolExecutionService {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, ["name", "files"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: "artifact.publish", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, taskId: c.taskId } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * The agent ends its own attempt (`work.end`, card H12n; offered as a bridge tool with card W02, so a turn can end with it and the worker can tell such an ending from a plain stop). It goes through the same door every client uses (the
+   * `work.end` operation with the worker's task credential: only the attempt's own agent may, and a pause or stop refuses it there). The attempt is the one the request came through, never one the request names.
+   */
+  async #workEnd(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, ["submit", "result", "note", "message"]);
+    const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
