@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -1380,9 +1380,9 @@ export class ChatService {
     const ask = (field: string, question: string, rows: { choice: string; says: string }[]) => ({ ok: false as const, kind: "ask" as const, question, options: rows.map((r) => `${r.choice}: ${r.says}`), field: `integration.${field}`, choices: rows.map((r) => r.choice) });
     if (given["landing"] === undefined) {
       const rows = [
-        { choice: "integration-branch", says: "finished work is merged onto a separate integration branch; nothing reaches main until you or an integrator promotes it" },
-        { choice: "human-promotes", says: "finished work waits for a person to promote it" },
-        ...(locked ? [] : [{ choice: "main-automatic", says: "finished work goes to main by itself once its required checks pass, with no human step" }]),
+        { choice: "integration-branch", says: LANDING_MEANS["integration-branch"]! },
+        { choice: "human-promotes", says: LANDING_MEANS["human-promotes"]! },
+        ...(locked ? [] : [{ choice: "main-automatic", says: LANDING_MEANS["main-automatic"]! }]),
         { choice: "default", says: `use the installation default (or the ${profile} profile's, which is ${rec.landing})` },
       ];
       return ask("landing", `How should finished work land on this project? I suggest ${rec.landing}.`, rows);
