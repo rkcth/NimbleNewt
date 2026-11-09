@@ -582,6 +582,8 @@ for (const backend of backends) {
         return r.result!["attemptId"] as string;
       };
       const bogus = "rat-000000000000000000000000";
+      const broken = JSON.parse(JSON.stringify(bogus)) as string;
+      await new Promise((r) => setTimeout(r, 1100)); // a commandId of its own: the store keeps an id unique per owner for a minute
 
       // A candidate that passed only after a failure: the owner accepts it, and the interpreter's invented attempt list is replaced by what the gate says.
       const cand = await submit("a");
@@ -590,7 +592,7 @@ for (const backend of backends) {
       assert.ok(sickRep.ok, JSON.stringify(sickRep));
       const retry = await issue(cand, "a");
       assert.ok((await callAs(worker.token, "release.report", report(retry))).ok, "the host reports the retry that went green");
-      const earlier = (await gate(cand)).cells.flatMap((c: any) => (c.earlierFailures ?? []).map((f: any) => f.id)) as string[];
+      const earlier = (await gate(cand)).cells.flatMap((c: any) => (c.earlierFailures ?? []).map((x: any) => x.id)) as string[];
       assert.deepEqual(earlier, [sick], "the gate lists the one attempt that failed before it passed");
 
       const ackWords = `approve the release candidate ${cand}, I accept the earlier failures`;
@@ -599,6 +601,8 @@ for (const backend of backends) {
       const shownText = (ackShown[0]!.preview ?? []).join(" ");
       assert.match(shownText, new RegExp(sick), "the owner is shown the earlier failure the gate lists");
       assert.equal(shownText.includes(bogus), false, `the attempt ID the interpreter invented is nowhere in what the owner is shown:\n${shownText}`);
+      const ackArgs = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, ackShown[0]!.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
+      assert.deepEqual(ackArgs["expectedFailures"], [sick], `what is sent is the chat's own reading of the gate, not the interpreter's list: ${JSON.stringify(ackArgs)}`);
       const ackApplied = await turn("f4", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(ackApplied[0]!.status, "applied", `the approval carries the chat's own reading of the gate, not the interpreter's list: ${JSON.stringify(ackApplied[0])}`);
       assert.equal((await gate(cand)).approved, true);
@@ -609,9 +613,11 @@ for (const backend of backends) {
       assert.ok((await callAs(worker.token, "release.report", report(green, { sourceCommit: "b".repeat(40) }))).ok, "the clean candidate passed straight away");
       assert.equal((await gate(clean)).needsAcknowledgement, false, "nothing failed before it passed");
       const cleanWords = `approve the release candidate ${clean}`;
-      const cleanShown = await turn("f5", cleanWords, [{ kind: "command", op: "release.approve", args: { candidateId: clean, acknowledgeFlaky: false, expectedFailures: [bogus] }, evidence: cleanWords, basis: "owner" }]);
+      const cleanShown = await turn("f5", cleanWords, [{ kind: "command", op: "release.approve", args: { candidateId: clean, acknowledgeFlaky: false, expectedFailures: [broken] }, evidence: cleanWords, basis: "owner" }]);
       assert.equal(cleanShown[0]!.status, "proposed", JSON.stringify(cleanShown[0]));
       assert.equal((cleanShown[0]!.preview ?? []).join(" ").includes(bogus), false, "the dropped list is not shown to the owner either");
+      const cleanArgs = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, cleanShown[0]!.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
+      assert.equal("expectedFailures" in cleanArgs, false, `an approval the owner did not acknowledge carries no earlier failures at all: ${JSON.stringify(cleanArgs)}`);
       const cleanApplied = await turn("f6", "confirm that approval", [{ kind: "apply_proposal", proposalId: cleanShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(cleanApplied[0]!.status, "applied", `the invented expectedFailures were dropped rather than sent: ${JSON.stringify(cleanApplied[0])}`);
       assert.equal((await gate(clean)).approved, true);
