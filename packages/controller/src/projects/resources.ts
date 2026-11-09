@@ -499,12 +499,13 @@ export class ProjectResourceService {
    * Where a task's checkout is, from records alone (card L04d: the dependency probe a resume check runs needs the directory, and
    * nothing else). Like `dispatchCheckout` it takes no caller's rights, is for code that builds the services, reads only and never
    * writes or pins. `undefined` when the task is gone, names no repository, or its repository is not bound to the project.
+   * `paths` is the project's scope in it (none: all of it), so a probe looks only where the project may.
    */
-  async checkoutLocation(taskId: string): Promise<string | undefined> {
+  async checkoutLocation(taskId: string): Promise<{ readonly root: string; readonly paths: readonly string[] } | undefined> {
     const task = (await this.#runner.get("task", checkTaskId(taskId)))?.body as unknown as TaskBody | undefined;
     if (task === undefined || task.repositoryId === undefined) return undefined;
     const bound = (await this.#resourcesOf(task.projectId, true)).find((r) => r.body.repositoryId === task.repositoryId && r.body.state === "bound");
-    return bound?.body.locator;
+    return bound === undefined ? undefined : { root: bound.body.locator, paths: bound.body.scope.paths };
   }
 
   /**

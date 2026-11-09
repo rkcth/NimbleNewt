@@ -14,9 +14,9 @@ import type { DeltaItem, ResumePorts } from "./resume.js";
  * - a verdict for every change or none of them: an answer that misses one, or gives one without a reason, is a failure
  *   of that route, tried on the next one; when no route answers, it throws, and the check waits at the review
  *   (`review_failed`) rather than being passed off as judged;
- * - the safe answer is "it matters": a change that cannot be checked (unknown, expired, freshness-uncertain), or one the
- *   reviewer cannot place in the task's work, is the owner's to accept, so a confused model holds the resume rather than
- *   releasing it;
+ * - the safe answer is "it matters": a change that cannot be checked (unknown, expired, freshness-uncertain) is never put
+ *   to the model and is always relevant (the owner's to accept), and the model is told to call relevant one it cannot place
+ *   in the task's work, so a confused model holds the resume rather than releasing it;
  * - a change's key, detail and title are data, each quoted as one JSON string, redacted and cut to a bound; nothing in
  *   them is an instruction, and nothing the model says about them reaches the agent except through the check's own note;
  * - ids the model invents are dropped: only what was asked about is answered.
@@ -53,6 +53,9 @@ const SYSTEM = [
 
 type Verdicts = Awaited<ReturnType<ResumePorts["review"]>>;
 
+/** The statuses that are an observation of what changed, which a reviewer can weigh; anything else could not be checked. */
+const JUDGEABLE: ReadonlySet<string> = new Set(["changed", "deleted", "new-members"]);
+
 export class ResumeReviewer {
   readonly #model: ResumeReviewModel;
   readonly #routes: () => Promise<readonly string[]>;
@@ -70,13 +73,17 @@ export class ResumeReviewer {
 
   /** A reasoned verdict for every change asked about, or a refusal (which leaves the check waiting at the review). */
   async review(request: { taskId: string; changes: readonly DeltaItem[] }): Promise<Verdicts> {
-    if (request.changes.length === 0) return {};
+    const out: Record<string, { relevant: boolean; rationale: string }> = {};
+    // What nobody could check is not the model's to wave through: an unknown, an expired search or an external thing with no way to
+    // check it is the owner's to accept, whatever a model (or text quoted to it) says. Only an observed change is put to the model.
+    const judged = request.changes.filter((c) => JUDGEABLE.has(c.status));
+    for (const c of request.changes) if (!JUDGEABLE.has(c.status)) out[c.id] = { relevant: true, rationale: `it could not be checked (${clipText(c.status, 40)}), so the owner decides whether it matters` };
+    if (judged.length === 0) return out;
     const routes = await this.#routes();
     if (!Array.isArray(routes) || routes.length === 0) throw new DomainError("unavailable", "the resume reviewer has no model route");
     const context = await this.#context(request.taskId);
-    const out: Record<string, { relevant: boolean; rationale: string }> = {};
-    for (let i = 0; i < request.changes.length; i += this.#perCall) {
-      const piece = request.changes.slice(i, i + this.#perCall);
+    for (let i = 0; i < judged.length; i += this.#perCall) {
+      const piece = judged.slice(i, i + this.#perCall);
       const prompt = this.#prompt(context, piece);
       let last = "no route answered";
       let verdicts: Verdicts | undefined;

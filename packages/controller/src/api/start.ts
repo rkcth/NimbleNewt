@@ -71,7 +71,7 @@ import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJo
 import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
 import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
-import { DependencyService, checkoutDependencyObserver } from "../dependencies/index.js";
+import { DependencyService, checkoutDependencyObserver, locallyPlaced, resumeProbeEnabled } from "../dependencies/index.js";
 import { ActivityService, ReplayLimitsService, ReplayService } from "../activity/index.js";
 import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, type LocalWork } from "../lifecycle/index.js";
@@ -117,9 +117,11 @@ export interface StartOptions {
    * Whether a checked resume may look at the task's own checkout to see how its recorded files and directories are now (card L04d),
    * instead of leaving every one of them `unknown`. Default: yes. `false` turns the reading off, `{ maxEntries, maxBytes }` bounds it
    * tighter. A probe reads nothing outside the checkout the task's records name, and reports only what it really read. An explicit
-   * `resume.observe` wins over this.
+   * `resume.observe` wins over this. With remote hosts (`dispatch.remote.hosts`) the default is off: the resumed attempt's host is
+   * chosen after the check, and this machine's disk says nothing about another's. Given explicitly there, a task last placed on a
+   * remote host (or never placed) is still not probed, so its files stay `unknown` unless the host's own `resume.observe` answers.
    */
-  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number };
+  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number; readonly maxTotalBytes?: number; readonly timeoutMs?: number };
   /**
    * Moving the controller database to another one from chat (card F04e). The databases a transfer may go to are named here by the host (a PostgreSQL address holds a password, so it is never typed in chat); with none given
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
@@ -751,12 +753,18 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       },
     };
     // The two ports of a checked resume that were only stand-ins (card L04d): what the recorded files and directories look like here
-    // now, read from the task's own checkout before the attempt it checks starts, and a reviewer agent's reasoned verdict on each
+    // now, read from the checkout the task's repository is bound at before the attempt it checks starts, and a reviewer agent's reasoned verdict on each
     // change. Whatever the host supplies outright for either port is used instead of these.
     const RESUME_READER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
-    const resumeProbe = options.resumeProbe === false || options.resume?.observe !== undefined ? undefined : checkoutDependencyObserver({
+    const remoteHostIds: ReadonlySet<string> = new Set((options.dispatch?.remote?.hosts ?? []).map((h) => h.hostId));
+    const resumeProbe = !resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) || options.resume?.observe !== undefined ? undefined : checkoutDependencyObserver({
       manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId),
-      locate: async (taskId) => await resources.checkoutLocation(taskId),
+      // A task placed on a remote host works on that host's disk, not this one: nothing here is evidence about it (and a task never
+      // placed, in an installation with remote hosts, may be about to go to one). Left unobserved, so the owner decides.
+      locate: locallyPlaced(remoteHostIds, async (taskId) => {
+        const placed = (await storage.getAggregate({ kind: "task-placement", id: taskId }))?.body as { hostId?: unknown } | undefined;
+        return typeof placed?.hostId === "string" ? placed.hostId : undefined;
+      }, async (taskId) => await resources.checkoutLocation(taskId)),
       ...(typeof options.resumeProbe === "object" ? options.resumeProbe : {}),
       onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
     });

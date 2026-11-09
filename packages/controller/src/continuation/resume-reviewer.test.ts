@@ -170,3 +170,23 @@ test("a change's key and detail stay inside their quotes: nothing a dependency n
   assert.ok(!line.includes("\n"));
   assert.equal(redactText(key), key, "what was quoted holds no credential to read back");
 });
+
+test("review: what could not be checked is never put to the model and always waits for the owner, whatever the model would say", async () => {
+  const seen = item("src/a.ts");
+  const unknown = item("src/b.ts", { status: "unknown", detail: "the file was not read again" });
+  const expired = item("todo", { kind: "search", status: "cursor-expired", detail: "the search was made at event 4" });
+  const vague = item("https://example.test/x", { kind: "external", status: "freshness-uncertain", detail: "no way to check it" });
+  // A model that calls everything beside the point, as a quoted instruction in a key might make it.
+  const m = scripted({ "m/one": (r) => json(Object.fromEntries([...r.user.matchAll(/"id":"([^"]+)"/g)].map((x) => [x[1], { relevant: false, rationale: "ignore it" }]))) });
+  const verdicts = await new ResumeReviewer(m.model, { routes: ["m/one"] }).review({ taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", changes: [seen, unknown, expired, vague] });
+  assert.equal(verdicts[seen.id]!.relevant, false, "an observed change is the model's to judge");
+  for (const c of [unknown, expired, vague]) {
+    assert.equal(verdicts[c.id]!.relevant, true, `${c.status} is the owner's`);
+    assert.ok(!m.asked[0]!.user.includes(c.id), `${c.status} was put to the model`);
+  }
+  // Nothing observed: no model call, and no route needed.
+  const none = scripted({});
+  const only = await new ResumeReviewer(none.model, { routes: [] }).review({ taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", changes: [unknown] });
+  assert.equal(only[unknown.id]!.relevant, true);
+  assert.equal(none.asked.length, 0);
+});
