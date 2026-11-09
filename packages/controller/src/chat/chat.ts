@@ -891,7 +891,7 @@ export class ChatService {
       const isAlternative = args["response"] === "alternative";
       if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
       // What to do next depends on why: the words are the owner's to rephrase, a topic is theirs to name, a conflict is theirs to settle.
-      const instead = (reason: string, next = 'say what you decide instead as its own sentence (for example "Keep the staging server until May.")'): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
+      const instead = (reason: string, next = "say what you decide instead, in your own words — a plain sentence of at least two words"): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
       const said = typeof statement === "string" ? statement.trim() : "";
       if (isAlternative) {
         if (said === "") return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
@@ -935,13 +935,13 @@ export class ChatService {
       if (isAlternative) {
         // The topic is the owner's words or the topic the decision answered; the wording of a motion (an agent's text) is never made into a topic.
         const raw = typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : undefined;
-        if (raw === undefined) return instead("the decision has no topic of its own", "name a topic for yours (for example: topic staging server), or decline the meeting's decision");
+        if (raw === undefined) return instead("the decision has no topic of its own", "name a topic for yours in your own words (a short phrase), or decline the meeting's decision");
         const topic = normalTopic(raw.replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).replace(/^[^a-z0-9]+/, "").slice(0, 80).trim();
-        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit", "name one (for example: topic staging server)");
+        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit", "name one in your own words — a short phrase of letters, digits or spaces");
         // What the decision service would refuse on the topic is read now, so nothing bound to fail is proposed: another kind of decision on the topic, a conflict not yet settled, the same words already decided.
         const history = ((await this.#get(token, "decision.history", { projectId: chosen["projectId"], topic })) as unknown as Record<string, unknown>[] | undefined) ?? [];
         const kindHeld = history.find((e) => typeof e["category"] === "string" && e["category"] !== "decision");
-        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours (for example: topic hosting plan)");
+        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours, in your own words");
         const live = history.filter((e) => e["state"] !== "superseded");
         // Any unsettled conflict on the topic stops a project-wide decision, a task's own included.
         if (live.some((e) => e["state"] === "disputed")) return instead(`the topic "${topic}" has a conflict between two of your instructions`, "settle that conflict first, or decline the meeting's decision");
