@@ -269,6 +269,25 @@ describe("context budgets (C07)", () => {
     assert.ok(cut.text.startsWith("Task: Rotate the deploy token:\n- entry"), cut.text.slice(0, 80));
   });
 
+  test("a private key block given one line to an entry is removed across all its lines, each line keeping its place (C07p second review)", () => {
+    // Redacting line by line saw only the BEGIN line: the key's body and its END line were shown as they were.
+    const head = ["Task: t", "-----BEGIN RSA PRIVATE KEY-----", "MIIEpAIBAAKCAQEAsecretbody", "-----END RSA PRIVATE KEY----- after"];
+    const note = cutNote({ head, list: ["- newest"] }, 1000);
+    assert.ok(!note.whole.includes("MIIEpAIBAAKCAQEAsecretbody") && !note.whole.includes("BEGIN RSA"), note.whole);
+    assert.deepEqual(note.whole.split("\n"), ["Task: t", "[redacted]", "[redacted]", "[redacted] after", "- newest"]);
+    const cut = cutNote({ head: ["Task: t"], list: [...head.slice(1), ...Array.from({ length: 40 }, (_, i) => `- entry ${i} ${"x".repeat(30)}`)] }, 900, { readWith: NOTE_ARCHIVE_READ });
+    assert.ok(!cut.whole.includes("secretbody") && cut.whole.split("\n").length === 44, cut.whole.slice(0, 200));
+    assert.equal(cut.droppedLines + cut.text.split("\n").length - 1, 44, "the marker does not count every line");
+  });
+
+  test("a note with no head whose only line is over its limit is the marker alone, with no empty line before it (C07p second review)", () => {
+    const note = cutNote({ head: [], list: ["y".repeat(5000)] }, 1000, { readWith: NOTE_ARCHIVE_READ });
+    assert.ok(note.cut && note.text.length <= 1000);
+    assert.ok(!note.text.startsWith("\n"), JSON.stringify(note.text.slice(0, 40)));
+    assert.equal(note.text.split("\n").length, 1);
+    assert.equal(note.droppedLines, 1);
+  });
+
   test("a note whose head alone does not fit says the rest went, not that older lines did (C07p review)", () => {
     // The list's lines are the newest the note has: calling them "older" would tell the reader the newest is in front of them.
     const note = cutNote({ head: [`Task: ${"x".repeat(800)}`, "Last known state: y"], list: ["- the newest entry"] }, 600, { readWith: NOTE_ARCHIVE_READ });

@@ -1,4 +1,5 @@
-import { redactText } from "../security/redact.js";
+import { REDACTED, redactText } from "../security/redact.js";
+import { CREDENTIAL_PATTERNS } from "../security/credential-patterns.js";
 import { quoted } from "../status/explain.js";
 import { createHash } from "node:crypto";
 
@@ -165,6 +166,7 @@ export const classifyFailure = (message: string): "context_overflow" | "other" =
 export const NOTE_ARCHIVE_READ = "context.note-archive.read";
 /** The smallest limit the cut rules can honour: below it a marker that says what was left out and where the whole text is kept would not fit beside anything worth keeping. */
 const NOTE_MIN_CHARS = 400;
+const PRIVATE_KEY_BLOCK = CREDENTIAL_PATTERNS.find((p) => p.name === "private key block")!.pattern;
 
 /** The largest prefix of `text` of at most `n` code units that leaves no half character (an emoji cut in half is text a model server may refuse to encode). */
 export function clipToChar(text: string, n: number): string {
@@ -210,10 +212,16 @@ export function cutNote(input: { readonly head: readonly string[]; readonly list
   if (!Number.isSafeInteger(maxChars) || maxChars < NOTE_MIN_CHARS) throw new RangeError(`a note that may be cut is ${NOTE_MIN_CHARS} characters or more`);
   // Every line of a note is one line: a line break the note itself did not put there would read as the controller speaking (card C07g). Redacted one line at a time: a credential shape matched across
   // a line break (`token:` at the end of one line and the next line's first word) would otherwise join two lines, and every count below would be off.
-  const fold = (l: string): string => redactText(l.replace(/[\r\n]+/g, " ")).replace(/[\r\n]+/g, " ");
+  // A private key block is the one credential shape that is a run of lines by nature: given one line to an entry, no single line holds it whole, so it is first removed across the lines it covers, each of them
+  // keeping its place (C07p second review) - the rest of its body would otherwise be shown with only its first line redacted.
+  const flat = (l: string): string => l.replace(/[\r\n]+/g, " ");
+  const given = [...(input.list === undefined ? [] : [{ lines: input.list }]), ...(input.lists ?? [])].map((g: NoteList) => ({ heading: g.heading === undefined || g.lines.length === 0 ? undefined : flat(g.heading), lines: g.lines.map(flat) }));
+  const sequence = [...input.head.map(flat), ...given.flatMap((g) => [...(g.heading === undefined ? [] : [g.heading]), ...g.lines])];
+  const keyFree = sequence.join("\n").replace(new RegExp(PRIVATE_KEY_BLOCK.source, PRIVATE_KEY_BLOCK.flags), (m) => (m.includes("\n") ? m.split("\n").map(() => REDACTED).join("\n") : m)).split("\n");
+  let at = 0;
+  const fold = (): string => redactText(keyFree[at++]!).replace(/[\r\n]+/g, " ");
   const head = input.head.map(fold);
-  const groups = [...(input.list === undefined ? [] : [{ lines: input.list }]), ...(input.lists ?? [])]
-    .map((g: NoteList) => ({ heading: g.heading === undefined || g.lines.length === 0 ? undefined : fold(g.heading), lines: g.lines.map(fold) }));
+  const groups = given.map((g) => ({ heading: g.heading === undefined ? undefined : fold(), lines: g.lines.map(fold) }));
   const render = (from: readonly number[]): string[] => [...head, ...groups.flatMap((g, k) => [...(g.heading === undefined ? [] : [g.heading]), ...g.lines.slice(from[k])])];
   const all = render(groups.map(() => 0));
   const whole = all.join("\n");
@@ -256,7 +264,9 @@ export function cutNote(input: { readonly head: readonly string[]; readonly list
     return { text: shown === "" ? marker : `${shown}\n${marker}`, whole, cut: true, droppedLines: tailOnly ? 0 : gone, droppedChars: whole.length - shown.length, digest };
   }
   const shown = render(from).join("\n");
-  return { text: `${shown}\n${markerFor("older", dropped, whole.length - shown.length)}`, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
+  // A note with no head whose every line went shows the marker alone, not after an empty line (C07p second review).
+  const marker = markerFor("older", dropped, whole.length - shown.length);
+  return { text: shown === "" ? marker : `${shown}\n${marker}`, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
 }
 
 export interface HandoffFacts {
