@@ -20,8 +20,10 @@ const shown = (o: Outcome, reply: readonly string[]): string => [...(o.preview ?
 
 /**
  * Nothing an owner may read may tell them how to word a message: no example phrase, no "say the limit", no "only when your own message says so".
- * Asking for information in a plain sentence ("How much may it spend?") is not a phrase instruction and is not matched here, and neither is an
- * invention guard naming the value it wants ("grantee is not in your message: which agent did you mean?").
+ * Two kinds of line are deliberately not matched here. A plain question asking for information ("How much may Rex spend under this grant — a figure,
+ * or no ceiling at all?") asks for a fact, not for a form of words. And an invention guard naming the value it wants ("40 days is not a length your
+ * message gives … How long should the grant last?", "grantee is not in your message … Say what it should be.") is the allowed ID-and-value guard: it
+ * stops the chat inventing something the record would hold, and the owner may answer it in any words they like.
  */
 const PHRASE_INSTRUCTIONS: readonly { readonly re: RegExp; readonly unless?: RegExp }[] = [
   { re: /for example\s*["\u201c']/i },
