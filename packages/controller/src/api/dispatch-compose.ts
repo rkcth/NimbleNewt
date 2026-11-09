@@ -462,7 +462,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       assignee: (order) => i.taskCredentials.agentOf(principal, order.attemptId),
       window: i.options.local.window,
       // Card C07n: a route the host's figure does not know is checked against the routing table's `contextTokens` for it; a route neither says is refused with a blocker, never admitted unchecked.
-      routeWindow: (order) => tableWindow(order.route),
+      // A routing table that cannot be read is not a route without a window (C07n review): the error reaches the guards, so the call is refused as unchecked without a blocker telling the owner to set a figure
+      // that is already set, and a stored conversation starts fresh.
+      routeWindow: async (order) => (await i.routing.get())?.routes[order.route]?.contextTokens,
       // And a stored conversation is judged whatever the embedder passed: a checkpoint of the worker package's shape says its size, and one that says nothing is not resumed.
       storedTokens: i.options.local.storedTokens ?? checkpointStoredTokens,
       // Card C07g: the worker's process is up and says what it sends besides the prompt; the route is measured with that, and the view built again on the measured figure before the first call.

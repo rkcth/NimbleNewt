@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resumeDecision } from "../context/budget.js";
 import { contextRouteKey, type ContextEnforcementService } from "../context/index.js";
+import { routeNamed } from "../context/enforcement.js";
 import type { PauseService } from "../lifecycle/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { Principal } from "../security/principals.js";
@@ -51,7 +52,7 @@ function framed(id: string, sender: string, purpose: string, text: string): stri
 }
 
 /** Card C07n: why a route nobody gives a window is refused, in the words the agent's refusal and the owner's blocker both read. */
-export const unknownWindowReason = (route: string): string => `route ${route.replace(/\s+/g, " ").slice(0, 120)} has no context window the controller knows (its host states none for it and the routing table gives it no contextTokens); set its window before work runs on it`;
+export const unknownWindowReason = (route: string): string => `route ${routeNamed(route)} has no context window the controller knows (its host states none for it and the routing table gives it no contextTokens); set its window before work runs on it`;
 
 export function controllerGuards(binding: GuardBinding): RuntimeGuards {
   const { context, pause, messages } = binding;
@@ -66,9 +67,9 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
    * unchecked admission; the refusal is told to the owner once per task (the context service keeps the one open blocker).
    */
   const windowOf = async (order: WorkOrder): Promise<number | undefined> => {
-    const own = binding.window(order);
-    if (own !== undefined) return own;
-    return await binding.routeWindow?.(order);
+    // A figure that is no window (zero, negative, fractional, NaN) is not one the host knows: the routing table is asked, as for a route the host's map leaves out (C07n review).
+    const usable = (w: number | undefined): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
+    return usable(binding.window(order)) ?? usable(await binding.routeWindow?.(order));
   };
   /** A route with no window anywhere: the refusal, with the owner's blocker behind it. A blocker that cannot be written still refuses the call (and says why it could not be recorded). */
   const refuseUnknownWindow = async (order: WorkOrder, what: string): Promise<{ readonly admit: false; readonly reasons: readonly string[]; readonly retryable: false }> => {

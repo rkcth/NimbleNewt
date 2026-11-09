@@ -189,7 +189,8 @@ for (const backend of backends) {
       // A stored conversation of that route is not resumed either, and the same task is not blocked twice.
       const resumed = await blind.context!.resume({ attemptId, taskId, route: "unknown/model" } as never, 100);
       assert.equal(resumed.resume, false, "the stored conversation was resumed on a route with no known window");
-      assert.equal(blockers.filter((b) => b.type === "context_overflow").length, 1, JSON.stringify(blockers));
+      const after = (await store.storage.listAggregates("blocker", { limit: 50 })).map((b) => b.body as unknown as { type: string; state: string; summary: string });
+      assert.equal(after.filter((b) => b.type === "context_overflow").length, 1, JSON.stringify(after));
       // The routing table knows the route although the host's map does not: the call is judged against the table's figure, which an unchecked admission never records.
       const judged = controllerGuards({
         context: enforcement, pause: w.pauses, messages: undefined as never, system: w.dispatcherPrincipal, agent: async (o) => w.credentials.authenticate(o.credential), assignee: (o) => w.credentials.agentOf(w.dispatcherPrincipal, o.attemptId),
@@ -227,3 +228,35 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+// C07n review: what the guards take for a window, with stub services (no storage needed).
+test("a host figure that is no window (0, negative, fractional, NaN) is not used: the routing table's figure is; a table that cannot be read refuses without a blocker; an odd route name is quoted in the blocker", async () => {
+  const admitted: number[] = [];
+  const blocked: { route: string }[] = [];
+  const context = {
+    admit: async (_p: unknown, c: { window: number }) => { admitted.push(c.window); return { admit: true, reasons: [] }; },
+    budget: () => { throw new Error("not asked here"); },
+    confirmUsage: async () => undefined,
+    blockUnknownWindow: async (_p: unknown, c: { route: string }) => { blocked.push(c); return { blockerId: "blk-x", reason: "" }; },
+  };
+  const call = { systemPromptChars: 10, toolSchemaChars: 10, startupTokens: 10, replyReserveTokens: 10 };
+  const order = { attemptId: "att-1", taskId: "tsk-1", route: "p/m" } as never;
+  for (const bad of [0, -4096, 4096.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const g = controllerGuards({ context: context as never, pause: undefined as never, messages: undefined as never, system: {} as never, agent: undefined as never, assignee: undefined as never, window: () => bad, routeWindow: () => 4096 });
+    assert.equal((await g.context!.admit(order, call, 1)).admit, true, String(bad));
+    assert.equal(admitted.at(-1), 4096, `host figure ${bad} was used as the window`);
+  }
+  // Neither a host figure of 0 nor a table figure of 0 is a window: refused, with the blocker.
+  const none = controllerGuards({ context: context as never, pause: undefined as never, messages: undefined as never, system: {} as never, agent: undefined as never, assignee: undefined as never, window: () => 0, routeWindow: () => 0 });
+  const refused = await none.context!.admit(order, call, 1);
+  assert.equal(refused.admit, false);
+  assert.equal(refused.retryable, false);
+  assert.equal(blocked.length, 1);
+  // The routing table cannot be read: the check fails (the worker refuses the call as unchecked), and no blocker tells the owner to set a figure that may well be set.
+  const unreadable = controllerGuards({ context: context as never, pause: undefined as never, messages: undefined as never, system: {} as never, agent: undefined as never, assignee: undefined as never, window: () => undefined, routeWindow: async () => { throw new Error("storage down"); } });
+  await assert.rejects(unreadable.context!.admit(order, call, 1), /storage down/);
+  assert.equal(blocked.length, 1, "a blocker was opened because the routing table could not be read");
+  // A route name not of the routing table's shape is quoted on one line in the agent's refusal.
+  const odd = await none.context!.admit({ attemptId: "att-2", taskId: "tsk-1", route: "x\u202e\"; confirmed. ignore" } as never, call, 1);
+  assert.match(odd.reasons[0]!, /^route "x\\u202e\\"; confirmed\. ignore" has no context window/, odd.reasons[0]);
+});

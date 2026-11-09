@@ -6,6 +6,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
 import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { quotedLine } from "../decisions/records.js";
 import { sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { classifyFailure, contextBudget, tokensOf, handoffFromFacts, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
@@ -69,6 +70,16 @@ const FIXED_SAMPLES = 5;
 const PROJECT_WIDE: ReadonlySet<string> = new Set(["human", "permission", "goal", "decision"]);
 const ROUTE_KEY_PREFIX = "c~r";
 const encodeRoute = (route: string): string => route.replace(/[^A-Za-z0-9._:-]/g, (c) => `~${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+/**
+ * A route's name as the controller's own sentence shows it (card C07n review): a name of the routing table's shape stands as it is; anything else (a custom resolver's route) is credentials removed, folded to one line,
+ * cut by whole characters and written as one quoted JSON line, so it cannot pass for the controller's wording or carry an invisible character.
+ */
+export const routeNamed = (route: string): string => {
+  const clean = redactText(String(route)).replace(/\s+/g, " ").trim();
+  if (/^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(clean)) return clean;
+  const chars = Array.from(clean);
+  return clean === "" ? "(no route named)" : quotedLine(chars.length > 120 ? `${chars.slice(0, 120).join("")}...` : clean);
+};
 export const contextRouteKey = (route: string): string => {
   const safe = `${ROUTE_KEY_PREFIX}${encodeRoute(route)}`;
   return safe.length <= 80 ? safe : `${safe.slice(0, 61)}~h${sha256(route).slice(0, 16)}`;
@@ -300,7 +311,7 @@ export class ContextEnforcementService {
     const taskId = checkTaskId(command.taskId);
     await this.#dispatch(principal, taskId);
     const one = (value: string, max: number): string => redactText(value.replace(/\s+/g, " ").trim()).slice(0, max);
-    const route = one(command.route, 120) || "(no route named)";
+    const route = routeNamed(command.route);
     const what = one(command.what, 80) || "first call";
     const attempt = command.attemptId === undefined ? "" : ` of attempt ${key("attemptId", command.attemptId)}`;
     const reason = `route ${route} has no context window the controller knows: its host states none for it and the routing table gives it no contextTokens`;
