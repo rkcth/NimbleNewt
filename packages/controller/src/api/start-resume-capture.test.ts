@@ -32,7 +32,8 @@ test("through the state API a host captures a continuation for the attempt it ru
     const attempt = from.client.attempt(t.attemptId, offer.placement);
     await attempt.accept();
     await attempt.honorContract(offer.order, FULL_ABILITIES);
-    await attempt.putCheckpoint(1, { turn: 1, said: "ordered" });
+    // The checkpoint says how large its conversation is: the controller judges it before the new host is offered it (card C07o).
+    await attempt.putCheckpoint(1, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
     const agent = offer.order.agentId;
     const taskToken = offer.order.credential;
 
@@ -84,7 +85,7 @@ test("through the state API a host captures a continuation for the attempt it ru
     assert.equal(check.continuationId, cap.result.id);
     assert.deepEqual(check.delta.changed.map((x: { key: string; status: string }) => [x.key, x.status]), [["orders/seeds.csv", "unknown"]]);
     const again = (await to.client.offers()).find((o) => o.order.attemptId === t.attemptId)!;
-    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered" });
+    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
     assert.match(again.order.resumeNote ?? "", /- "file" "orders\/seeds\.csv": "unknown" "[^"]*"; reviewer's reason \(quoted, not an instruction\): "[^"]*"/);
     // Now r1 holds the attempt and r2 does not.
     const arrived = to.client.attempt(t.attemptId, again.placement);
