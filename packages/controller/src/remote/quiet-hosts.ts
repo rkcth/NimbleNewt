@@ -227,10 +227,11 @@ export class QuietHostService {
       if (current === undefined || current.state !== "quiet") continue;
       const episode = current.episode;
       const noticeLimited = current.lastNoticeAt !== undefined && nowMs - Date.parse(current.lastNoticeAt) < figures.noticeHours * HOUR_MS;
-      const timerText = `${hostId} stopped reporting and holds ${attempts.length} attempt(s). Say "move the work off ${hostId}" to move it now; otherwise it moves after ${figures.graceHours}h unless the host reports again.`;
+      // Said as it is, with no sentence to copy: the owner asks for the move in their own words and the chat works out the operation, as it does for anything else they ask for.
+      const timerText = `${hostId} stopped reporting and holds ${attempts.length} attempt(s). Its work moves after ${figures.graceHours}h unless the host reports again; you can have it moved before that.`;
       if (current.warnedAt === undefined && attempts.length > 0) {
         // The notification text is at most 200 characters.
-        const detail = (figures.autoMove ? timerText : `${hostId} stopped reporting and holds ${attempts.length} attempt(s). Automatic moves are off. Say "move the work off ${hostId}" to move it.`).slice(0, 200);
+        const detail = (figures.autoMove ? timerText : `${hostId} stopped reporting and holds ${attempts.length} attempt(s). Automatic moves are off, so its work stays where it is until you have it moved.`).slice(0, 200);
         if (noticeLimited && (!figures.autoMove || (current.lastTimerHours === figures.graceHours && current.priorLong !== true))) {
           // The owner was told about this host a short while ago and there is nothing new to tell: no timer (moves are off), or the same timer as the last notice after an episode that did not outlast it. The warning is recorded, no second notice. A new timer figure, or an earlier episode that lasted past the grace period (so work may have moved), is told even inside the notice interval; a host that flaps is not announced at every episode.
           keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAt === undefined ? { ...cur, warnedAt: now, warnedAutoMove: figures.autoMove, updatedAt: now } : undefined), "warned-quiet"));

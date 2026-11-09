@@ -7,7 +7,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { CELL_KEYS, PROFILE_TABLES, PolicyService } from "../policy/index.js";
 import { ReviewService } from "../review/index.js";
 import { GrantService } from "../security/index.js";
-import { GRANT_LENGTH_OPTIONS, PolicyEditService, chooseGrantLength, saysWords, lengthInWords, ownerOrders, targetsOf, POLICY_EDIT_LIMITS, checkIntents, type Outcome } from "./index.js";
+import { GRANT_LENGTH_OPTIONS, PolicyEditService, chooseGrantLength, lengthInWords, ownerOrders, targetsOf, POLICY_EDIT_LIMITS, checkIntents, type Outcome } from "./index.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 after(stopServer);
@@ -994,19 +994,6 @@ for (const backend of backends) {
   });
 }
 
-test("saysWords (kept for the host-move order): curly quotes negate, and a negation must govern the words", () => {
-  const permanent = /\bpermanent(ly)?\b|\bno\s+end\b|\bnever\s+expires?\b|\bdoesn'?t\s+expire\b/i;
-  assert.equal(saysWords(permanent, "Don’t make it permanent."), false, "curly apostrophe");
-  assert.equal(saysWords(permanent, "Don't make it permanent."), false);
-  assert.equal(saysWords(permanent, "Not permanent."), false);
-  assert.equal(saysWords(permanent, "Never permanent, please."), false);
-  assert.equal(saysWords(permanent, "Make it permanent instead of a week."), true, "the negation is after the word");
-  assert.equal(saysWords(permanent, "Permanent, I don't want to keep approving this."), true, "another clause");
-  assert.equal(saysWords(permanent, "No end, and stop asking me."), true);
-  assert.equal(saysWords(permanent, "It never expires."), true);
-  assert.equal(saysWords(permanent, "It doesn’t expire."), true);
-  assert.equal(saysWords(permanent, "Please do not make this grant permanent."), false);
-});
 
 test("lengthInWords: number words, fortnight, and months and years within calendar tolerance", () => {
   assert.equal(lengthInWords(14, "for two weeks"), true);

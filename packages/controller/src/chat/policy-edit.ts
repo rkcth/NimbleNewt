@@ -155,6 +155,8 @@ const MOVE_ORDER: Readonly<Record<string, RegExp>> = {
 };
 const NEGATION = /\b(don'?t|do not|doesn'?t|never|not|no|keep|leave|without|can'?t|cannot|won'?t|stop|quit|no longer|no need|need not|skip)\b/i;
 const MUSING = /\b(maybe|perhaps|should we|should i|i wonder|what if|let me think|thinking about|might|could we|would it|if we|not sure)\b/i;
+/** A curly apostrophe is an apostrophe: "don’t" negates as much as "don't". */
+const CURLY = /[\u2018\u2019\u02bc\u201b]/g;
 const moveOf = (c: PolicyEditChange): string => (c.type === "gate" ? (c.on ? "gate" : "none") : c.type === "revoke" || c.type === "lock" || c.type === "reserve" || c.type === "profile" || c.type === "environment" ? c.type : c.type === "cell" ? `cell:${c.mode}` : "none");
 const ENV_WORDS: Readonly<Record<string, RegExp>> = { development: /\b(dev|development)\b/i, testing: /\b(test|testing)\b/i, staging: /\bstag(e|ing)\b/i, "customer-live": /\b(prod|production|live|customer-live)\b/i };
 /** The words by which an owner names an action class. */
@@ -183,41 +185,6 @@ const EDIT_ID = /^pedit-[0-9a-f]{32}$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const line = (s: string): string => (s.length > POLICY_EDIT_LIMITS.line ? `${s.slice(0, POLICY_EDIT_LIMITS.line - 3)}...` : s);
-/** The words of a sentence that order a move, with a negation in the rest of the sentence, a question or a musing ruled out; "taking forever" is a complaint, not an order. It is kept for the one thing that still needs to know whether the owner's own sentence gave the order (`ordersHostMove`: whether a move applies at once or is shown first). It decides no consent, no spending limit and no end: a grant with either is a proposal the owner confirms, not a wording question. */
-const WORD_NEGATION = /\b(don'?t|do\s+not|doesn'?t|does\s+not|didn'?t|never|not|isn'?t|aren'?t|won'?t|can'?t|cannot|no\s+longer|stop|avoid|rather\s+than|instead\s+of)\b/i;
-const FOREVER_COMPLAINT = /\b(tak(es?|ing)|took|wait(ed|ing|s)?|seems?|feels?|felt)\b[^.!?;]*\bforever\b/i;
-const CURLY = /[\u2018\u2019\u02bc\u201b]/g;
-/** How many words before a matched word can govern it ("I don't think it should be permanent" reaches five). */
-const NEGATION_WINDOW = 6;
-export function saysWords(words: RegExp, wording: string): boolean {
-  const normal = wording.replace(CURLY, "'");
-  const sentences = (normal.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((x) => !x.trimEnd().endsWith("?"));
-  const global = new RegExp(words.source, "gi");
-  return sentences.some((x) => {
-    const s = FOREVER_COMPLAINT.test(x) ? x.replace(/\bforever\b/gi, " ") : x;
-    if (!words.test(s) || MUSING.test(s)) return false;
-    // A negation counts only when it directly governs the matched words: a few words before them in the same clause (clauses end at a comma, "but" or "and").
-    return s.split(/,|\bbut\b|\band\b/i).some((clause) => {
-      for (const m of clause.matchAll(global)) {
-        const before = clause.slice(0, m.index).replace(global, " ").trim().split(/\s+/).filter((w) => w.length > 0).slice(-NEGATION_WINDOW).join(" ");
-        if (!WORD_NEGATION.test(before)) return true;
-      }
-      return false;
-    });
-  });
-}
-/**
- * Whether the owner's own words give the order to move the work off this host: an imperative move verb that directly governs the host ("move the work off host:r1", "take everything away from host:r1"), in a sentence
- * that is not a question, a musing or a negation of it ("don't move the work off host:r1", "never take the work off host:r1"). "Take a look at host:r1" is not an order; the move is then shown first.
- */
-export function ordersHostMove(wording: string, hostId: string): boolean {
-  // "take" and "pull" are ordinary words ("take a backup from host:r1", "pull the logs from host:r1"): they order a move only when what is taken is the work itself (work, attempts, tasks, everything).
-  const verb = "move|relocate|re-?place|reassign|transfer|shift";
-  const prep = `(?:off|from|away\\s+from|out\\s+of)\\s+(?:the\\s+)?${esc(hostId)}(?![a-z0-9-])`;
-  const plain = `\\b(?:${verb})\\b(?:\\s+[\\w'-]+){0,5}?\\s+${prep}`;
-  const taking = `\\b(?:take|pull)\\b(?:\\s+[\\w'-]+){0,4}?\\s+(?:work|attempts?|tasks?|everything)\\b(?:\\s+[\\w'-]+){0,3}?\\s+${prep}`;
-  return saysWords(new RegExp(`(?:${plain}|${taking})`, "i"), wording);
-}
 const freedom = (profile: string): number => (profile === "strict" ? 0 : profile === "derived" ? 1 : 2);
 const refuseDraft = (change: PolicyEditChange, evidence: string, code: string, message: string, conditions: readonly string[] = [], wording = ""): PolicyEditPrepared => ({
   ok: true, draft: { change: asJson(change), evidence, summary: [], explanation: [], unapplied: unappliedOf(conditions, wording), direction: "unknown", direct: false, status: "refused", reason: message, refusal: { code, message } },

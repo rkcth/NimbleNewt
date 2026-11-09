@@ -17,7 +17,7 @@ const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3
 const MIN = 60_000, HOUR = 3_600_000;
 type Reply = { ok: boolean; result?: any; error?: { code: string; message: string } };
 
-test("host.quiet.get/change and host.move-work through the API: owner only, validated, replay-safe, race-safe; the dispatcher's tick warns once and re-places after the grace period; chat proposes the setting and applies the move on the owner's words", async () => {
+test("host.quiet.get/change and host.move-work through the API: owner only, validated, replay-safe, race-safe; the dispatcher's tick warns once and re-places after the grace period; chat proposes the setting and the move, and the move happens on the owner's confirmation", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-quiet-"));
   const say: Record<string, unknown[]> = {};
   let now = Date.parse("2026-10-30T10:00:00.000Z");
@@ -82,13 +82,21 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     const off = "never move work off a quiet host by yourself";
     const offShown = await turn("m3", off, [{ kind: "command", op: "host.quiet.change", args: { autoMove: false }, evidence: off, basis: "owner" }]);
     assert.equal(offShown[0]!.status, "proposed", "disabling is also shown first");
-    const vague = "that laptop is annoying";
-    const notSaid = await turn("m4", vague, [{ kind: "command", op: "host.move-work", args: { hostId: "host:laptop" }, evidence: vague, basis: "owner" }]);
-    assert.notEqual(notSaid[0]!.status, "applied", "the owner's words neither say the move nor name the host: nothing is done");
-    for (const [i, weak] of ["Take a look at host:laptop", "Don't move the work off host:laptop"].entries()) {
-      const r = await turn(`mw${i}`, weak, [{ kind: "command", op: "host.move-work", args: { hostId: "host:laptop" }, evidence: weak, basis: "owner" }]);
-      assert.equal(r[0]!.status, "proposed", `weak wording is shown first: ${weak}`);
+    // No sentence is needed and none is enough. Whatever the owner's words, a move is drawn up as a proposal that says what it does, and it moves nothing until they confirm that proposal.
+    const wordings = ["Take a look at host:laptop", "Don't move the work off host:laptop", "host:laptop has been slow all day, can its jobs run somewhere else?", "host:laptop, please get its work onto the other machine", "is host:laptop still holding that build? I would rather it ran on the other box"];
+    for (const [i, vague] of wordings.entries()) {
+      const r = await turn(`mw${i}`, vague, [{ kind: "command", op: "host.move-work", args: { hostId: "host:laptop" }, evidence: vague, basis: "owner" }]);
+      const shown = `${r[0]!.message ?? ""} ${(r[0]!.preview ?? []).join(" ")}`;
+      assert.equal(r[0]!.status, "proposed", `every wording is shown first: ${vague}: ${JSON.stringify(r[0])}`);
+      assert.match(shown, /Move the work off a host/, shown);
+      assert.match(shown, /host:laptop/, "the proposal says which host it takes the work off");
+      assert.doesNotMatch(shown, /\bfor example\b|\bSay\b|your own words|to copy/i, `nothing tells the owner how to phrase it: ${vague}: ${shown}`);
+      assert.equal((await call(boot.token, "host.quiet.get", {})).result.item.effective.autoMove, true, "a shown move changes neither the setting nor the work");
     }
+    // Which host is not the chat's to invent: with no host named, the move is refused as a value that is missing, and the owner is asked for it.
+    const unnamed = await turn("mw-none", "that laptop is annoying", [{ kind: "command", op: "host.move-work", args: { hostId: "host:laptop" }, evidence: "that laptop is annoying", basis: "owner" }]);
+    assert.equal(unnamed[0]!.status, "refused", JSON.stringify(unnamed[0]));
+    assert.equal(unnamed[0]!.code, "unsupported_value");
     assert.ok((await call(boot.token, "host.quiet.change", { graceHours: 12 }, "q5")).ok);
 
     // Work on pc; the tick's quiet-host pass warns once, waits the grace period, then re-places it on laptop.
@@ -133,10 +141,13 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     assert.equal(await where(), other, "on again, past the grace period of a warning that named the timer: re-placed on the other host");
     assert.equal((await c.dispatch.remote.placement(rob, attempt))!.relocations, 1);
 
-    // The owner's move, in chat and through the API (nothing left on that host now).
+    // The owner's move, in chat and through the API (nothing left on that host now). In chat it is shown first and made on the owner's word; the API call is the owner's own order.
     const words = `move the work off ${first}`;
     const said = await turn("m5", words, [{ kind: "command", op: "host.move-work", args: { hostId: first }, evidence: words, basis: "owner" }]);
-    assert.equal(said[0]!.status, "applied", JSON.stringify(said));
+    assert.equal(said[0]!.status, "proposed", JSON.stringify(said));
+    assert.equal((await c.dispatch!.remote!.placement(rob, attempt))!.hostId, other, "the proposal alone moves nothing");
+    const movedByOwner = await turn("m5-ok", "yes, do it", [{ kind: "apply_proposal", proposalId: said[0]!.proposalId, evidence: "yes, do it", basis: "owner" }]);
+    assert.equal(movedByOwner[0]!.status, "applied", JSON.stringify(movedByOwner));
     const m = await call(boot.token, "host.move-work", { hostId: other }, "mv1");
     assert.ok(m.ok, JSON.stringify(m));
     assert.deepEqual([m.result.moved.length, m.result.skipped.length], [0, 1], "the old host is quiet, so no host is fresh enough to take it");
