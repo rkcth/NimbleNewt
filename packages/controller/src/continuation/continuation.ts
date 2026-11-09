@@ -3,6 +3,7 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, taskId as checkTaskId, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { InspectionService } from "../context/inspection.js";
+import { foldLineage, LINEAGE_DIGEST, type LineageEarlier } from "../context/lineage.js";
 import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -27,7 +28,10 @@ export interface ContinuationInput {
     readonly nextStep: string;
   };
   readonly manifest: {
+    /** The summaries the conversation was compacted into, oldest first. At most `CONTINUATION_LIMITS.items` are kept listed; a longer list is accepted and its older part folded into `summaryLineageEarlier` (card C07q). */
     readonly summaryLineage: readonly string[];
+    /** The older part of the lineage, kept by reference: how many, their chained digest and the newest of them (the controller's compaction records lead from it to the rest). */
+    readonly summaryLineageEarlier?: LineageEarlier;
     readonly sourceRanges: readonly { readonly source: string; readonly from: number; readonly to: number }[];
     readonly compression: { readonly state: "none" | "compacted"; readonly compactions: number };
     readonly branches: readonly { readonly conversationId: number; readonly parent: number }[];
@@ -58,7 +62,7 @@ export interface ResumeBody { readonly taskId: string; readonly continuationId: 
 export type RestoreMethod = "native-restore" | "reconstruction" | "restart";
 export const RESTORE_METHODS: readonly RestoreMethod[] = ["native-restore", "reconstruction", "restart"];
 
-export const CONTINUATION_LIMITS = { items: 200, text: 2000, ranges: 200, tools: 50 } as const;
+export const CONTINUATION_LIMITS = { items: 200, text: 2000, ranges: 200, tools: 50, /** The longest summary lineage a capture accepts before folding it (card C07q). */ lineage: 10_000 } as const;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const NAME = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const REF = /^[a-z]{2,5}-[a-z2-7]{20}$/;
@@ -246,8 +250,17 @@ export class ContinuationService {
       nextStep: text(k["nextStep"], "continuation.nextStep"),
     };
     const m = obj(c.manifest, "manifest"); const comp = obj(m["compression"], "manifest.compression"); const ad = obj(m["adapter"], "manifest.adapter");
+    // A long-running task's lineage is never a reason to refuse its capture (card C07q): the newest IDs stay listed and the older ones are folded into a count, a digest and a reference, continuing any the host had folded already.
+    const givenEarlier = m["summaryLineageEarlier"] === undefined ? undefined : (() => {
+      const e = obj(m["summaryLineageEarlier"], "manifest.summaryLineageEarlier");
+      onlyKnown(e, ["count", "digest", "through"]);
+      const n = count(e["count"], "manifest.summaryLineageEarlier.count");
+      if (n < 1) invalid("manifest.summaryLineageEarlier.count", "must be at least 1");
+      return { count: n, digest: typeof e["digest"] === "string" && LINEAGE_DIGEST.test(e["digest"]) ? e["digest"] : invalid("manifest.summaryLineageEarlier.digest", "is not a lineage digest"), through: ref(e["through"], "manifest.summaryLineageEarlier.through") };
+    })();
+    const lineage = foldLineage(list(m["summaryLineage"], "manifest.summaryLineage", CONTINUATION_LIMITS.lineage, ref), givenEarlier, CONTINUATION_LIMITS.items);
     const manifest = {
-      summaryLineage: list(m["summaryLineage"], "manifest.summaryLineage", CONTINUATION_LIMITS.items, ref),
+      summaryLineage: lineage.lineage, ...(lineage.earlier === undefined ? {} : { summaryLineageEarlier: lineage.earlier }),
       sourceRanges: list(m["sourceRanges"], "manifest.sourceRanges", CONTINUATION_LIMITS.ranges, (x, f) => { const o = obj(x, f) as { from?: unknown; to?: unknown; source?: unknown }; const start = count(o.from, `${f}.start`); const end = count(o.to, `${f}.end`); if (end < start) invalid(f, "ends before it starts"); return { source: text(o.source, `${f}.source`, 100), from: start, to: end }; }),
       compression: { state: comp["state"] === "compacted" ? "compacted" as const : comp["state"] === "none" ? "none" as const : invalid("manifest.compression.state", "must be none or compacted"), compactions: count(comp["compactions"], "manifest.compression.compactions") },
       branches: list(m["branches"], "manifest.branches", CONTINUATION_LIMITS.items, (x, f) => { const o = obj(x, f); return { conversationId: count(o["conversationId"], `${f}.conversationId`), parent: count(o["parent"], `${f}.parent`) }; }),

@@ -85,13 +85,15 @@ export class RetainedMaterial {
     });
     await scan("ctx-spill", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) out.#add("ctx-spill", a.id, `paged-out text of task ${b.taskId}, which can still resume`); });
     await scan("continuation", (a) => {
-      const b = a.body as { taskId?: unknown; continuation?: { artifacts?: unknown }; scratchRecords?: unknown; manifest?: { summaryLineage?: unknown; sourceRanges?: unknown } };
+      const b = a.body as { taskId?: unknown; continuation?: { artifacts?: unknown }; scratchRecords?: unknown; manifest?: { summaryLineage?: unknown; summaryLineageEarlier?: { through?: unknown }; sourceRanges?: unknown } };
       if (!live(b.taskId)) return;
       const why = `listed by a checkpoint of task ${b.taskId}, which can still resume or be replayed`;
       out.#add("continuation", a.id, why);
       for (const id of strings(b.continuation?.artifacts)) out.#add("artifact", id, why);
       for (const id of strings(b.scratchRecords)) out.#add("desk-record", id, why);
       for (const id of strings(b.manifest?.summaryLineage)) { out.#add("ctx-compaction", id, why); out.#add("summary-record", id, why); }
+      // The older part of a bounded lineage (card C07q) is kept by reference: the newest folded compaction leads to the rest (a resumable task's compactions are all kept above).
+      if (typeof b.manifest?.summaryLineageEarlier?.through === "string") { out.#add("ctx-compaction", b.manifest.summaryLineageEarlier.through, why); out.#add("summary-record", b.manifest.summaryLineageEarlier.through, why); }
       for (const r of Array.isArray(b.manifest?.sourceRanges) ? (b.manifest.sourceRanges as { source?: unknown }[]) : []) if (typeof r?.source === "string") { out.#add("history-scope", r.source, why); out.#add("desk-record", r.source, why); }
     });
     // A tool version a resumable task ran stays (card T02c): the task may resume on, or replay, what it used. Usage records are per project; only projects with a resumable task are read.

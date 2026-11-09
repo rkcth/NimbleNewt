@@ -11,6 +11,7 @@ import { sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { classifyFailure, contextBudget, tokensOf, handoffNote, NOTE_ARCHIVE_READ, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
 import { admitFirstCall, boundedSummarise, calibratedCharsPerToken, reviewRouteChange, SUMMARY_DEFAULTS, type FirstCallDecision, type FirstCall, type SummariseAttempt, type SummariseLimits, type Summariser } from "./dispatch.js";
+import { foldLineage, LINEAGE_KEEP, type LineageEarlier } from "./lineage.js";
 import type { RetrievalService, SourceRef } from "./retrieval.js";
 import { DEFAULT_ROUTE_FLOOR_CHARS, type RouteSettingsEffective } from "./route-settings.js";
 
@@ -48,7 +49,9 @@ export interface AdmissionBody {
 export interface CompactionBody {
   readonly taskId: string; readonly projectId: string; readonly key: string; readonly compressorId: string;
   readonly state: "started" | "done" | "failed";
-  readonly generation: number; readonly parent?: string; readonly lineage: readonly string[];
+  readonly generation: number; readonly parent?: string;
+  /** The newest earlier compactions of the task, oldest first (at most `LINEAGE_KEEP`, card C07q); the older ones are kept by reference in `earlier`. */
+  readonly lineage: readonly string[]; readonly earlier?: LineageEarlier;
   readonly sources: readonly SourceRef[]; readonly pinned: readonly SourceRef[];
   readonly title: string;
   /** Kept so that finishing the step after a restart writes exactly this text; readers get it only through the retrieval summary (`readSummary`), which checks every source. */
@@ -143,7 +146,7 @@ export interface EnforcementOptions extends RunnerOptions {
 }
 export interface OverflowAction { readonly action: "none" | "restart-fresh" | "blocked"; readonly count: number; readonly reason: string; readonly blockerId?: string }
 export type CompactionOutcome =
-  | { readonly kind: "summary"; readonly id: string; readonly summary: string; readonly summaryId: string; readonly route: string; readonly degraded: boolean; readonly generation: number; readonly lineage: readonly string[]; readonly attempts: readonly SummariseAttempt[]; readonly replayed: boolean }
+  | { readonly kind: "summary"; readonly id: string; readonly summary: string; readonly summaryId: string; readonly route: string; readonly degraded: boolean; readonly generation: number; readonly lineage: readonly string[]; readonly earlier?: LineageEarlier; readonly attempts: readonly SummariseAttempt[]; readonly replayed: boolean }
   | { readonly kind: "aborted"; readonly id: string }
   | { readonly kind: "superseded"; readonly id: string; readonly reason: string }
   | { readonly kind: "overflow"; readonly id: string; readonly reason: string; readonly attempts: readonly SummariseAttempt[]; readonly overflow: OverflowAction; readonly replayed: boolean };
@@ -652,7 +655,7 @@ export class ContextEnforcementService {
     if (body.state !== "done") return { kind: "overflow", id, reason: body.reason ?? "", attempts: body.attempts ?? [], overflow: await this.#overflowAction(taskId), replayed };
     // Publish as a retrieval summary (idempotent), and record its ID once.
     const summaryId = body.summaryId ?? await this.#publish(principal, { id, ref, body });
-    return { kind: "summary", id, summary: body.summary ?? "", summaryId, route: body.route ?? "", degraded: body.degraded === true, generation: body.generation, lineage: body.lineage, attempts: body.attempts ?? [], replayed };
+    return { kind: "summary", id, summary: body.summary ?? "", summaryId, route: body.route ?? "", degraded: body.degraded === true, generation: body.generation, lineage: body.lineage, ...(body.earlier === undefined ? {} : { earlier: body.earlier }), attempts: body.attempts ?? [], replayed };
   }
 
   async #begin(principal: Principal, a: { taskId: string; projectId: string; k: string; id: string; ref: AggregateRef; compressorId: string; title: string; command: { sources: readonly SourceRef[]; pinned?: readonly SourceRef[]; parent?: string } }) {
@@ -665,11 +668,12 @@ export class ContextEnforcementService {
     const chain = await this.#runner.get(chainRef.kind, chainRef.id);
     const head = (chain?.body as unknown as ChainBody | undefined)?.head;
     if (parent !== head) throw new DomainError("invalid_command", head === undefined ? "parent: this task has no earlier compaction" : `parent: the latest compaction of this task is ${head}; a compaction continues the latest one`, { field: "parent" });
-    let generation = 1; let lineage: string[] = []; let carried: SourceRef[] = [];
+    let generation = 1; let lineage: string[] = []; let earlier: LineageEarlier | undefined; let carried: SourceRef[] = [];
     if (parent !== undefined) {
       const p = (await this.#runner.get("ctx-compaction", parent))?.body as unknown as CompactionBody | undefined;
       if (p === undefined || p.taskId !== a.taskId || p.state !== "done") throw new DomainError("invalid_command", "parent: must be a finished compaction of this task", { field: "parent" });
-      generation = p.generation + 1; lineage = [...p.lineage, parent]; carried = [...p.pinned];
+      // The lineage is bounded (card C07q): the newest IDs stay listed, the older ones are folded into a count, a digest and the newest of them, and read back through `earlierLineage`.
+      generation = p.generation + 1; ({ lineage, earlier } = foldLineage([...p.lineage, parent], p.earlier, LINEAGE_KEEP)); carried = [...p.pinned];
     }
     // Owner decisions already carried stay; the new ones are added once.
     const allPinned = [...carried]; for (const s of pinned) if (!allPinned.some((o) => sameSource(o, s))) allPinned.push(s);
@@ -678,7 +682,7 @@ export class ContextEnforcementService {
       const original = await this.#retrieval.fetch(principal, s);
       if (original === undefined || original.projectId !== a.projectId) invalid(i < sources.length ? `sources[${i}]` : `pinned[${i - sources.length}]`, "must exist, be readable by the writer and belong to the task's project");
     }
-    const body: CompactionBody = { taskId: a.taskId, projectId: a.projectId, key: a.k, compressorId: a.compressorId, state: "started", generation, ...(parent === undefined ? {} : { parent }), lineage, sources: [...sources], pinned: allPinned, title: a.title, startedBy: principal.id };
+    const body: CompactionBody = { taskId: a.taskId, projectId: a.projectId, key: a.k, compressorId: a.compressorId, state: "started", generation, ...(parent === undefined ? {} : { parent }), lineage, ...(earlier === undefined ? {} : { earlier }), sources: [...sources], pinned: allPinned, title: a.title, startedBy: principal.id };
     await this.#runner.command("context.compaction.begin", { commandId: `ctx-cbg-${a.id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId: a.taskId, key: a.k, compressorId: a.compressorId, title: a.title, sources: sources as unknown as JsonObject[], pinned: pinned as unknown as JsonObject[], ...(parent === undefined ? {} : { parent }) },
       build: async () => ({ ref: a.ref, creates: true, changes: [{ type: "create", ref: a.ref, body: body as unknown as JsonObject }], detail: { generation } }),
@@ -767,12 +771,33 @@ export class ContextEnforcementService {
     return rec?.summaryId === undefined ? undefined : this.#retrieval.resolve(principal, rec.summaryId);
   }
   /** The latest compaction of a task, if any. */
-  async latestCompaction(principal: Principal, taskId: string): Promise<{ id: string; generation: number; lineage: readonly string[] } | undefined> {
+  async latestCompaction(principal: Principal, taskId: string): Promise<{ id: string; generation: number; lineage: readonly string[]; earlier?: LineageEarlier } | undefined> {
     taskId = checkTaskId(taskId);
     if ((await this.#task(principal, taskId, true)) === undefined) return undefined;
     const head = ((await this.#runner.get("ctx-chain", derivedId("ctx", `${taskId}\0chain`)))?.body as unknown as ChainBody | undefined)?.head;
     const rec = head === undefined ? undefined : await this.getCompaction(principal, head);
-    return rec === undefined ? undefined : { id: rec.id, generation: rec.generation, lineage: rec.lineage };
+    return rec === undefined ? undefined : { id: rec.id, generation: rec.generation, lineage: rec.lineage, ...(rec.earlier === undefined ? {} : { earlier: rec.earlier }) };
+  }
+  /**
+   * The part of a task's lineage kept by reference (card C07q), read back a page at a time, newest first: from `from` (a compaction of the task; by default the newest one the latest compaction folded,
+   * its `earlier.through`), following each compaction's parent. `next` is where the following page starts; absent when the first compaction of the task was reached. Unreadable reads like missing.
+   */
+  async earlierLineage(principal: Principal, command: { taskId: string; from?: string; limit?: number }): Promise<{ ids: string[]; next?: string } | undefined> {
+    onlyKnown(command, ["taskId", "from", "limit"]);
+    const taskId = checkTaskId(command.taskId);
+    const limit = command.limit === undefined ? 200 : Number.isSafeInteger(command.limit) && command.limit >= 1 && command.limit <= 1000 ? command.limit : invalid("limit", "must be a whole number from 1 to 1000");
+    if (command.from !== undefined && (typeof command.from !== "string" || !/^cmp-[a-z2-7]{20}$/.test(command.from))) invalid("from", "is not a compaction ID");
+    if ((await this.#task(principal, taskId, true)) === undefined) return undefined;
+    let at = command.from ?? (await this.latestCompaction(principal, taskId))?.earlier?.through;
+    const ids: string[] = [];
+    while (at !== undefined && ids.length < limit) {
+      const b = (await this.#runner.get("ctx-compaction", at))?.body as unknown as CompactionBody | undefined;
+      // A compaction of another task is not this task's lineage, and a missing one ends it (both read like the end).
+      if (b === undefined || b.taskId !== taskId) break;
+      ids.push(at);
+      at = b.parent;
+    }
+    return { ids, ...(at === undefined || ids.length < limit ? {} : { next: at }) };
   }
   /** The owner decisions kept through every compaction of the task, each read again now with this reader's rights (`unavailable`: gone or not readable by this reader). */
   async keptDecisions(principal: Principal, taskId: string): Promise<{ source: SourceRef; state: "available" | "unavailable"; text?: string }[]> {
