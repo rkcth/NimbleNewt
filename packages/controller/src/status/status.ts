@@ -876,7 +876,7 @@ export class StatusService {
         }
         throw error;
       }
-      const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: approving needs acknowledgeFlaky)" : ""}.`, c)];
+      const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: an approval shows these failures and accepting it means accepting them)" : ""}.`, c)];
       for (const cell of gate.cells) block.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
       // Newest first: what is running now, or the attempt that just ended, is what the owner is asking about.
       for (const a of [...attempts].reverse()) block.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));

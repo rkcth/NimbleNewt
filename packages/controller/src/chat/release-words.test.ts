@@ -1,72 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { foreignValue, platformsNamed, RELEASE_ID_KEYS, saysAcknowledgeFlaky, saysMainAutomatic, saysPlatform } from "./commands.js";
+import { foreignValue, platformsNamed, RELEASE_ID_KEYS, saysMainAutomatic, saysPlatform } from "./commands.js";
 
 /**
- * The owner's own words behind a flaky approval and behind a release ID (card X09b part 2 review). `acknowledgeFlaky` is a boolean, so `foreignValue` cannot see it: it needs its own word check, and a
- * release or host ID needs whole-word matching, or a name that merely starts with it lets it through.
+ * The checks behind the release commands that are not about wording (card X09b part 2 review, redone): a release or host ID needs whole-word matching, or a name that merely starts with it lets it
+ * through, and a platform counts only when the owner's own words name it. Accepting a flaky pass is NOT a wording question any more: the chat proposes the approval showing the earlier failures the
+ * gate lists, and the owner's confirmation of that shown proposal is the acceptance (see `release-owner-words.test.ts`). Nothing here scans the owner's sentence for an acceptance, and no message
+ * asks them to say a particular word.
  */
 
-test("saying you accept a flaky pass is the owner's own acceptance of the failures: naming flaky, knowing about it or asking about it is not", () => {
-  const cand = "rcn-64c39134f5136c6cfe8ea2b4";
-  const yes = [
-    `approve the release candidate ${cand} with acknowledgeFlaky: I have read the gate and accept the earlier failures`,
-    `approve ${cand}: I have read the gate and accept the earlier failures`,
-    `approve ${cand}, I am fine with the flaky pass`,
-    `approve ${cand}, it is ok with me that it failed first`,
-    `approve ${cand}, go ahead despite the failures`,
-    `the gate shows a flaky platform and I accept it, approve ${cand}`,
-    `${cand} failed before it passed and I accept that`,
-  ];
-  for (const words of yes) assert.equal(saysAcknowledgeFlaky(words, cand), true, `"${words}" accepts the earlier failures`);
-
-  // Every one of these was accepted before (card X09b part 2 review 2, item 1): none of them accepts anything.
-  const no = [
-    `approve ${cand}`,
-    `approve ${cand}, the flaky test fixtures are fine`,
-    `approve ${cand}. Was another candidate flaky?`,
-    `approve ${cand} unless it is flaky`,
-    `approve ${cand} if nothing failed`,
-    `approve ${cand}, it isn't flaky`,
-    `approve ${cand}, it wasn't flaky`,
-    `approve ${cand}, the tests didn't fail`,
-    `approve ${cand}, nothing is flaky`,
-    `approve ${cand}, I do not accept the earlier failures`,
-    `approve ${cand}, I won't accept a flaky pass`,
-    `approve ${cand}, the gate shows a flaky platform`,
-    `approve ${cand}, I know it failed first`,
-    `is ${cand} the flaky one? I want to approve it`,
-    `approve ${cand}. Was rcn-bbbbbbbbbbbbbbbbbbbbbbbb flaky? I accept the failures`,
-    `the gate is flaky. Approve rcn-bbbbbbbbbbbbbbbbbbbbbbbb, I accept the failures`,
-    "",
-  ];
-  for (const words of no) assert.equal(saysAcknowledgeFlaky(words, cand), false, `"${words}" accepts nothing`);
-
-  // The question about another candidate and the acceptance about this one, in the right order, is about this one.
-  assert.equal(saysAcknowledgeFlaky(`was rcn-bbbbbbbbbbbbbbbbbbbbbbbb flaky? approve ${cand}, I accept its earlier failures`, cand), true, "the acceptance names the candidate being approved");
-  // With no candidate to bind to, the acceptance still has to be an acceptance.
-  assert.equal(saysAcknowledgeFlaky("I accept the earlier failures, approve it"), true, "an acceptance with no candidate named is still an acceptance");
-  assert.equal(saysAcknowledgeFlaky("the gate looks flaky, approve it"), false, "naming flaky is not accepting it");
-});
-
-test("a curly apostrophe is still a negation: phones type ’, and it must not turn a refusal into an acceptance (third review, D1)", () => {
-  const cand = "rcn-64c39134f5136c6cfe8ea2b4";
+test("a curly apostrophe is still a negation where one is checked: phones type ’, and it must not turn a denial into an order (third review, D1)", () => {
   // The straight apostrophe already refused all of these; the curly one (and the modifier letter apostrophe) must refuse them too.
-  const no = [
-    `approve ${cand}, I don’t accept the earlier failures`,
-    `approve ${cand}, I won’t accept a flaky pass`,
-    `approve ${cand}, we can’t accept the failures`,
-    `approve ${cand}, it isn’t flaky`,
-    `approve ${cand}, that wasn’t my acceptance of the failures`,
-    `approve ${cand}, I donʼt accept the failures`,
-    `approve ${cand}, I don‘t accept the failures`,
-  ];
-  for (const words of no) {
-    assert.equal(saysAcknowledgeFlaky(words, cand), false, `"${words}" accepts nothing`);
-    assert.equal(saysAcknowledgeFlaky(words.replace(/[’ʼ‘]/g, "'"), cand), false, "the same sentence typed with a straight apostrophe accepts nothing");
-  }
-
-  // The same shared negation rule guards landing on main with no human step.
   const noMain = [
     "don’t send it straight to main",
     "won’t go to main automatically",
@@ -79,78 +23,10 @@ test("a curly apostrophe is still a negation: phones type ’, and it must not t
     assert.equal(saysMainAutomatic(words.replace(/[’ʼ‘]/g, "'")), false, "the same sentence typed with a straight apostrophe orders nothing");
   }
 
-  // Normalising the apostrophe must not invent an order or an acceptance that was never said.
+  // Normalising the apostrophe must not invent an order that was never said.
   assert.equal(saysMainAutomatic("land finished work on main automatically"), true, "a plain order still lands on main");
   assert.equal(saysMainAutomatic("don’t send it straight to main. From now on land finished work on main automatically"), true, "the denial is one sentence, the order another");
   assert.equal(saysMainAutomatic("don’t send it straight to main; it is not automatic to main"), false, "normalising the apostrophe invents no order");
-  assert.equal(saysAcknowledgeFlaky(`approve ${cand}, I’m fine with the earlier failures`, cand), true, "a curly apostrophe in I’m still carries the acceptance");
-});
-
-test("an acceptance is a verb, in the owner's own mouth, unconditioned and about the candidate being approved (third review, D2)", () => {
-  const a = "rcn-1a2b3c4d5e6f7a8b9c0d1e2f";
-  const b = "rcn-9f9f9f9f9f9f9f9f9f9f9f9f";
-
-  // What an owner really says when they accept the earlier failures of the candidate they are approving.
-  const yes = [
-    `approve ${a}, I accept the earlier failures`,
-    `approve ${a} anyway, I accept that linux failed first`,
-    `approve ${a}. Yes accept the earlier failures`,
-    `approve ${a}. I accept the failures that came first`,
-    `approve ${a}: the acceptance suite failed on linux first and I accept that`,
-    `approve ${a}, go ahead despite the failures`,
-    `approve ${a}, acknowledge the flaky pass`,
-    `${a} failed before it passed and I accept that`,
-    `approve ${b} and ${a}, I accept the failures`,
-  ];
-  for (const words of yes) assert.equal(saysAcknowledgeFlaky(words, a), true, `"${words}" accepts the earlier failures of ${a}`);
-
-  // None of these accepts the earlier failures of `a` (third review, D2), each for the reason its group says.
-  const no: ReadonlyArray<readonly [string, string]> = [
-    // A noun is not an acceptance: the owner has to accept something, not mention acceptance or an acknowledgement.
-    [`approve ${a}; the acceptance suite failed on linux first`, "a noun"],
-    [`approve ${a}; the acknowledgement of the failures sits in the waiver file`, "a noun"],
-    // A condition is not an acceptance: the owner accepts nothing yet, something has to happen first.
-    [`approve ${a} once QA has accepted the failures`, "once"],
-    [`approve ${a} only after the failures are acknowledged`, "after"],
-    [`approve ${a} before the failures are acknowledged`, "before"],
-    [`approve ${a} until QA accepts the failures`, "until"],
-    [`approve ${a}. Ask QA whether they accept its failures`, "whether"],
-    [`approve ${a} when the team accepts the failures`, "when"],
-    [`approve ${a}, once I have read the log I accept the failures`, "once, and the owner's own mouth"],
-    [`approve ${a}; ask me whether I accept the failures`, "whether, and the owner's own mouth"],
-    [`approve ${a}, I accept the failures if only linux failed`, "if, even after the acceptance"],
-    [`approve ${a}, I accept the failures assuming only linux failed`, "assuming"],
-    // An acceptance of another candidate is not an acceptance of this one.
-    [`approve ${a} and ${b}; I accept the failures of ${b}`, "another candidate is nearer to the acceptance"],
-    [`approve ${a} and ${b}. I accept the failures of ${b}`, "another candidate is nearer to the acceptance"],
-    [`approve ${a} and ${b}, I accept the failures`, "the other candidate is the one nearest to the acceptance"],
-    // A question is not an acceptance, with or without its final mark.
-    [`approve ${a}, did you accept the failures`, "a question with no mark"],
-    [`approve ${a}, do you accept the failures`, "a question with no mark"],
-    [`approve ${a}, does QA accept the failures`, "a question with no mark"],
-    [`approve ${a}, would you accept the failures`, "a question with no mark"],
-    [`approve ${a}, should we accept the failures`, "a question with no mark"],
-    [`approve ${a}, could you accept the failures`, "a question with no mark"],
-    [`approve ${a}, can you accept the failures`, "a question with no mark"],
-    [`approve ${a}, will you accept the failures`, "a question with no mark"],
-    [`approve ${a}, the earlier failures were accepted?!`, "a question ending ?!"],
-    [`approve ${a}\uff1fI accept the earlier failures`, "a question with a full-width mark"],
-    // Somebody else's acceptance is not the owner's.
-    [`approve ${a}, Bob accepted the failures`, "another person accepted them"],
-    [`approve ${a}, QA has accepted the failures`, "another person accepted them"],
-    [`approve ${a}, they accepted the failures`, "another person accepted them"],
-    [`approve ${a}, the reviewer accepted the failures`, "another person accepted them"],
-  ];
-  for (const [words, why] of no) assert.equal(saysAcknowledgeFlaky(words, a), false, `"${words}" accepts nothing (${why})`);
-
-  // The binding is to the candidate the acceptance sits nearest to: this one is nearer, so it is the owner's acceptance of this one.
-  assert.equal(saysAcknowledgeFlaky(`approve ${b} and ${a}: I accept the failures of ${a}`, a), true, "the acceptance named for this candidate is for this candidate");
-  // D2b: a sentence that carries the acceptance but names no candidate belongs to the candidate of the sentence before it.
-  assert.equal(saysAcknowledgeFlaky(`approve ${a}. Accept the earlier failures`, a), true, "the acceptance after the candidate's name is about that candidate");
-  assert.equal(saysAcknowledgeFlaky(`is ${a} the flaky one? Accept the earlier failures of ${b}`, a), false, "and still nothing when the earlier sentence was about something else");
-  // With no candidate to bind to, the acceptance still has to be the owner's own unconditioned one.
-  assert.equal(saysAcknowledgeFlaky("I accept the earlier failures"), true, "an acceptance with no candidate named is still an acceptance");
-  assert.equal(saysAcknowledgeFlaky("Bob accepted the earlier failures"), false, "someone else's acceptance binds to nothing");
 });
 
 test("a release ID or a host ID only counts when the owner said it as a whole word, not as the start of a longer name", () => {
@@ -213,7 +89,7 @@ test("a platform the owner ruled out names nothing, and so does the ordinary wor
 
 test("an ID the owner wrote with markdown, a colon or trailing punctuation is still their own whole word, and a longer or joined name still is not", () => {
   // What owners actually type around an ID: markdown bold and backticks, a label and colon before it, a quote, a bracket, a comma or a full stop after it (card X09b part 2 review 2, item 6).
-  for (const text of ["approve **rcn-1a2b** now", "approve `rcn-1a2b` now", "candidate:rcn-1a2b", "approve rcn-1a2b: it is the one", "approve rcn-1a2b_ please", 'approve "rcn-1a2b" now', "approve rcn-1a2b, then tell me", "(rcn-1a2b) is the one", "approve rcn-1a2b."]) {
+  for (const text of ["approve **rcn-1a2b** now", "approve `rcn-1a2b` now", "candidate:rcn-1a2b", "approve rcn-1a2b: it is the one", "approve rcn-1a2b_ please", 'approve "rcn-1a2b" now', "(rcn-1a2b) is the one", "approve rcn-1a2b."]) {
     assert.equal(foreignValue({ candidateId: "rcn-1a2b" }, text, "", RELEASE_ID_KEYS), undefined, `"${text}" names the candidate`);
   }
   // A name that carries on past the ID is another name: a letter, a digit, or a dash, underscore, dot or colon with more of the name after it.

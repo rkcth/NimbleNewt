@@ -40,7 +40,13 @@ for (const backend of backends) {
     });
     try {
       const chat = w.chat({ status });
-      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes; };
+      // (d) No message the owner can see may name the old magic word or tell them to say a particular thing: every turn's outcomes are scanned for it.
+      const turn = async (id: string, text: string, intents: unknown[]) => {
+        script[text] = intents;
+        const outcomes = (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes;
+        for (const o of outcomes) assert.equal(JSON.stringify(o).includes("acknowledgeFlaky"), false, `a user-visible outcome mentions acknowledgeFlaky: ${JSON.stringify(o)}`);
+        return outcomes;
+      };
       const call = (token: string, op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(token, { v: 1, op, ...(op === "release.gate" || op === "release.attempts" || op === "status.ask" ? {} : { commandId: cid("x") }), args } as never) as never;
       const submit = async (commit: string): Promise<string> => (await call(w.ownerToken, "release.submit", { manifest: manifest(commit) })).result["candidateId"] as string;
       const attempts = async (candidateId: string): Promise<any[]> => (await call(w.ownerToken, "release.attempts", { candidateId })).result["attempts"] as any[];
@@ -92,76 +98,32 @@ for (const backend of backends) {
       assert.ok((await call(worker.token, "release.report", report(passWin, { environment: win }))).ok);
       assert.deepEqual([(await gate(cand)).ready, (await gate(cand)).needsAcknowledgement], [true, true], "linux passed only after failing");
 
-      // ---- release.approve: shown first; a flaky candidate is approved only with the owner's acknowledged flaky, never behind their back.
-      const naive = `approve the release candidate ${cand}`;
-      const naiveShown = await turn("m7", naive, [{ kind: "command", op: "release.approve", args: { candidateId: cand }, evidence: naive, basis: "owner" }]);
-      assert.equal(naiveShown[0]!.status, "proposed");
-      const naiveApplied = await turn("m8", "yes, approve it plainly", [{ kind: "apply_proposal", proposalId: naiveShown[0]!.proposalId, evidence: "approve it", basis: "owner" }]);
-      assert.equal(naiveApplied[0]!.status, "refused", JSON.stringify(naiveApplied[0]));
-      assert.equal((await gate(cand)).approved, false, "a flaky release is not approved without the owner acknowledging it");
-
-      // ---- the model may not acknowledge the flaky pass on the owner's behalf: acknowledgeFlaky is a word the owner must say themselves (part 2 review, item 1).
+      // ---- release.approve: shown first whatever the words are (card X09b part 2 review, redone). No wording is a key and nothing scans the owner's sentence for an acceptance: the approval of a flaky
+      // candidate is drawn up as a proposal that shows the exact earlier failures the gate lists, it is never applied at once, and the owner's confirmation of that shown proposal is the acceptance.
+      // (a) ordinary words, no magic phrasing: what is shown and bound are the failures, not any particular sentence.
+      const shipWords = `yeah ship the release candidate ${cand}, I've seen those failures are just noise`;
+      const shipShown = await turn("m7", shipWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand }, evidence: shipWords, basis: "owner" }]);
+      assert.equal(shipShown[0]!.status, "proposed", `an approval in ordinary words is proposed, not refused: ${JSON.stringify(shipShown[0])}`);
+      const shipPreview = (shipShown[0]!.preview ?? []).join(" ");
+      assert.match(shipPreview, /linux x64 passed only after 1 earlier failure/, "the proposal says which platform failed before it passed");
+      assert.match(shipPreview, new RegExp(fail), "and it names the attempt that failed, so the owner sees exactly what they are accepting");
+      assert.match(shipPreview, /if the gate shows anything different when you confirm/i, "the owner is told a moved gate is refused and shown again");
+      // (b) never applied without the confirmation of that shown proposal: while it waits, nothing is approved.
+      assert.equal((await gate(cand)).approved, false, "nothing is approved while the proposal waits");
+      // The interpreter setting the flag itself is never the acceptance: the chat drops it and re-reads the gate, and the proposal still waits for the owner.
       const quiet = `approve the release candidate ${cand}`;
       const quietShown = await turn("m7b", quiet, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: quiet, basis: "owner" }]);
-      assert.equal(quietShown[0]!.status, "refused", `a model-set acknowledgeFlaky on a flaky candidate is refused: ${JSON.stringify(quietShown[0])}`);
-      assert.equal(quietShown[0]!.code, "unsupported_value");
-      assert.match(quietShown[0]!.message!, /your own words/i);
-      assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
-
-      // ---- naming the flaky pass is not accepting it (part 2 review 2, item 1): the owner's words must accept the earlier failures themselves.
-      const flakyWords = `the gate shows a flaky platform; approve the release candidate ${cand}`;
-      const flakyShown = await turn("m7c", flakyWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: flakyWords, basis: "owner" }]);
-      assert.equal(flakyShown[0]!.status, "refused", `naming the flaky platform without accepting it is not an acknowledgement: ${JSON.stringify(flakyShown[0])}`);
-      assert.match(flakyShown[0]!.message!, /your own words/i);
-      assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
-      const askedFlaky = `approve the release candidate ${cand}. Is the other candidate the flaky one?`;
-      const askedShown = await turn("m7d", askedFlaky, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: askedFlaky, basis: "owner" }]);
-      assert.equal(askedShown[0]!.status, "refused", `a question about another platform's flakiness accepts nothing: ${JSON.stringify(askedShown[0])}`);
-      // ---- the negation a phone types (’ rather than ') refuses exactly as the straight one does (third review, D1).
-      const curlyNo = `approve the release candidate ${cand}, I don’t accept the earlier failures`;
-      const straightNo = `approve the release candidate ${cand}, I don't accept the earlier failures`;
-      for (const [id, noWords] of [["m7f", curlyNo], ["m7g", straightNo]] as const) {
-        const shownNo = await turn(id, noWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: noWords, basis: "owner" }]);
-        assert.equal(shownNo[0]!.status, "refused", `"${noWords}" is no acceptance: ${JSON.stringify(shownNo[0])}`);
-        assert.equal(shownNo[0]!.code, "unsupported_value");
-        assert.match(shownNo[0]!.message!, /your own words/i);
-        assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
-      }
-      // A curly apostrophe in the middle of a real acceptance still reads as one: the sentence says "I'm fine with …".
-      const curlyYes = `approve the release candidate ${cand}, I’m fine with the failures that came first`;
-      const curlyYesShown = await turn("m7h", curlyYes, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: curlyYes, basis: "owner" }]);
-      assert.equal(curlyYesShown[0]!.status, "proposed", `the owner's own acceptance with a typed apostrophe is read: ${JSON.stringify(curlyYesShown[0])}`);
-      // ---- an acceptance that is not the owner's own, is conditioned, is a question or belongs to another candidate is no acknowledgement at all (third review, D2).
-      const notAcceptance: ReadonlyArray<readonly [string, string]> = [
-        ["m7i", `approve the release candidate ${cand} and rcn-9f9f9f9f9f9f9f9f9f9f9f; I accept the failures of rcn-9f9f9f9f9f9f9f9f9f9f9f`],
-        ["m7j", `approve the release candidate ${cand}, did you accept the failures`],
-        ["m7k", `approve the release candidate ${cand}, Bob accepted the failures`],
-        ["m7l", `approve the release candidate ${cand} once QA has accepted the failures`],
-        ["m7m", `approve the release candidate ${cand}; the acceptance suite failed on linux first`],
-      ];
-      for (const [id, words] of notAcceptance) {
-        const shown = await turn(id, words, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: words, basis: "owner" }]);
-        assert.equal(shown[0]!.status, "refused", `"${words}" accepts nothing for ${cand}: ${JSON.stringify(shown[0])}`);
-        assert.equal(shown[0]!.code, "unsupported_value");
-        assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
-      }
-      // An acceptance in the sentence after the candidate's name is the owner's acceptance of that candidate.
-      const nextSentence = `approve the release candidate ${cand}. Yes accept the earlier failures`;
-      const nextShown = await turn("m7n", nextSentence, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: nextSentence, basis: "owner" }]);
-      assert.equal(nextShown[0]!.status, "proposed", `the acceptance that follows the candidate's name is about it: ${JSON.stringify(nextShown[0])}`);
-      const acceptWords = `the gate shows a flaky platform and I accept it; approve the release candidate ${cand}`;
-      const acceptShown = await turn("m7e", acceptWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: acceptWords, basis: "owner" }]);
-      assert.equal(acceptShown[0]!.status, "proposed", `the owner accepting the flaky pass is an acknowledgement: ${JSON.stringify(acceptShown[0])}`);
-
-      const ackWords = `approve the release candidate ${cand} with acknowledgeFlaky: I have read the gate and accept the earlier failures`;
-      const ackShown = await turn("m9", ackWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: ackWords, basis: "owner" }]);
-      assert.equal(ackShown[0]!.status, "proposed");
-      assert.match((ackShown[0]!.preview ?? []).join(" "), /linux x64 passed only after 1 earlier failure/, "the preview says which platform failed before it passed");
-      const ackConfirm = await turn("m10", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
-      assert.equal(ackConfirm[0]!.status, "applied", JSON.stringify(ackConfirm[0]));
+      assert.equal(quietShown[0]!.status, "proposed", `the interpreter's own acknowledgeFlaky is dropped and the gate re-read: ${JSON.stringify(quietShown[0])}`);
+      const quietArgs = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, quietShown[0]!.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
+      assert.deepEqual(quietArgs["expectedFailures"], [fail], "what the approval binds to is the chat's own reading of the gate, not anything the interpreter sent");
+      assert.equal((await gate(cand)).approved, false, "a model-set flag approves nothing by itself");
+      assert.equal((await turn("m7c", "no, forget that one", [{ kind: "discard_proposal", proposalId: quietShown[0]!.proposalId, evidence: "forget that one", basis: "owner" }]))[0]!.status, "discarded");
+      // The owner's later confirmation of the proposal that showed the failures is itself the acceptance — no special words said beforehand.
+      const shipConfirm = await turn("m8", "yes, approve it", [{ kind: "apply_proposal", proposalId: shipShown[0]!.proposalId, evidence: "approve it", basis: "owner" }]);
+      assert.equal(shipConfirm[0]!.status, "applied", `confirming the shown proposal is the acceptance: ${JSON.stringify(shipConfirm[0])}`);
       assert.equal((await gate(cand)).approved, true);
 
-      // ---- the acknowledgement is bound to what the owner was shown (part 2 review 2, item 1): a gate that gains an earlier failure before the owner confirms is refused, and the new one is shown to them.
+      // ---- a gate that gains an earlier failure before the owner confirms is refused, and the new one is shown to them (part 2 review 2, item 1, kept by the redesign): the confirmation only ever accepts the failures that were shown.
       {
         const late = await submit("d");
         const issueLate = async (cell: Record<string, unknown>, host: string) => {
@@ -558,12 +520,18 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 
-  test(`${backend.name}: the expectedFailures the interpreter sends are never used — the chat writes its own reading of the gate into the approval, and drops it when the owner's words do not acknowledge (card X09b part 2 review 2, item 1; third review)`, async () => {
+  test(`${backend.name}: the expectedFailures the interpreter sends are never used — the chat writes its own reading of the gate into the approval, and the owner's confirmation of the shown proposal is the acceptance (card X09b part 2 review 2, item 1; third review; redesign)`, async () => {
     const script: Record<string, unknown[]> = {};
     const w = await openWorld(backend, script, undefined, (storage, epoch) => ({ release: ReleaseService.withEpoch(storage, epoch, options) }));
     try {
       const chat = w.chat({});
-      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes; };
+      const turn = async (id: string, text: string, intents: unknown[]) => {
+        script[text] = intents;
+        const outcomes = (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes;
+        // (d) nothing the owner is told may name the old magic word or ask them to say anything in particular.
+        for (const o of outcomes) assert.equal(JSON.stringify(o).includes("acknowledgeFlaky"), false, `a user-visible outcome mentions acknowledgeFlaky: ${JSON.stringify(o)}`);
+        return outcomes;
+      };
       const callAs = (token: string, op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(token, { v: 1, op, ...(op === "release.gate" || op === "release.attempts" ? {} : { commandId: cid("x") }), args } as never) as never;
       const call = (op: string, args: Record<string, unknown>): Promise<Reply> => callAs(w.ownerToken, op, args);
       const gate = async (candidateId: string): Promise<any> => (await call("release.gate", { candidateId })).result["gate"];
@@ -603,11 +571,13 @@ for (const backend of backends) {
       assert.equal(shownText.includes(bogus), false, `the attempt ID the interpreter invented is nowhere in what the owner is shown:\n${shownText}`);
       const ackArgs = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, ackShown[0]!.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
       assert.deepEqual(ackArgs["expectedFailures"], [sick], `what is sent is the chat's own reading of the gate, not the interpreter's list: ${JSON.stringify(ackArgs)}`);
+      assert.equal(ackArgs["acknowledgeFlaky"], true, "the written approval is the chat's own, set because the gate is flaky — the interpreter's value was dropped and re-read");
       const ackApplied = await turn("f4", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(ackApplied[0]!.status, "applied", `the approval carries the chat's own reading of the gate, not the interpreter's list: ${JSON.stringify(ackApplied[0])}`);
       assert.equal((await gate(cand)).approved, true);
 
-      // A candidate with nothing flaky and no acknowledgement in the owner's words: the interpreter's list is dropped, so the clean gate is approved as it stands.
+      // A candidate with nothing flaky: (c) a non-flaky approval behaves as before — proposed, then applied on the owner's confirmation. The interpreter's invented list is still dropped, and the
+      // approval is bound to the clean gate it shows, so a gate that gains a failure before the confirmation is refused rather than approved unseen.
       const clean = await submit("b");
       const green = await issue(clean, "b");
       assert.ok((await callAs(worker.token, "release.report", report(green, { sourceCommit: "b".repeat(40) }))).ok, "the clean candidate passed straight away");
@@ -617,7 +587,8 @@ for (const backend of backends) {
       assert.equal(cleanShown[0]!.status, "proposed", JSON.stringify(cleanShown[0]));
       assert.equal((cleanShown[0]!.preview ?? []).join(" ").includes(bogus), false, "the dropped list is not shown to the owner either");
       const cleanArgs = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, cleanShown[0]!.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
-      assert.equal("expectedFailures" in cleanArgs, false, `an approval the owner did not acknowledge carries no earlier failures at all: ${JSON.stringify(cleanArgs)}`);
+      assert.deepEqual(cleanArgs["expectedFailures"], [], `an approval shown a clean gate is bound to it with no earlier failures, so a gate that moves before the confirmation is refused: ${JSON.stringify(cleanArgs)}`);
+      assert.equal("acknowledgeFlaky" in cleanArgs, false, `an approval of a clean gate needs no acceptance at all: ${JSON.stringify(cleanArgs)}`);
       const cleanApplied = await turn("f6", "confirm that approval", [{ kind: "apply_proposal", proposalId: cleanShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(cleanApplied[0]!.status, "applied", `the invented expectedFailures were dropped rather than sent: ${JSON.stringify(cleanApplied[0])}`);
       assert.equal((await gate(clean)).approved, true);

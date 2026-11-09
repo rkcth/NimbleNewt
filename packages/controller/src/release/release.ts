@@ -746,7 +746,7 @@ export class ReleaseService {
     return { candidateId, ready: cells.every((c) => c.state === "passed"), needsAcknowledgement: cells.some((c) => c.flaky), approved, cells };
   }
 
-  /** The owner's decision to release. A worker cannot make it, and nothing missing, failing, running or lost can pass it. A platform that passed only after failing needs `acknowledgeFlaky: true`. */
+  /** The owner's decision to release. A worker cannot make it, and nothing missing, failing, running or lost can pass it. A platform that passed only after failing is accepted only by an approval that was shown those earlier failures (`acknowledgeFlaky: true` with `expectedFailures`; the chat draws up one from the gate for the owner to confirm). */
   async approve(owner: Principal, command: NoActor & { candidateId: string; acknowledgeFlaky?: boolean; expectedFailures?: readonly string[] }): Promise<void> {
     this.#owner(owner, "approve a release");
     onlyKnown(command, ["commandId", "candidateId", "acknowledgeFlaky", "expectedFailures"]);
@@ -766,7 +766,7 @@ export class ReleaseService {
           if (was.length !== now.length || was.some((id, k) => id !== now[k])) throw new DomainError("invalid_command", `the gate is not what this approval was shown with: it was shown ${was.length === 0 ? "no earlier failure" : was.join(", ")} and release.gate now shows ${now.length === 0 ? "no earlier failure" : now.join(", ")}. Read release.gate again, then approve with what it shows.`.slice(0, 500), { field: "expectedFailures" });
         }
         const flaky = gate.cells.filter((c) => c.flaky);
-        if (flaky.length > 0 && command.acknowledgeFlaky !== true) throw new DomainError("invalid_command", `passed only after failing: ${flaky.map((c) => `${cellKey(c.cell)} (${c.earlierFailures.length} earlier failure${c.earlierFailures.length === 1 ? "" : "s"}: ${c.earlierFailures.map((f) => f.id).join(", ")})`).join("; ")}. Read release.gate, then approve with acknowledgeFlaky true.`.slice(0, 500), { field: "acknowledgeFlaky" });
+        if (flaky.length > 0 && command.acknowledgeFlaky !== true) throw new DomainError("invalid_command", `passed only after failing: ${flaky.map((c) => `${cellKey(c.cell)} (${c.earlierFailures.length} earlier failure${c.earlierFailures.length === 1 ? "" : "s"}: ${c.earlierFailures.map((f) => f.id).join(", ")})`).join("; ")}. Read release.gate again, then approve with the earlier failures it shows.`.slice(0, 500), { field: "acknowledgeFlaky" });
         if ((await this.#runner.get(APPROVAL, ref.id)) !== undefined) throw new DomainError("invalid_command", "that candidate is already approved", { field: "candidateId" });
         const body: ApprovalBody = { candidateId: command.candidateId, by: owner.id, at: this.#runner.now(), ...(flaky.length === 0 ? {} : { acknowledged: flaky.flatMap((c) => c.earlierFailures.map((f) => f.id)) }) };
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { candidateId: command.candidateId, acknowledged: flaky.length } };
