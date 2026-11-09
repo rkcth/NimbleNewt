@@ -84,7 +84,7 @@ export type CellState = "passed" | "failed" | "interrupted" | "timed_out" | "run
 /** An attempt that failed before the platform's passing one: kept in view beside the pass, never hidden by it. */
 export interface EarlierFailure { readonly id: string; readonly n: number; readonly issuedBy?: string; readonly summary?: string; readonly endedAt?: string }
 export interface GateCell { readonly cell: Cell; readonly state: CellState; readonly attempts: number; readonly latest?: string; /** True when the platform passed only after earlier failures (a retry until green). */ readonly flaky: boolean; readonly earlierFailures: readonly EarlierFailure[] }
-/** `ready`: every platform's latest attempt passed. `needsAcknowledgement`: some platform passed only after failing; the owner approves such a release only by saying so (`acknowledgeFlaky`). */
+/** `ready`: every platform's latest attempt passed. `needsAcknowledgement`: some platform passed only after failing; an approval of such a release must carry those earlier failures as the ones it was shown (`acknowledgeFlaky` with `expectedFailures`). */
 export interface Gate { readonly candidateId: string; readonly ready: boolean; readonly needsAcknowledgement: boolean; readonly approved: boolean; readonly cells: readonly GateCell[] }
 
 /** Who besides the owner may start and cancel release tests. A setting not set takes the installation profile's default (strict: owner only; derived and autonomous: both on). */
