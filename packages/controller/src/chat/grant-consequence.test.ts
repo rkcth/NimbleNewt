@@ -22,7 +22,7 @@ const shown = (o: Outcome, reply: readonly string[]): string => [...(o.preview ?
  * Nothing an owner may read may tell them how to word a message: no example phrase, no "say the limit", no "only when your own message says so".
  * Two kinds of line are deliberately not matched here. A plain question asking for information ("How much may Rex spend under this grant — a figure,
  * or no ceiling at all?") asks for a fact, not for a form of words. And an invention guard naming the value it wants ("40 days is not a length your
- * message gives … How long should the grant last?", "grantee is not in your message … Say what it should be.") is the allowed ID-and-value guard: it
+ * message gives … How long should the grant last?", "What was given for grantee is not in your message … What did you mean instead?") is the allowed ID-and-value guard: it
  * stops the chat inventing something the record would hold, and the owner may answer it in any words they like.
  */
 const PHRASE_INSTRUCTIONS: readonly { readonly re: RegExp; readonly unless?: RegExp }[] = [

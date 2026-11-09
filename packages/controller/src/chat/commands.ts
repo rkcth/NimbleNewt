@@ -82,9 +82,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Not letting it go on: the task is released (nothing works on it until it is assigned again). Shown first as well: it ends the task's waiting attempt.
   "resume.decline": { verb: "Stop a task a resume check held for changes that matter to it (the task is released)", mode: "propose" },
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
-  // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.
+  // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30).
+  // Moving a host's work re-plays running attempts, so it is shown first too, whatever words the owner used to ask: no wording makes it apply on its own.
   "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },
-  "host.move-work": { verb: "Move the work off a host", mode: "apply" },
+  "host.move-work": { verb: "Move the work off a host", mode: "propose" },
   // Reviewing and deciding on a deliverable (card Q01): the owner's decision on the work. Accepting or rejecting is first shown in every profile (provisional: it lets dependent work go on); starting a review changes nothing else.
   "deliverable.review.start": { verb: "Start reviewing a deliverable", mode: "apply" },
   "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
@@ -251,6 +252,67 @@ export function durationInWords(seconds: number, text: string): boolean {
   return false;
 }
 
+/** The month names an owner may write for a date, abbreviations included because people write `Nov 30`. */
+const MONTH_WORDS: Readonly<Record<string, number>> = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4, may: 5, jun: 6, june: 6,
+  jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+/** The two times of a right. They are checked by `grantDateInWords` (a day the owner named, not the exact characters of an ISO moment), so `foreignValue` is told to leave them alone. */
+export const GRANT_DATE_KEYS: ReadonlySet<string> = new Set(["notBefore", "expiresAt"]);
+
+/**
+ * The moment a right starts or ends, when the owner's own words give that day (card U03e). What counts as their day: the moment as written (what `foreignValue` looks for in every other text of a
+ * command), an ISO day `2026-11-30` (alone or with a time after it), a slashed `30/11/2026` or `11/30/26` — both readings of the pair count, and the moment the proposal shows settles which one the
+ * owner meant — or a written day and month (`30 November`, `November 30th`, `the 30th of Nov 2026`), with the year they wrote when they wrote one. "the end of the month", "a few more days" and "when
+ * the audit is done" name no day the controller can check, so they give no date: the day would be the model's, and the right is not drawn up. The time of day is the interpreter's reading of the day
+ * the owner named and is shown on the proposal line the owner confirms. Returns the moment in the UTC form the state API records, or undefined when the words do not give it.
+ */
+export function grantDateInWords(value: unknown, ownText: string): string | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return undefined;
+  const when = new Date(ms);
+  const iso = when.toISOString();
+  const own = ` ${ownText.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim()} `;
+  // What the interpreter wrote, standing in the owner's message: the search `foreignValue` makes for every other text of a command. Only a moment that carries a calendar date is searched for, so a
+  // value like "0" cannot be "said" by any message that happens to hold the digit.
+  const given = value.toLowerCase().trim();
+  if (/\d{4}-\d{2}-\d{2}/.test(given) && own.includes(given)) return iso;
+  // The day is the one on the calendar where the moment was written: an end of "Nov 30" written as 2026-11-30T23:59-08:00 is Dec 1 in UTC, and the owner's day is still the 30th. The UTC day is
+  // accepted too (a moment written in UTC, or one the owner wrote that way). The moment recorded and shown is the same either way.
+  const written = /^(\d{4})-(\d{2})-(\d{2})(?:[t ]|$)/.exec(given);
+  const days: { year: number; month: number; day: number; text: string }[] = [{ year: when.getUTCFullYear(), month: when.getUTCMonth() + 1, day: when.getUTCDate(), text: iso.slice(0, 10) }];
+  if (written !== null && written[0].slice(0, 10) !== iso.slice(0, 10)) days.push({ year: Number(written[1]), month: Number(written[2]), day: Number(written[3]), text: written[0].slice(0, 10) });
+  return days.some((d) => dayInWords(d, own)) ? iso : undefined;
+}
+
+/** Whether the owner's words (lowercased, padded) name this calendar day: see `grantDateInWords`. */
+function dayInWords({ year, month, day, text }: { year: number; month: number; day: number; text: string }, own: string): boolean {
+  // 2026-11-30, on its own or followed by a time (`wholeWord` will not match a day running straight into a `T`).
+  if (wholeWord(own, text) || new RegExp(`${text}[t ]\\d{1,2}:\\d{2}`, "i").test(own)) return true;
+  // A slashed or dashed numeric day, read either way round; the shown moment is what the owner confirms.
+  for (const m of own.matchAll(/(?:^|[^0-9])(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})(?:[^0-9]|$)/g)) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (Number(m[3]!.length === 2 ? `20${m[3]}` : m[3]) !== year) continue;
+    if ((a === day && b === month) || (a === month && b === day)) return true;
+  }
+  // A written month with a day, in either order, with the year when the owner wrote one (26 and 2026 both count as their own spelling).
+  const names = Object.keys(MONTH_WORDS).sort((x, y) => y.length - x.length).join("|");
+  const ordinal = "(?:st|nd|rd|th)?";
+  const yearSaid = "(?:,?\\s+(?<year>\\d{4}|\\d{2}))?";
+  const sameYear = (m: RegExpMatchArray): boolean => {
+    const written = m.groups?.["year"];
+    if (written === undefined) return true;
+    const n = written.length === 2 ? (Number(written) < 70 ? 2000 + Number(written) : 1900 + Number(written)) : Number(written);
+    return n === year;
+  };
+  const dayFirst = new RegExp(`(?:^|[^0-9])(\\d{1,2})${ordinal}(?:\\s+of)?\\s+(${names})${yearSaid}(?:[^0-9a-z]|$)`, "g");
+  const monthFirst = new RegExp(`(?:^|[^a-z])(${names})\\s+(\\d{1,2})${ordinal}${yearSaid}(?:[^0-9a-z]|$)`, "g");
+  for (const m of own.matchAll(dayFirst)) if (Number(m[1]) === day && MONTH_WORDS[m[2]!] === month && sameYear(m)) return true;
+  for (const m of own.matchAll(monthFirst)) if (Number(m[2]) === day && MONTH_WORDS[m[1]!] === month && sameYear(m)) return true;
+  return false;
+}
+
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
@@ -294,7 +356,6 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "task.assign": /\b(assign|give|allocate)/i,
   "maintenance.revoke": /\b(revoke|undo|remove|take back|withdraw|roll back|uninstall|cancel)/i,
   "maintenance.site.set:deny": /\b(deny|block|forbid|ban|disallow|stop)/i,
-  "host.move-work": /\b(move|relocate|re-?place|reassign|transfer|shift|take)/i,
 };
 
 /** The key into `MOVE_VERBS` for a command, or undefined when the command needs no verb. */
@@ -359,7 +420,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (spec.mode === "propose" && (op === "integration.set" || op === "integration.default.set")) return landingOf(args) === "main-automatic" ? "finished work would go to main by itself with no human step, so this is shown first for you to confirm" : "how finished work lands is shown first";
   if (spec.mode === "propose" && op === "project.create" && landingOf(args) === "main-automatic") return "a new project is drafted first, and its finished work would go to main by itself with no human step";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.
-  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : op.startsWith("release.") ? "a release action is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op === "host.move-work" ? "moving the work off a host re-places what is running on it, so it is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : op.startsWith("release.") ? "a release action is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
   if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
@@ -590,12 +651,24 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? ` (${typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : "no end: it never runs out and stays until you revoke it"}${args["project"] === "*" ? "; everywhere: it covers every project, including ones made later" : typeof args["project"] === "string" ? `; only in ${labels[args["project"]] === undefined ? short(args["project"]) : quotedText(labels[args["project"]], 60)}` : ""})` : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
+  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? grantMeaning(args, labels) : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
   // The verb is this file's own wording; an operation the table does not know is whoever called this saying an operation name, so even that is escaped.
   const line = `${short(spec?.verb ?? op)}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
   return line.length > room ? `${cutAt(line, room - 3)}...` : line;
+}
+
+/**
+ * When a right is alive and how far it reaches, said before the names so a cut line still shows them. Neither is read out of the owner's wording: the two times are the ones their own words gave
+ * (`grantDateInWords`, checked in the chat) or none, and with none the line says the right never runs out. A date is the owner's own text and goes through `short`, once, like every other value here.
+ */
+function grantMeaning(args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
+  const end = typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : "no end: it never runs out and stays until you revoke it";
+  const start = typeof args["notBefore"] === "string" ? `; starts ${short(args["notBefore"])}` : "";
+  const scope = args["project"];
+  const reach = scope === "*" ? "; everywhere: it covers every project, including ones made later" : typeof scope === "string" ? `; only in ${labels[scope] === undefined ? short(scope) : quotedText(labels[scope], 60)}` : "";
+  return ` (${end}${start}${reach})`;
 }
 
 /**

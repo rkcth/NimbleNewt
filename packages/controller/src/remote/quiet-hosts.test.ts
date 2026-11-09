@@ -55,6 +55,7 @@ for (const backend of backends) {
     assert.equal(w.notices[0]!.hostId, w.r1.id);
     assert.match(w.notices[0]!.detail, /holds 1 attempt/);
     assert.match(w.notices[0]!.detail, /moves after 12h/);
+    assert.doesNotMatch(w.notices[0]!.detail, /\bsay\b|\bfor example\b|["\u201c]/i, `the warning tells the owner how things stand, not what to type: ${w.notices[0]!.detail}`);
     assert.ok(w.notices.every((n) => n.detail.length <= 200), "within the notification limit");
     await pass(c, 10 * MIN, [w.r2]);
     assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).warned, 0);
@@ -63,6 +64,28 @@ for (const backend of backends) {
     assert.equal((await restarted.sweep(c.dispatcherPrincipal)).warned, 0, "a restarted controller reads the record and warns no more");
     assert.equal(w.notices.length, 1);
     assert.equal((await w.where()).hostId, w.r1.id, "a warning moves nothing");
+  }, { policy: open });
+
+  suite("what the owner is told about a quiet host is the situation, not a sentence to copy: the timer when moves are on, that nothing moves by itself when they are off, and the timer again when they turn them on", async (c) => {
+    const w = await world(c);
+    await w.settings.change(c.owner, { commandId: "q-off", autoMove: false });
+    await pass(c, 6 * MIN, [w.r2]);
+    assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).warned, 1);
+    assert.equal(w.notices.length, 1);
+    assert.match(w.notices[0]!.detail, /holds 1 attempt/, "what is on the host");
+    assert.match(w.notices[0]!.detail, /automatic moves are off/i, "that nothing will move by itself");
+    assert.match(w.notices[0]!.detail, /until you have it moved/i, "and that the owner can have it moved");
+    assert.doesNotMatch(w.notices[0]!.detail, /\bsay\b|\bfor example\b|\byour own words\b|["\u201c]/i, `no sentence to copy: ${w.notices[0]!.detail}`);
+    await pass(c, 2 * MIN, [w.r2]);
+    assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).moved, 0, "moves are off, so nothing moves however long the host is quiet");
+    // The owner turns automatic moves on: the timer they now have is told to them, because it answers their own change.
+    await w.settings.change(c.owner, { commandId: "q-on", autoMove: true });
+    await pass(c, 2 * MIN, [w.r2]);
+    assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).warned, 1, "the warning is restated with the timer that now applies");
+    assert.equal(w.notices.length, 2);
+    assert.match(w.notices[1]!.detail, /moves after 12h/, "the timer, said as a fact about the work");
+    assert.doesNotMatch(w.notices[1]!.detail, /\bsay\b|\bfor example\b|["\u201c]/i, w.notices[1]!.detail);
+    assert.ok(w.notices.every((n) => n.detail.length <= 200), "within the notification limit");
   }, { policy: open });
 
   suite("a notice that cannot be sent does not stop the pass or count as sent: the next pass sends it, once", async (c) => {
@@ -180,7 +203,12 @@ for (const backend of backends) {
       assert.deepEqual(await damaged.effective(), { graceHours: 12, autoMove: false, recoverMinutes: 10, noticeHours: 6 });
       assert.deepEqual(told.length, 1);
       // Fixing the damaged setting by naming only the grace period must not turn automatic moves back on: autoMove has to be stated.
-      await refuses("invalid_command", () => w.settings.change(c.owner, { commandId: "d1", graceHours: 6 }), (e) => assert.equal(e.field, "autoMove"));
+      await refuses("invalid_command", () => w.settings.change(c.owner, { commandId: "d1", graceHours: 6 }), (e) => {
+        assert.equal(e.field, "autoMove");
+        // Reachable from chat: it asks the question, it does not give the owner a form of words to type.
+        assert.match(e.message, /Should automatic moves be on or off\?$/);
+        assert.doesNotMatch(e.message, /\bsay\b|autoMove true/i, e.message);
+      });
       await refuses("invalid_command", () => w.settings.change(c.owner, { commandId: "d1b", graceHours: 6, autoMove: null }), (e) => assert.equal(e.field, "autoMove"));
       assert.equal((await w.settings.get(c.owner)).damaged, true);
     } finally { c.storage.getAggregate = real; }

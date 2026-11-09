@@ -237,7 +237,7 @@ export function defineMeetingDecisionChatTests(backendName: string): void {
       script[both] = [cmd(OP, { response: "agree", decisionId: d.id, decisionTopic: "nightly build" }, both.slice(0, -1))];
       const twice = only((await say(w, chat, both)).outcomes);
       assert.deepEqual([twice.status, twice.code, twice.proposalId], ["refused", "invalid_command", undefined], JSON.stringify(twice));
-      assert.match(String(twice.message), /give either decisionId or decisionTopic, not both/);
+      assert.match(String(twice.message), /^the meeting decision is named twice over, as decisionId and as decisionTopic; which one is meant has to be settled\.$/);
       for (const extra of [{ alternativeStatement: "keep the nightly build at midnight" }, { alternativeTopic: "nightly build" }]) {
         const text = "No to the nightly build, keep the nightly build at midnight.";
         script[text] = [cmd(OP, { response: "decline", decisionTopic: "nightly build", ...extra }, "keep the nightly build at midnight")];
@@ -291,7 +291,8 @@ export function defineMeetingDecisionChatTests(backendName: string): void {
         assert.deepEqual([refused.status, refused.code], ["refused", "invalid_command"], `${text}: ${JSON.stringify(refused)}`);
         assert.match(String(refused.message), /^Nothing was proposed: /);
         assert.match(String(refused.message), reason);
-        assert.match(String(refused.message), /The meeting decision still waits for your answer; say what you decide instead, in your own words/);
+        assert.match(String(refused.message), /The meeting decision still waits for your answer; what do you decide instead\?$/);
+        assert.doesNotMatch(String(refused.message), /\bsay\b|for example/i, `a refusal states what is missing, it does not tell the owner how to phrase it: ${refused.message}`);
         // The owner is told what is missing, never given a form of words to copy.
         assert.equal(/for example|say it exactly|only say/i.test(String(refused.message)), false, `a refusal dictates a phrase to the owner: ${JSON.stringify(refused)}`);
       }
@@ -543,7 +544,7 @@ export function defineMeetingDecisionChatTests(backendName: string): void {
       const text = "I would rather keep the nightly build at midnight until March.";
       script[text] = [cmd(OP, { response: "alternative", decisionTopic: "nightly", alternativeStatement: "keep the nightly build at midnight until March" }, "keep the nightly build at midnight until March")];
       const refused = only((await say(w, chat, text)).outcomes);
-      assert.match(String(refused.message), /^Nothing was proposed: the topic "nightly build" has a conflict between two of your instructions\. The meeting decision still waits for your answer; settle that conflict first, or decline the meeting's decision\.$/);
+      assert.match(String(refused.message), /^Nothing was proposed: the topic "nightly build" has a conflict between two of your instructions\. The meeting decision still waits for your answer; that conflict has to be settled first, or the meeting's decision declined\.$/);
     });
 
     suite("words match whole words across hyphens and es-plurals, and decisions of different projects are told apart by project, or narrowed by the project the owner names", async (w, script, ctl) => {
@@ -846,7 +847,7 @@ export function defineMeetingDecisionChatTests(backendName: string): void {
       assert.deepEqual(resumed.outcomes.filter((o) => o.op === "decision.record").map((o) => o.status), ["applied", "applied"], JSON.stringify(resumed.outcomes));
       // The step recorded before the crash is answered from the record (no revision comes back, as from a send), because it is this message's own record.
       assert.equal(resumed.outcomes[0]!.revision, undefined, JSON.stringify(resumed.outcomes[0]));
-      assert.deepEqual(resumed.outcomes[0]!.shown, ['Recorded decision version 1 on "schedule": use midnight for the nightly build']);
+      assert.deepEqual(resumed.outcomes[0]!.shown, ['Recorded decision version 1 on "schedule": "use midnight for the nightly build"']);
       assert.deepEqual((await w.decisions.history(w.owner, { projectId: ctl.project, topic: "schedule" })).map((d) => [d.version, d.state]), [[1, "superseded"], [2, "active"]]);
     });
 
