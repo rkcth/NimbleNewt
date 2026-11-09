@@ -3,6 +3,7 @@ import { after, test } from "node:test";
 import { openWorld, cid, options } from "../chat/testing/harness.js";
 import { ContinuationService, type ContinuationInput } from "../continuation/index.js";
 import { BlockerService } from "../domain/blockers.js";
+import { COMPACTION_KEEP, compactionKeep } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ContextEnforcementService, ENFORCEMENT_LIMITS, LINEAGE_KEEP, lineageDigest, type SourceRef } from "./index.js";
@@ -97,13 +98,22 @@ for (const backend of backends) {
       const second = (await continuations.latest(host, t))!;
       assert.deepEqual([second.manifest.summaryLineage.length, second.manifest.summaryLineageEarlier], [LINEAGE_KEEP + 1, head.earlier]);
       // Folding continues a reference the host passed: the digest goes on from it, the count adds up.
-      const more = Array.from({ length: 205 }, (_, i) => ids[i]!);
-      await continuations.capture(host, { commandId: cid("cap"), taskId: t, ...input(more, { summaryLineageEarlier: { count: 3, digest: lineageDigest(["cmp-aaaaaaaaaaaaaaaaaaaa", "cmp-bbbbbbbbbbbbbbbbbbbb", "cmp-cccccccccccccccccccc"]), through: "cmp-cccccccccccccccccccc" } }) });
+      const longer = Array.from({ length: 205 }, (_, i) => ids[i]!);
+      await continuations.capture(host, { commandId: cid("cap"), taskId: t, ...input(longer, { summaryLineageEarlier: { count: 3, digest: lineageDigest(["cmp-aaaaaaaaaaaaaaaaaaaa", "cmp-bbbbbbbbbbbbbbbbbbbb", "cmp-cccccccccccccccccccc"]), through: "cmp-cccccccccccccccccccc" } }) });
       const third = (await continuations.latest(host, t))!;
-      assert.deepEqual(third.manifest.summaryLineageEarlier, { count: 8, digest: lineageDigest(["cmp-aaaaaaaaaaaaaaaaaaaa", "cmp-bbbbbbbbbbbbbbbbbbbb", "cmp-cccccccccccccccccccc", ...more.slice(0, 5)]), through: more[4] });
+      assert.deepEqual(third.manifest.summaryLineageEarlier, { count: 8, digest: lineageDigest(["cmp-aaaaaaaaaaaaaaaaaaaa", "cmp-bbbbbbbbbbbbbbbbbbbb", "cmp-cccccccccccccccccccc", ...longer.slice(0, 5)]), through: longer[4] });
       // Still bounded on input: a list past 10,000 or a malformed reference is refused, never stored.
       await assert.rejects(continuations.capture(host, { commandId: cid("cap"), taskId: t, ...input(Array.from({ length: 10_001 }, () => ids[0]!)) }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && e.field === "manifest.summaryLineage");
       await assert.rejects(continuations.capture(host, { commandId: cid("cap"), taskId: t, ...input(ids.slice(0, 3), { summaryLineageEarlier: { count: 1, digest: "sha256:nope", through: ids[0]! } }) }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && e.field === "manifest.summaryLineageEarlier.digest");
+
+      // The process's own compaction (the one that runs in production) is given the same owner decisions: twelve lines, each its ID and the wording quoted and cut; more than twelve are counted, not dropped silently.
+      const given = compactionKeep((await w.decisions.controllerContext({ projectId: a, taskId: t }))!)!;
+      assert.deepEqual(given.lines.map((l) => l.slice(0, l.indexOf(":"))).sort(), (pinned as { id: string }[]).map((p) => p.id).sort());
+      for (const l of given.lines) assert.ok(l.length <= 24 + 2 + 2 + COMPACTION_KEEP.chars + 40 && /^dec-[a-z2-7]{20}: "/.test(l), l);
+      for (let i = 0; i < 2; i++) await w.decisions.record(w.owner, { commandId: cid("dec"), projectId: a, category: "decision", topic: `extra-${i}`, statement: "More", wording: `Extra decision ${i}`, source: { channel: "direct" }, basedOn: 0 } as never);
+      const more = compactionKeep((await w.decisions.controllerContext({ projectId: a, taskId: t }))!)!;
+      assert.equal(more.lines.length, COMPACTION_KEEP.items);
+      assert.match(more.note, /2 more are not listed.*decision\.context/);
     } finally { await w.close(); }
   });
 }

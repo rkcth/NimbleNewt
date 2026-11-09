@@ -277,6 +277,25 @@ export function startupItems(context: DecisionContext): StartupItem[] {
   return out;
 }
 
+/** How many of the owner's items a compaction of the model process keeps, and how much of each (card C07q): the same 12 as the controller's own compaction pins. */
+export const COMPACTION_KEEP = { items: 12, chars: 200 } as const;
+/**
+ * The owner's decisions given to the model process's own compaction (card C07q). The process compacts its conversation itself (Pi's `beforeCompact` hook, with the extractive summary), so the controller's
+ * summariser, which pins decisions by reference, never sees that text. Instead the process is handed, when it starts, the owner's current items for its task (decisions, gates, goals, permissions and
+ * unresolved conflicts; never an agent's open question), each as its ID and its wording quoted and cut, and adds them to every summary it writes. They are a snapshot: the note says which version and
+ * how to read the current ones whole, so a later correction is never hidden by an older line. `undefined` when the owner has decided nothing for the task.
+ */
+export function compactionKeep(context: DecisionContext): { readonly note: string; readonly lines: readonly string[] } | undefined {
+  const items = startupItems(context).filter((i) => i.kind !== "decision");
+  if (items.length === 0) return undefined;
+  const cut = (text: string): string => { const chars = Array.from(text.replace(/\s+/g, " ").trim()); return chars.length > COMPACTION_KEEP.chars ? `${chars.slice(0, COMPACTION_KEEP.chars - 3).join("")}...` : chars.join(""); };
+  const kept = items.slice(0, COMPACTION_KEEP.items);
+  const more = items.length - kept.length;
+  const lines = kept.map((i) => `${i.id}: ${quotedLine(cut(i.text))}`);
+  const note = `The owner's decisions for this task, kept through this compaction as they stood when this process started (decision version ${context.version}), each cut to ${COMPACTION_KEEP.chars} characters${more > 0 ? `; ${more} more are not listed` : ""}. A later correction replaces any of them: read the current ones whole with the state API query decision.context, giving this task's project and task ID.`;
+  return { note, lines };
+}
+
 /** What a gate or an obsolete reliance says about starting work. Same shape as the pause guard: the reasons, and the revision checks to commit with the caller's change. */
 export interface DecisionGuard {
   /** `start`: a generation begins or a task's work resumes. `effect`: an external effect is admitted, started, or approved. */

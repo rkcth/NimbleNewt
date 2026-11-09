@@ -84,6 +84,9 @@ const EXTRACT_CHARS = 6000;
 export function contextPolicyOf(context: ChannelStart["context"]): AdapterContextPolicy | undefined {
   if (context === undefined) return undefined;
   const extractive = context.compaction?.fallback === "extractive";
+  // The owner's decisions the controller gave the process (card C07q): written after every summary, so a compaction never drops them. Pi's own summariser (no `extractive`) is not given them: its text is the model's.
+  const keep = context.compaction?.keep;
+  const kept = keep === undefined || keep.lines.length === 0 ? "" : `\n\n${keep.note}\n${keep.lines.map((l) => `- ${l}`).join("\n")}`;
   return {
     ...(context.streamTimeoutMs === undefined ? {} : { streamTimeoutMs: context.streamTimeoutMs }),
     ...(context.streamMaxRetries === undefined ? {} : { streamMaxRetries: context.streamMaxRetries }),
@@ -100,7 +103,7 @@ export function contextPolicyOf(context: ChannelStart["context"]): AdapterContex
         let tailStart = text.length - (EXTRACT_CHARS - head);
         if (tailStart < text.length && isLow(tailStart)) tailStart += 1;
         const body = text.length <= EXTRACT_CHARS ? text : `${text.slice(0, headEnd)}\n[… ${tailStart - headEnd} characters left out …]\n${text.slice(tailStart)}`;
-        return { summary: `Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}` };
+        return { summary: `Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}${kept}` };
       },
       onHookFailure: (error: unknown) => { console.error(`compaction hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
     } : {}),

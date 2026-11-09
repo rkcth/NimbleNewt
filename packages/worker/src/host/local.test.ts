@@ -120,7 +120,7 @@ test("a checkpoint that does not say how big the conversation is is estimated fr
 
 // Card H12e (review): a turn whose process ends before it answers still reports the cache figures its model calls produced, under a turn number of its own: a crash, and a process the host closed (a stop, a restart for a recipe change, which the local worker continues).
 /** A launcher whose process the test plays: ready at the start, a turn that never answers, and an exit on `close` (or when the test ends it). */
-function playedProcess() {
+function playedProcess(seen: ToChild[] = []) {
   let finish!: (r: RunResult) => void;
   const result = new Promise<RunResult>((ok) => { finish = ok; });
   const exit = (extra: Partial<RunResult> = {}) => finish({ exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "", stderr: "", stdoutTruncated: false, ...extra } as RunResult);
@@ -131,6 +131,7 @@ function playedProcess() {
     result, kill: () => exit({ killed: true, exitCode: null }), endInput: () => undefined,
     write: async (text: string) => {
       for (const m of text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as ToChild)) {
+        seen.push(m);
         if (m.t === "start") queueMicrotask(() => emit({ t: "ready", v: WORKER_CHANNEL_VERSION }));
         if (m.t === "run") turnStarted();
         if (m.t === "close") exit();
@@ -140,6 +141,25 @@ function playedProcess() {
   const launcher = { launch: async (request: LaunchRequest) => { emit = (m) => request.stream!.onStdout(Buffer.from(encodeMessage(m))); return run; } };
   return { launcher, running, crash: () => exit({ exitCode: 1, stderr: "killed" }) };
 }
+test("the context the controller gives for an order, read when the process starts (it may be read from storage), reaches the process with the owner's decisions it keeps through compaction (card C07q)", async () => {
+  const seen: ToChild[] = [];
+  const played = playedProcess(seen);
+  const keep = { note: "The owner's decisions for this task.", lines: ['dec-aaaaaaaaaaaaaaaaaaaa: "[AUTHORITATIVE] Only raised beds"'] };
+  let asked = 0;
+  const p = localWorkerParts<unknown>({
+    launcher: played.launcher as never, app, protectedPaths: [], workspace: () => work, requireEnforced: false,
+    model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }),
+    namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+    context: async () => { asked++; await new Promise((ok) => setTimeout(ok, 5)); return { compaction: { fallback: "extractive", keep } }; },
+  });
+  const session = await p.sandbox.open(order([]).recipe, order([]));
+  const runtime = await p.runtimes.open(order([]), {}, undefined);
+  const start = seen.find((m) => m.t === "start") as Extract<ToChild, { t: "start" }> | undefined;
+  assert.deepEqual(start?.start.context, { compaction: { fallback: "extractive", keep } });
+  assert.equal(asked, 1, "read once per process start");
+  await runtime.close();
+  await session.close();
+});
 const figures = (cachedTokens: number) => ({ backend: "llama-cpp", route: "r", cachedTokens, computedTokens: 3, writtenTokens: 0 });
 
 test("a turn whose process dies after its model calls reports their cache figures with the failure, under the next turn number after the checkpoint's (card H12e)", async () => {
