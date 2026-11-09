@@ -16,7 +16,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
-import { profileDefaults } from "../policy/integration-policy.js";
+import { CHECKS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
@@ -523,7 +523,7 @@ export class ChatService {
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
-      if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
+      if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long running work may go on, in your own words." }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
       // proposal that shows the exact earlier failures the gate lists, and the owner's confirmation of that shown proposal is the acceptance. No wording is a gate; the binding is the shown failures themselves.
       let command = intent;
@@ -1264,12 +1264,26 @@ export class ChatService {
     // is the consent, and nothing is applied until they do.
     if ((intent.op === "integration.set" || intent.op === "integration.default.set" || intent.op === "project.create") && landingOf(args) === "main-automatic") {
       const given = Array.isArray(args["requiredChecks"]) ? args["requiredChecks"] : (args["integration"] as { requiredChecks?: unknown } | undefined)?.requiredChecks;
+      // The checks are shown in the proposal, so only the policy's own check names are: anything else is not a check and is refused here, never displayed.
+      if (given !== undefined && (!Array.isArray(given) || given.some((x) => !(CHECKS as readonly unknown[]).includes(x)))) return refuse("invalid_command", `requiredChecks must be a list of ${CHECKS.join(", ")}`);
       const named = Array.isArray(given) && given.length > 0 ? given.map((x) => String(x)).join(", ") : undefined;
-      const record = named === undefined && typeof args["project"] === "string" && /^proj-[a-z2-7]{20}$/i.test(args["project"]) ? await this.#get(token, "integration.get", { project: args["project"] }) : undefined;
-      const fromRecord = Array.isArray(record?.["requiredChecks"]) && (record!["requiredChecks"] as unknown[]).length > 0 ? (record!["requiredChecks"] as unknown[]).map((x) => String(x)).join(", ") : undefined;
+      const listed = (value: unknown): string | undefined => (Array.isArray(value) && value.length > 0 ? value.map((x) => String(x)).join(", ") : undefined);
+      const record = named === undefined && intent.op === "integration.set" && typeof args["project"] === "string" && /^proj-[a-z2-7]{20}$/i.test(args["project"]) ? await this.#get(token, "integration.get", { project: args["project"] }) : undefined;
+      const defItem = await this.#get(token, "integration.default.get", {});
+      // The checks shown are the ones that will gate the landing when the owner confirms: a project's own record (pinned by its revision, so a change
+      // to it in between refuses the stale proposal), else for a new project or the default, the installation default's (pinned likewise) or the profile's.
+      let fromRecord: string | undefined;
+      if (named === undefined && intent.op === "integration.set" && record !== undefined) {
+        fromRecord = listed(record["requiredChecks"]);
+        if (typeof record["revision"] === "number") args["expectedRevision"] = record["revision"];
+      } else if (named === undefined && intent.op !== "integration.set") {
+        fromRecord = listed(defItem?.["requiredChecks"]) ?? listed(profileDefaults(profile).requiredChecks);
+        if (intent.op === "integration.default.set" && typeof defItem?.["revision"] === "number") args["expectedRevision"] = defItem["revision"];
+        // A new project has no record to pin: the checks shown are written into its section, so what is created is what was shown.
+        if (intent.op === "project.create" && fromRecord !== undefined) args["integration"] = { ...(args["integration"] as Record<string, unknown>), requiredChecks: fromRecord.split(", ") };
+      }
       const who = intent.op === "project.create" ? "the new project's" : intent.op === "integration.default.set" ? "every new project's" : "this project's";
-      const def = await this.#deps.api.handle(token, { v: API_VERSION, op: "integration.default.get", args: {} });
-      const locked = def.ok && (def.result as { item?: { forbidMainAutomatic?: boolean } }).item?.forbidMainAutomatic === true;
+      const locked = defItem?.["forbidMainAutomatic"] === true;
       fillNotes.push(`What this means: ${who} finished work goes to main on its own once ${named !== undefined ? `its checks (${named})` : fromRecord !== undefined ? `its checks (${fromRecord})` : "the checks it requires"} pass — no person approves each one, so anything that only passed on the integration branch is on main. Confirming this proposal is what turns it on.${locked ? " The installation currently forbids landing on main automatically, so it is refused while that lock stands." : ""}`);
     }
     steps.push({ op: intent.op, args, commandId: "" });

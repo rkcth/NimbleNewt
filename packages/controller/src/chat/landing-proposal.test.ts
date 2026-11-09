@@ -122,6 +122,53 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 
+  test(`${backend.name}: the checks a landing proposal names are the ones that gate it when confirmed: read from the project's record, and a change in between refuses the stale proposal (card P08b, redone; review)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script, undefined, withIntegration);
+    try {
+      const chat = w.chat({});
+      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes as any[]; };
+      const ask = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, args } as never) as never;
+      const send = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, commandId: cid("x"), args } as never) as never;
+      const project = await w.project("Garden");
+      assert.ok((await send("integration.set", { project, requiredChecks: ["qa"] })).ok, "the project's own record requires qa");
+      const words = "once Garden's work passes its checks it can go straight in, I don't need to look at it";
+      const shown = await turn("r1", words, cmd("integration.set", { project, landing: "main-automatic" }, words));
+      assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
+      const preview = (shown[0].preview ?? []).join(" ");
+      assert.match(preview, /its checks \(qa\)/, `the gate shown is the project's own record, not a guess: ${preview}`);
+      // The owner then drops the check that the proposal named; confirming the old proposal must not land work on main under a gate they were never shown.
+      assert.ok((await send("integration.set", { project, requiredChecks: ["tests"] })).ok);
+      const late = await turn("r2", "yes, go ahead with that", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "go ahead with that", basis: "owner" }]);
+      assert.notEqual(late[0].status, "applied", `a proposal whose shown gate is out of date is not applied: ${JSON.stringify(late)}`);
+      assert.notEqual((await ask("integration.get", { project })).result.item.landing, "main-automatic", "nothing landed on main under an unshown gate");
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: a new project drafted to land on main names the checks that will gate it, and is created with exactly those (card P08b, redone; review)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script, undefined, withIntegration);
+    try {
+      const chat = w.chat({});
+      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes as any[]; };
+      const ask = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, args } as never) as never;
+      const send = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, commandId: cid("x"), args } as never) as never;
+      assert.ok((await send("integration.default.set", { requiredChecks: ["docs"] })).ok, "the installation default requires docs");
+      const words = "start a project called Orchard, and its finished work can go to main without me";
+      const shown = await turn("c1", words, cmd("project.create", { name: "Orchard", integration: { landing: "main-automatic", integrator: "default", requiredChecks: "default", refreshRounds: "default" } }, words));
+      assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
+      const preview = (shown[0].preview ?? []).join(" ");
+      assert.match(preview, /its checks \(docs\)/, `the gate of the new project is named: ${preview}`);
+      assert.match(preview, /goes to main by itself/, preview);
+      assert.equal((await ask("project.list", {})).result.items.length, 0, "nothing is created before the owner confirms");
+      const done = await turn("c2", "yes please", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "yes please", basis: "owner" }]);
+      assert.equal(done[0].status, "applied", JSON.stringify(done));
+      const made = (await ask("project.list", {})).result.items[0].id as string;
+      const item = (await ask("integration.get", { project: made })).result.item;
+      assert.deepEqual([item.landing, item.requiredChecks], ["main-automatic", ["docs"]], "created with the gate that was shown");
+    } finally { await w.close(); }
+  });
+
   test(`${backend.name}: with the installation lock on, the proposal says the change will be refused, and the refusal after confirming tells the owner nothing to say (card P08b, redone)`, async () => {
     const script: Record<string, unknown[]> = {};
     const w = await openWorld(backend, script, undefined, withIntegration);
