@@ -66,6 +66,8 @@ export const nodeProbeFileSystem: ProbeFileSystem = {
         if (length > maxBytes) return { kind: "too-big" }; // it grew while it was read
         if (length === buffer.length) break;
       }
+      // It grew or shrank while it was read: what was read is part of one version and part of another (or a cut-off prefix), never the file.
+      if (length !== info.size) throw moved(path);
       const where = await descriptorPath(handle.fd);
       // A part of the path swapped for a link while it was opened: the path no longer names what was read.
       if ((await realpath(path)) !== path) throw moved(path);
@@ -155,17 +157,26 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
   const maxTotal = bound(options.maxTotalBytes, OBSERVE_LIMITS.totalBytes);
   const timeoutMs = bound(options.timeoutMs, OBSERVE_LIMITS.ms);
   const fileSystem = options.fs ?? nodeProbeFileSystem;
+  // File-system calls an earlier probe gave up on that have still not come back. Node runs them on a small shared thread pool, so a
+  // mount that hangs would take one more thread at every probe until the whole process's file work stalls: while one is still out,
+  // no probe starts another call, and everything is left unobserved.
+  let hung = 0;
   return async (taskId: string): Promise<Readonly<Record<string, Observation>>> => {
     const out: Record<string, Observation> = {};
     const deadline = Date.now() + timeoutMs;
     // One file-system call, cut off at the probe's deadline. A call that hangs past it is abandoned: what it would have said is not used.
-    const timed = async <T>(step: Promise<T>): Promise<T> => {
+    const timed = async <T>(start: () => Promise<T>): Promise<T> => {
+      if (hung > 0 || deadline - Date.now() <= 0) throw new ProbeTimeout();
+      const step = start();
       const left = deadline - Date.now();
-      if (left <= 0) { step.catch(() => undefined); throw new ProbeTimeout(); }
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let late = false;
       try {
-        return await Promise.race([step, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new ProbeTimeout()), left); })]);
-      } finally { if (timer !== undefined) clearTimeout(timer); step.catch(() => undefined); }
+        return await Promise.race([step, new Promise<never>((_, reject) => { timer = setTimeout(() => { late = true; reject(new ProbeTimeout()); }, Math.max(0, left)); })]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        if (late) { hung++; step.then(() => { hung--; }, () => { hung--; }); } else step.catch(() => undefined);
+      }
     };
     let manifest: ManifestBody | undefined;
     try { manifest = await options.manifest(taskId); } catch (error) { fault(options, `the manifest of ${taskId} could not be read: ${messageOf(error)}`); return out; }
@@ -177,7 +188,7 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
     const scope = { mode: "read" as const, paths: typeof located === "object" ? [...(located.paths ?? [])] : [] };
     if (root === undefined || !isAbsolute(root)) return out; // nowhere to look: everything stays unknown
     let base: string;
-    try { base = await timed(fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? `the checkout ${root} did not answer in time` : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
+    try { base = await timed(() => fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? (hung > 0 ? `an earlier probe's read has not come back, so ${root} is not read again until it does` : `the checkout ${root} did not answer in time`) : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
     let read = 0;
     for (const entry of wanted) {
       const key = relativePath(entry.key);
@@ -187,7 +198,7 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
       if (!within(base, target)) continue;
       try {
         let real: string;
-        try { real = await timed(fileSystem.realpath(target)); } catch (error) {
+        try { real = await timed(() => fileSystem.realpath(target)); } catch (error) {
           if (missing(error)) out[entry.id] = { exists: false }; // it is gone: the check says so
           else throw error;
           continue;
@@ -196,14 +207,14 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
         // A link inside the checkout to a part the project may not use is not followed there either.
         if (scope.paths.length > 0 && !scopeAllows(scope, { mode: "read", path: relative(base, real).split(sep).join("/") })) { fault(options, `${key} is a link to outside the project's paths`); continue; }
         if (entry.kind === "directory") {
-          const listed = await timed(fileSystem.readdir(real, OBSERVE_LIMITS.members));
+          const listed = await timed(() => fileSystem.readdir(real, OBSERVE_LIMITS.members));
           if (listed.kind === "not-directory") { fault(options, `${key} is not a directory now`); continue; }
           if (listed.kind === "too-wide") { fault(options, `${key} holds more names than a listing carries`); continue; }
           out[entry.id] = { exists: true, members: [...listed.names].sort() };
           continue;
         }
         const budget = Math.min(maxBytes, maxTotal - read);
-        const got = await timed(fileSystem.readFile(real, budget));
+        const got = await timed(() => fileSystem.readFile(real, budget));
         if (got.kind === "not-file") { fault(options, `${key} is not a file now`); continue; }
         if (got.kind === "too-big") { fault(options, budget < maxBytes ? `${key} is past what one probe reads in all` : `${key} is bigger than a probe reads`); continue; }
         if (got.where !== undefined && !within(base, got.where)) { fault(options, `${key} was opened outside the checkout`); continue; }

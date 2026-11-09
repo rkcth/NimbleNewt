@@ -218,6 +218,29 @@ for (const backend of backends) {
     assert.ok(faults.some((f) => /ran out of time/.test(f)), JSON.stringify(faults));
   });
 
+  suite("second review: while a read an earlier probe gave up on still hangs, no probe starts another", async (c) => {
+    writeFileSync(join(c.checkout, "a.ts"), "one"); writeFileSync(join(c.checkout, "b.ts"), "two");
+    await record(c, [{ kind: "file", key: "a.ts", hash: H("one") }, { kind: "file", key: "b.ts", hash: H("two") }]);
+    let release: () => void = () => undefined;
+    const stuck = new Promise<void>((r) => { release = r; });
+    const calls: string[] = [];
+    const hang: ProbeFileSystem = {
+      realpath: async (p) => { calls.push(`realpath ${p}`); return real.realpath(p); },
+      readdir: (p, max) => real.readdir(p, max),
+      readFile: async (p, max) => { calls.push(`read ${p}`); if (p.endsWith("b.ts")) await stuck; return real.readFile(p, max); },
+    };
+    const faults: string[] = [];
+    const probe = observe(c, { fs: hang, timeoutMs: 200, onFault: (d) => faults.push(d) });
+    assert.equal((await statuses(c, await probe(c.task)))["b.ts"], "unknown");
+    calls.length = 0;
+    assert.deepEqual(await statuses(c, await probe(c.task)), { "a.ts": "unknown", "b.ts": "unknown" }, "the next probe reads nothing while the first one's read is out");
+    assert.deepEqual(calls, [], "no file-system call was started while one still hangs (each would hold a thread of the shared pool)");
+    assert.ok(faults.some((f) => /has not come back/.test(f)), JSON.stringify(faults));
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(await statuses(c, await probe(c.task)), { "a.ts": "unchanged", "b.ts": "unchanged" }, "once it came back, probes read again");
+  });
+
   suite("review: one probe reads a bounded number of bytes in all", async (c) => {
     for (const name of ["a.ts", "b.ts", "c.ts"]) writeFileSync(join(c.checkout, name), "0123456789");
     await record(c, ["a.ts", "b.ts", "c.ts"].map((key) => ({ kind: "file" as const, key, hash: H("0123456789") })));
@@ -248,4 +271,10 @@ test("review: with remote hosts the probe is off unless asked for, and a task no
   assert.deepEqual(located, ["tsk-local"]);
   const alone = locallyPlaced(new Set(), async () => undefined, async () => "/srv/checkout");
   assert.equal(await alone("tsk-never"), "/srv/checkout", "one machine: every task's checkout is here");
+});
+
+test("second review: a file whose size moved while it was read is not hashed from what was read", { skip: process.platform !== "linux" }, async () => {
+  // A procfs file says it is empty and still has bytes: the same as a file that grew between the look and the read.
+  const path = await real.realpath("/proc/self/status");
+  await assert.rejects(() => real.readFile(path, 1024 * 1024), /moved while it was read/);
 });
