@@ -7,14 +7,46 @@ import { foreignValue, RELEASE_ID_KEYS, saysAcknowledgeFlaky, saysPlatform } fro
  * release or host ID needs whole-word matching, or a name that merely starts with it lets it through.
  */
 
-test("saying you accept a flaky pass is the owner's word: the word flaky, or accepting the failures; anything else is not", () => {
-  assert.equal(saysAcknowledgeFlaky("approve the release candidate rcn-64c39134f5136c6cfe8ea2b4 with acknowledgeFlaky: I have read the gate and accept the earlier failures"), true, "the wording the chat test uses");
-  assert.equal(saysAcknowledgeFlaky("the gate shows a flaky platform, approve it"), true, "the word flaky alone");
-  assert.equal(saysAcknowledgeFlaky("I know it failed first. Approve it."), true, "accepting the failure in other words");
-  assert.equal(saysAcknowledgeFlaky("approve the release candidate rcn-64c39134f5136c6cfe8ea2b4"), false, "a plain approval says nothing about failures");
-  assert.equal(saysAcknowledgeFlaky("did the linux platform fail before it passed?"), false, "a question accepts nothing");
-  assert.equal(saysAcknowledgeFlaky("I do not accept the earlier failures, do not approve it"), false, "a negated sentence is not an acceptance");
-  assert.equal(saysAcknowledgeFlaky(""), false, "no words say nothing");
+test("saying you accept a flaky pass is the owner's own acceptance of the failures: naming flaky, knowing about it or asking about it is not", () => {
+  const cand = "rcn-64c39134f5136c6cfe8ea2b4";
+  const yes = [
+    `approve the release candidate ${cand} with acknowledgeFlaky: I have read the gate and accept the earlier failures`,
+    `approve ${cand}: I have read the gate and accept the earlier failures`,
+    `approve ${cand}, I am fine with the flaky pass`,
+    `approve ${cand}, it is ok with me that it failed first`,
+    `approve ${cand}, go ahead despite the failures`,
+    `the gate shows a flaky platform and I accept it, approve ${cand}`,
+    `${cand} failed before it passed and I accept that`,
+  ];
+  for (const words of yes) assert.equal(saysAcknowledgeFlaky(words, cand), true, `"${words}" accepts the earlier failures`);
+
+  // Every one of these was accepted before (card X09b part 2 review 2, item 1): none of them accepts anything.
+  const no = [
+    `approve ${cand}`,
+    `approve ${cand}, the flaky test fixtures are fine`,
+    `approve ${cand}. Was another candidate flaky?`,
+    `approve ${cand} unless it is flaky`,
+    `approve ${cand} if nothing failed`,
+    `approve ${cand}, it isn't flaky`,
+    `approve ${cand}, it wasn't flaky`,
+    `approve ${cand}, the tests didn't fail`,
+    `approve ${cand}, nothing is flaky`,
+    `approve ${cand}, I do not accept the earlier failures`,
+    `approve ${cand}, I won't accept a flaky pass`,
+    `approve ${cand}, the gate shows a flaky platform`,
+    `approve ${cand}, I know it failed first`,
+    `is ${cand} the flaky one? I want to approve it`,
+    `approve ${cand}. Was rcn-bbbbbbbbbbbbbbbbbbbbbbbb flaky? I accept the failures`,
+    `the gate is flaky. Approve rcn-bbbbbbbbbbbbbbbbbbbbbbbb, I accept the failures`,
+    "",
+  ];
+  for (const words of no) assert.equal(saysAcknowledgeFlaky(words, cand), false, `"${words}" accepts nothing`);
+
+  // The question about another candidate and the acceptance about this one, in the right order, is about this one.
+  assert.equal(saysAcknowledgeFlaky(`was rcn-bbbbbbbbbbbbbbbbbbbbbbbb flaky? approve ${cand}, I accept its earlier failures`, cand), true, "the acceptance names the candidate being approved");
+  // With no candidate to bind to, the acceptance still has to be an acceptance.
+  assert.equal(saysAcknowledgeFlaky("I accept the earlier failures, approve it"), true, "an acceptance with no candidate named is still an acceptance");
+  assert.equal(saysAcknowledgeFlaky("the gate looks flaky, approve it"), false, "naming flaky is not accepting it");
 });
 
 test("a release ID or a host ID only counts when the owner said it as a whole word, not as the start of a longer name", () => {

@@ -108,10 +108,18 @@ for (const backend of backends) {
       assert.match(quietShown[0]!.message!, /your own words/i);
       assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
 
-      // ---- the owner's own word "flaky" is enough: they see the flaky pass in release.gate and say so.
+      // ---- naming the flaky pass is not accepting it (part 2 review 2, item 1): the owner's words must accept the earlier failures themselves.
       const flakyWords = `the gate shows a flaky platform; approve the release candidate ${cand}`;
       const flakyShown = await turn("m7c", flakyWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: flakyWords, basis: "owner" }]);
-      assert.equal(flakyShown[0]!.status, "proposed", `the owner's own "flaky" is an acknowledgement: ${JSON.stringify(flakyShown[0])}`);
+      assert.equal(flakyShown[0]!.status, "refused", `naming the flaky platform without accepting it is not an acknowledgement: ${JSON.stringify(flakyShown[0])}`);
+      assert.match(flakyShown[0]!.message!, /your own words/i);
+      assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
+      const askedFlaky = `approve the release candidate ${cand}. Is the other candidate the flaky one?`;
+      const askedShown = await turn("m7d", askedFlaky, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: askedFlaky, basis: "owner" }]);
+      assert.equal(askedShown[0]!.status, "refused", `a question about another platform's flakiness accepts nothing: ${JSON.stringify(askedShown[0])}`);
+      const acceptWords = `the gate shows a flaky platform and I accept it; approve the release candidate ${cand}`;
+      const acceptShown = await turn("m7e", acceptWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: acceptWords, basis: "owner" }]);
+      assert.equal(acceptShown[0]!.status, "proposed", `the owner accepting the flaky pass is an acknowledgement: ${JSON.stringify(acceptShown[0])}`);
 
       const ackWords = `approve the release candidate ${cand} with acknowledgeFlaky: I have read the gate and accept the earlier failures`;
       const ackShown = await turn("m9", ackWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: ackWords, basis: "owner" }]);
@@ -120,6 +128,77 @@ for (const backend of backends) {
       const ackConfirm = await turn("m10", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(ackConfirm[0]!.status, "applied", JSON.stringify(ackConfirm[0]));
       assert.equal((await gate(cand)).approved, true);
+
+      // ---- the acknowledgement is bound to what the owner was shown (part 2 review 2, item 1): a gate that gains an earlier failure before the owner confirms is refused, and the new one is shown to them.
+      {
+        const late = await submit("d");
+        const issueLate = async (cell: Record<string, unknown>, host: string) => {
+          const r = await call(w.ownerToken, "release.issue", { candidateId: late, cell, hostId: host, workerId: worker.principal.id, timeoutSeconds: 600, memoryMb: 512 });
+          assert.ok(r.ok, JSON.stringify(r));
+          return r.result["attemptId"] as string;
+        };
+        // linux has one failed attempt standing, win32 passed: the gate shows no flaky platform at all yet.
+        const onLate = { sourceCommit: "d".repeat(40) };
+        const sick = await issueLate(linux, "host:rig");
+        assert.ok((await call(worker.token, "release.report", report(sick, { ...onLate, outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "segfaulted" }))).ok, "the host reports what it saw on the candidate that is not approved yet");
+        const healthy = await issueLate(win, "host:yard");
+        assert.ok((await call(worker.token, "release.report", report(healthy, { ...onLate, environment: win }))).ok);
+        assert.equal((await gate(late)).needsAcknowledgement, false, "nothing has failed and then passed yet");
+        const lateWords = `approve the release candidate ${late}, I accept the earlier failures`;
+        const lateShown = await turn("m20", lateWords, [{ kind: "command", op: "release.approve", args: { candidateId: late, acknowledgeFlaky: true }, evidence: lateWords, basis: "owner" }]);
+        assert.equal(lateShown[0]!.status, "proposed", `an acceptance while nothing was flaky is drawn up: ${JSON.stringify(lateShown[0])}`);
+        assert.ok(!/passed only after/.test((lateShown[0]!.preview ?? []).join(" ")), `nothing flaky was shown to accept: ${(lateShown[0]!.preview ?? []).join(" ").slice(0, 400)}`);
+        // linux is retried and passes: the gate gains the one earlier failure nobody was ever shown.
+        const cured = await issueLate(linux, "host:rig");
+        assert.ok((await call(worker.token, "release.report", report(cured, { ...onLate }))).ok);
+        assert.equal((await gate(late)).needsAcknowledgement, true, "the gate is flaky now");
+        const drifted = await turn("m21", "confirm that approval", [{ kind: "apply_proposal", proposalId: lateShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
+        assert.equal(drifted[0]!.status, "refused", `an approval whose gate changed under it is refused: ${JSON.stringify(drifted[0])}`);
+        assert.match(String(drifted[0]!.message), /gate|failur/i, `the refusal says what moved: ${JSON.stringify(drifted[0])}`);
+        assert.equal((await gate(late)).approved, false, "nothing was approved behind the owner's back");
+        // Asked again, the same approval shows the failure it now carries, and then stands.
+        const lateWords2 = `approve the release candidate ${late}, I accept the earlier failures`;
+        const lateShown2 = await turn("m22", lateWords2, [{ kind: "command", op: "release.approve", args: { candidateId: late, acknowledgeFlaky: true }, evidence: lateWords2, basis: "owner" }]);
+        assert.equal(lateShown2[0]!.status, "proposed", `the same approval asked again is drawn up: ${JSON.stringify(lateShown2[0])}`);
+        const shown = (lateShown2[0]!.preview ?? []).join(" ");
+        assert.match(shown, /linux x64 passed only after 1 earlier failure/, `the preview names the flaky platform: ${shown.slice(0, 400)}`);
+        assert.match(shown, new RegExp(sick), "and it names the attempt that failed");
+        const lateConfirm = await turn("m23", "confirm that approval", [{ kind: "apply_proposal", proposalId: lateShown2[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
+        assert.equal(lateConfirm[0]!.status, "applied", `the approval that showed the gate as it stands goes through: ${JSON.stringify(lateConfirm[0])}`);
+        assert.equal((await gate(late)).approved, true);
+      }
+
+      // ---- an ID the owner did not say is refused: no host, attempt or candidate the model picked on its own.
+      const blindHost = "authorize another machine for release tests on win32 x64";
+      const bh = await turn("m11", blindHost, [{ kind: "command", op: "release.host", args: { hostId: "host:secret", os: "win32", arch: "x64" }, evidence: blindHost, basis: "owner" }]);
+      assert.equal(bh[0]!.status, "refused", JSON.stringify(bh[0]));
+      assert.equal(bh[0]!.code, "unsupported_value");
+      // ---- a name that only starts like another host, and a platform the interpreter picked: both refused (part 2 review, item 7).
+      const near = "authorize host:rig2 for release tests on win32 x64";
+      const nearShown = await turn("m11b", near, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", os: "win32", arch: "x64" }, evidence: near, basis: "owner" }]);
+      assert.equal(nearShown[0]!.status, "refused", `host:rig2 is not host:rig: ${JSON.stringify(nearShown[0])}`);
+      assert.match(nearShown[0]!.message!, /hostId/);
+      const otherCell = "let host:yard run release tests on linux x64";
+      const otherShown = await turn("m11c", otherCell, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "darwin", arch: "arm64" }, evidence: otherCell, basis: "owner" }]);
+      assert.equal(otherShown[0]!.status, "refused", `the platform the model chose is refused: ${JSON.stringify(otherShown[0])}`);
+      assert.match(otherShown[0]!.message!, /os|arch/);
+      const ownCell = "let host:yard run release tests on darwin arm64 too";
+      const ownCellShown = await turn("m11d", ownCell, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "darwin", arch: "arm64" }, evidence: ownCell, basis: "owner" }]);
+      assert.equal(ownCellShown[0]!.status, "proposed", `the platform the owner named is proposed: ${JSON.stringify(ownCellShown[0])}`);
+      const cand2 = await submit("c");
+      const open = await call(w.ownerToken, "release.issue", { candidateId: cand2, cell: linux, hostId: "host:rig", workerId: "agent:none", timeoutSeconds: 600, memoryMb: 512 });
+      assert.ok(open.ok, JSON.stringify(open));
+      // Only the attempt ID is foreign: the reason is taken from the owner's own words, so this fails if `attemptId` is ever dropped from RELEASE_ID_KEYS (part 2 review, item 2).
+      const blindInt = "stop the release test that is running now, it is not needed";
+      const bi = await turn("m12", blindInt, [{ kind: "command", op: "release.interrupt", args: { attemptId: open.result["attemptId"], reason: "it is not needed" }, evidence: blindInt, basis: "owner" }]);
+      assert.equal(bi[0]!.status, "refused", JSON.stringify(bi[0]));
+      assert.equal(bi[0]!.code, "unsupported_value", "the foreign value is the attempt ID the owner never named");
+      assert.match(bi[0]!.message!, /attemptId/, "the refusal names the attempt ID, not the owner's own reason");
+      assert.equal((await attempts(cand2))[0]!.state, "issued", "nothing was interrupted");
+      const blindApp = await turn("m13", "approve the current release", [{ kind: "command", op: "release.approve", args: { candidateId: cand }, evidence: "approve the current release", basis: "owner" }]);
+      assert.equal(blindApp[0]!.status, "refused", JSON.stringify(blindApp[0]));
+      assert.equal((await gate(cand)).approved, true, "the refusal changed nothing");
+
       // ---- the release status view in chat: the gate, the attempts, the flaky pass; bounded; and nothing for a caller who may not read it.
       const viewWords = `how is the release testing of ${cand} going`;
       const view = await turn("m14", viewWords, [ask({ kind: "release", candidateId: cand }, viewWords)]);

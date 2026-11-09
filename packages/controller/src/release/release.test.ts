@@ -176,6 +176,40 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true }), /already approved/);
   });
 
+  suite("an approval that acknowledges the flaky pass names the failures the owner was shown, and a gate that changed under it is refused (card X09b part 2 review 2, item 1)", async (c) => {
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx1", os: "linux", arch: "x64" });
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "wn1", os: "win32", arch: "x64" });
+    const sick = await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1);
+    await c.rel.report(c.w1, result(sick.attemptId, { outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "segfaulted" }));
+    const healthy = await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1);
+    await c.rel.report(c.w1, result(healthy.attemptId));
+    const win1 = await issue(c.rel, c.owner, c.candidate, win, "wn1", c.w2);
+    await c.rel.report(c.w2, result(win1.attemptId, { environment: { os: "win32", arch: "x64" } }));
+    assert.deepEqual((await c.rel.gate(c.owner, c.candidate)).cells.find((x) => x.cell.os === "linux")!.earlierFailures.map((f) => f.id), [sick.attemptId], "the one earlier failure the owner is shown");
+    // An approval that was shown no earlier failure does not carry a gate that has one.
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [] }), /shown/i);
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: ["rat-ffffffffffffffffffffffff"] }), /shown/i);
+    // Shown the failure it carries, it stands.
+    await c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId] });
+    assert.equal((await c.rel.gate(c.owner, c.candidate)).approved, true);
+  });
+
+  suite("an approval shown the earlier failures is refused when the gate gains one after it was drawn up (card X09b part 2 review 2, item 1)", async (c) => {
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx1", os: "linux", arch: "x64" });
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "wn1", os: "win32", arch: "x64" });
+    const sick = await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1);
+    await c.rel.report(c.w1, result(sick.attemptId, { outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "segfaulted" }));
+    await c.rel.report(c.w1, result((await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1)).attemptId));
+    const winSick = await issue(c.rel, c.owner, c.candidate, win, "wn1", c.w2);
+    await c.rel.report(c.w2, result(winSick.attemptId, { environment: { os: "win32", arch: "x64" }, outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "one blue screen" }));
+    // The gate shows one earlier failure; the second is still to come.
+    assert.deepEqual((await c.rel.gate(c.owner, c.candidate)).cells.map((x) => x.earlierFailures.length), [1, 0]);
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId] }), /not ready/i);
+    await c.rel.report(c.w2, result((await issue(c.rel, c.owner, c.candidate, win, "wn1", c.w2)).attemptId, { environment: { os: "win32", arch: "x64" } }));
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId] }), /shown/i);
+    await c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId, winSick.attemptId] });
+    assert.equal((await c.rel.gate(c.owner, c.candidate)).approved, true, "shown every earlier failure, it stands");
+  });
 
   suite("X09b: two settings writes from the same revision cannot both win, a host's two pick-ups at once are one, and a platform has a bounded number of attempts", async (c) => {
     const [a, b] = await Promise.allSettled([

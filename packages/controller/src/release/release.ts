@@ -747,16 +747,24 @@ export class ReleaseService {
   }
 
   /** The owner's decision to release. A worker cannot make it, and nothing missing, failing, running or lost can pass it. A platform that passed only after failing needs `acknowledgeFlaky: true`. */
-  async approve(owner: Principal, command: NoActor & { candidateId: string; acknowledgeFlaky?: boolean }): Promise<void> {
+  async approve(owner: Principal, command: NoActor & { candidateId: string; acknowledgeFlaky?: boolean; expectedFailures?: readonly string[] }): Promise<void> {
     this.#owner(owner, "approve a release");
-    onlyKnown(command, ["commandId", "candidateId", "acknowledgeFlaky"]);
+    onlyKnown(command, ["commandId", "candidateId", "acknowledgeFlaky", "expectedFailures"]);
     if (command.acknowledgeFlaky !== undefined && typeof command.acknowledgeFlaky !== "boolean") bad("acknowledgeFlaky", "must be true or false");
+    const shown = command.expectedFailures;
+    if (shown !== undefined && (!Array.isArray(shown) || shown.length > 100 || shown.some((f) => typeof f !== "string" || f.length === 0 || f.length > 80))) bad("expectedFailures", "must be the list of attempt IDs release.gate listed as earlier failures");
     const ref: AggregateRef = { kind: APPROVAL, id: String(command.candidateId) };
     await this.#runner.command("release.approve", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { candidateId: command.candidateId, acknowledgeFlaky: command.acknowledgeFlaky === true },
+      payload: { candidateId: command.candidateId, acknowledgeFlaky: command.acknowledgeFlaky === true, ...(shown === undefined ? {} : { expectedFailures: [...shown] }) },
       build: async (): Promise<Built> => {
         const gate = await this.gate(owner, command.candidateId);
         if (!gate.ready) throw new DomainError("invalid_command", `the release is not ready: ${gate.cells.filter((c) => c.state !== "passed").map((c) => `${cellKey(c.cell)} ${c.state}`).join(", ")}`, { field: "candidateId" });
+        // The owner accepts the failures they were shown, so an approval that says which ones it was shown with is refused when the gate has gained or lost one since (card X09b part 2 review 2, item 1).
+        if (shown !== undefined) {
+          const now = gate.cells.flatMap((c) => c.earlierFailures.map((f) => f.id)).sort();
+          const was = [...shown].sort();
+          if (was.length !== now.length || was.some((id, k) => id !== now[k])) throw new DomainError("invalid_command", `the gate is not what this approval was shown with: it was shown ${was.length === 0 ? "no earlier failure" : was.join(", ")} and release.gate now shows ${now.length === 0 ? "no earlier failure" : now.join(", ")}. Read release.gate again, then approve with what it shows.`.slice(0, 500), { field: "expectedFailures" });
+        }
         const flaky = gate.cells.filter((c) => c.flaky);
         if (flaky.length > 0 && command.acknowledgeFlaky !== true) throw new DomainError("invalid_command", `passed only after failing: ${flaky.map((c) => `${cellKey(c.cell)} (${c.earlierFailures.length} earlier failure${c.earlierFailures.length === 1 ? "" : "s"}: ${c.earlierFailures.map((f) => f.id).join(", ")})`).join("; ")}. Read release.gate, then approve with acknowledgeFlaky true.`.slice(0, 500), { field: "acknowledgeFlaky" });
         if ((await this.#runner.get(APPROVAL, ref.id)) !== undefined) throw new DomainError("invalid_command", "that candidate is already approved", { field: "candidateId" });

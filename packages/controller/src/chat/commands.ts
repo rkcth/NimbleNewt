@@ -232,7 +232,7 @@ export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId
 /** The owner's own words say that finished work goes to main with no human step (card P08b). Quoted or forwarded text is never part of `words`. */
 const MAIN_AUTOMATIC = /\bmain[\s-]*automatic(?:ally)?\b|\bautomatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main\b|\b(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main\b/i;
 /** A negation in the same sentence as the phrase (not, never, don't, without, no, stop): then it is not an order to turn it on. */
-const NEGATED = /\b(?:not|never|no|without|don'?t|do\s+not|won'?t|shouldn'?t|stop|disable|turn\s+off)\b/i;
+const NEGATED = /\b(?:not|never|no|nothing|without|neither|nor|don'?t|do\s+not|does'?n'?t|did'?n'?t|is'?n'?t|are'?n'?t|was'?n'?t|were'?n'?t|ha(?:s|ve|d)'?n'?t|could'?n'?t|should'?n'?t|would'?n'?t|can'?t|cannot|won'?t|hardly|stop|disable|turn\s+off)\b/i;
 export function saysMainAutomatic(words: string): boolean {
   return words.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
 }
@@ -242,11 +242,33 @@ export function saysMainAutomatic(words: string): boolean {
  * failures", "acknowledge the flaky pass", "I know it failed first, go ahead"). A negated sentence does not accept anything. The model's own `acknowledgeFlaky: true` is never enough: approving a flaky
  * release is the owner accepting that a platform had to be retried before it went green.
  */
-const FLAKY_WORD = /\bflaky\b/i;
-const FLAKY_ACCEPT = /\b(?:accept\w*|acknowledg\w*|approve|agree|confirm|allow|ok(?:ay)?|fine|go ahead|understand\w*|aware|know|knew|seen|read)\b/i;
-const FLAKY_FAILURE = /\b(?:fail|fails|failed|failing|failure\w*)\b/i;
-export function saysAcknowledgeFlaky(words: string): boolean {
-  return words.split(/(?<=[.!?\n])\s+/).some((sentence) => (FLAKY_WORD.test(sentence) || (FLAKY_ACCEPT.test(sentence) && FLAKY_FAILURE.test(sentence))) && !NEGATED.test(sentence));
+const FLAKY_WORD = /\b(?:flaky|fail|fails|failed|failing|failure\w*)\b/i;
+// An acceptance of what went wrong, in the owner's own mouth. "approve", "confirm", "know" and a bare "flaky" are deliberately not here: naming the flaky pass, knowing about it or asking about it is not accepting it.
+const FLAKY_ACCEPT = /\b(?:accept\w*|acknowledg\w*|agree(?:s|d)?\s+to|fine\s+with|ok(?:ay)?\s+with|all\s+right\s+with|despite|notwithstanding|waiv\w*)\b/i;
+const FLAKY_CONDITIONAL = /\b(?:if|unless|only\s+if|only\s+when|provided|providing|as\s+long\s+as|in\s+case|assuming|when(?:ever)?)\b/i;
+
+/**
+ * Whether the owner accepted the earlier failures themselves (card X09b part 2 review 2, item 1). `acknowledgeFlaky` lets a candidate through a gate whose platform failed before it went green, so the words
+ * have to carry a real acceptance: a sentence with an acceptance in it AND a failure in it, that is about the candidate being approved (`candidateId` named as a whole word, or an "it" straight after a
+ * sentence that names it), that asks nothing (a question marks what the owner is still unsure of), that conditions nothing ("if", "unless") and that denies nothing ("isn't flaky", "nothing failed"). So
+ * "approve rcn-a, the flaky test fixtures are fine", "approve rcn-a. Was rcn-b flaky?", "approve rcn-a unless it is flaky", "approve rcn-a if nothing failed" and "approve rcn-a, it isn't flaky" all say
+ * nothing, while "approve rcn-a, I accept the earlier failures" and "approve rcn-a, go ahead despite the failures" do. Without a `candidateId` to bind to, any sentence may carry the acceptance.
+ */
+export function saysAcknowledgeFlaky(words: string, candidateId?: string): boolean {
+  const said = (words ?? "").replace(/\s+/g, " ").trim();
+  if (said === "") return false;
+  let previousNames = false;
+  for (const sentence of said.split(/(?<=[.?!])\s+/)) {
+    const text = sentence.trim();
+    if (text === "") continue;
+    const names = candidateId === undefined || wholeWord(text, candidateId);
+    const about = names || (previousNames && /\b(?:it|its|this|that|these|those|them)\b/i.test(text));
+    previousNames = candidateId !== undefined && wholeWord(text, candidateId);
+    if (!about || /\?\s*$/.test(text)) continue;
+    if (FLAKY_CONDITIONAL.test(text) || NEGATED.test(text) || !FLAKY_WORD.test(text)) continue;
+    if (FLAKY_ACCEPT.test(text)) return true;
+  }
+  return false;
 }
 
 const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
