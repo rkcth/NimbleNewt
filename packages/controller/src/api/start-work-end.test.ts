@@ -19,7 +19,7 @@ const open = (file: string, blobs: string, extra: Partial<Parameters<typeof star
   dispatch: {
     timer: new ManualTimer(), manual: true,
     route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
-    remote: { blobDirectory: blobs, hosts: [{ hostId: "host:pc", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
+    remote: { blobDirectory: blobs, hosts: [{ hostId: "host:pc", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
   },
 });
 type C = Awaited<ReturnType<typeof open>>;

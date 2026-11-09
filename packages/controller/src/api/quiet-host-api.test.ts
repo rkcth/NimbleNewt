@@ -29,7 +29,7 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
       // A lenient lease: a silent worker's attempt is not abandoned by the dispatcher's own lease rule (60 s by default) before the quiet-host pass looks at it.
       dispatcher: { leaseMs: 1000 * HOUR },
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: ["pc", "laptop"].map((n) => ({ hostId: `host:${n}`, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) })) },
+      remote: { blobDirectory: join(d, "blobs"), hosts: ["pc", "laptop"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) })) },
     },
   } as never);
   try {

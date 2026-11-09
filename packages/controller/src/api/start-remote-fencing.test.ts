@@ -61,8 +61,9 @@ test("moving an attempt to another host: the policy and the integrity of what tr
     const attempt = from.client.attempt(t.attemptId, offer.placement);
     await attempt.accept();
     await attempt.honorContract(offer.order, FULL_ABILITIES);
-    await attempt.putCheckpoint(1, { turn: 1, said: "ordered" });
-    const move = (key: string) => w.c.dispatch!.remote!.relocate(w.rob, { commandId: key, attemptId: t.attemptId, toHostId: to.id, reason: "the host is being retired" });
+    // The checkpoint says how large its conversation is (the worker package's `nn.contextTokens`): the controller judges it before the new host is offered it (card C07o); one that says nothing is not carried.
+    await attempt.putCheckpoint(1, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
+    const move =(key: string) => w.c.dispatch!.remote!.relocate(w.rob, { commandId: key, attemptId: t.attemptId, toHostId: to.id, reason: "the host is being retired" });
     const refuses = async (code: string, key: string, message?: RegExp): Promise<void> => {
       await assert.rejects(move(key), (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, code, e.message); if (message !== undefined) assert.match(e.message, message); return true; });
       const p = (await w.c.dispatch!.remote!.placement(w.rob, t.attemptId))!;
@@ -95,7 +96,7 @@ test("moving an attempt to another host: the policy and the integrity of what tr
     const again = (await to.client.offers())[0]!;
     assert.equal(again.placement, moved.placement);
     assert.deepEqual(again.order.resumeFrom, (await w.c.dispatch!.remote!.latestCheckpoint(w.rob, t.attemptId))!.checkpoint, "the new host restarts from the checkpoint the old one sent");
-    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered" });
+    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
     const arrived = to.client.attempt(t.attemptId, again.placement);
     await arrived.accept();
     await arrived.honorContract(again.order, FULL_ABILITIES);
@@ -121,7 +122,7 @@ test("a move whose checkpoint has no captured continuation does not wait on a re
     const attempt = from.client.attempt(t.attemptId, offer.placement);
     await attempt.accept();
     await attempt.honorContract(offer.order, FULL_ABILITIES);
-    await attempt.putCheckpoint(1, { turn: 1, said: "ordered" });
+    await attempt.putCheckpoint(1, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
     assert.equal(await w.c.services.resumes.hasContinuation(w.rob, t.taskId), false, "nothing was captured for the task");
     const moved = await w.c.dispatch!.remote!.relocate(w.rob, { commandId: "mv-nocont", attemptId: t.attemptId, toHostId: to.id, reason: "retiring" });
     const report = await w.tick();
@@ -130,7 +131,7 @@ test("a move whose checkpoint has no captured continuation does not wait on a re
     assert.equal((await w.c.services.resumes.forTask(w.rob, t.taskId)), undefined, "no resume check was made");
     const again = (await to.client.offers())[0]!;
     assert.equal(again.placement, moved.placement);
-    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered" });
+    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
