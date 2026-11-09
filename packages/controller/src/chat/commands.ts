@@ -480,11 +480,17 @@ export function hasRefMarker(value: unknown): boolean {
 }
 
 /** Characters that could break a proposal line or disguise it: line breaks become a space, and controls, separators, invisible format characters (bidirectional overrides, zero-width characters, tags) and half surrogate pairs are written as escapes, so a value (model text above all) can never start a second line or reorder what the owner reads. */
-const UNSHOWN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]|\p{Cf}/gu;
-const oneLine = (text: string): string => text.replace(/[\r\n\u0085\u2028\u2029]+/g, " ").replace(UNSHOWN, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+const UNSHOWN = /^(?:[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]|\p{Cf})$/u;
+/** Cut to at most `max` UTF-16 units without splitting a surrogate pair, so a cut never leaves half a character on the line. */
+const cutAt = (text: string, max: number): string => (text.length <= max ? text : text.slice(0, /[\ud800-\udbff]/.test(text.charAt(max - 1)) ? max - 1 : max));
 const short = (value: unknown): string => {
-  const text = oneLine(typeof value === "string" ? value : JSON.stringify(value) ?? String(value));
-  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  const text = (typeof value === "string" ? value : JSON.stringify(value) ?? String(value)).replace(/[\r\n\u0085\u2028\u2029]+/g, " ");
+  // Escaped one code point at a time and cut only between whole parts, so a cut never splits a character or an escape.
+  const parts = Array.from(text, (c) => (UNSHOWN.test(c) ? `\\u{${c.codePointAt(0)!.toString(16)}}` : c));
+  if (parts.reduce((n, p) => n + p.length, 0) <= 80) return parts.join("");
+  let body = "";
+  for (const p of parts) { if (body.length + p.length > 77) break; body += p; }
+  return `${body}...`;
 };
 
 /**
@@ -546,7 +552,7 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
-  return line.length > room ? `${line.slice(0, room - 3)}...` : line;
+  return line.length > room ? `${cutAt(line, room - 3)}...` : line;
 }
 
 /**

@@ -60,6 +60,19 @@ test("a value on a landing proposal line can never start a second line or hide w
   assert.equal(/[\n\u202e]/.test(describe("integration.set", { project: "proj-a", landing: "main-automatic\n\u202eok" }, {})), false, "an unknown landing is escaped in the meaning too");
 });
 
+test("a long value or line is cut between whole characters and whole escapes, never leaving half a surrogate pair or half an escape (third review)", () => {
+  const halves = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  for (let pad = 70; pad <= 80; pad++) {
+    // An emoji (two UTF-16 units) and an escaped override at every position around the cut of one value.
+    const value = describe("integration.set", { project: "proj-a", landing: "human-promotes", note: `${"a".repeat(pad)}\u{1F600}\u202e${"b".repeat(20)}` }, {});
+    assert.equal(halves.test(value), false, `no half character at pad ${pad}: ${JSON.stringify(value)}`);
+    assert.doesNotMatch(value, /\\u\{[0-9a-f]*\.\.\./, `no half escape at pad ${pad}: ${JSON.stringify(value)}`);
+    // And the whole line's own limit.
+    const line = describe("integration.set", { project: "proj-a", landing: "human-promotes", ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`k${i}`, `${"x".repeat(pad - 60 + i)}\u{1F600}`])) }, {});
+    assert.equal(halves.test(line), false, `no half character in the cut line at pad ${pad}: ${JSON.stringify(line)}`);
+  }
+});
+
 for (const backend of backends) {
   test(`${backend.name}: the owner's own sentence about not waiting for a person is proposed, and lands nothing until that proposal is confirmed (card P08b, redone)`, async () => {
     const script: Record<string, unknown[]> = {};
@@ -222,6 +235,20 @@ for (const backend of backends) {
       const empty = "Garden can go to main by itself, no checks needed";
       const none = await turn("e1", empty, cmd("integration.set", { project, landing: "main-automatic", requiredChecks: [] }, empty));
       assert.equal(none[0].status, "refused", `an empty gate is refused before it is shown: ${JSON.stringify(none)}`);
+      // A name that is not a check, as a list or as bare text, is refused before it is shown (third review: bare text used to slip past and show the record's checks).
+      const lint = "Garden can go to main by itself once lint passes";
+      for (const [n, requiredChecks] of [["lint"], "lint", "tests, review"].entries()) {
+        const bad = await turn(`b${n}`, lint, cmd("integration.set", { project, landing: "main-automatic", requiredChecks }, lint));
+        assert.equal(bad[0].status, "refused", `${JSON.stringify(requiredChecks)} is not a list of checks: ${JSON.stringify(bad)}`);
+      }
+      // One check named on its own is that one check, shown and set as such.
+      const one = "Garden can go to main by itself once the tests pass";
+      const single = await turn("s1", one, cmd("integration.set", { project, landing: "main-automatic", requiredChecks: "tests" }, one));
+      assert.equal(single[0].status, "proposed", JSON.stringify(single));
+      assert.match((single[0].preview ?? []).join(" "), /its checks \(tests\)/, JSON.stringify(single[0].preview));
+      const set = await turn("s2", "yes, set it that way", [{ kind: "apply_proposal", proposalId: single[0].proposalId, evidence: "set it that way", basis: "owner" }]);
+      assert.equal(set[0].status, "applied", JSON.stringify(set));
+      assert.deepEqual((await ask("integration.get", { project })).result.item.requiredChecks, ["tests"]);
 
       const def = "new projects should land on main by themselves";
       const shown = await turn("d1", def, cmd("integration.default.set", { landing: "main-automatic" }, def));

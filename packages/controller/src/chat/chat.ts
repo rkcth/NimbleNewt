@@ -1268,7 +1268,9 @@ export class ChatService {
     // gates it (the project's own required checks, read from its record) and whether the installation lock stands; confirming that shown proposal
     // is the consent, and nothing is applied until they do.
     if ((intent.op === "integration.set" || intent.op === "integration.default.set" || intent.op === "project.create") && landingOf(args) === "main-automatic") {
-      const given = Array.isArray(args["requiredChecks"]) ? args["requiredChecks"] : (args["integration"] as { requiredChecks?: unknown } | undefined)?.requiredChecks;
+      // Whatever form the checks were given in is judged here, so the proposal never shows the record's checks while sending something else: a single check name is that one check, anything else not a list is refused.
+      if (typeof args["requiredChecks"] === "string" && (CHECKS as readonly unknown[]).includes(args["requiredChecks"])) args["requiredChecks"] = [args["requiredChecks"]];
+      const given = args["requiredChecks"] !== undefined ? args["requiredChecks"] : (args["integration"] as { requiredChecks?: unknown } | undefined)?.requiredChecks;
       // The checks are shown in the proposal, so only the policy's own check names are: anything else is not a check and is refused here, never displayed.
       if (given !== undefined && (!Array.isArray(given) || given.some((x) => !(CHECKS as readonly unknown[]).includes(x)))) return refuse("invalid_command", `requiredChecks must be a list of ${CHECKS.join(", ")}`);
       // An empty list would show the record's checks but set none, which the policy refuses for this landing: it is refused now, before anything is shown.
