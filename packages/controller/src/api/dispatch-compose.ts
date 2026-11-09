@@ -10,7 +10,7 @@ import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate }
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, startupItems, type DecisionDeps } from "../decisions/index.js";
-import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, type ContextRouteSettingsService } from "../context/index.js";
+import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
 import type { LandingPolicyFigures } from "./landing-policy.js";
@@ -104,6 +104,11 @@ export interface DispatchStartOptions {
   readonly remote?: RemoteStartOptions;
   /** The worker hosts, local or remote, tried in order. None: attempts are admitted and checked but no worker starts (the loops still run). */
   readonly workers?: readonly WorkerHost[];
+  /**
+   * What the controller writes a hand-off from when an attempt ends without one — the durable facts of the task: the effect ledger, its artifacts, the checkpoint and the last known state (card C07p). Absent:
+   * the dispatcher's own default (the task's title, how the attempt ended and whether it holds a checkpoint), which is all a controller with no ledger reader knows.
+   */
+  readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
   /** How the route and harness of a task are chosen. Default: the owner's configured execution profiles and routing table (R03). */
   readonly route?: RouteResolver;
   /** Time between ticks. Default 5 seconds. */
@@ -183,6 +188,8 @@ export interface DispatchHandle {
   readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>;
   /** The full text of an item cut when a task moved to a smaller route (card C07f), for someone who may work on the task. */
   readonly readRouteArchive: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined>;
+  /** The whole text of a note that was cut to fit, by the digest its marker names (card C07p), for someone who may work on the task. */
+  readonly readNoteArchive: (by: Principal, taskId: string, digest: string) => Promise<{ taskId: string; attemptId?: string; what: string; digest: string; text: string } | undefined>;
   /** One hand-off note of a task, by the ID its next attempt's first call names (card C07m), for someone who may work on the task. */
   readonly readHandoffNote: (by: Principal, noteId: string) => Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined>;
   /** Charges time that is not a model call (a review, a job) to a task, as the dispatcher does; the commandId makes a repeat count once (card R05f). */
@@ -636,6 +643,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       routeKept: async (k) => { await context.routeKept(principal, { taskId: k.taskId, route: k.route }); },
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
+      ...(i.options.handoffFacts === undefined ? {} : { handoffFacts: i.options.handoffFacts }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...((i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning) === undefined ? {} : { safeLongRunning: (i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning)! }), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
@@ -686,6 +694,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         return { text: found.untrusted === true ? framedMcp(found.tool ?? "mcp", found.text, undefined, true) : found.text, ...(found.next === undefined ? {} : { next: found.next }) };
       },
       readRouteArchive: (by, taskId, digest) => context.routeArchive(by, { taskId, digest }),
+      readNoteArchive: (by, taskId, digest) => context.noteArchive(by, { taskId, digest }),
       readHandoffNote: (by, noteId) => context.readHandoff(by, noteId),
       principal,
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),

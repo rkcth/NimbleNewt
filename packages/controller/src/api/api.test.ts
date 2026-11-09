@@ -256,6 +256,24 @@ for (const backend of backends) {
     assert.equal(archiveCalls.at(-1)!.by, "agent:ann");
     assert.equal((await fails(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:abc", extra: 1 }))).code, "invalid_command");
   }, (deps) => ({ ...deps, spill: { readSpill: async () => undefined, readRouteArchive: async (by, taskId, digest) => { archiveCalls.push({ by: by.id, taskId, digest }); return by.kind === "owner" && digest === "sha256:abc" ? { itemId: "r1", text: "the whole report", digest } : undefined; } } }));
+
+  const noteCalls: { by: string; taskId: string; digest: string }[] = [];
+  suite("the whole text of a note cut to fit is read through the API by the caller's own principal, and a note that kept nothing reads as not found (card C07p)", async ({ ownerToken, agent, ok, fails }) => {
+    noteCalls.length = 0;
+    const read = (args: Record<string, unknown>) => ({ v: 1, op: "context.note-archive.read", args });
+    assert.deepEqual((await ok(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:aaa" }))).result, { item: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", attemptId: "att-1", what: "the controller's hand-off note", digest: "sha256:aaa", text: "the whole note" } });
+    assert.deepEqual(noteCalls.at(-1), { by: "owner:rob", taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:aaa" });
+    assert.equal((await fails(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:bbb" }))).code, "not_found", "a digest nobody kept reads as nothing");
+    const ann = await agent("ann", []);
+    assert.equal((await fails(ann, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:aaa" }))).code, "not_found", "the service decides who may read; the API passes the caller on");
+    assert.equal(noteCalls.at(-1)!.by, "agent:ann");
+    assert.equal((await fails(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:aaa", extra: 1 }))).code, "invalid_command");
+    assert.equal((await fails(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa" }))).code, "invalid_command", "the digest the note names is not optional");
+  }, (deps) => ({ ...deps, spill: { readSpill: async () => undefined, readNoteArchive: async (by, taskId, digest) => { noteCalls.push({ by: by.id, taskId, digest }); return by.kind === "owner" && digest === "sha256:aaa" ? { taskId, attemptId: "att-1", what: "the controller's hand-off note", digest, text: "the whole note" } : undefined; } } }));
+
+  suite("a controller configured without these reads says so, the same way the reads beside it do (card C07p)", async ({ ownerToken, fails }) => {
+    assert.equal((await fails(ownerToken, { v: 1, op: "context.note-archive.read", args: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:aaa" } })).code, "unavailable");
+  });
 }
 
 test("the documentation is generated from the operation table and is up to date", () => {

@@ -2496,12 +2496,28 @@
       ],
       "deliverable": "Split from C07l (2026-11-08), finding 4: two notes an attempt is given or left are cut silently. context/budget.ts line 178 (handoffFromFacts) cuts the controller's hand-off note at its tail with '[\u2026 hand-off cut at N characters]' and keeps no original, so the newest effects and artifacts are the ones lost; dispatch/dispatcher.ts line 493 cuts the note listing how each parked call was decided to 500 characters with no marker, so the agent that resumes is not told the later verdicts",
       "acceptance_and_verification": "A cut note keeps the newest lines, says how much was left out and names where the whole text can be read (an archive readable through the state API by whoever may read the note), never splits a surrogate pair, and quotes agent-written text on one line; the C07l todo case for the controller's note passes and loses its todo, and a test with more parked verdicts than fit shows every verdict readable",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d35c73f8",
+          "da022c7c",
+          "d96e6eaf",
+          "f8c8559d",
+          "302bf11e",
+          "3ac80cc0",
+          "ebc53d47",
+          "1b95c2d2"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A hand-off note or parked-call verdict note that does not fit is cut by one rule (context/budget.ts cutNote): the head lines stay, the newest lines are kept, the marker says how many lines and characters were left out and where the whole text is kept, cuts never split a surrogate pair, agent text is quoted on one line and credentials are removed (a private key block across all its lines). The whole text of a cut hand-off note is archived before the note is stored (ctx-note-archive; capped at 100k characters, and a note over the cap says plainly that the rest cannot be read) and read by the new context.note-archive.read (attempt.work on the note's task). An attempt woken for many parked calls is told how every one was decided (20 verdicts fit). Left: no handoffFacts producer is wired in production, so the cut path is reached only in tests; no retention rule for archives; the parked-verdict note names no archive. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "C07q",
