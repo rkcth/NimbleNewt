@@ -689,10 +689,17 @@ export class StopService {
   /**
    * Makes the charges that failed or were cut short by a crash, for any request (a sweep does this, so a charge that could not be made at the time is retried later). When every charge a finished request was waiting on is made, the
    * request's "cleanup spend not charged" mark is taken off its outcome.
+   *
+   * The window matters: a sweep reads `RETRY_PAGES` x 100 open entries and the rest wait for a later sweep. An entry whose charge is made and whose wanted figure is charged has nothing left to pay, so it is taken off the index
+   * even while a request it lists has not finished (card L02e): that request has no debt on it, and when it settles with the "not charged" mark the sweep clears the mark once no entry lists it (`#payOwed`). Kept on the index only
+   * for a request the sweep could not pay, one whose record it could not read, one that still owes a figure of its own, or one some entry past the cut lists: otherwise entries that stay only for an unfinished request would fill
+   * every window and keep a later unpaid charge from ever being reached.
    */
   async #retryCharges(by: Principal): Promise<void> {
     const cleared = new Set<string>();
     const stuck = new Set<string>();
+    // Requests listed on a settled entry that have not finished yet: nothing to pay for them there, so they hold nothing back (see above).
+    const live = new Set<string>();
     // Requests an entry past the cut lists: their marks are kept (that entry was not paid by this sweep), but the paid entries in the window that list them are still taken off (see below).
     const pastCut = new Set<string>();
     const finished: { attemptId: string; revision: number }[] = [];
@@ -732,7 +739,9 @@ export class StopService {
       // A request that has not finished has no outcome to clear yet (its mark may still be written): it stays listed. Nor is a request cleared while it still owes a figure of its own (`owed`): its mark stays until
       // `#payOwed` has charged that too, and it stays listed here. A clear that fails is tried again by the next sweep.
       const x0 = (await this.#runner.get(KIND, intentId))?.body as unknown as StopIntentBody | undefined;
-      if (x0 === undefined || !TERMINAL.includes(x0.phase) || (x0.owed?.length ?? 0) > 0) { stuck.add(intentId); continue; }
+      if (x0 === undefined || (x0.owed?.length ?? 0) > 0) { stuck.add(intentId); continue; }
+      // Not finished: it has no mark to clear and nothing left on a settled entry, so it does not hold that entry (its own note, when it writes one, puts the entry back).
+      if (!TERMINAL.includes(x0.phase)) { live.add(intentId); continue; }
       let owes = false;
       const wrote = await this.#update(intentId, (x) => {
         owes = (x.owed?.length ?? 0) > 0;
@@ -745,7 +754,8 @@ export class StopService {
       const now = await this.#runner.get(OPEN, f.attemptId);
       const charge = (await this.#runner.get(CHARGE, f.attemptId))?.body as unknown as ChargeBody | undefined;
       const wants = (now?.body as unknown as OpenBody | undefined)?.want;
-      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some((i) => stuck.has(i) || !cleared.has(i)) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
+      const holds = (i: string): boolean => stuck.has(i) || (!cleared.has(i) && !live.has(i));
+      if (now === undefined || charge?.pending !== undefined || (now.body as unknown as OpenBody).intents.some(holds) || (wants !== undefined && (charge === undefined || charge.costMicros < wants.costMicros || charge.computeMs < wants.computeMs))) continue;
       await this.#runner.command("stop.charge-index-drop", { commandId: `stop-drop-${f.attemptId}-${now.revision}`.slice(0, 200), actor: "system" }, async () => ({
         payload: { attemptId: f.attemptId, revision: now.revision },
         build: async () => ({ ref: { kind: OPEN, id: f.attemptId }, creates: false, changes: [{ type: "delete", ref: { kind: OPEN, id: f.attemptId }, expectedRevision: now.revision }], detail: { attemptId: f.attemptId } }),

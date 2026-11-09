@@ -2132,6 +2132,34 @@ export function defineStopTests(backendName: string): void {
       assert.equal(await outcomeMarked(c, x), false);
     });
 
+    suite("2000 settled entries that list nothing but an unfinished request are taken off the index by one sweep, so a later unpaid charge behind them is paid and not starved (card L02e)", async (c) => {
+      c.rt.seenAttempts = [];
+      // A Stop that blocks on an uncooperative process and reports no cleanup cost: it stays unfinished and leaves no entry of its own.
+      c.rt.items = [{ kind: "process", ref: "pid-7", state: "uncooperative" }];
+      c.rt.cleanups = [{ remaining: [{ kind: "process", ref: "pid-7", state: "uncooperative" }] }];
+      const blocked = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "will not settle" });
+      assert.equal((await c.stops.advance(c.owner, { intentId: blocked.intentId })).phase, "blocked");
+      // 2000 entries whose charge is made and whose wanted figure is nothing, each listing only that unfinished request, sorting before every other attempt: one sweep reads exactly these.
+      await fillIndex(c, "b", 2000, () => ({ open: { intents: [blocked.intentId], settled: false }, charge: { costMicros: 5, computeMs: 0 } }));
+      assert.equal(await openCount(c), 2000);
+      // A later Stop of the agent, whose ending's charge fails once, leaves its note on an attempt that sorts after them all.
+      c.rt.items = [];
+      c.rt.cleanups = [{ remaining: [] }];
+      c.rt.terminateCosts = [{ attemptId: "zzlate", costMicros: 30, computeMs: 0 }];
+      c.rt.failCharges = 1;
+      const later = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "stop", reason: "later" });
+      await c.stops.advance(c.owner, { intentId: later.intentId });
+      assert.equal(await outcomeMarked(c, later.intentId), true, "its charge is still to be made");
+      c.rt.failCharges = 0;
+      await c.stops.sweep(c.owner);
+      assert.equal(await openCount(c), 1, "an entry with nothing left to pay is not kept by a request that has not finished: the window is cleared");
+      assert.equal(((await c.runner.get("stop-intent", blocked.intentId))!.body as { phase: string }).phase, "blocked", "the unfinished request is left as it was, blocked");
+      await c.stops.sweep(c.owner);
+      assert.equal(sumOf(c, "zzlate"), 30, "so the next sweep reaches the charge that was past the cut");
+      assert.equal(await outcomeMarked(c, later.intentId), false, "and clears its mark");
+      assert.equal(await openCount(c), 0);
+    });
+
     suite("a scope that cannot be stopped yet is refused before anything is paused or recorded", async (c) => {
       c.rt.unsupportedWith = "stopping a whole team is not supported yet";
       await refuses("unavailable", () => c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" }));
