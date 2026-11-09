@@ -158,6 +158,85 @@ const OVERFLOW = [/context compression timed out/i, /context[ _-]?(?:length|wind
 /** Whether a failure message is the context running out (its own failure class, `context_overflow`) rather than a generic error. */
 export const classifyFailure = (message: string): "context_overflow" | "other" => (!/rate[ _-]?limit|per minute|per day|quota|invalid .*setting|contextWindow setting/i.test(message) && OVERFLOW.some((r) => r.test(message)) ? "context_overflow" : "other");
 
+// ---- notes an attempt is given or left (card C07p) -----------------------------------------------------------------------
+
+/** The state API query that answers with the whole text of a note cut to fit (card C07p). */
+export const NOTE_ARCHIVE_READ = "context.note-archive.read";
+/** The smallest limit the cut rules can honour: below it a marker that says what was left out and where the whole text is kept would not fit beside anything worth keeping. */
+const NOTE_MIN_CHARS = 400;
+
+/** The largest prefix of `text` of at most `n` code units that leaves no half character (an emoji cut in half is text a model server may refuse to encode). */
+export function clipToChar(text: string, n: number): string {
+  if (n <= 0) return "";
+  if (n >= text.length) return text;
+  return isHighSurrogate(text.charCodeAt(n - 1)) ? text.slice(0, n - 1) : text.slice(0, n);
+}
+
+export interface NoteCut {
+  /** What the attempt or the agent that follows is given: the whole note, or its newest lines and a marker saying what is missing. */
+  readonly text: string;
+  /** The whole note as it was composed (credentials removed) — what to keep under `digest` when `cut` is set. */
+  readonly whole: string;
+  readonly cut: boolean;
+  /** Lines of `whole` the cut left out (always the oldest ones; 0 when only the tail of the last kept line went). */
+  readonly droppedLines: number;
+  readonly droppedChars: number;
+  /** `sha256:` of `whole`: the digest a cut names, and the ID the whole text is kept under. */
+  readonly digest: string;
+}
+
+/**
+ * Composes a note that has to fit `maxChars` (card C07p). `head` lines always stay; `list` lines are kept newest first (the list
+ * is given in the order it was recorded, oldest first), so a cut never loses the newest entry — the opposite of a plain tail slice.
+ * A cut says how much was left out and names where the whole text can be read (`readWith`); without a `readWith` it says honestly
+ * that the rest is not kept anywhere. One line per entry, the marker last, and no cut leaves half a character.
+ */
+export function cutNote(input: { readonly head: readonly string[]; readonly list: readonly string[] }, maxChars: number, options: { readonly readWith?: string } = {}): NoteCut {
+  if (!Number.isSafeInteger(maxChars) || maxChars < NOTE_MIN_CHARS) throw new RangeError(`a note that may be cut is ${NOTE_MIN_CHARS} characters or more`);
+  // Every line of a note is one line: a line break the note itself did not put there would read as the controller speaking (card C07g).
+  const lines = [...input.head, ...input.list].map((l) => l.replace(/[\r\n]+/g, " "));
+  const whole = redactText(lines.join("\n"));
+  const digest = digestOf(whole);
+  const kept = whole.split("\n");
+  const headLines = input.head.length;
+  const markerFor = (dropped: number, chars: number): string => {
+    // `dropped` is 0 when nothing whole went out, only the tail of the last kept line; both forms are shorter than the worst case measured below.
+    const left = dropped === 0 ? `the tail of this note left out (${chars} characters)` : `${dropped} older line${dropped === 1 ? "" : "s"} of this note left out (${chars} characters)`;
+    return options.readWith === undefined
+      ? `[… ${left}; the whole note was not kept, so the part left out cannot be read]`
+      : `[… ${left}; the whole note is archived for this task as ${digest} — read it with ${options.readWith}, giving this task's ID and that digest]`;
+  };
+  if (whole.length <= maxChars) return { text: whole, whole, cut: false, droppedLines: 0, droppedChars: 0, digest };
+  // Measured at its largest (every list line and character left out), so the note the marker lands on always fits.
+  const worst = markerFor(kept.length, whole.length);
+  if (maxChars < worst.length + 40) throw new RangeError("the note's limit leaves no room for a marker naming where the whole text is kept");
+  // What the list costs from each position on, and what the lines that must be kept cost (each line carries the newline after it, so the last is over-counted by one).
+  const listLines = kept.slice(headLines);
+  const headChars = Math.max(0, kept.slice(0, headLines).reduce((n, l) => n + l.length + 1, 0) - 1);
+  const tail: number[] = new Array(listLines.length + 1).fill(0);
+  for (let i = listLines.length - 1; i >= 0; i--) tail[i] = tail[i + 1]! + listLines[i]!.length + 1;
+  /** Whether the lines that must be kept plus the list from `from` on, with the marker, fit. */
+  const fits = (from: number): boolean => {
+    const listChars = Math.max(0, tail[from]! - 1);
+    const shown = headChars === 0 ? listChars : listChars === 0 ? headChars : headChars + 1 + listChars;
+    return shown + 1 + worst.length <= maxChars;
+  };
+  let from = 0;
+  while (from < listLines.length && !fits(from)) from++;
+  if (!fits(from)) {
+    // Even the lines that must be kept do not fit: the note is cut at its tail, on a whole character, and the marker counts that too.
+    const shown = clipToChar(kept.slice(0, headLines).join("\n"), Math.max(0, maxChars - 1 - worst.length));
+    const dropped = kept.length - shown.split("\n").length;
+    const marker = markerFor(dropped, whole.length - shown.length);
+    const text = shown === "" ? marker : `${shown}\n${marker}`;
+    return { text, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
+  }
+  const shown = [...kept.slice(0, headLines), ...listLines.slice(from)].join("\n");
+  const dropped = from;
+  const marker = markerFor(dropped, whole.length - shown.length);
+  return { text: `${shown}\n${marker}`, whole, cut: true, droppedLines: dropped, droppedChars: whole.length - shown.length, digest };
+}
+
 export interface HandoffFacts {
   readonly task: string;
   readonly endedBecause: string;
