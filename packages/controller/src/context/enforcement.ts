@@ -9,7 +9,7 @@ import { redactText } from "../security/redact.js";
 import { quotedLine } from "../decisions/records.js";
 import { sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { classifyFailure, contextBudget, tokensOf, handoffFromFacts, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
+import { classifyFailure, contextBudget, tokensOf, handoffNote, NOTE_ARCHIVE_READ, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
 import { admitFirstCall, boundedSummarise, calibratedCharsPerToken, reviewRouteChange, SUMMARY_DEFAULTS, type FirstCallDecision, type FirstCall, type SummariseAttempt, type SummariseLimits, type Summariser } from "./dispatch.js";
 import type { RetrievalService, SourceRef } from "./retrieval.js";
 import { DEFAULT_ROUTE_FLOOR_CHARS, type RouteSettingsEffective } from "./route-settings.js";
@@ -354,15 +354,15 @@ export class ContextEnforcementService {
           // Another first call wrote the figure at the same moment: read it again and add ours to it. Anything else (including a command that conflicts with itself, which no retry changes) is reported, not hidden, and never fails the admission.
           // Two creations of the record at once make the loser's `command_conflict` ("already exists"): that one is a race and is retried. The same command ID used for another payload (the record was there when this try began) cannot succeed on a retry.
           if (error instanceof DomainError && (error.code === "stale_revision" || (error.code === "command_conflict" && creating))) continue;
-          this.#reportFixedError(error);
+          this.#reportFault(error);
           return;
         }
       }
-      this.#reportFixedError(new Error(`the figure of route ${m.route} could not be kept: other first calls kept changing it`));
-    } catch (error) { this.#reportFixedError(error); /* best effort: the figure is an aid for later route changes, never a condition of this call */ }
+      this.#reportFault(new Error(`the figure of route ${m.route} could not be kept: other first calls kept changing it`));
+    } catch (error) { this.#reportFault(error); /* best effort: the figure is an aid for later route changes, never a condition of this call */ }
   }
   /** At most once a minute, so a store that refuses every write is one line, not one per admission. */
-  #reportFixedError(error: unknown): void {
+  #reportFault(error: unknown): void {
     if (this.#onError === undefined) return;
     const now = Date.parse(this.#runner.now());
     if (Number.isFinite(now) && this.#lastFixedError !== 0 && now - this.#lastFixedError < 60_000) return;
@@ -945,6 +945,8 @@ export class ContextEnforcementService {
   /**
    * Called when an attempt ends. If the attempt left a hand-off, that one is returned; otherwise the controller writes one from the facts the dispatcher can read (the effect ledger, artifacts, the
    * checkpoint and the last known state), credentials removed, and attaches it to the task. A crash after a confirmed effect and before the attempt's own hand-off therefore still yields one.
+   * A note that does not fit keeps its newest entries and says where the rest of itself is kept: the whole text is archived **before** the note is stored, so the marker it carries is true. When the archive
+   * cannot be written the note is stored anyway - without a pointer it cannot honour - and the fault is reported.
    */
   async ensureHandoff(principal: Principal, command: { taskId: string; attemptId: string; endedBecause: string }, facts: (taskId: string, attemptId: string) => Promise<HandoffFacts>): Promise<{ id: string; source: "attempt" | "controller"; text: string }> {
     onlyKnown(command, ["taskId", "attemptId", "endedBecause"]);
@@ -955,7 +957,18 @@ export class ContextEnforcementService {
       const existing = await this.#runner.get("ctx-handoff", handoffId(taskId, attemptId, source));
       if (existing !== undefined) return { id: existing.id, source, text: (existing.body as unknown as HandoffBody).text };
     }
-    const written = handoffFromFacts({ ...(await facts(taskId, attemptId)), endedBecause: ended }, ENFORCEMENT_LIMITS.handoff);
+    const given = { ...(await facts(taskId, attemptId)), endedBecause: ended };
+    const note = handoffNote(given, ENFORCEMENT_LIMITS.handoff, { readWith: NOTE_ARCHIVE_READ });
+    let written = note.text;
+    if (note.cut) {
+      // The marker the cut leaves names this archive, so the whole text is kept first and the note is stored after it.
+      try { await this.archiveNote(principal, { taskId, attemptId, what: `the controller's hand-off note for attempt ${attemptId}`, digest: note.digest, text: note.whole }); }
+      catch (error) {
+        // It could not be kept: the note must not promise to say where it is. It says plainly that the rest cannot be read, and the hand-off is written anyway.
+        this.#reportFault(error);
+        written = handoffNote(given, ENFORCEMENT_LIMITS.handoff).text;
+      }
+    }
     const id = await this.#writeHandoff(principal, { taskId, projectId, attemptId, source: "controller", text: written, endedBecause: ended });
     const b = (await this.#runner.get("ctx-handoff", id))!.body as unknown as HandoffBody;
     return { id, source: b.source, text: b.text };

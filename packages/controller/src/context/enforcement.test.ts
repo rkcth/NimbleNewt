@@ -6,7 +6,7 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextEnforcementService, NOTE_ARCHIVE_READ, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, handoffNote, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
+import { ContextEnforcementService, ENFORCEMENT_LIMITS, NOTE_ARCHIVE_READ, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, handoffNote, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
 
 after(stopServer);
 
@@ -868,6 +868,41 @@ for (const backend of backends) {
     assert.notEqual(elsewhere.id, kept.id, "the archive is keyed by the task as well as the text");
     assert.equal((await enf.noteArchive(owner, { taskId: t2, digest: note.digest }))!.what, "the parked-call verdicts");
   });
+
+  suite("the hand-off an attempt ends with keeps the rest of itself where its own marker says (C07p)", async ({ enf, owner, ann, t, t2 }) => {
+    told.length = 0;
+    const many = (n: number): HandoffFacts => ({ task: "Ship the importer", endedBecause: "", effects: Array.from({ length: n }, (_, i) => ({ id: `eff-${String(i).padStart(4, "0")}`, state: "confirmed", summary: `effect ${i} on the fixtures` })), artifacts: [{ id: "art-1", title: "report" }], lastKnownState: "running", nextStep: "tell the owner" });
+    // Enough effects that the note will not fit the bound an attempt's hand-off is allowed: the oldest are what go out.
+    const h = await enf.ensureHandoff(owner, { taskId: t, attemptId: "att-1", endedBecause: "the worker stopped beating" }, async () => many(120));
+    assert.equal(h.source, "controller");
+    assert.ok(h.text.length <= ENFORCEMENT_LIMITS.handoff, `${h.text.length} characters, over ${ENFORCEMENT_LIMITS.handoff}`);
+    const marker = h.text.split("\n").at(-1)!;
+    assert.match(marker, /older lines of this note left out \(\d+ characters\)/, marker);
+    const digest = /sha256:[0-9a-f]{64}/.exec(marker)?.[0];
+    assert.ok(digest !== undefined, `the marker names no digest: ${marker}`);
+    assert.ok(marker.includes(NOTE_ARCHIVE_READ), `the marker names no read: ${marker}`);
+    assert.ok(!h.text.includes("eff-0000 ") && h.text.includes("eff-0119"), "the newest effect is the one that went");
+    // The pointer is true: the whole text is kept under the digest the note names, and it is what that digest says it is.
+    const back = await enf.noteArchive(ann, { taskId: t, digest: digest! });
+    assert.ok(back !== undefined, "the whole text the note names was not kept");
+    assert.deepEqual([back.what, back.attemptId], ["the controller's hand-off note for attempt att-1", "att-1"]);
+    assert.ok(back.text.includes("eff-0000 ") && back.text.includes("eff-0119"), "the archived text is not the whole note");
+    assert.ok(!back.text.includes("left out"), "the archived text carries the cut marker, so it is not whole");
+    assert.equal(dig(back.text), digest, "the digest the note names is not the digest of what comes back");
+    // Asked again (a restart, the dispatcher ticking twice): the same note, the same one archive, the facts not asked for again.
+    let asked = 0;
+    const again = await enf.ensureHandoff(owner, { taskId: t, attemptId: "att-1", endedBecause: "later" }, async () => { asked++; return many(120); });
+    assert.deepEqual([again.id, again.text, asked], [h.id, h.text, 0]);
+    assert.equal((await enf.noteArchive(owner, { taskId: t, digest: digest! }))!.text, back.text);
+    // A note whose whole text is bigger than the archive accepts is written anyway - with no pointer it cannot honour, and told.
+    const huge = await enf.ensureHandoff(owner, { taskId: t2, attemptId: "att-1", endedBecause: "out of context" }, async () => many(2_000));
+    assert.ok(huge.text.length <= ENFORCEMENT_LIMITS.handoff, `${huge.text.length} characters`);
+    assert.match(huge.text, /was not kept, so the part left out cannot be read/, huge.text.split("\n").at(-1)!);
+    assert.ok(!huge.text.includes(NOTE_ARCHIVE_READ), "the note points at an archive that was never written");
+    assert.equal(told.length, 1, JSON.stringify(told.map(String)));
+    assert.equal((told[0] as DomainError).code, "invalid_command", String(told[0]));
+    assert.match((told[0] as DomainError).message, /text/, "the fault told is the archive refusing the text");
+  }, { onError: (error: unknown) => { told.push(error); } });
 
   suite("the dispatcher's methods are for the owner, hosts and services, never an agent; reading and the attempt's own hand-off stay open to whoever may work on the task", async ({ enf, owner, host, ann, ben, eve, t, setup, note }) => {
     const call = { systemPromptChars: 100, toolSchemaChars: 100, startupTokens: 100, replyReserveTokens: 100 };
