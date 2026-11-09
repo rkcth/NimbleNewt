@@ -18,7 +18,7 @@ No keyword scan of owner text is added anywhere: intent is the interpreter's; on
 
 ## What was done
 
-Four commits on `pi-m03h-chat`, one per numbered step after the plan.
+Five commits on `pi-m03h-chat`: one for each numbered step, with steps 5 and 6 in the last of them (the report could not carry the step-6 counts before they had been measured) and one small wording commit after them.
 
 **Step 1 — the plan.** Committed as `a6296c9f`, before any code was written.
 
@@ -30,18 +30,20 @@ Four commits on `pi-m03h-chat`, one per numbered step after the plan.
 
 **Step 5 — docs and notes (this commit).** `status.ask`'s summary in `api/operations.ts` now names `standups` beside `meetings` (its test in `api.test.ts` requires every `STATUS_KINDS` kind to appear there), `npm run api:docs:write` regenerated `docs/nimblenewt/api-v1.md`, and `implementation-notes.md` has an M03h part 1 entry that says plainly which parts were already built by earlier slices and what this one added.
 
-**Step 6 — the runs**, all with the offline guard (`NIMBLENEWT_REQUIRE_SANDBOX=1`), from `packages/controller`:
+**Wording commit (`5e2363fa`).** Three refusals each built their own list of the project's stand-ups, so a project with three of them was described differently depending on which question had been asked; they share one phrase now. No behaviour the card asked for changed.
+
+**Step 6 — the runs**, all with the offline guard (`NIMBLENEWT_REQUIRE_SANDBOX=1`), from `packages/controller`. Every one of these was run again after the last commit, so the figures below describe the branch as it stands:
 
 | command | result |
 | --- | --- |
 | `npx tsc --build --force` (repo root) | clean, exit 0 |
-| `node --import scripts/offline-guard.mjs --test dist/chat/*.test.js dist/status/*.test.js dist/api/*.test.js dist/meetings/*.test.js dist/standups/*.test.js` | 2063 tests, 2063 pass, 0 fail, 0 skipped, 0 todo |
+| `node --import scripts/offline-guard.mjs --test dist/chat/*.test.js dist/status/*.test.js dist/api/*.test.js dist/meetings/*.test.js dist/standups/*.test.js` | 2063 tests, 2063 pass, 0 fail |
 | `node --test scripts/plan.test.mjs` | 6 pass, 0 fail |
 | `npm run check:deps` | "package boundaries ok" |
 | `npm run roadmap:check` | "roadmap ok" |
 | `npm run api:docs:write` | rewrote `docs/nimblenewt/api-v1.md` (the `status.ask` summary changed) |
 
-Run separately before the combined sweep: `dist/standups/standups.test.js` 104 pass / 0 fail, `dist/chat/standup-commands.test.js` 32 pass / 0 fail, `dist/status/status.test.js` with `dist/chat/standup-commands.test.js` 192 pass / 0 fail, `dist/chat/*.test.js` alone 945 pass / 0 fail, `dist/meetings/*.test.js` alone 469 pass / 0 fail, `dist/api/*.test.js` alone 373 pass / 0 fail. No failures were left, and nothing was skipped or marked todo.
+Run separately while working (before the last two commits, and not re-run since except as listed above): `dist/standups/standups.test.js` 104 pass / 0 fail, `dist/chat/standup-commands.test.js` 32 pass / 0 fail, `dist/status/status.test.js` with `dist/chat/standup-commands.test.js` 192 pass / 0 fail, `dist/chat/*.test.js` alone 945 pass / 0 fail, `dist/meetings/*.test.js` alone 469 pass / 0 fail, `dist/api/*.test.js` alone 373 pass / 0 fail. No failures were left, and nothing was skipped or marked todo.
 
 New tests, each against four backends (reference store, SQLite, SQLite on a worker thread, PostgreSQL): one `overview` suite (13 suites × 4 backends of them ran inside `standups.test.js`), one `standups` status suite, and three chat suites of ordinary sentences. Two of them caught real defects while being written, both fixed rather than written around: the status view detached `overview` from its service and crashed with `Cannot read properties of undefined`, and the listed stand-ups came out in whatever order the backend returned records, so the same question answered twice could name them in different orders.
 
