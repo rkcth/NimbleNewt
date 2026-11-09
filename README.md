@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **243 of 348 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **245 of 348 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -111,7 +111,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 78% | 26 of 33 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 28 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 65% | 13 of 20 |
@@ -274,7 +274,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓░░░ 26 of 33</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 28 of 33</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -303,8 +303,8 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C07l** · P34 · Extend the 50-hand-off test to the first call, the stored conversation and the resume note _(needs C07h)_
 - [x] **C09e** · P34 · Record activity: approvals, messages, meetings, chat _(needs C09d)_
 - [ ] **C07k** · P35 · Summarise accumulated decisions so a hand-off package stops growing with the number of hand-offs _(needs C07j)_
-- [ ] **C07m** · P35 · Give the next agent its hand-off: the first call names the package, the controller's hand-off note and the open blockers _(needs C07l)_
-- [ ] **C07n** · P35 · Check the first call on a route whose window the controller does not know _(needs C07l)_
+- [x] **C07m** · P35 · Give the next agent its hand-off: the first call names the package, the controller's hand-off note and the open blockers _(needs C07l)_
+- [x] **C07n** · P35 · Check the first call on a route whose window the controller does not know _(needs C07l)_
 - [ ] **C07o** · P35 · Check the first call and the stored conversation for attempts on remote worker hosts _(needs C07l)_
 - [ ] **C07p** · P35 · Mark and keep what is cut from an attempt's hand-off note and resume note _(needs C07l)_
 - [ ] **C07q** · P35 · Use the controller's summariser for compaction and keep the compaction lineage bounded _(needs C07l)_
