@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -522,8 +522,6 @@ export class ChatService {
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
-      const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
-      if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
@@ -1260,6 +1258,20 @@ export class ChatService {
       }
     }
     if (intent.op === "maintenance.site.set" && typeof args["site"] === "string") extraTargets.push(args["site"]);
+    // Landing finished work on main with no human step (card P08b, redone the way the flaky release approval was): the owner's wording is never
+    // scanned for a phrase and no refusal tells them one to say. The change is drawn up as a proposal that says plainly what will happen and what
+    // gates it (the project's own required checks, read from its record) and whether the installation lock stands; confirming that shown proposal
+    // is the consent, and nothing is applied until they do.
+    if ((intent.op === "integration.set" || intent.op === "integration.default.set" || intent.op === "project.create") && landingOf(args) === "main-automatic") {
+      const given = Array.isArray(args["requiredChecks"]) ? args["requiredChecks"] : (args["integration"] as { requiredChecks?: unknown } | undefined)?.requiredChecks;
+      const named = Array.isArray(given) && given.length > 0 ? given.map((x) => String(x)).join(", ") : undefined;
+      const record = named === undefined && typeof args["project"] === "string" && /^proj-[a-z2-7]{20}$/i.test(args["project"]) ? await this.#get(token, "integration.get", { project: args["project"] }) : undefined;
+      const fromRecord = Array.isArray(record?.["requiredChecks"]) && (record!["requiredChecks"] as unknown[]).length > 0 ? (record!["requiredChecks"] as unknown[]).map((x) => String(x)).join(", ") : undefined;
+      const who = intent.op === "project.create" ? "the new project's" : intent.op === "integration.default.set" ? "every new project's" : "this project's";
+      const def = await this.#deps.api.handle(token, { v: API_VERSION, op: "integration.default.get", args: {} });
+      const locked = def.ok && (def.result as { item?: { forbidMainAutomatic?: boolean } }).item?.forbidMainAutomatic === true;
+      fillNotes.push(`What this means: ${who} finished work goes to main on its own once ${named !== undefined ? `its checks (${named})` : fromRecord !== undefined ? `its checks (${fromRecord})` : "the checks it requires"} pass — no person approves each one, so anything that only passed on the integration branch is on main. Confirming this proposal is what turns it on.${locked ? " The installation currently forbids landing on main automatically, so it is refused while that lock stands." : ""}`);
+    }
     steps.push({ op: intent.op, args, commandId: "" });
     const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
     const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: (intent.op !== "host.move-work" || (typeof args["hostId"] === "string" && ordersHostMove(words, args["hostId"]))) && ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(intent.op === "host.move-work" && typeof args["hostId"] === "string" ? [args["hostId"]] : []).concat(extraTargets)) });

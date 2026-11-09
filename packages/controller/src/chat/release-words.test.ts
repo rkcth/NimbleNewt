@@ -1,33 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { foreignValue, platformsNamed, RELEASE_ID_KEYS, saysMainAutomatic, saysPlatform } from "./commands.js";
+import { foreignValue, platformsNamed, RELEASE_ID_KEYS, saysPlatform } from "./commands.js";
 
 /**
  * The checks behind the release commands that are not about wording (card X09b part 2 review, redone): a release or host ID needs whole-word matching, or a name that merely starts with it lets it
  * through, and a platform counts only when the owner's own words name it. Accepting a flaky pass is NOT a wording question any more: the chat proposes the approval showing the earlier failures the
- * gate lists, and the owner's confirmation of that shown proposal is the acceptance (see `release-owner-words.test.ts`). Nothing here scans the owner's sentence for an acceptance, and no message
- * asks them to say a particular word.
+ * gate lists, and the owner's confirmation of that shown proposal is the acceptance (see `release-owner-words.test.ts`). Landing on main with no human step is not a wording question either
+ * (`landing-words.test.ts`). Nothing here scans the owner's sentence for an acceptance, and no message asks them to say a particular word.
  */
-
-test("a curly apostrophe is still a negation where one is checked: phones type ’, and it must not turn a denial into an order (third review, D1)", () => {
-  // The straight apostrophe already refused all of these; the curly one (and the modifier letter apostrophe) must refuse them too.
-  const noMain = [
-    "don’t send it straight to main",
-    "won’t go to main automatically",
-    "we can’t land it straight to main",
-    "it isn’t automatic to main",
-    "donʼt push it straight to main",
-  ];
-  for (const words of noMain) {
-    assert.equal(saysMainAutomatic(words), false, `"${words}" does not order main-automatic`);
-    assert.equal(saysMainAutomatic(words.replace(/[’ʼ‘]/g, "'")), false, "the same sentence typed with a straight apostrophe orders nothing");
-  }
-
-  // Normalising the apostrophe must not invent an order that was never said.
-  assert.equal(saysMainAutomatic("land finished work on main automatically"), true, "a plain order still lands on main");
-  assert.equal(saysMainAutomatic("don’t send it straight to main. From now on land finished work on main automatically"), true, "the denial is one sentence, the order another");
-  assert.equal(saysMainAutomatic("don’t send it straight to main; it is not automatic to main"), false, "normalising the apostrophe invents no order");
-});
 
 test("a release ID or a host ID only counts when the owner said it as a whole word, not as the start of a longer name", () => {
   const own = "authorize host:rig2 for release tests on linux x64";

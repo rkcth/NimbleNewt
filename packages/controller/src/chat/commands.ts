@@ -229,17 +229,6 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
 export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId", prerequisiteTitle: "prerequisiteId" };
 
 /** The argument names the operation takes (from the API's own table, so they cannot drift), plus the chat-only names and the revision the chat fills in. */
-/** The owner's own words say that finished work goes to main with no human step (card P08b). Quoted or forwarded text is never part of `words`. */
-const MAIN_AUTOMATIC = /\bmain[\s-]*automatic(?:ally)?\b|\bautomatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main\b|\b(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main\b/i;
-/** A negation in the same sentence as the phrase (not, never, don't, without, no, stop): then it is not an order to turn it on. */
-const NEGATED = /\b(?:not|never|no|nothing|without|neither|nor|don'?t|do\s+not|does'?n'?t|did'?n'?t|is'?n'?t|are'?n'?t|was'?n'?t|were'?n'?t|ha(?:s|ve|d)'?n'?t|could'?n'?t|should'?n'?t|would'?n'?t|can'?t|cannot|won'?t|hardly|stop|disable|turn\s+off)\b/i;
-/** Phones and keyboards type a curly or modifier apostrophe (’ ‘ ʼ) where the negations are written with `'`; every word check normalises them first, so "don’t" is checked exactly like "don't". */
-const plainApostrophes = (words: string): string => (words ?? "").replace(/[\u2018\u2019\u02bc]/g, "'");
-
-export function saysMainAutomatic(words: string): boolean {
-  const said = plainApostrophes(words);
-  return said.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
-}
 
 const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
 const DURATION_UNITS: Readonly<Record<string, number>> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60, h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600, d: 86_400, day: 86_400, days: 86_400 };
@@ -363,6 +352,11 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (spec.mode === "propose" && op === "retention.run") return args["dryRun"] === false ? "a real retention run deletes what the rules expire, so it is shown first, with the preview it will carry out" : "it only previews what retention would remove and deletes nothing; it is shown first like every retention command";
   if (spec.mode === "propose" && op === "retention.settings.set") return "retention settings decide what may be deleted and how much room is kept back, so they are shown first";
   if (spec.mode === "propose" && op.startsWith("retention.")) return "deleting, archiving or restoring records is shown first";
+  // How finished work lands decides whether anything reaches main without a person (card P08b, redone): it is shown first in every
+  // profile, the proposal line says in plain words what the landing does, and the owner's confirmation of that shown proposal is the
+  // consent. No wording of theirs is scanned for a phrase, so nothing here asks them to say anything in particular.
+  if (spec.mode === "propose" && (op === "integration.set" || op === "integration.default.set")) return landingOf(args) === "main-automatic" ? "finished work would go to main by itself with no human step, so this is shown first for you to confirm" : "how finished work lands is shown first";
+  if (spec.mode === "propose" && op === "project.create" && landingOf(args) === "main-automatic") return "a new project is drafted first, and its finished work would go to main by itself with no human step";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.
   if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : op.startsWith("release.") ? "a release action is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
@@ -490,6 +484,34 @@ const short = (value: unknown): string => {
   return text.length > 80 ? `${text.slice(0, 77)}...` : text;
 };
 
+/**
+ * What each landing does to the owner's work, in plain words (the same sentences the project-creation question shows, card P08b).
+ * A landing change is a proposal that carries this, so the owner reads the consequence before they confirm it; nothing here judges
+ * how they phrased their message — their confirmation of the shown proposal is what consents to it.
+ */
+export const LANDING_MEANS: Readonly<Record<string, string>> = {
+  "integration-branch": "finished work is merged onto a separate integration branch; nothing reaches main until you or an integrator promotes it",
+  "human-promotes": "finished work waits for a person to promote it",
+  "main-automatic": "finished work goes to main by itself once its required checks pass, with no human step",
+};
+
+/** The landing a command would set (`project.create` carries it inside its `integration` section), or undefined when it sets none. */
+export function landingOf(args: Readonly<Record<string, unknown>>): string | undefined {
+  const section = args["integration"];
+  const value = args["landing"] ?? (section !== null && typeof section === "object" && !Array.isArray(section) ? (section as Record<string, unknown>)["landing"] : undefined);
+  return typeof value === "string" ? value : undefined;
+}
+
+/** What a landing change means for the owner's work, said on the proposal line before the fields it sets. */
+function landingMeaning(op: string, args: Readonly<Record<string, unknown>>): string {
+  const landing = landingOf(args);
+  if (landing === undefined) return "";
+  const means = LANDING_MEANS[landing] ?? landing;
+  if (op === "project.create") return ` (this project's ${means})`;
+  if (op === "integration.default.set") return ` (every new project starts this way: ${means})`;
+  return ` (from now on, ${means})`;
+}
+
 /** One plain line saying what a command will do, for the owner to read before it happens. Built from the typed command, never from model text. */
 export function describe(op: string, args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
   const spec = CHAT_OPS[op];
@@ -507,12 +529,17 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
       parts.push(`alternative="${String(alt["statement"])}" on topic "${String(alt["topic"])}"`);
       continue;
     }
+    // A new project's integration section is shown as the settings it holds, not as a JSON blob the owner has to decode.
+    if (op === "project.create" && key === "integration" && value !== null && typeof value === "object" && !Array.isArray(value)) {
+      parts.push(Object.entries(value as Record<string, unknown>).map(([k, v]) => `${k}=${typeof v === "string" ? (labels[v] ?? v) : short(v)}`).join(", "));
+      continue;
+    }
     const label = typeof value === "string" ? labels[value] : undefined;
     parts.push(`${key}=${label === undefined ? short(value) : `"${label}"`}`);
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : "";
+  const meaning = op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? (typeof args["expiresAt"] === "string" ? ` (ends ${args["expiresAt"]})` : " (permanent: no end time)") : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
   const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : CHAT_LIMITS.line;
