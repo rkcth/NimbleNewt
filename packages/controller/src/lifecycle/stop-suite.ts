@@ -566,6 +566,39 @@ export function defineStopTests(backendName: string): void {
       assert.deepEqual([byParentSeen?.intentId, byParentSeen?.through], [byParent.intentId, { kind: "task", id: parent }], "the newest request that reaches the task is the answer");
     });
 
+    suite("a wider scope's stop made before the task existed, or before the task was given to that agent, is not the task's answer (review of card L02e)", async (c) => {
+      c.rt.seenAttempts = ["att-old"];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-old", costMicros: 10, computeMs: 1 }] }];
+      const byInstallation = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "installation", id: "installation" }, mode: "stop", reason: "shutting down" });
+      await c.stops.advance(c.owner, { intentId: byInstallation.intentId });
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: { kind: "installation", id: "installation" }, reason: "back" });
+      assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.intentId, byInstallation.intentId, "the task that existed then was reached");
+      now += 60_000;
+      const later = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "later" })).id;
+      assert.equal(await c.stops.cleanupSpend(c.owner, scopeOf(later)), undefined, "a task created after that stop was never reached by it");
+      // The agent is stopped and resumed; a task given to the agent afterwards was not reached by that stop.
+      now += 60_000;
+      const byAgent = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "stop", reason: "agent" });
+      await c.stops.advance(c.owner, { intentId: byAgent.intentId });
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: agentScope(c), reason: "back" });
+      assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.intentId, byAgent.intentId, "the agent's task then is answered by the agent's stop");
+      now += 60_000;
+      await c.projects.transitionTask({ commandId: cid("r"), actor: c.owner.id, taskId: later, expectedRevision: 1, to: "ready" });
+      await c.assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: later, owner: { kind: "agent", id: c.agentA } });
+      assert.equal(await c.stops.cleanupSpend(c.owner, scopeOf(later)), undefined, "a task given to the agent after its stop was not reached by it");
+    });
+
+    suite("a Stop of the agent holds the swarm children of its tasks for the dispatcher (wider), not for swarm.cancel's own-task look; a resume lets go (review of card L02e)", async (c) => {
+      const byAgent = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "stop", reason: "agent" });
+      await c.stops.advance(c.owner, { intentId: byAgent.intentId });
+      assert.equal(await c.stops.holding(c.task, "child-y"), undefined, "the task has no Stop of its own");
+      assert.equal((await c.stops.holding(c.task, "child-y", { wider: true }))?.intentId, byAgent.intentId, "the agent's Stop ended the children's work, so it holds them");
+      mayHoldHook = async (_by, child) => child !== "child-x";
+      assert.equal(await c.stops.holding(c.task, "child-x", { wider: true }), undefined, "not a child the one who stopped may not control");
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: agentScope(c), reason: "back" });
+      assert.equal(await c.stops.holding(c.task, "child-y", { wider: true }), undefined, "the resume lets go");
+    });
+
     suite("cleanupSpend lists the attempts the ending charged when preparation never saw them: a Force Stop, and a Stop that reuses a finished Suspend's checkpoint (card L02d review)", async (c) => {
       // A Force Stop goes straight to the ending.
       c.rt.terminateCosts = [{ attemptId: "att-f", costMicros: 900, computeMs: 3 }];

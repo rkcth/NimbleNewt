@@ -9,6 +9,7 @@ import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { PauseScope, PauseService } from "./pause.js";
 import { PAUSE_LIMITS } from "./pause.js";
+import { assignmentIdOf, generationIdOf, type AssignmentBody } from "../domain/assignment-model.js";
 
 /** `suspend` stops at a durable checkpoint; `stop` goes on to end execution; `force-stop` skips preparation. */
 export type StopMode = "suspend" | "stop" | "force-stop";
@@ -484,11 +485,23 @@ export class StopService {
   /** The latest request made for any scope that covers this one; a request on a scope the asker may not control is not shown to them at all, and is not even said to exist. */
   async #coveringRequest(viewer: Principal, scope: PauseScope): Promise<{ id: string; body: StopIntentBody; through: { kind: string; id: string } } | undefined> {
     let best: { id: string; body: StopIntentBody; through: { kind: string; id: string }; at: number } | undefined;
+    // A request made before the asked scope existed did not reach it (a task created after the installation was stopped and resumed), nor did an agent's or team's request made before the task was given to that agent
+    // (review of card L02e): such a request is not this scope's answer.
+    const createdAt = async (kind: string, id: string): Promise<number | undefined> => { const at = (await this.#runner.get(kind, id))?.createdAt; return at === undefined ? undefined : Date.parse(at); };
+    const born = scope.kind === "installation" ? undefined : await createdAt(scope.kind, scope.id);
+    let given: number | undefined;
+    if (scope.kind === "task") {
+      const asg = (await this.#runner.get("assignment", assignmentIdOf(scope.id)))?.body as unknown as AssignmentBody | undefined;
+      if (asg !== undefined && asg.generation > 0) given = await createdAt("assignment-generation", generationIdOf(scope.id, asg.generation));
+    }
     for (const s of await this.#covering(scope)) {
       const id = await this.#activeId(s);
       if (id === undefined) continue;
       const rec = await this.#runner.get(KIND, id);
       if (rec === undefined) continue;
+      const asked = Date.parse((rec.body as unknown as StopIntentBody).requestedAt);
+      if (born !== undefined && asked < born) continue;
+      if (given !== undefined && (s.kind === "agent" || s.kind === "team") && asked < given) continue;
       try { await this.#pauses.authorizeControl(viewer, s); } catch (error) {
         if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) continue;
         throw error;
@@ -818,22 +831,27 @@ export class StopService {
   /**
    * Whether a Stop or Suspend of this task is in force: its request is not cancelled and the task is still paused. The dispatcher asks it for the swarm ancestors of a task before it starts an attempt, so a child of a stopped
    * task is not started again while the parent's stop holds (card L02d). Resuming the parent, or cancelling the request, lets go.
+   * With `wider`, a Stop or Suspend of a scope above the task (its agent, a team above that, the installation) whose pause blocks the task holds too: such a Stop ends the work of the task's swarm children (card L02e), so the
+   * dispatcher must not start them again either (review of card L02e). Without it only the task's own request counts (`swarm.cancel` carries on the child's own Stop).
    */
-  async holding(taskId: string, child?: string): Promise<{ intentId: string; mode: StopMode; requestedBy: string } | undefined> {
-    const scope: PauseScope = { kind: "task", id: taskId };
-    const id = await this.#activeId(scope);
-    const found = id === undefined ? undefined : await this.#runner.get(KIND, id);
-    if (id === undefined || found === undefined) return undefined;
-    const b = found.body as unknown as StopIntentBody;
-    if (b.phase === "cancelled") return undefined;
-    // The request must be the cause of the gate as it stands now: a Stop or Suspend that finished, followed by a resume, does not hold when the task is merely paused again.
-    const gate = await this.#pauses.gateState(scope);
-    if (gate === undefined || gate.intent !== "pause" || (b.gateRequestId !== undefined && gate.requestId !== b.gateRequestId)) return undefined;
+  async holding(taskId: string, child?: string, options?: { readonly wider?: boolean }): Promise<{ intentId: string; mode: StopMode; requestedBy: string } | undefined> {
+    const own: PauseScope = { kind: "task", id: taskId };
     const guard = await this.#pauses.guard(taskId);
-    if (!guard.blockedBy.some((s) => s.kind === "task" && s.id === taskId)) return undefined;
-    // A child the one who asked may not control is not held by their stop.
-    if (child !== undefined && this.#mayHold !== undefined && !(await this.#mayHold(b.requestedBy, child).catch(() => false))) return undefined;
-    return { intentId: id, mode: b.mode, requestedBy: b.requestedBy };
+    const scopes = options?.wider === true ? guard.blockedBy : guard.blockedBy.filter((s) => s.kind === "task" && s.id === taskId);
+    for (const scope of scopes) {
+      const id = await this.#activeId(scope.kind === "task" && scope.id === taskId ? own : scope);
+      const found = id === undefined ? undefined : await this.#runner.get(KIND, id);
+      if (id === undefined || found === undefined) continue;
+      const b = found.body as unknown as StopIntentBody;
+      if (b.phase === "cancelled") continue;
+      // The request must be the cause of the gate as it stands now: a Stop or Suspend that finished, followed by a resume, does not hold when the scope is merely paused again.
+      const gate = await this.#pauses.gateState(scope);
+      if (gate === undefined || gate.intent !== "pause" || (b.gateRequestId !== undefined && gate.requestId !== b.gateRequestId)) continue;
+      // A child the one who asked may not control is not held by their stop.
+      if (child !== undefined && this.#mayHold !== undefined && !(await this.#mayHold(b.requestedBy, child).catch(() => false))) continue;
+      return { intentId: id, mode: b.mode, requestedBy: b.requestedBy };
+    }
+    return undefined;
   }
 
   /**

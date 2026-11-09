@@ -667,7 +667,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   }
 }
 
-/** The nearest swarm ancestor of a task that has a Stop or Suspend in force (card L02d), or undefined. Bounded: 50 levels, so a cycle in the links ends. */
+/** The nearest swarm ancestor of a task that has a Stop or Suspend in force, its own or one of a scope above it (cards L02d, L02e), or undefined. Bounded: 50 levels, so a cycle in the links ends. */
 async function stoppedAncestor(storage: ControllerStorage, stops: Pick<StopService, "holding">, taskId: string): Promise<{ taskId: string; intentId: string; mode: string } | undefined> {
   const seen = new Set<string>([taskId]);
   let at = taskId;
@@ -675,7 +675,8 @@ async function stoppedAncestor(storage: ControllerStorage, stops: Pick<StopServi
     const parent = ((await storage.getAggregate({ kind: "swarm-link", id: at }))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
     if (typeof parent !== "string" || seen.has(parent)) return undefined;
     seen.add(parent);
-    const held = await stops.holding(parent, taskId);
+    // A Stop of the parent's agent, a team above it or the installation ends the children's work too (card L02e), so it holds them as well.
+    const held = await stops.holding(parent, taskId, { wider: true });
     if (held !== undefined) return { taskId: parent, ...held };
     at = parent;
   }
