@@ -2258,12 +2258,24 @@
       ],
       "deliverable": "Split from C07l (2026-11-08), finding 1: what the next agent is given in its first call is the task's title and description, the rules that bind it and the route view only (dispatch/dispatcher.ts line 1863, the order's content), plus a resume note for a resumed attempt. Nothing names the hand-off package (the next action, decisions, acceptance criteria, open questions, pending effects: readable only through handoff.get, which the call never names), the controller's own hand-off note of the ended attempt (written at dispatch/dispatcher.ts line 2163 through ContextEnforcementService.ensureHandoff, and read by no production caller of latestHandoff, context/enforcement.ts line 914), or the task's open blockers (in neither the package nor the call). A fresh start after a stored conversation over the resume share says it starts 'from the continuation record', which the call does not carry either",
       "acceptance_and_verification": "The first call of a new or resumed attempt carries, bounded and JSON-quoted on one line where agent-written, or names by ID with the operation that reads it: the latest hand-off package, the controller's hand-off note of the previous attempt and the task's open blockers; the C07l test's three todo checks (hand-off named, open blocker named, controller note given) pass on every backend and lose their todo, with its first-call limit and size-trend checks still passing",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "c2dc7a95",
+          "40faa3df",
+          "834c4470",
+          "9b0ff57a"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "An attempt's first call names the hand-off package the task came with, the controller's note of the attempt before it and the task's open blockers, in one bounded paragraph before the route view (dispatch/handoff-brief.ts; agent text quoted). A new agent-side operation context.handoff.read gives the agent the note it is pointed at (gated by attempt.work on the note's task; returns only id, taskId, attemptId, source, endedBecause, text). Best-effort: a failed read is reported and never stops the attempt. Left: a blocker on an effect or attempt of the task is not named; the paragraph can point at a package a recipient who has since lost the task cannot read. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "C07n",
@@ -2275,12 +2287,23 @@
       ],
       "deliverable": "Split from C07l (2026-11-08), finding 2: dispatch/runtime-guards.ts line 57 admits every first call (admit: true, no record, no measurement) and line 74 resumes every stored conversation when the binding's window for the order's route is undefined, so a route missing from the embedder's window map is never checked. Found at review (2026-11-08): the resume share is judged only when the embedder passes local.storedTokens (api/dispatch-compose.ts line 450; dispatch/local-worker.ts line 232 skips the decision without it), and no composition in the repository passes it, the integration tests included, so through startController a stored conversation is resumed whatever its size and only the first-call admission (with its one compaction) bounds it",
       "acceptance_and_verification": "A route with no known window uses the routing table's contextTokens for it, and with neither it is refused visibly (a blocker naming the route and how to set its window), never admitted unchecked; the stored-conversation resume is judged the same way, and a checkpoint whose size the host does not say (no storedTokens, or one that answers undefined) is judged by a default that reads the worker package's checkpoint shape or is refused visibly, shown through startController; the C07l todo case (a first call of a million tokens on a route of unknown window) passes and loses its todo",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "7f7d36fa",
+          "a6919e37",
+          "6d866474"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A route's window has an order: the host's figure, then the routing table's contextTokens, then a refusal (one open context_overflow blocker naming the route and both places the window is set; retryable false, no compaction spent). Only a positive safe integer is a window, on both the first-call guards and the route-move rebuild. A stored conversation is judged before it is resumed; a checkpoint that does not say its size starts fresh with a visible note. Left: a refused resume also drops the turn counter; a transient routing-table read error drops the stored conversation (it starts from the continuation record); tool-output limits still come from the host map only. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "C07o",
