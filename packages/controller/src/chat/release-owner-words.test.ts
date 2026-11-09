@@ -304,6 +304,76 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 
+  test(`${backend.name}: words that name two platforms of a kind are asked about, a denial and a MAC address name nothing, and a withdrawal carries no platform the owner did not say (card X09b part 2 review 3, items D3 and D4)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script, undefined, (storage, epoch) => ({ release: ReleaseService.withEpoch(storage, epoch, options) }));
+    try {
+      const chat = w.chat({});
+      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes; };
+      const call = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, ...(op === "release.gate" || op === "release.attempts" ? {} : { commandId: cid("x") }), args } as never) as never;
+      const order = (hostId: string, os: string, arch: string) => ({ kind: "command", op: "release.host", args: { hostId, os, arch }, evidence: "", basis: "owner" });
+      const cand = (await call("release.submit", { manifest: manifest("a") })).result!["candidateId"] as string;
+
+      // D3: an address printed on a sticker is not macOS, so the interpreter's darwin is refused and the machine is authorized for nothing.
+      const sticker = "let host:box run release tests on linux x64, its MAC address is on the sticker";
+      const stickerOut = (await turn("d1", sticker, [{ ...order("host:box", "darwin", "x64"), evidence: sticker }]))[0]!;
+      assert.equal(stickerOut.status, "refused", `a MAC address does not name darwin: ${JSON.stringify(stickerOut)}`);
+      assert.equal(stickerOut.code, "unsupported_value");
+      assert.match(stickerOut.message!, /linux/, "the refusal says the os the owner did name");
+      assert.equal((await call("release.start", { candidateId: cand, cell: linux, hostId: "host:box" })).error?.code, "forbidden", "the refused order authorized nothing");
+
+      // The same order in the owner's own words is drawn up for them to confirm.
+      const plain = "let host:box run release tests on linux x64";
+      const plainShown = (await turn("d2", plain, [{ ...order("host:box", "linux", "x64"), evidence: plain }]))[0]!;
+      assert.equal(plainShown.status, "proposed", JSON.stringify(plainShown));
+      assert.equal((await turn("d3", "yes, authorize it", [{ kind: "apply_proposal", proposalId: plainShown.proposalId, evidence: "authorize it", basis: "owner" }]))[0]!.status, "applied");
+      assert.ok((await call("release.start", { candidateId: cand, cell: linux, hostId: "host:box" })).ok, "the platform the owner said is the one authorized");
+
+      // D3: the platform the owner denied names nothing, so their own words still say linux.
+      const denied = "let host:yard run release tests for linux x64, not the mac";
+      const deniedOut = (await turn("d4", denied, [{ ...order("host:yard", "darwin", "x64"), evidence: denied }]))[0]!;
+      assert.equal(deniedOut.status, "refused", `"not the mac" authorizes no darwin: ${JSON.stringify(deniedOut)}`);
+      assert.match(deniedOut.message!, /your own words say os "linux"/i, `the refusal points at the denial, not at a second platform: ${deniedOut.message}`);
+
+      // D3: two platforms of one kind in one message cannot be told apart, so nothing is guessed — the owner is asked which.
+      const bothChips = "let host:old run release tests on linux arm64; the old one was x64";
+      const bothChipsOut = (await turn("d5", bothChips, [{ ...order("host:old", "linux", "x64"), evidence: bothChips }]))[0]!;
+      assert.equal(bothChipsOut.status, "refused", `two chips in one message are not settled by taking one: ${JSON.stringify(bothChipsOut)}`);
+      assert.equal(bothChipsOut.code, "unsupported_value");
+      assert.match(bothChipsOut.message!, /arm64/, "the refusal says both chips the message names");
+      assert.match(bothChipsOut.message!, /x64/);
+      const bothOs = "authorize host:old for release tests on mac or linux";
+      const bothOsOut = (await turn("d6", bothOs, [{ ...order("host:old", "darwin", "x64"), evidence: bothOs }]))[0]!;
+      assert.equal(bothOsOut.status, "refused", `an owner torn between two systems is not answered for: ${JSON.stringify(bothOsOut)}`);
+      assert.match(bothOsOut.message!, /linux/);
+      assert.match(bothOsOut.message!, /darwin|mac/);
+
+      // D4: withdrawing takes a machine off the release list; it does not choose a platform for it, so the interpreter's os and arch are dropped.
+      const stop = "stop letting host:box run release tests";
+      const stopShown = (await turn("d7", stop, [{ kind: "command", op: "release.host", args: { hostId: "host:box", active: false, os: "darwin", arch: "arm64" }, evidence: stop, basis: "owner" }]))[0]!;
+      assert.equal(stopShown.status, "proposed", `a withdrawal is still drawn up: ${JSON.stringify(stopShown)}`);
+      const dropped = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, stopShown.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
+      assert.equal("os" in dropped, false, `the interpreter's os is not sent on a withdrawal: ${JSON.stringify(dropped)}`);
+      assert.equal("arch" in dropped, false, `the interpreter's arch is not sent on a withdrawal: ${JSON.stringify(dropped)}`);
+      assert.equal(dropped["active"], false, "the withdrawal itself is kept");
+      assert.equal((await turn("d8", "yes, take it off the release machines", [{ kind: "apply_proposal", proposalId: stopShown.proposalId, evidence: "take it off", basis: "owner" }]))[0]!.status, "applied");
+      assert.equal((await call("release.start", { candidateId: cand, cell: linux, hostId: "host:box" })).error?.code, "forbidden", "the withdrawn machine takes no test now");
+
+      // A withdrawal whose platform the owner did say keeps it, and one their words contradict is refused rather than sent.
+      const again = "authorize host:box for release tests on linux x64 again";
+      const againShown = (await turn("d9", again, [{ ...order("host:box", "linux", "x64"), evidence: again }]))[0]!;
+      assert.equal(againShown.status, "proposed", JSON.stringify(againShown));
+      assert.equal((await turn("d10", "yes, authorize it again", [{ kind: "apply_proposal", proposalId: againShown.proposalId, evidence: "authorize it again", basis: "owner" }]))[0]!.status, "applied");
+      const stopNamed = "stop letting host:box run release tests on linux x64";
+      const stopNamedShown = (await turn("d11", stopNamed, [{ kind: "command", op: "release.host", args: { hostId: "host:box", active: false, os: "linux", arch: "x64" }, evidence: stopNamed, basis: "owner" }]))[0]!;
+      assert.equal(stopNamedShown.status, "proposed", JSON.stringify(stopNamedShown));
+      const kept = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, stopNamedShown.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
+      assert.deepEqual(kept, { hostId: "host:box", active: false, os: "linux", arch: "x64" }, "the platform the owner named on a withdrawal is their own and stays");
+      const stopWrong = (await turn("d12", stopNamed, [{ kind: "command", op: "release.host", args: { hostId: "host:box", active: false, os: "win32", arch: "x64" }, evidence: stopNamed, basis: "owner" }]))[0]!;
+      assert.equal(stopWrong.status, "refused", `a withdrawal whose platform the owner's words contradict is refused: ${JSON.stringify(stopWrong)}`);
+    } finally { await w.close(); }
+  });
+
   test(`${backend.name}: the release status view calls a pass after failures flaky, keeps hostile host, agent-written and pointer text inside one quoted line, shows the staged release, stays within 30 lines and answers nothing to a caller who may not read it (card X09b part 2)`, async () => {
     const root = mkdtempSync(join(tmpdir(), "nn-rel-view-"));
     let releaseS!: ReleaseService;
