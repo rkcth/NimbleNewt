@@ -4,7 +4,8 @@ import { ContextEnforcementService, DeskService, HistoryService, RetrievalServic
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { HandoffService, StopService, controllerHandoffSources, type StopPorts } from "../lifecycle/index.js";
 import type { JsonObject } from "../storage/types.js";
-import type { RouteResolver } from "./dispatcher.js";
+import type { DispatcherDeps, RouteResolver } from "./dispatcher.js";
+import { HANDOFF_BRIEF_LIMITS } from "./handoff-brief.js";
 import { LocalWorker, type AttemptRuntime } from "./local-worker.js";
 import { controllerGuards } from "./runtime-guards.js";
 import { buildWorld, workGrants } from "./testing/world.js";
@@ -100,8 +101,6 @@ for (const backend of backends) {
       let fallback = false;
       const base = w.deps.route;
       const route: RouteResolver = async (a) => { const r = await base(a); return fallback && "route" in r ? { ...r, route: "localp/tiny" } : r; };
-      const deps = { workers: [local], context, route };
-      let d = w.restart(deps);
 
       const a = await w.agent("ann", workGrants(w.project));
       const b = await w.agent("bob", workGrants(w.project));
@@ -125,6 +124,9 @@ for (const backend of backends) {
       const sources = controllerHandoffSources({ getTask: (id) => w.projects.getTask(id), contracts: contracts as never, agentState: async () => "active", more: async () => ({ outstandingQuestions: OPEN_QUESTION }) });
       const stops = StopService.withEpoch(store.storage, w.epoch, w.pauses, stub, options);
       const handoffs = HandoffService.withEpoch(store.storage, w.epoch, { pauses: w.pauses, stops, assignments: w.assignments, sources, responsibilities: { check: async () => undefined, apply: async () => ({ moved: [], failed: [] }) }, onTransferred: async () => undefined }, options);
+      // The hand-off records go to the dispatcher as `api/dispatch-compose.ts` hands them (card C07m), so a new owner's first call can name the package its task came with.
+      const deps: Partial<DispatcherDeps> = { workers: [local], context, route, handedIn: (taskId) => handoffs.latestForTask(taskId) };
+      let d = w.restart(deps);
 
       const admit = async (agent: string, label: string): Promise<string> => {
         const asg = (await w.assignments.getAssignment(taskId))!;
@@ -217,7 +219,7 @@ for (const backend of backends) {
     const lastTen = mean(r.hops.slice(-10).map((h) => size(h.hop)));
     assert.ok(lastTen <= first * 1.05, `first 10 average ${Math.round(first)} tokens, last 10 average ${Math.round(lastTen)}: the first call grows with the number of hand-offs`);
     // The same without the stored conversation: the hops' design front-loads it (the restarts of the first ten resume theirs, those of the last ten start fresh), which would hide a prompt that grows.
-    // Today nothing carried across hand-offs reaches the prompt (C07m), so neither comparison can fail on a defect of the code under test; they guard the prompt once C07m adds the hand-off to it.
+    // Since card C07m the hand-off reaches the prompt, named by record: this comparison is what keeps that naming from growing with the number of hand-offs (the package itself is never copied in — C07k).
     const prompt = (hop: number): number => Math.max(...sentIn(r, hop).map((s) => s.tokens - s.stored));
     const firstPrompt = mean(r.hops.slice(0, 10).map((h) => prompt(h.hop)));
     const lastPrompt = mean(r.hops.slice(-10).map((h) => prompt(h.hop)));
@@ -239,17 +241,29 @@ for (const backend of backends) {
     }
   });
 
-  test(`${backend.name}: 50 hand-offs: a resumed call carries its resume note, and the note stays bounded`, async () => {
+  test(`${backend.name}: 50 hand-offs: a resumed call ends with its resume note, and the note and the hand-off paragraph stay bounded`, async () => {
     const r = await sim();
-    const plain = r.sent.find((s) => s.kind === "plain")!.content;
     for (const h of r.hops.filter((x) => x.kind === "restart")) assert.ok(sentIn(r, h.hop).some((s) => s.resumeNote !== undefined), `hop ${h.hop}: the resumed start carried no resume note`);
+    // What every call carries before the controller adds anything of the hand-off: the task's own text and the rules that bind the agent. Card C07m put the hand-off paragraph between that and the resume note.
+    const shared = (content: string): string => content.split("\n\n[What the controller hands you")[0]!;
+    const base = shared(r.sent[0]!.content);
+    assert.ok(base.includes(OWNER_WORDS) && /Rules that bind you in this project/.test(base), "what every call shares is the task's own words and the rules");
     for (const s of r.sent) {
-      // What a call carries beyond the task's own text and rules is its resume note, as the last bracketed paragraph (and nothing for a call that is not a resume).
-      assert.ok(s.content.startsWith(plain), `hop ${s.hop}: the call does not start with the task's text and rules`);
-      const extra = s.content.slice(plain.length);
-      if (s.resumeNote === undefined) { assert.equal(extra, "", `hop ${s.hop}: a call that is not a resume carries something more`); continue; }
-      assert.ok(extra.startsWith(`\n\n[${s.resumeNote}`) && extra.endsWith("]"), `hop ${s.hop}: the resume note is not given: ${JSON.stringify(extra)}`);
-      assert.ok(extra.length <= 1000, `hop ${s.hop}: the resume note is ${extra.length} characters`);
+      assert.ok(s.content.startsWith(base), `hop ${s.hop}: the call does not start with the task's text and rules`);
+      let rest = s.content.slice(base.length);
+      if (rest.startsWith("\n\n[What the controller hands you")) {
+        // The hand-off paragraph is one bracketed block of its own, within its bound, and never eats what follows it.
+        const next = rest.indexOf("\n\n[", 3);
+        const brief = next === -1 ? rest : rest.slice(0, next);
+        assert.ok(brief.endsWith("]"), `hop ${s.hop}: the hand-off paragraph is not closed: ${JSON.stringify(brief.slice(-80))}`);
+        assert.ok(brief.length - 4 <= HANDOFF_BRIEF_LIMITS.chars, `hop ${s.hop}: the hand-off paragraph is ${brief.length - 4} characters, over ${HANDOFF_BRIEF_LIMITS.chars}`);
+        rest = next === -1 ? "" : rest.slice(next);
+      }
+      // Beyond the task's text, the rules and the hand-off there is only ever the resume note, as the last bracketed paragraph (and nothing at all for a call that is not a resume).
+      if (s.resumeNote === undefined) { assert.equal(rest, "", `hop ${s.hop}: a call that is not a resume carries something more: ${JSON.stringify(rest.slice(0, 120))}`); continue; }
+      // The worker may add why it started fresh to the note it was given; nothing else may follow it.
+      assert.ok(rest.startsWith(`\n\n[${s.resumeNote}`) && rest.endsWith("]") && rest.indexOf("]") === rest.length - 1, `hop ${s.hop}: the resume note is not the last thing the call carries: ${JSON.stringify(rest.slice(0, 120))}`);
+      assert.ok(rest.length <= 1000, `hop ${s.hop}: the resume note is ${rest.length} characters`);
     }
   });
 
@@ -261,17 +275,16 @@ for (const backend of backends) {
     }
   });
 
-  // Findings: what the next agent is given names nothing of the hand-off. The package (next action, decisions, acceptance criteria, open questions) is read only through `handoff.get`, which no call names;
-  // the controller's own hand-off note of the ended attempt is written and never given; an open blocker is in neither. Card C07m.
-  const C07M = "C07m: dispatch/dispatcher.ts:1863 builds the call from the task's title and description, the rules and the route view only; nothing names the hand-off package, the controller's hand-off note (written at dispatcher.ts:2163, read by no caller of context/enforcement.ts:914) or the open blockers";
-  test(`${backend.name}: 50 hand-offs: the call names the hand-off package, so its next action, decisions, acceptance criteria and open question can be read by reference`, { todo: C07M }, async () => {
+  // Card C07m: what the next agent is given names what it was handed. The package (next action, decisions, acceptance criteria, open questions) is named by its hand-off and read with `handoff.get`; the
+  // controller's own hand-off note of the ended attempt is named by its ID and read with `context.handoff.read`; an open blocker is given in the call itself. These were the three findings C07l left; they are required now.
+  test(`${backend.name}: 50 hand-offs: the call names the hand-off package, so its next action, decisions, acceptance criteria and open question can be read by reference`, async () => {
     const r = await sim();
     for (const h of r.hops) for (const s of sentIn(r, h.hop)) assert.ok(s.content.includes(h.handoffId) || s.content.includes(h.nextAction), `hop ${h.hop}: the call neither carries nor names the hand-off ${h.handoffId}`);
   });
-  test(`${backend.name}: 50 hand-offs: the call names the open blockers of the task`, { todo: C07M }, async () => {
+  test(`${backend.name}: 50 hand-offs: the call names the open blockers of the task`, async () => {
     for (const s of (await sim()).sent) assert.ok(s.content.includes(OPEN_BLOCKER) || /blk-[a-z2-7]{20}/.test(s.content), `hop ${s.hop}: the open blocker is not named`);
   });
-  test(`${backend.name}: 50 hand-offs: the controller's hand-off note of the ended attempt reaches the next attempt`, { todo: C07M }, async () => {
+  test(`${backend.name}: 50 hand-offs: the controller's hand-off note of the ended attempt reaches the next attempt`, async () => {
     const r = await sim();
     assert.ok(r.controllerNotes.length >= HOPS, "the controller wrote a note at the end of each attempt");
     for (const h of r.hops) for (const s of sentIn(r, h.hop)) assert.ok(/Hand-off written by the controller|hof-[a-z2-7]{20}/.test(s.content), `hop ${h.hop}: the previous attempt's hand-off note is not given or named`);
