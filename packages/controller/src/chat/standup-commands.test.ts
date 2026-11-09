@@ -272,5 +272,61 @@ for (const backend of backends) {
     await other.setFocus(w.ownerToken, { commandId: cid("f"), projectId: quiet });
     assert.match(JSON.stringify((await say(w, other, "What stand-ups do we have?", cid("m"))).outcomes), /No stand-up is set up in this project\./);
   });
+
+  suite("an order to get a stand-up ready or to write on its briefs says what the project actually has: a stand-up set up but not yet met is named, never invented away (card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    // Both stand-ups are at 11:30 London (10:30 UTC), past the world's clock of 10:00 UTC, and nothing has been ticked, so neither has a meeting of its own yet.
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    await ctl.sched(a, "Morning sync", when);
+    await ctl.sched(a, "Evening wrap", when);
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const said = async (text: string, intent: unknown): Promise<Outcome> => { script[text] = [intent]; return only((await say(w, chat, text)).outcomes); };
+
+    // One word of the owner's words reaches the stand-up they meant, and the answer is about that one.
+    const early = await said("Can you get the morning one ready?", cmd("standup.prepare", { meetingTopic: "morning" }, "Can you get the morning one ready"));
+    assert.equal(early.status, "refused", JSON.stringify(early));
+    assert.match(String(early.message), /"Morning sync" is set up in this project but has no meeting to prepare right now/, "the owner is told the stand-up by the title it has");
+    assert.equal(early.proposalId, undefined, "nothing is proposed for a stand-up that has no meeting");
+    assert.equal(JSON.stringify(early).includes("Evening wrap"), false, "only the stand-up the owner named is spoken of");
+
+    // Nothing named: every stand-up of the project is told, because none can be worked on.
+    const wide = await said("Get the stand-up ready.", cmd("standup.prepare", {}, "Get the stand-up ready"));
+    assert.equal(wide.status, "refused", JSON.stringify(wide));
+    assert.match(String(wide.message), /"Morning sync"/);
+    assert.match(String(wide.message), /"Evening wrap"/);
+    assert.match(String(wide.message), /none of them has a meeting to prepare yet/);
+
+    // A note for an agent meets the same answer on the briefs side.
+    const note = await said("Tell the morning agent to look at the cache.", cmd("standup.add-statement", { meetingTopic: "morning", agentName: "morning", section: "note", text: "look at the cache" }, "Tell the morning agent to look at the cache"));
+    assert.equal(note.status, "refused", JSON.stringify(note));
+    assert.match(String(note.message), /"Morning sync" is set up in this project but has no meeting to write into right now/);
+
+    // Once the meeting is planned, the same words are a proposal, and applying it prepares that stand-up.
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 2, "both stand-ups have a planned meeting now");
+    const ready = await said("Can you get the morning one ready?", cmd("standup.prepare", { meetingTopic: "morning" }, "Can you get the morning one ready"));
+    assert.equal(ready.status, "proposed", JSON.stringify(ready));
+    assert.match(JSON.stringify(ready), /Morning sync/);
+    assert.equal(JSON.stringify(ready).includes("Evening wrap"), false, "only the named stand-up is offered");
+    assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: ready.proposalId! })).applied, true, "applying prepares the stand-up the owner named");
+
+    // A project with no stand-up, and one whose only stand-up has ended, say so plainly rather than offering anything.
+    const empty = await w.project("Empty");
+    const bare = w.chat({ status: ctl.status() });
+    await bare.setFocus(w.ownerToken, { commandId: cid("f"), projectId: empty });
+    script["Get the stand-up ready."] = [cmd("standup.prepare", {}, "Get the stand-up ready")];
+    assert.match(JSON.stringify(only((await say(w, bare, "Get the stand-up ready.")).outcomes)), /no stand-up is set up in this project/);
+    const one = await w.project("One");
+    const ended = await ctl.sched(one, "Closed stand-up");
+    await w.api.handle(w.ownerToken, { v: 1, op: "standup.update", commandId: cid("end"), args: { scheduleId: ended, expectedRevision: (await ctl.schedule(ended)).revision, state: "ended" } } as never);
+    const past = w.chat({ status: ctl.status() });
+    await past.setFocus(w.ownerToken, { commandId: cid("f"), projectId: one });
+    script["Get the closed stand-up ready."] = [cmd("standup.prepare", { meetingTopic: "closed stand-up" }, "Get the closed stand-up ready")];
+    const over = only((await say(w, past, "Get the closed stand-up ready.").then((r) => r.outcomes)));
+    assert.equal(over.status, "refused", JSON.stringify(over));
+    assert.match(String(over.message), /no stand-up is set up in this project/, "an ended stand-up is not one the project has");
+    assert.equal(JSON.stringify(over).includes("Closed stand-up"), false, "the ended stand-up's title is not repeated as if it were running");
+  });
 }
 

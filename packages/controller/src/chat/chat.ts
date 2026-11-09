@@ -970,9 +970,18 @@ export class ChatService {
         args["expectedRevision"] = brief["revision"];
         labels[String(args["briefId"])] = `${String(brief["agent"]).slice(0, 80)}'s brief`;
       } else {
+        // The stand-ups the project has set up are read from the schedules, because a stand-up made this morning is one of them even before it has met (card M03h); the meeting to prepare, or to write into, is the one its latest occurrence is.
+        const live = (((await this.#get(token, "standup.list", { projectId, limit: 50 }))?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((s) => s["state"] !== "ended");
+        const titles = live.map((s) => String(s["title"]));
+        const noneReady = (): string => titles.length === 0
+          ? `no stand-up is set up in this project, so there is nothing to ${isNote ? "write into" : "prepare"}`
+          : titles.length === 1
+            ? `the stand-up ${quotedText(titles[0]!, 60)} has no meeting to ${isNote ? "write into" : "prepare"} yet`
+            : `this project has ${titles.map((t) => quotedText(t, 60)).join(", ")}, but none of them has a meeting to ${isNote ? "write into" : "prepare"} yet`;
         const recent = await this.#get(token, "standup.recent", { projectId, limit: 50 });
         const open = ((recent?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => (isNote ? i["state"] === "planned" : i["state"] === "planned" || i["state"] === "reported"));
         const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${String(i["title"]).slice(0, 60)}, ${String(i["startsAt"])})`;
+
         let occurrence: Record<string, unknown> | undefined;
         if (typeof args["occurrenceId"] === "string") {
           occurrence = open.find((i) => i["occurrenceId"] === args["occurrenceId"]);
@@ -980,8 +989,13 @@ export class ChatService {
         } else {
           const words = typeof topic === "string" ? topic : "";
           const matches = open.filter((i) => looseMatch(words, String(i["title"])));
-          if (open.length === 0) return refuse("not_found", isNote ? "no stand-up is coming up in this project" : "no stand-up in this project can be prepared now");
-          if (matches.length === 0) return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
+          // Words that fit one of the project's own stand-ups are answered about that stand-up, even when it has no meeting to work on: asking which one the owner meant would be odd when they named it.
+          const named = words === "" ? [] : live.filter((s) => looseMatch(words, String(s["title"])));
+          if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(String(named[0]!["title"]), 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
+          if (open.length === 0) return refuse("not_found", noneReady());
+          if (matches.length === 0) {
+            return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
+          }
           if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
           occurrence = matches[0]!;
           args["occurrenceId"] = String(occurrence["occurrenceId"]);
