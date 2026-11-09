@@ -183,7 +183,7 @@ export interface DispatcherDeps {
    * It is asked once more as the worker is started (card C07g): the `view` it answers then (the kept pieces and the references of what was cut, for the new route) goes in the attempt's first prompt, with `measured` saying whether the route's
    * fixed part was measured (a worker that can measure its own process rebuilds a view that was not, before it is sent).
    */
-  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
+  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number, /** What the first prompt carries besides the task's own text and the view, in characters: what the task was handed with and the resume note, counted as they are rather than as a guess. */ readonly noteChars?: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
   /** The task is on the same route it last ran on: a refusal that an earlier move to another route left behind is closed (card C07f). */
   readonly routeKept?: (kept: { readonly taskId: string; /** The route the task is on (a refusal made for this same route is not stale). */ readonly route: string }) => Promise<void>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
@@ -1402,7 +1402,7 @@ export class DispatcherService {
           // Whatever was remembered for this attempt (a "kept" from an earlier tick on the old route) is no longer true: a refusal or an error below must not leave it standing.
           this.#routeOk.delete(attemptId);
           let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
           if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
           this.#remember(attemptId, cacheKey);
         }
@@ -1843,12 +1843,14 @@ export class DispatcherService {
     // before the worker exists, and only one caller can make it: it must still be waiting, with the place this caller holds. If this process dies now, the lease ends and the attempt is taken as lost.
     // Card C07g: an attempt that starts on a route other than the one its task last ran on carries the context rebuilt for this route in its first prompt. The context is asked once more here (the same facts give the
     // same decision; facts that changed since the check give the view as it is now). A refusal or an error now starts nothing: the place is given back and the next pass checks the move again (and blocks on a refusal).
+    // What the task was handed with, read now: it goes in the first prompt, and its size goes with the request for the route view, which has to leave room for it (card C07g).
+    const handed = await this.#handedInNote(b);
     let view: { readonly text: string; readonly measured: boolean } | undefined;
     if (this.#deps.routeChange !== undefined) {
       const previous = ((await this.#runner.get(PLACED_KIND, b.taskId))?.body as unknown as { route?: string } | undefined)?.route;
       if (previous !== undefined && previous !== b.route) {
         let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
+        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length, noteChars: handed.length + (b.resumeNote?.length ?? 0) + (reviewed?.length ?? 0) }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (!moved.ok) { this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (moved.view !== undefined && moved.view.text !== "") view = moved.view;
       }
@@ -1885,7 +1887,7 @@ export class DispatcherService {
     const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: await this.#contentOf(b.taskId) + (await this.#policyNote(b)) + (await this.#handedInNote(b)) + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
+      content: await this.#contentOf(b.taskId) + (await this.#policyNote(b)) + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}`,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
     };
@@ -1950,7 +1952,7 @@ export class DispatcherService {
    * one follows, and the task's open blockers. Each is named by its record and by the operation its agent reads it with, so the call stays bounded however much the earlier attempt left behind — the package
    * itself is never copied into the prompt (it grows with every hand-off, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
    */
-  async #handedInNote(b: DispatchBody): Promise<string> {
+  async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<string> {
     const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((): undefined => undefined);
     const context = this.#deps.context;
     const [handedIn, note, blockers] = await Promise.all([

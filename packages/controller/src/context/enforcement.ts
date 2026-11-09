@@ -108,8 +108,9 @@ const viewHeader = (route: string, window: number): string => `[The owner's deci
 const viewFooter = (n: number): string => `[${n} item${n === 1 ? " was" : "s were"} cut or left out to fit this route. Nothing is lost: each names the digest of its full text (sha256:...); read it with the state API query context.route-archive.read, giving this task's ID and that digest (the owner's own items need the right to read the project's history).]`;
 /** What the header, the footer and the separators of a view add at most, in characters: the pieces are built with room for them, so the whole view stays within the startup share. */
 const viewFrameChars = (route: string, window: number, items: number): number => viewHeader(route, window).length + 4 + viewFooter(Math.max(2, items)).length + 2 * Math.max(0, items - 1);
-/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text (the project's rules, what the task was handed with, a resume note), in characters, when their exact size is not known yet (card C07g; the hand-off paragraph of card C07m is bounded by `HANDOFF_BRIEF_LIMITS.chars`). */
-export const PROMPT_NOTE_RESERVE_CHARS = 4000;
+/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text when their exact size is not known yet (card C07g): the project's rules, and a resume note of its own bound. What the
+dispatcher does know — what the task was handed with (card C07m, bounded by `HANDOFF_BRIEF_LIMITS.chars`) and the resume note it carries — is counted as it is instead, and the larger of the two is what room is kept for. */
+export const PROMPT_NOTE_RESERVE_CHARS = 2000;
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
 interface SpillBody { /** An outside server's text: read only by those who may use MCP in the project, and framed as data when paged out. */ readonly untrusted?: boolean; readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
