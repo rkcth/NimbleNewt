@@ -659,10 +659,10 @@ export class PolicyEditService {
     if (tool !== undefined && reserved.includes(tool)) throw new Refusal("mandatory_gate", `${tool} is reserved for you in "${project.name}"; no grant can waive that, so none was made.`);
     // What the grant still lacks is asked for as a plain question (the existing ask mechanism), not demanded as a form of words: an audience or a ceiling is information only the owner can give.
     if ((cls === "external-send" || cls === "publish") && (change.audiences ?? []).length === 0) {
-      return { ask: { ok: false, kind: "ask", question: `This grant would let ${grantee.name} ${cls === "publish" ? "publish" : "send things out"}, and that is only ever granted per account and audience. Which account or audience is it for?`, options: [] } };
+      return { ask: { ok: false, kind: "ask", question: `Sending out is granted per account and audience: which account or audience may ${grantee.name} ${cls === "publish" ? "publish for" : "send to"}?`, options: [] } };
     }
     if (cls === "spend" && change.spendLimit === undefined) {
-      return { ask: { ok: false, kind: "ask", question: `How much may ${grantee.name} spend under this grant? Give me a figure, or tell me it has no ceiling, and the grant is drawn up with whichever you said.`, options: [] } };
+      return { ask: { ok: false, kind: "ask", question: `How much may ${grantee.name} spend under this grant — a figure, or no ceiling at all?`, options: [] } };
     }
     const rules = await this.#lengthRules(owner);
     const chosen = chooseGrantLength({ ...(change.lengthDays === undefined ? {} : { lengthDays: change.lengthDays }), ...(change.until === undefined ? {} : { until: change.until }), now: this.#runner.now(), rules });
