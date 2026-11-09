@@ -241,7 +241,10 @@ export class DependencyService {
         return same(o.hash) ? ["unchanged", "the same results"] : ["changed", "the results differ"];
       }
       case "directory": {
-        if (o === undefined || o.members === undefined) return ["unknown", "the directory was not listed again"];
+        if (o === undefined) return ["unknown", "the directory was not listed again"];
+        // A probe that looked and found nothing says so; a listing that came back without members is still no listing at all.
+        if (o.exists === false) return ["deleted", "the directory is gone"];
+        if (o.members === undefined) return ["unknown", "the directory was not listed again"];
         const added = o.members.filter((m) => !e.members!.includes(m));
         const removed = e.members!.filter((m) => !o.members!.includes(m));
         const list = (xs: string[]): string => `${xs.slice(0, 5).join(", ")}${xs.length > 5 ? "…" : ""}`;

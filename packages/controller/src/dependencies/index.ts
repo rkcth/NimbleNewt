@@ -1,1 +1,2 @@
 export { DEPENDENCY_KINDS, DEPENDENCY_LIMITS, DependencyService, type DependencyCheck, type DependencyEntry, type DependencyKind, type DependencyStatus, type ManifestBody, type NewDependency, type Observation } from "./dependencies.js";
+export { checkoutDependencyObserver, OBSERVE_LIMITS, type DependencyObserverOptions, type ProbeFileSystem } from "./observe.js";
