@@ -41,6 +41,16 @@ export interface AttemptRuntime {
   activeModelCalls?(): number;
   close(): Promise<void>;
 }
+/**
+ * The size of the conversation a checkpoint of the worker package's host holds, in tokens, when it says. The mirror of `storedTokensOf` in `packages/worker/src/host/local.ts` (the controller cannot import the worker
+ * package): that host writes the size it last knew into the checkpoint's `nn` part, so a stored conversation is judged against the route's resume share wherever the checkpoint came from. `undefined` when the checkpoint
+ * says nothing at all, which card C07n refuses to resume unchecked.
+ */
+export function checkpointStoredTokens(from: JsonObject | undefined): number | undefined {
+  const tokens = (from?.["nn"] as JsonObject | undefined)?.["contextTokens"];
+  return typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : undefined;
+}
+
 /** Two reports of one turn (the part cut short by a restart and the rest) as one: the same turn number, the cache figures added when they are about the same route. */
 function mergeUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsage | undefined {
   if (a === undefined || b === undefined) return b ?? a;
@@ -96,11 +106,11 @@ export type MessageBoundaryName = "interrupt" | "safe-boundary";
 export interface RuntimeGuards {
   readonly context?: {
     /** `retry`: the runtime will make the call smaller and ask again as the next round, so a refusal now opens no blocker (the refusal of that round does). */
-    admit(order: WorkOrder, call: FirstCall, round: number, retry?: boolean, launch?: string): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
+    admit(order: WorkOrder, call: FirstCall, round: number, retry?: boolean, launch?: string): Promise<{ readonly admit: boolean; readonly reasons: readonly string[]; /** `false`: making the call smaller cannot change this answer (card C07n: the route's window is not known), so the worker does not spend its one compaction on it. */ readonly retryable?: boolean }>;
     /** The first call went out and the provider reported its input size (card C07b): recorded against the admission, which calibrates the estimate for the route. */
     confirm?(order: WorkOrder, usage: { readonly reportedInputTokens: number; readonly promptChars: number }): Promise<void>;
     resume(order: WorkOrder, storedTokens: number): Promise<{ readonly resume: boolean; readonly reason: string }>;
-    /** The size of the conversation a checkpoint holds, in tokens, when it says. */
+    /** The size of the conversation a checkpoint holds, in tokens, when it says. Absent, a checkpoint of the worker package's shape is read by `checkpointStoredTokens` (card C07n); one that says nothing is not resumed. */
     storedTokens?(from: JsonObject): number | undefined;
     /**
      * The order's rebuilt view was made for a route whose fixed part nobody had measured (card C07g): `fixed` is what this worker's process will send besides the prompt (its system prompt and tool schemas). The controller keeps
@@ -240,21 +250,25 @@ export class LocalWorker implements WorkerHost {
     const options = this.#options;
     const guards = options.guards;
     const report = (what: string, error: unknown): void => { try { options.onGuardError?.(order.attemptId, what, error); } catch { /* the report must not stop the attempt */ } };
-    // A stored conversation over the resume share is not continued: the attempt starts fresh, and the agent is told why (C07b).
+    // A stored conversation over the resume share is not continued: the attempt starts fresh, and the agent is told why (C07b). Card C07n: it is continued only when its size was judged — a checkpoint
+    // whose size nobody says (no reader, or one that answers nothing, and not one of the worker package's shape either) is left behind, not carried in unchecked.
     let from = order.resumeFrom;
     let note = order.resumeNote;
-    if (from !== undefined && guards?.context?.storedTokens !== undefined) {
+    const startFresh = (why: string): void => { from = undefined; note = note === undefined ? why : `${note}\n${why}`; };
+    if (from !== undefined && guards?.context !== undefined) {
       try {
-        const stored = guards.context.storedTokens(from);
-        if (stored !== undefined) {
+        const stored = guards.context.storedTokens?.(from) ?? checkpointStoredTokens(from);
+        if (stored === undefined) {
+          report("resume decision", new Error("the checkpoint does not say how large the stored conversation is"));
+          startFresh("the size of the stored conversation is not known (its checkpoint does not say), so it was not resumed; starting fresh from the continuation record");
+        } else {
           const decision = await guards.context.resume(order, stored);
-          if (!decision.resume) { from = undefined; note = note === undefined ? decision.reason : `${note}\n${decision.reason}`; }
+          if (!decision.resume) startFresh(decision.reason);
         }
       } catch (error) {
         // The size of the stored conversation could not be judged: it is not continued (a fresh start from the continuation record is the safe side).
         report("resume decision", error);
-        from = undefined;
-        note = note === undefined ? "the stored conversation could not be checked against the context budget; starting fresh" : `${note}\nthe stored conversation could not be checked against the context budget; starting fresh`;
+        startFresh("the stored conversation could not be checked against the context budget; starting fresh");
       }
     }
     let sandbox = await options.sandbox.open(order.recipe, order);
@@ -322,7 +336,8 @@ export class LocalWorker implements WorkerHost {
           const decision = await guards.context.admit(order, first, ++round, compactable, launch);
           if (decision.admit) return undefined;
           refusal = decision.reasons.join("; ") || "the first call is over the context budget";
-          if (!compactable) break;
+          // A refusal a smaller call cannot change (card C07n: the route's window is not known) is final at once: nothing is compacted for it.
+          if (!compactable || decision.retryable === false) break;
           // A compaction that fails is not the end of the road: the second round asks about the unchanged call, is refused, and opens the blocker.
           try { await rt.compact!(); } catch (error) { report("compaction", error); }
         }

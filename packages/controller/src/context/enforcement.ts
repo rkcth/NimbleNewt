@@ -290,6 +290,25 @@ export class ContextEnforcementService {
   }
 
   /**
+   * Card C07n: the route a call was to run on has no context window the controller knows — the worker's host states none for it and the owner's routing table has no entry for it with
+   * a `contextTokens` figure. Nothing can be judged against an unknown window, so nothing is admitted on such a route: the caller sends no first call and continues no stored conversation, and
+   * the owner is told by a `context_overflow` blocker naming the route and where its window is set. One blocker per task (an open one is returned, never a second opened), so a tick that asks
+   * again for the same attempt does not pile them up.
+   */
+  async blockUnknownWindow(principal: Principal, command: { taskId: string; attemptId?: string; route: string; what: string }): Promise<{ blockerId: string; reason: string }> {
+    onlyKnown(command, ["taskId", "attemptId", "route", "what"]);
+    const taskId = checkTaskId(command.taskId);
+    await this.#dispatch(principal, taskId);
+    const one = (value: string, max: number): string => redactText(value.replace(/\s+/g, " ").trim()).slice(0, max);
+    const route = one(command.route, 120) || "(no route named)";
+    const what = one(command.what, 80) || "first call";
+    const attempt = command.attemptId === undefined ? "" : ` of attempt ${key("attemptId", command.attemptId)}`;
+    const reason = `route ${route} has no context window the controller knows: its host states none for it and the routing table gives it no contextTokens`;
+    const blockerId = await this.#block(principal, taskId, `Route ${route}${attempt}: the ${what} was refused rather than admitted unchecked, because ${reason}. Set the window — ${route}'s contextTokens in the routing table the operator installs, or the local host's own window figure for that route — then resolve this blocker.`);
+    return { blockerId, reason };
+  }
+
+  /**
    * Keeps what a first call measured of its route's fixed part, beside the decision and not in it: a failure or a lost race never costs the admission. Kept per route and harness (a prompt differs between harnesses),
    * the latest few measurements, the largest counting; a repeat of the same admission is the same command.
    */
