@@ -183,9 +183,7 @@ const EDIT_ID = /^pedit-[0-9a-f]{32}$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const line = (s: string): string => (s.length > POLICY_EDIT_LIMITS.line ? `${s.slice(0, POLICY_EDIT_LIMITS.line - 3)}...` : s);
-const NO_LIMIT_WORDS = /\b(no\s+(spend(ing)?\s+|money\s+)?(limit|cap|ceiling|maximum)|unlimited|without\s+(a\s+|any\s+)?(spend(ing)?\s+)?(limit|cap)|no\s+upper\s+limit)\b/i;
-const NO_END_WORDS = /\b(permanent(ly)?|no\s+(end|expir\w*|time\s+limit)|never\s+expires?|(does\s*n[o']?t|doesn't|do\s+not)\s+expire|without\s+(an\s+)?(end|expir\w*)|indefinite(ly)?|forever|open[- ]ended)\b/i;
-/** The words of a sentence that say what the owner means, with a negation in the rest of the sentence ("don't make it permanent", "not unlimited"), a question or a musing ruled out; "taking forever" is a complaint, not an order. */
+/** The words of a sentence that order a move, with a negation in the rest of the sentence, a question or a musing ruled out; "taking forever" is a complaint, not an order. It is kept for the one thing that still needs to know whether the owner's own sentence gave the order (`ordersHostMove`: whether a move applies at once or is shown first). It decides no consent, no spending limit and no end: a grant with either is a proposal the owner confirms, not a wording question. */
 const WORD_NEGATION = /\b(don'?t|do\s+not|doesn'?t|does\s+not|didn'?t|never|not|isn'?t|aren'?t|won'?t|can'?t|cannot|no\s+longer|stop|avoid|rather\s+than|instead\s+of)\b/i;
 const FOREVER_COMPLAINT = /\b(tak(es?|ing)|took|wait(ed|ing|s)?|seems?|feels?|felt)\b[^.!?;]*\bforever\b/i;
 const CURLY = /[\u2018\u2019\u02bc\u201b]/g;
@@ -230,7 +228,7 @@ const unappliedOf = (conditions: readonly string[], wording: string): { text: st
 export interface GrantLengthRules { readonly maxDays?: number; readonly defaultDays?: number }
 const noMore = (max: number, what: string): string => `the owner setting grants.maxDays allows a standing grant at most ${max} day${max === 1 ? "" : "s"}; ${what}`;
 
-/** The length of a standing grant, from what the owner said, else the default. `lengthDays: null` is a grant with no end, which is allowed only while no maximum is set. The explanation is in plain words and is kept with the edit and the grant (card A07d adds the pattern of earlier approvals as an input). */
+/** The length of a standing grant, from what the change carries, else the default. `lengthDays: null` is a grant with no end, which is allowed only while no maximum is set. Nothing here reads the owner's wording for a no-end phrase: the grant is a proposal that says its own end (or that it has none), and the owner's confirmation of that proposal is what agrees to it. The `why` is in plain words, says only what the record will hold, and is kept with the edit and the grant (card A07d adds the pattern of earlier approvals as an input). */
 /** The hard ceiling on a grant's length in days (about a hundred years): beyond it a date cannot be held, and no one means it. */
 export const GRANT_DAYS_CEILING = 36_500;
 export function chooseGrantLength(input: { lengthDays?: number | null; until?: string; now: string; rules?: GrantLengthRules }): { ok: true; days?: number; permanent?: true; why: string; until?: string } | { ok: false; message: string } {
@@ -243,11 +241,11 @@ export function chooseGrantLength(input: { lengthDays?: number | null; until?: s
     const days = Math.ceil((parsed - now) / DAY_MS);
     if (!(parsed > now)) return { ok: false, message: `${input.until} is not in the future` };
     if (max !== undefined && days > max) return { ok: false, message: noMore(max, `${input.until} is further away`) };
-    return { ok: true, days, until, why: `you asked for it to last until ${input.until}` };
+    return { ok: true, days, until, why: `it is drawn up to end ${input.until}` };
   }
   if (input.lengthDays === null) {
     if (max !== undefined) return { ok: false, message: noMore(max, "a grant with no end is not possible until that setting is removed") };
-    return { ok: true, permanent: true, why: "you asked for it to have no end" };
+    return { ok: true, permanent: true, why: "nothing in it expires by itself" };
   }
   if (input.lengthDays !== undefined) {
     if (input.lengthDays > GRANT_DAYS_CEILING) return { ok: false, message: `${input.lengthDays} days is more than a grant can last (${GRANT_DAYS_CEILING} days)` };
@@ -315,11 +313,11 @@ export class PolicyEditService {
     if (foreign !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` };
     if (change.type === "grant") {
       const bad = (change.environments ?? []).find((e) => !(ENV_WORDS[e] as RegExp).test(wording));
-      if (bad !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${bad} is not in your message, so it was not done. Say which environments.` };
-      if (change.spendLimit === null && !saysWords(NO_LIMIT_WORDS, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say there is no spending limit, so it was not done. Say the limit, or say there is none." };
-      if (change.lengthDays === null && !saysWords(NO_END_WORDS, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say the grant has no end, so it was not done. Say how long, or say it has no end." };
-      if (typeof change.lengthDays === "number" && !lengthInWords(change.lengthDays, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.lengthDays} days is not in your message, so it was not done. Say how long.` };
-      if (typeof change.spendLimit === "number" && !new RegExp(`(^|[^0-9.])${String(change.spendLimit).replace(".", "\\.")}([^0-9]|$)`).test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.spendLimit} is not in your message, so it was not done. Say the limit.` };
+      if (bad !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${bad} is not named in your message, so the grant was not drawn up with it. Which environments should it cover?` };
+      // A grant with no spending limit (`spendLimit: null`) and a grant with no end (`lengthDays: null`) are not read out of the owner's wording: each is drawn up as a proposal whose own text says plainly
+      // what it lets through (see `#grant`), and the owner's confirmation of that shown proposal is the consent. What still has to be the owner's own is a figure the record will hold.
+      if (typeof change.lengthDays === "number" && !lengthInWords(change.lengthDays, wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.lengthDays} days is not a length your message gives, so nothing was drawn up. How long should the grant last?` };
+      if (typeof change.spendLimit === "number" && !new RegExp(`(^|[^0-9.])${String(change.spendLimit).replace(".", "\\.")}([^0-9]|$)`).test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.spendLimit} is not an amount your message gives, so nothing was drawn up. What is the most it may spend?` };
     }
     let built: Built | { ask: PolicyEditPrepared & { ok: false } };
     try { built = await this.#build(owner, change, input); } catch (error) {
@@ -651,34 +649,47 @@ export class PolicyEditService {
     return { summary, explanation: [`${tool} will always ask you, whatever the profile, a grant or an agent's review says; it is never routed to an agent and an earlier agent approval never clears it. The other rules of the project's review policy are unchanged.`], direction: "tighten", op: { kind: "reserve", projectId: project.id, ...revisionField(found.revision), policy } };
   }
 
-  async #grant(owner: Principal, change: Extract<PolicyEditChange, { type: "grant" }>, project: ScopeRef, grantee: AgentRef): Promise<Built> {
+  async #grant(owner: Principal, change: Extract<PolicyEditChange, { type: "grant" }>, project: ScopeRef, grantee: AgentRef): Promise<Built | { ask: PolicyEditPrepared & { ok: false } }> {
     const tool = change.approve.tool;
     const cls: ActionClass | "unknown" = change.approve.class ?? this.#catalog.classify(tool as string);
     const what = tool !== undefined ? `use ${tool}` : `do ${change.approve.class} actions`;
-    const summary = [`Let ${grantee.name} ${what} in project "${project.name}" without asking you.`];
     if (cls === "unknown") throw new Refusal("unsupported", `${tool} is not a classified action, so it goes to review and no approval can waive that.`);
     if (cls === "access-change") throw new Refusal("stays_decision", "Changing access always stays your decision, and a standing grant cannot waive it.");
     const reserved = (await this.#deps.reviews.getPolicy(owner, project.id))?.policy.mandatoryHuman ?? [];
     if (tool !== undefined && reserved.includes(tool)) throw new Refusal("mandatory_gate", `${tool} is reserved for you in "${project.name}"; no grant can waive that, so none was made.`);
-    if ((cls === "external-send" || cls === "publish") && (change.audiences ?? []).length === 0) throw new Refusal("needs_audience", `Sending out and publishing are granted per account and audience. Say who ${grantee.name} may ${cls === "publish" ? "publish for" : "send to"}.`);
-    if (cls === "spend" && change.spendLimit === undefined) throw new Refusal("needs_limit", "A spending grant has to state its limit. Say how much, or say there is no limit.");
+    // What the grant still lacks is asked for as a plain question (the existing ask mechanism), not demanded as a form of words: an audience or a ceiling is information only the owner can give.
+    if ((cls === "external-send" || cls === "publish") && (change.audiences ?? []).length === 0) {
+      return { ask: { ok: false, kind: "ask", question: `This grant would let ${grantee.name} ${cls === "publish" ? "publish" : "send things out"}, and that is only ever granted per account and audience. Which account or audience is it for?`, options: [] } };
+    }
+    if (cls === "spend" && change.spendLimit === undefined) {
+      return { ask: { ok: false, kind: "ask", question: `How much may ${grantee.name} spend under this grant? Give me a figure, or tell me it has no ceiling, and the grant is drawn up with whichever you said.`, options: [] } };
+    }
     const rules = await this.#lengthRules(owner);
     const chosen = chooseGrantLength({ ...(change.lengthDays === undefined ? {} : { lengthDays: change.lengthDays }), ...(change.until === undefined ? {} : { until: change.until }), now: this.#runner.now(), rules });
     if (!chosen.ok) throw new Refusal("invalid_length", chosen.message);
+    const noEnd = chosen.permanent === true;
+    const noLimit = change.spendLimit === null;
     const now = this.#runner.now();
     let ends: string;
-    try { ends = chosen.permanent === true ? "permanent: it has no end time" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`; } catch (error) {
+    try { ends = noEnd ? "no end date is recorded on it, so nothing retires it" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`; } catch (error) {
       if (error instanceof RangeError) throw new Refusal("invalid_length", "that length puts the end of the grant beyond any date a record can hold");
       throw error;
     }
     const environments = change.environments ?? ["development", "testing"];
     const options = lengthOptions(typeof change.lengthDays === "number" ? change.lengthDays : change.until === undefined ? undefined : chosen.days, rules.maxDays);
+    // The consequence the owner is agreeing to is stated on the proposal itself, in its own words, before the detail: no spending limit, and no end. Their confirmation of this proposal is the
+    // consent, whatever words their message was in, so nothing here has to judge the wording and nothing here tells them what to say.
+    const summary = [
+      `Let ${grantee.name} ${what} in project "${project.name}" without asking you.`,
+      ...(noEnd ? [`This grant has no end: it never runs out, and it keeps letting ${grantee.name} ${what} until you revoke it.`] : []),
+      ...(noLimit ? [`This grant has no spending limit: anything it spends goes through, however large, without asking you.`] : []),
+    ];
     const explanation = [
       `It covers ${environments.join(" and ")} only${change.environments === undefined ? " (you did not name an environment, so only the free ones)" : ""}.`,
-      `Length: ${chosen.permanent === true ? "no end" : `${chosen.days} day${chosen.days === 1 ? "" : "s"}`} (${chosen.why}); ${ends}. You can pick another when you apply it: ${options.map((d) => `${d} day${d === 1 ? "" : "s"}`).join(", ")}.`,
-      chosen.permanent === true ? "It does not expire by itself; you can revoke it at any time." : "It expires by itself and you can revoke it at any time.",
-      " A standing grant never covers what stays your decision: changing access, a customer-live deployment, a protected branch, spending beyond the estimate, an irreversible action, or an audience nobody named.",
-      ...(change.audiences === undefined ? [] : [`Audiences: ${change.audiences.join(", ")}.`]), ...(change.spendLimit === undefined ? [] : [change.spendLimit === null ? "Spend limit: none, as you said (it can spend any amount)." : `Spend limit: ${change.spendLimit}.`]),
+      `Length: ${noEnd ? "no end" : `${chosen.days} day${chosen.days === 1 ? "" : "s"}`} (${chosen.why}); ${ends}. You can pick another when you apply it: ${options.map((d) => `${d} day${d === 1 ? "" : "s"}`).join(", ")}.`,
+      noEnd ? "It does not expire by itself: it stays in force until you revoke it." : "It expires by itself and you can revoke it at any time.",
+      "A standing grant never covers what stays your decision: changing access, a customer-live deployment, a protected branch, spending beyond the estimate, an irreversible action, or an audience nobody named.",
+      ...(change.audiences === undefined ? [] : [`Audiences: ${change.audiences.join(", ")}.`]), ...(change.spendLimit === undefined ? [] : [noLimit ? "Spend limit: none. There is no ceiling on this grant: it may spend any amount without asking you." : `Spend limit: ${change.spendLimit}.`]),
     ];
     return {
       summary, explanation, direction: "loosen",
