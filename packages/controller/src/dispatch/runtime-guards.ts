@@ -37,7 +37,15 @@ export interface GuardBinding {
   readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
   /** Card C07g: the route's fixed part measured by the worker's process, and the owner's context built again with it (the composer binds the context and decision services). */
   readonly rebuildView?: NonNullable<RuntimeGuards["context"]>["rebuildView"];
+  /**
+   * Whether the host reports the provider's input count for an admitted first call (`confirm`). Default true. False for a remote host (card C07o review): no remote operation reports the count, so the admitted round is
+   * not kept for a `confirm` that never comes (one map entry per remote attempt for the controller's lifetime otherwise).
+   */
+  readonly confirms?: boolean;
 }
+
+/** The most admitted rounds kept for `confirm` at once; the oldest is forgotten past it (an attempt whose host never confirmed: it lost its process, or was refused after admission). Its usage is then not calibrated. */
+export const KEPT_ROUNDS = 10_000;
 
 const MESSAGE_LIMIT = 20;
 
@@ -106,7 +114,12 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
         // Card C07n: a route of unknown window is never admitted unchecked. A compaction cannot make a window known, so this refusal says it is final.
         if (window === undefined) return await refuseUnknownWindow(order, "first call");
         const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: contextRouteKey(order.route), ...(order.route.length <= 500 ? { routeName: order.route } : {}), ...(order.harness === undefined ? {} : { harness: order.harness }), call, ...(retry === true ? { retry: true } : {}) });
-        if (decision.admit) rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
+        if (decision.admit && binding.confirms !== false) {
+          // Kept for this attempt's `confirm`, newest last; bounded, so attempts whose confirm never comes cannot grow it for the controller's lifetime.
+          rounds.delete(order.attemptId);
+          rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
+          while (rounds.size > KEPT_ROUNDS) rounds.delete(rounds.keys().next().value!);
+        }
         return { admit: decision.admit, reasons: decision.reasons };
       },
       async confirm(order, usage) {

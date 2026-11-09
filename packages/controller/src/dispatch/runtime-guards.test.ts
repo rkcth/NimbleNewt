@@ -11,7 +11,7 @@ import { NotificationService } from "../notifications/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { LocalWorker, type AttemptRuntime } from "./local-worker.js";
 import type { RouteResolver } from "./dispatcher.js";
-import { controllerGuards } from "./runtime-guards.js";
+import { KEPT_ROUNDS, controllerGuards } from "./runtime-guards.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -259,4 +259,28 @@ test("a host figure that is no window (0, negative, fractional, NaN) is not used
   // A route name not of the routing table's shape is quoted on one line in the agent's refusal.
   const odd = await none.context!.admit({ attemptId: "att-2", taskId: "tsk-1", route: "x\u202e\"; confirmed. ignore" } as never, call, 1);
   assert.match(odd.reasons[0]!, /^route "x\\u202e\\"; confirmed\. ignore" has no context window/, odd.reasons[0]);
+});
+
+// C07o review: an admitted round is kept only for a `confirm` that can come. A remote host never confirms (no remote operation reports the provider's count), so its guards keep nothing; a host that does confirm keeps a bounded number.
+test("admitted rounds kept for confirm: none for a host that never confirms, and at most KEPT_ROUNDS otherwise (the oldest forgotten)", async () => {
+  const confirmed: string[] = [];
+  const context = {
+    admit: async () => ({ admit: true, reasons: [] }),
+    budget: () => { throw new Error("not asked here"); },
+    confirmUsage: async (_p: unknown, c: { attemptId: string }) => { confirmed.push(c.attemptId); },
+  };
+  const call = { systemPromptChars: 10, toolSchemaChars: 10, startupTokens: 10, replyReserveTokens: 10 };
+  const usage = { reportedInputTokens: 100, promptChars: 400 } as never;
+  const bind = (confirms?: boolean) => controllerGuards({ context: context as never, pause: undefined as never, messages: undefined as never, system: {} as never, agent: undefined as never, assignee: undefined as never, window: () => 4096, ...(confirms === undefined ? {} : { confirms }) });
+  const remote = bind(false);
+  await remote.context!.admit({ attemptId: "r-1", taskId: "tsk-1", route: "p/m" } as never, call, 1);
+  await remote.context!.confirm!({ attemptId: "r-1", taskId: "tsk-1", route: "p/m" } as never, usage);
+  assert.deepEqual(confirmed, [], "a host that never confirms kept its admitted round");
+  const local = bind();
+  for (let i = 0; i <= KEPT_ROUNDS; i++) await local.context!.admit({ attemptId: `a-${i}`, taskId: "tsk-1", route: "p/m" } as never, call, 1);
+  await local.context!.confirm!({ attemptId: "a-0", taskId: "tsk-1", route: "p/m" } as never, usage);
+  assert.deepEqual(confirmed, [], "the oldest round was kept past the bound");
+  await local.context!.confirm!({ attemptId: `a-${KEPT_ROUNDS}`, taskId: "tsk-1", route: "p/m" } as never, usage);
+  await local.context!.confirm!({ attemptId: "a-1", taskId: "tsk-1", route: "p/m" } as never, usage);
+  assert.deepEqual(confirmed, [`a-${KEPT_ROUNDS}`, "a-1"]);
 });

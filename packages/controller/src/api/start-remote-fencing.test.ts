@@ -63,7 +63,7 @@ test("moving an attempt to another host: the policy and the integrity of what tr
     await attempt.honorContract(offer.order, FULL_ABILITIES);
     // The checkpoint says how large its conversation is (the worker package's `nn.contextTokens`): the controller judges it before the new host is offered it (card C07o); one that says nothing is not carried.
     await attempt.putCheckpoint(1, { turn: 1, said: "ordered", nn: { contextTokens: 500 } });
-    const move =(key: string) => w.c.dispatch!.remote!.relocate(w.rob, { commandId: key, attemptId: t.attemptId, toHostId: to.id, reason: "the host is being retired" });
+    const move = (key: string) => w.c.dispatch!.remote!.relocate(w.rob, { commandId: key, attemptId: t.attemptId, toHostId: to.id, reason: "the host is being retired" });
     const refuses = async (code: string, key: string, message?: RegExp): Promise<void> => {
       await assert.rejects(move(key), (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, code, e.message); if (message !== undefined) assert.match(e.message, message); return true; });
       const p = (await w.c.dispatch!.remote!.placement(w.rob, t.attemptId))!;

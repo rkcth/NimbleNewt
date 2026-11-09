@@ -632,6 +632,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           agent: (order) => i.taskCredentials.authenticate(order.credential),
           assignee: (order) => i.taskCredentials.agentOf(principal, order.attemptId),
           window: hostWindow, routeWindow, storedTokens: checkpointStoredTokens,
+          // No remote operation reports the provider's input count, so no admitted round is kept waiting for one.
+          confirms: false,
         }).context!;
         // The first call as the controller can know it before the host's process is up, measured against the same window the guards judge it by.
         const firstCall = estimatedFirstCall(context, async (order) => usableWindow(hostWindow(order)) ?? usableWindow(await routeWindow(order)));
