@@ -472,7 +472,7 @@ export class ChatService {
             // A meeting is named by its own title or by the title its stand-up has now (a stand-up renamed after its meeting was made is still that stand-up).
             const setUp = await this.#standups(token, currentFocus.projectId);
             const titles = setUp.titles;
-            const matches = all.filter((m) => looseMatch(words, String(m["title"])) || looseMatch(words, setUp.titleOf.get(String(m["scheduleId"])) ?? ""));
+            const matches = meetingsNamed(words, all, setUp.titleOf);
             if (matches.length === 0) {
               // The project's stand-ups are read from the schedules, so a stand-up that has not met yet is answered about itself rather than called a name that fits nothing (card M03h).
               const named = titles.filter((t) => looseMatch(words, t));
@@ -482,7 +482,8 @@ export class ChatService {
             }
             const coming = matches.filter((m) => m["state"] === "planned").sort((a, b) => (String(a["startsAt"]) < String(b["startsAt"]) ? -1 : 1));
             // Words that fit several stand-ups ask; with no words, the next one coming up is meant.
-            if (words.trim() !== "" && new Set(matches.map((m) => String(m["title"]))).size > 1) { push({ i, kind: "asked", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${quotedText(String(m["title"]), 60)}, ${String(m["startsAt"])}`) }); continue; }
+            // Several stand-ups are told apart by their schedules, not their titles: two stand-ups can carry the same title (one renamed to what another's meeting is still called).
+            if (words.trim() !== "" && new Set(matches.map((m) => String(m["scheduleId"] ?? m["title"]))).size > 1) { push({ i, kind: "asked", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${quotedText(shownTitle(m, setUp.titleOf), 60)}, ${String(m["startsAt"])}`) }); continue; }
             request["occurrenceId"] = String((coming[0] ?? matches[0])!["occurrenceId"]);
           }
           if (request["agent"] === undefined && typeof agentName === "string" && agentName.trim() !== "") {
@@ -986,7 +987,7 @@ export class ChatService {
           : `${titleList(titles)} ${titles.length === 1 ? "has" : "have"} no meeting to ${isNote ? "write into" : "prepare"} yet`;
         const recent = await this.#get(token, "standup.recent", { projectId, limit: 50 });
         const open = ((recent?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => (isNote ? i["state"] === "planned" : i["state"] === "planned" || i["state"] === "reported"));
-        const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${quotedText(String(i["title"]), 60)}, ${String(i["startsAt"])})`;
+        const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${quotedText(shownTitle(i, setUp.titleOf), 60)}, ${String(i["startsAt"])})`;
         let occurrence: Record<string, unknown> | undefined;
         if (typeof args["occurrenceId"] === "string") {
           occurrence = open.find((i) => i["occurrenceId"] === args["occurrenceId"]);
@@ -994,7 +995,7 @@ export class ChatService {
         } else {
           const words = typeof topic === "string" ? topic : "";
           // A meeting is named by its own title or by the title its stand-up has now (a stand-up renamed after its meeting was made is still that stand-up).
-          const matches = open.filter((i) => looseMatch(words, String(i["title"])) || looseMatch(words, setUp.titleOf.get(String(i["scheduleId"])) ?? ""));
+          const matches = meetingsNamed(words, open, setUp.titleOf);
           // Words that fit one of the project's own stand-ups are answered about that stand-up, even when it has no meeting to work on: asking which one the owner meant would be odd when they named it.
           const named = words === "" ? [] : titles.filter((t) => looseMatch(words, t));
           if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(named[0]!, 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
@@ -1004,7 +1005,7 @@ export class ChatService {
           occurrence = matches[0]!;
           args["occurrenceId"] = String(occurrence["occurrenceId"]);
         }
-        labels[String(args["occurrenceId"])] = `${String(occurrence["title"]).slice(0, 80)} (${String(occurrence["startsAt"])})`;
+        labels[String(args["occurrenceId"])] = `${shownTitle(occurrence, setUp.titleOf).slice(0, 80)} (${String(occurrence["startsAt"])})`;
         if (isNote) {
           const briefs = (await this.#get(token, "standup.briefs", { occurrenceId: args["occurrenceId"] })) as unknown as Record<string, unknown>[] | undefined;
           if (briefs === undefined || briefs.length === 0) return refuse("not_found", "that stand-up has no briefs yet; they are made when it is prepared");
@@ -1965,6 +1966,19 @@ function shownOf(result: JsonObject): string[] | undefined {
 }
 
 const refuse = (code: string, message: string): { ok: false; kind: "refuse"; code: string; message: string } => ({ ok: false, kind: "refuse", code, message });
+
+/**
+ * The stand-up meetings the owner's words name (second review of card M03h). A stand-up is named first by the title it has now; only when no stand-up's current title fits are the meetings' own titles tried (a meeting keeps the title its
+ * stand-up had when it was made). So when one stand-up was renamed and another took its old title, the words mean the one called that now, not the renamed one whose meeting still carries the old title. No words name every meeting.
+ */
+function meetingsNamed(words: string, items: readonly Record<string, unknown>[], titleOf: ReadonlyMap<string, string>): Record<string, unknown>[] {
+  if (words.trim() === "") return [...items];
+  const byCurrent = items.filter((m) => { const now = titleOf.get(String(m["scheduleId"])); return now !== undefined && looseMatch(words, now); });
+  return byCurrent.length > 0 ? byCurrent : items.filter((m) => looseMatch(words, String(m["title"])));
+}
+
+/** The title a stand-up meeting is shown by: its stand-up's title now, else the title the meeting was made with. */
+const shownTitle = (m: Record<string, unknown>, titleOf: ReadonlyMap<string, string>): string => titleOf.get(String(m["scheduleId"])) ?? String(m["title"]);
 
 /** A few things the owner is being told about, as one phrase: `x`, `x and y`, `x, y and z`; a long list is cut with a count. Each is quoted, because a title like this was written by whoever set it up. */
 const titleList = (titles: readonly string[]): string => {

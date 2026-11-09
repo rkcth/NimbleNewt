@@ -413,4 +413,39 @@ for (const backend of backends) {
     const lines = only((await say(w, chat, "What stand-ups do we have?")).outcomes).lines!.map((l) => l.text);
     assert.equal(lines.filter((l) => l.startsWith("next one ")).length, 2, JSON.stringify(lines));
   });
+
+  suite("a stand-up renamed to a title another stand-up's meeting still carries is never picked in that one's place (second review of card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    const old = await ctl.sched(a, "Morning sync", when);
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 1);
+    // The first stand-up is renamed; its meeting keeps the old title. A new stand-up then takes the old title and gets its own meeting.
+    const renamed = await w.api.handle(w.ownerToken, { v: 1, op: "standup.update", commandId: cid("rn"), args: { scheduleId: old, expectedRevision: (await ctl.schedule(old)).revision, title: "Daybreak check" } } as never) as { ok: boolean };
+    assert.equal(renamed.ok, true, JSON.stringify(renamed));
+    const fresh = await ctl.sched(a, "Morning sync", { time: "12:00", windowFrom: "08:00", windowTo: "13:00" });
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 1);
+    const recent = await w.api.handle(w.ownerToken, { v: 1, op: "standup.recent", args: { projectId: a } } as never) as unknown as { ok: boolean; result: { item: { items: { occurrenceId: string; scheduleId: string; title: string; startsAt: string }[] } } };
+    const items = recent.result.item.items;
+    const ofOld = items.find((i) => i.scheduleId === old)!;
+    const ofFresh = items.find((i) => i.scheduleId === fresh)!;
+    assert.notEqual(ofOld.startsAt, ofFresh.startsAt);
+    assert.equal(items.filter((i) => i.title === "Morning sync").length, 2, "both meetings carry the title Morning sync");
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const said = async (text: string, intent: unknown): Promise<Outcome> => { script[text] = [intent]; return only((await say(w, chat, text)).outcomes); };
+
+    const ready = await said("Get the morning sync ready.", cmd("standup.prepare", { meetingTopic: "morning sync" }, "Get the morning sync ready"));
+    assert.equal(ready.status, "proposed", JSON.stringify(ready));
+    // The proposal names the meeting it prepares by its stand-up's title and start.
+    assert.deepEqual(ready.preview, [`Prepare a stand-up now: occurrenceId="Morning sync (${ofFresh.startsAt})"`], "the stand-up called Morning sync now is the one prepared");
+    const brief = await said("What did the morning sync brief say?", { kind: "status", request: { kind: "standup_briefs", meetingTopic: "morning sync" }, evidence: "What did the morning sync brief say", basis: "owner" });
+    assert.equal(brief.status, "answered", JSON.stringify(brief));
+    assert.deepEqual(brief.lines!.flatMap((l) => (l.cites ?? []).map((c) => c.id)), [ofFresh.occurrenceId], "the meeting of the stand-up called Morning sync now is read, not the renamed one's");
+    // The renamed one is still reached by its new title.
+    const day = await said("Get the daybreak check ready.", cmd("standup.prepare", { meetingTopic: "daybreak check" }, "Get the daybreak check ready"));
+    assert.equal(day.status, "proposed", JSON.stringify(day));
+    // ... and its proposal shows the title it has now, not the one its meeting was made with.
+    assert.deepEqual(day.preview, [`Prepare a stand-up now: occurrenceId="Daybreak check (${ofOld.startsAt})"`]);
+  });
 }
