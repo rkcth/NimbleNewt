@@ -487,4 +487,64 @@ for (const backend of backends) {
       for (const l of answer!.lines) for (const ch of ["\u202e", "\u2066", "\u200b"]) assert.equal(l.text.includes(ch), false, `an invisible character reached the view unescaped: ${l.text}`);
     } finally { await w.close(); }
   });
+
+  test(`${backend.name}: the expectedFailures the interpreter sends are never used — the chat writes its own reading of the gate into the approval, and drops it when the owner's words do not acknowledge (card X09b part 2 review 2, item 1; third review)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script, undefined, (storage, epoch) => ({ release: ReleaseService.withEpoch(storage, epoch, options) }));
+    try {
+      const chat = w.chat({});
+      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes; };
+      const callAs = (token: string, op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(token, { v: 1, op, ...(op === "release.gate" || op === "release.attempts" ? {} : { commandId: cid("x") }), args } as never) as never;
+      const call = (op: string, args: Record<string, unknown>): Promise<Reply> => callAs(w.ownerToken, op, args);
+      const gate = async (candidateId: string): Promise<any> => (await call("release.gate", { candidateId })).result["gate"];
+      const submit = async (commit: string): Promise<string> => (await call("release.submit", { manifest: { sourceCommit: commit.repeat(40), suiteRevision: "suite-7", artifacts: { "nimblenewt.tgz": h("1") }, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] } })).result!["candidateId"] as string;
+      const report = (attemptId: string, extra: Record<string, unknown> = {}) => ({
+        attemptId, sourceCommit: "a".repeat(40), suiteRevision: "suite-7", artifactHashes: { "nimblenewt.tgz": h("1") }, dependencyLockHashes: { "package-lock.json": h("2") },
+        environment: linux, outcome: "pass", counts: { passed: 12, failed: 0, skipped: 1 }, logDigest: h("9"), summary: "all green", ...extra,
+      });
+      const worker = await w.agent("rigged", [{ action: "release.report", project: "*" }]);
+      const hostWords = "let host:rig run release tests on linux x64";
+      const hostShown = await turn("f1", hostWords, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", os: "linux", arch: "x64" }, evidence: hostWords, basis: "owner" }]);
+      assert.equal((await turn("f2", "yes, authorize it", [{ kind: "apply_proposal", proposalId: hostShown[0]!.proposalId, evidence: "authorize it", basis: "owner" }]))[0]!.status, "applied");
+      const issue = async (candidateId: string, commit: string) => {
+        const r = await call("release.issue", { candidateId, cell: linux, hostId: "host:rig", workerId: worker.principal.id, timeoutSeconds: 600, memoryMb: 512 });
+        assert.ok(r.ok, JSON.stringify(r));
+        return r.result!["attemptId"] as string;
+      };
+      const bogus = "rat-000000000000000000000000";
+
+      // A candidate that passed only after a failure: the owner accepts it, and the interpreter's invented attempt list is replaced by what the gate says.
+      const cand = await submit("a");
+      const sick = await issue(cand, "a");
+      const sickRep = await callAs(worker.token, "release.report", report(sick, { outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "three tests failed" }));
+      assert.ok(sickRep.ok, JSON.stringify(sickRep));
+      const retry = await issue(cand, "a");
+      assert.ok((await callAs(worker.token, "release.report", report(retry))).ok, "the host reports the retry that went green");
+      const earlier = (await gate(cand)).cells.flatMap((c: any) => (c.earlierFailures ?? []).map((f: any) => f.id)) as string[];
+      assert.deepEqual(earlier, [sick], "the gate lists the one attempt that failed before it passed");
+
+      const ackWords = `approve the release candidate ${cand}, I accept the earlier failures`;
+      const ackShown = await turn("f3", ackWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true, expectedFailures: [bogus] }, evidence: ackWords, basis: "owner" }]);
+      assert.equal(ackShown[0]!.status, "proposed", JSON.stringify(ackShown[0]));
+      const shownText = (ackShown[0]!.preview ?? []).join(" ");
+      assert.match(shownText, new RegExp(sick), "the owner is shown the earlier failure the gate lists");
+      assert.equal(shownText.includes(bogus), false, `the attempt ID the interpreter invented is nowhere in what the owner is shown:\n${shownText}`);
+      const ackApplied = await turn("f4", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
+      assert.equal(ackApplied[0]!.status, "applied", `the approval carries the chat's own reading of the gate, not the interpreter's list: ${JSON.stringify(ackApplied[0])}`);
+      assert.equal((await gate(cand)).approved, true);
+
+      // A candidate with nothing flaky and no acknowledgement in the owner's words: the interpreter's list is dropped, so the clean gate is approved as it stands.
+      const clean = await submit("b");
+      const green = await issue(clean, "b");
+      assert.ok((await callAs(worker.token, "release.report", report(green, { sourceCommit: "b".repeat(40) }))).ok, "the clean candidate passed straight away");
+      assert.equal((await gate(clean)).needsAcknowledgement, false, "nothing failed before it passed");
+      const cleanWords = `approve the release candidate ${clean}`;
+      const cleanShown = await turn("f5", cleanWords, [{ kind: "command", op: "release.approve", args: { candidateId: clean, acknowledgeFlaky: false, expectedFailures: [bogus] }, evidence: cleanWords, basis: "owner" }]);
+      assert.equal(cleanShown[0]!.status, "proposed", JSON.stringify(cleanShown[0]));
+      assert.equal((cleanShown[0]!.preview ?? []).join(" ").includes(bogus), false, "the dropped list is not shown to the owner either");
+      const cleanApplied = await turn("f6", "confirm that approval", [{ kind: "apply_proposal", proposalId: cleanShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
+      assert.equal(cleanApplied[0]!.status, "applied", `the invented expectedFailures were dropped rather than sent: ${JSON.stringify(cleanApplied[0])}`);
+      assert.equal((await gate(clean)).approved, true);
+    } finally { await w.close(); }
+  });
 }
