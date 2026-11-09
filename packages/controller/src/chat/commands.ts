@@ -493,12 +493,29 @@ const ALTERNATIVE_TOPIC_LIMIT = 80;
 /** An escape the helpers below write (`\u{202e}` from `short`, `‮`, `\"` or `\\` from `quotedText`), read left to right so an escaped backslash is one escape. */
 const ESCAPE = /\\(?:u\{[0-9a-f]+\}|u[0-9a-f]{4}|["\\/bfnrt])/g;
 /** Cut to at most `max` UTF-16 units without splitting a surrogate pair or an escape, so a cut never leaves half a character, or half of the escape that shows one, on the line. */
+/** The escape `short` writes, read where it starts. */
+const BRACED = /\\u\{[0-9a-f]+\}/y;
 const cutAt = (text: string, max: number): string => {
   if (text.length <= max) return text;
   let end = max;
-  for (const m of text.matchAll(ESCAPE)) {
-    if (m.index >= end) break;
-    if (m.index + m[0].length > end) { end = m.index; break; }
+  // `short` leaves a backslash of the value itself bare, so read left to right a bare backslash just before one of its `\u{...}` escapes pairs with the escape's own backslash and hides it:
+  // a `\u{...}` that starts before the cut and ends after it also moves the cut, and both are checked again until neither moves it (each move only shortens the line, so this ends).
+  for (;;) {
+    let next = end;
+    for (const m of text.matchAll(ESCAPE)) {
+      if (m.index >= next) break;
+      if (m.index + m[0].length > next) { next = m.index; break; }
+    }
+    // The longest `\u{...}` (`\u{10ffff}`) is ten units, so only one starting in the last ten before the cut can reach past it; escapes hold no backslash, so the nearest is the only candidate.
+    for (let i = next - 1; i >= Math.max(0, next - 10); i--) {
+      if (!text.startsWith("\\u{", i)) continue;
+      BRACED.lastIndex = i;
+      const m = BRACED.exec(text);
+      if (m !== null && i + m[0].length > next) next = i;
+      break;
+    }
+    if (next === end) break;
+    end = next;
   }
   return text.slice(0, /[\ud800-\udbff]/.test(text.charAt(end - 1)) ? end - 1 : end);
 };

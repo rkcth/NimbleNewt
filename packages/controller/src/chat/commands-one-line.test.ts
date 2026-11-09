@@ -106,6 +106,21 @@ test("a long name is cut between whole characters and whole escapes, at its own 
     assert.doesNotMatch(named, /(?<!\\)(?:\\\\)*\\(?:u[0-9a-f]{0,3})?\.\.\.$/, `a line cut through a quoted name's escapes at pad ${pad}: ${named.slice(-30)}`);
     assert.ok(bare.length <= CHAT_LIMITS.line && named.length <= CHAT_LIMITS.line, `pad ${pad}`);
   }
+
+  // A bare value keeps its own backslashes as they are, so one just before an escape `short` wrote reads, left to right, as an escaped backslash: the escape after it is still never cut in half.
+  for (let pad = 0; pad < 420; pad++) {
+    const line = describe("task.update", { title: "q".repeat(pad % 75), taskId: "task-1", description: `${"z".repeat(pad % 60)}${"\\\u0007".repeat(4)}`, extra: "w".repeat(pad % 77) }, { "task-1": "t".repeat(pad) });
+    assert.doesNotMatch(line, /\\u\{[0-9a-f]*\.\.\.$/, `a bare backslash cannot hide the escape after it from the cut at pad ${pad}: ${line.slice(-20)}`);
+    assert.ok(line.length <= CHAT_LIMITS.line, `pad ${pad}`);
+  }
+  // A quoted name's own `\\` followed by text that reads like an escape is cut whole, and a run of backslashes is not given up wholesale.
+  for (let pad = 0; pad < 420; pad++) {
+    const line = describe("task.update", { taskId: "task-1", title: "x".repeat(pad % 70) }, { "task-1": `${"t".repeat(pad)}${"\\u{41}\\\\".repeat(8)}` });
+    const run = line.match(/(\\*)(?:u\{?[0-9a-f]*)?\.\.\.$/);
+    assert.ok(run === null || run[1]!.length % 2 === 0, `a quoted name's escaped backslash is never cut in half at pad ${pad}: ${line.slice(-20)}`);
+  }
+  const backslashes = describe("task.update", { taskId: "task-1" }, { "task-1": "\\".repeat(500) });
+  assert.ok(backslashes.length > CHAT_LIMITS.line - 10, `a name of backslashes still fills the line: ${backslashes.length}`);
 });
 
 for (const backend of backends) {

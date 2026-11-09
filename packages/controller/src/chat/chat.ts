@@ -416,7 +416,7 @@ export class ChatService {
       }
       if (intent.kind === "switch_focus") {
         const found = await this.#projectByIntent(token, intent.projectId, intent.projectName);
-        if (found.ok) { currentFocus = { projectId: found.id, projectName: found.name }; projectId = found.id; push({ i, kind: "focus", projectId: found.id, preview: `Focus on project "${found.name}"` }); }
+        if (found.ok) { currentFocus = { projectId: found.id, projectName: found.name }; projectId = found.id; push({ i, kind: "focus", projectId: found.id, preview: `Focus on project ${quotedText(found.name, CHAT_LIMITS.line)}` }); }
         else push(askOrRefuse(i, found, n));
         continue;
       }

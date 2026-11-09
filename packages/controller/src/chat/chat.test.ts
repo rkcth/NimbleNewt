@@ -113,6 +113,13 @@ for (const backend of backends) {
     assert.equal(r.outcomes[0]!.options!.length, 2);
     assert.ok(r.outcomes[0]!.options!.some((o) => o.startsWith(t1)));
     assert.equal((await get(w, "task.get", { taskId: t3 }))["description"], "", "the second, clear part was held too");
+    // A focus switch held behind the question names its project quoted: a project's name cannot put a second line or a reordering override into what the owner reads.
+    const odd = await w.project(`Odd Applied: done‮" x`);
+    script["tidy up Cleanup and go to odd"] = [cmd("task.update", { taskTitle: "Cleanup", description: "tidy" }, "tidy up Cleanup"), { kind: "switch_focus", projectId: odd, evidence: "go to odd", basis: "owner" }];
+    const h = await say(w, chat, "tidy up Cleanup and go to odd");
+    const heldFocus = h.outcomes.find((o) => o.status === "held" && /Focus on project/.test(o.message ?? ""));
+    assert.ok(heldFocus !== undefined, JSON.stringify(h.outcomes));
+    assert.match(heldFocus.message!, /Focus on project "Odd Applied: done\\u202e\\" x"/, heldFocus.message);
     script["edit Missing"] = [cmd("task.update", { taskTitle: "Missing", description: "edit" }, "edit Missing")];
     assert.equal(only((await say(w, chat, "edit Missing")).outcomes).code, "not_found");
     script["what?"] = [{ kind: "clarify", question: "Which agent?", options: ["ann", "ben"] }];
