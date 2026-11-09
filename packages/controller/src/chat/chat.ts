@@ -438,6 +438,40 @@ export class ChatService {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
+        // A stop's cost for an agent, a team or the whole installation named in the owner's own words (card L02e leftover): the installation's
+        // agents and teams are read from the records and the one whose name stands as a whole word of the owner's message is meant - a name inside
+        // a bigger word names nothing. Nothing is invented: one answer decides, several ask which, none says what is not called that; an ID the
+        // owner gave is used as given, and the words are the chat's own field, never sent to the status service (which takes IDs and refuses an unknown key).
+        if (request["kind"] === "stop_cleanup") {
+          const declared = request["scopeKind"];
+          // An ID the owner gave decides: words beside it are dropped, as a task title beside an ID is. The status service takes IDs only, so the words never leave the chat.
+          const given = request["scope"] === undefined && request["scopeId"] === undefined && typeof request["scopeName"] === "string" ? (request["scopeName"] as string).trim() : "";
+          const named = given === "" ? undefined : given;
+          if (declared === "installation") request["scopeId"] = "installation"; // the whole installation has the one ID: nothing to look up, nothing to choose
+          else if (named !== undefined && declared !== undefined && declared !== "agent" && declared !== "team" && declared !== "task") {
+            push({ i, kind: "refused", code: "invalid_command", message: `a stop is read for a task, an agent, a team or the whole installation, not for ${quotedText(String(declared), 40)}. Which did you mean?` });
+            continue;
+          } else if (named !== undefined && (declared === undefined || declared === "agent" || declared === "team")) {
+            const what = declared === undefined ? "agent or team" : declared;
+            const plural = declared === undefined ? "agents or teams" : `${declared}s`;
+            // With no kind said the message is read against both lists; only a name standing as a whole word of the owner's message counts, whatever the interpreter offered for it.
+            const all = await this.#scopeCandidates(token, declared === undefined ? ["agent", "team"] : [declared]);
+            const found = all.filter((c) => wholeWord(words, c.name));
+            if (found.length === 0) {
+              push({ i, kind: "refused", code: "not_found", message: all.length === 0 ? `no ${what} of this installation is called ${quotedText(named, 80)} and this installation has no ${plural} at all. Did you mean a task or the whole installation?`
+                : `no ${what} of this installation is called ${quotedText(named, 80)}. Here they are: ${titleList(all.map((c) => c.name))}. Which did you mean?` });
+              continue;
+            }
+            if (found.length > 1) { push({ i, kind: "asked", question: `More than one ${what} here answers to the name in your message. Which did you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((f) => `${quotedText(f.name, 60)} (${f.kind})`) }); continue; }
+            request["scopeKind"] = found[0]!.kind;
+            request["scopeId"] = found[0]!.id;
+          } else if (declared === "task") {
+            // A task is read by its title, not by a flat scope: the words (when there are none already) become the task title the block below answers for the project in focus.
+            if (named !== undefined && request["taskTitle"] === undefined && request["taskId"] === undefined) request["taskTitle"] = named;
+            delete request["scopeKind"];
+          }
+          delete request["scopeName"]; // never sent on: the status service refuses a key it does not know
+        }
         // A task's activity, explanations, replay, hand-off or stop cleanup is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
         // A title beside an ID, or one that is not text, is dropped: the ID (or the missing task) decides. A stop-cleanup question that names a scope has no use for a title either, so the title goes.
         if (request["kind"] === "stop_cleanup" && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
@@ -1514,6 +1548,19 @@ export class ChatService {
     const wanted = title.trim().toLowerCase();
     const all = await this.#listAll(token, "task.list", { projectId });
     return all.filter((t) => (t["title"] as string).trim().toLowerCase() === wanted).map((t) => ({ id: t["id"] as string, state: t["state"] as string }));
+  }
+
+  /** The installation's agents and teams as the owner can name them (card L02e leftover): the kind a lifecycle scope takes, the ID for that scope and the name it goes by. Retired agents are in: what the stop of one cost is a fair thing to ask afterwards. */
+  async #scopeCandidates(token: string, kinds: readonly ("agent" | "team")[]): Promise<{ kind: "agent" | "team"; id: string; name: string }[]> {
+    const out: { kind: "agent" | "team"; id: string; name: string }[] = [];
+    for (const kind of kinds) {
+      for (const item of await this.#listAll(token, kind === "agent" ? "agent.list" : "team.list", {})) {
+        const name = String(kind === "agent" ? item["friendlyName"] ?? "" : item["name"] ?? "").trim();
+        const id = String(item["id"] ?? "");
+        if (name !== "" && id !== "") out.push({ kind, id, name });
+      }
+    }
+    return out;
   }
 
   /** The project's unbound resource bindings (the list operation takes no paging). */

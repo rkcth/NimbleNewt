@@ -1633,6 +1633,9 @@ for (const backend of backends) {
     await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "team" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "team", scopeId: "tm-a", scope: { kind: "team", id: "tm-a" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scope: { kind: "galaxy", id: "x" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    // A name is the chat's own field (it looks the agent or the team up first): this service takes IDs and refuses the words rather than reading them as an ID.
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "agent", scopeName: "bob" } as never), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => status.ask(c.owner, { kind: "stop_cleanup", scopeKind: "team", scopeId: "tm-a", scopeName: "Garden" } as never), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
   });
 
   suite("every sentence of the cleanup-spend view is true for each mode, phase and kind of scope (card L02d review)", async (c) => {
