@@ -53,6 +53,8 @@ interface RigOptions {
   /** The model process never finishes a turn on its own (the controller is brought down in the middle of it). */
   hang?: boolean;
   route?: RouteResolver;
+  /** The operator's map of routes to windows (default: it knows no route). */
+  hostWindow?: () => number | undefined;
   /** The embedder's own reader of a checkpoint's size: it answers 40,000 tokens for any checkpoint, whatever that checkpoint holds. */
   reader?: boolean;
   /** A controller brought up over a store another one already configured: the owner's setup is already there, only the host has to be seen again. */
@@ -75,7 +77,7 @@ async function rig(dir: string, options: RigOptions): Promise<Rig> {
       local: {
         acceptUnenforcedLimits: true,
         // The operator's map of routes to windows knows nothing about these routes, and (by default) no checkpoint reader is passed either.
-        window: () => undefined,
+        window: options.hostWindow ?? (() => undefined),
         ...(options.reader === true ? { storedTokens: () => 40_000 } : {}),
         close: async () => undefined,
         build: (s: BuildServices) => {
@@ -278,4 +280,24 @@ test("the checkpoint reader the embedder passes is the one that decides, whereve
     assert.equal(call.from, undefined, "the stored conversation was carried in unchecked");
     assert.match(call.content ?? "", /40000 tokens, over 2457/, (call.content ?? "").slice(-300));
   } finally { await second.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a host figure that is no window is not used for the route-move rebuild either: the rebuild and the first call are judged against the same routing-table window (card C07n second review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-c07n-zero-"));
+  // The operator's map answers 0 for a route it does not know: that is no window, so the routing table's 4096 is the figure for both checks.
+  const r = await rig(d, { firstCall: () => SMALL, checkpoint: () => ({}), hostWindow: () => 0 });
+  try {
+    assert.ok(r.c.dispatch !== undefined, r.c.dispatchProblem);
+    const attemptId = await task(r.c, r.owner, r.project, "Water the beds", 1);
+    await r.c.dispatch.dispatcher.tick();
+    await r.c.dispatch.dispatcher.idle();
+    assert.deepEqual(r.ran, [attemptId], "a first call that fits the routing table's window was not sent");
+    assert.deepEqual((await admissions(r.c)).map((a) => [a.routeName, a.window, a.admit]), [["localp/small", WINDOW, true]]);
+    const ended = (await r.c.dispatch.dispatcher.get(r.c.dispatch.principal, attemptId))!;
+    // The rebuild a worker asks for once its process is up (card C07g) goes through the same window: never one of 0 tokens, which no budget can be made for.
+    const rebuilt = await r.services.guards.context!.rebuildView!({ attemptId, taskId: ended.taskId, projectId: r.project, route: "localp/small" } as never, { systemPromptChars: 1000, toolSchemaChars: 1000 }, "l-zero", 100);
+    assert.ok(rebuilt === undefined || !("refused" in rebuilt), `the rebuild judged the route against the host's 0: ${JSON.stringify(rebuilt)}`);
+    const open = (await blockersFor(r.c, ended.taskId)).filter((b) => b.state === "open");
+    assert.deepEqual(open, [], JSON.stringify(open));
+  } finally { await r.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

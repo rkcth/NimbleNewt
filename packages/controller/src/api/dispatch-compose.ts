@@ -17,7 +17,7 @@ import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -419,12 +419,15 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
    * checked against what the owner configured for it. A route neither says is refused by the guards (never admitted unchecked) with a blocker naming it.
    */
   const tableWindow = async (route: string): Promise<number | undefined> => {
-    try { return (await i.routing.get())?.routes[route]?.contextTokens; } catch (error) { i.onError?.(error); return undefined; }
+    try { return usableWindow((await i.routing.get())?.routes[route]?.contextTokens); } catch (error) { i.onError?.(error); return undefined; }
   };
-  /** The window of an order's route: the local host's own figure when it has one, else the routing table's (card C07n). `undefined` when neither says. */
+  /**
+   * The window of an order's route: the local host's own figure when it is one, else the routing table's (card C07n). `undefined` when neither says. The same rule as the guards' `windowOf` (C07n second review): a host
+   * figure that is no window (0, negative, fractional, NaN) asks the routing table, so the route-move rebuild and the first-call admission never judge one attempt against two different windows.
+   */
   const windowOfRoute = async (order: WorkOrder): Promise<number | undefined> => {
     let own: number | undefined;
-    try { own = i.options.local?.window(order); } catch { own = undefined; }
+    try { own = usableWindow(i.options.local?.window(order)); } catch { own = undefined; }
     return own ?? await tableWindow(order.route);
   };
   /**

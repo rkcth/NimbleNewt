@@ -52,6 +52,9 @@ function framed(id: string, sender: string, purpose: string, text: string): stri
 }
 
 /** Card C07n: why a route nobody gives a window is refused, in the words the agent's refusal and the owner's blocker both read. */
+/** Card C07n review: a figure that is a context window — a positive safe integer. Anything else (0, negative, fractional, NaN, infinite, not a number) is no window, from the host or the routing table alike. */
+export const usableWindow = (w: unknown): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
+
 export const unknownWindowReason = (route: string): string => `route ${routeNamed(route)} has no context window the controller knows (its host states none for it and the routing table gives it no contextTokens); set its window before work runs on it`;
 
 export function controllerGuards(binding: GuardBinding): RuntimeGuards {
@@ -68,8 +71,7 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
    */
   const windowOf = async (order: WorkOrder): Promise<number | undefined> => {
     // A figure that is no window (zero, negative, fractional, NaN) is not one the host knows: the routing table is asked, as for a route the host's map leaves out (C07n review).
-    const usable = (w: number | undefined): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
-    return usable(binding.window(order)) ?? usable(await binding.routeWindow?.(order));
+    return usableWindow(binding.window(order)) ?? usableWindow(await binding.routeWindow?.(order));
   };
   /** A route with no window anywhere: the refusal, with the owner's blocker behind it. A blocker that cannot be written still refuses the call (and says why it could not be recorded). */
   const refuseUnknownWindow = async (order: WorkOrder, what: string): Promise<{ readonly admit: false; readonly reasons: readonly string[]; readonly retryable: false }> => {
