@@ -592,6 +592,17 @@ for (const backend of backends) {
       const cleanApplied = await turn("f6", "confirm that approval", [{ kind: "apply_proposal", proposalId: cleanShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(cleanApplied[0]!.status, "applied", `the invented expectedFailures were dropped rather than sent: ${JSON.stringify(cleanApplied[0])}`);
       assert.equal((await gate(clean)).approved, true);
+
+      // An approval that names no candidate has no gate to show, so nothing is drawn up: the interpreter's flag and list never reach a proposal on their own.
+      const third = await submit("c");
+      const sick3 = await issue(third, "c");
+      assert.ok((await callAs(worker.token, "release.report", report(sick3, { sourceCommit: "c".repeat(40), outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "three tests failed" }))).ok);
+      assert.ok((await callAs(worker.token, "release.report", report(await issue(third, "c"), { sourceCommit: "c".repeat(40) }))).ok);
+      const vague = "go ahead and approve the release, those failures don't bother me";
+      const vagueOut = await turn("f7", vague, [{ kind: "command", op: "release.approve", args: { acknowledgeFlaky: true, expectedFailures: [sick3] }, evidence: vague, basis: "owner" }]);
+      assert.equal(vagueOut[0]!.status, "refused", `no candidate, no gate to show, nothing drawn up: ${JSON.stringify(vagueOut[0])}`);
+      assert.equal(vagueOut[0]!.proposalId, undefined, "no proposal exists to confirm");
+      assert.equal((await gate(third)).approved, false, "nothing was approved");
     } finally { await w.close(); }
   });
 }

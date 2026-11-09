@@ -671,9 +671,14 @@ export class ChatService {
     // An approval is shown with what the gate says just now, so a flaky candidate shows the owner which platform failed before it passed and exactly which attempts those failures were (card X09b part 2 review, redone):
     // their confirmation of that shown proposal is the acceptance — no scanning of their wording, and the interpreter's acknowledgeFlaky is dropped and re-read from the gate here.
     // And what they were shown is written into the approval itself (expectedFailures), so a gate that changed before the owner confirms is refused rather than slipped past them (card X09b part 2 review 2, item 1).
-    if (intent.op === "release.approve" && typeof args["candidateId"] === "string") {
+    // The interpreter's acknowledgeFlaky and expectedFailures are dropped whatever else the approval carries, so neither can survive on any path (not even one with no candidate named).
+    if (intent.op === "release.approve") {
       delete args["expectedFailures"];
       delete args["acknowledgeFlaky"];
+      // Without a candidate there is no gate to read, so nothing to show and nothing to bind: the approval is not drawn up.
+      if (typeof args["candidateId"] !== "string") return refuse("invalid_command", "say which release candidate to approve");
+    }
+    if (intent.op === "release.approve" && typeof args["candidateId"] === "string") {
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.gate", args: { candidateId: args["candidateId"] } });
       // The gate is what the approval is bound to: without reading it there is nothing to show and nothing to bind, so the approval is not drawn up at all.
       if (!found.ok) return refuse(found.error.code, found.error.message);
