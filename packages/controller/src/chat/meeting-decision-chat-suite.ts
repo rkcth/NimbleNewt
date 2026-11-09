@@ -291,7 +291,7 @@ export function defineMeetingDecisionChatTests(backendName: string): void {
         assert.deepEqual([refused.status, refused.code], ["refused", "invalid_command"], `${text}: ${JSON.stringify(refused)}`);
         assert.match(String(refused.message), /^Nothing was proposed: /);
         assert.match(String(refused.message), reason);
-        assert.match(String(refused.message), /The meeting decision still waits for your answer; what you decide instead is not in your message/);
+        assert.match(String(refused.message), /The meeting decision still waits for your answer; what do you decide instead\?$/);
         assert.doesNotMatch(String(refused.message), /\bsay\b|for example/i, `a refusal states what is missing, it does not tell the owner how to phrase it: ${refused.message}`);
         // The owner is told what is missing, never given a form of words to copy.
         assert.equal(/for example|say it exactly|only say/i.test(String(refused.message)), false, `a refusal dictates a phrase to the owner: ${JSON.stringify(refused)}`);

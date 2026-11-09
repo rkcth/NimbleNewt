@@ -504,7 +504,7 @@ export class ChatService {
         // What is said to the coordinator is the owner's own: its texts must be in the message, like any command's. The project is the one named or in focus.
         const texts = { ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: [...intent.routes] }) };
         const foreign = foreignValue(texts, words);
-        if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
+        if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
         let target: string | undefined;
         if (intent.action === "answer" || intent.action === "decompose" || intent.action === "assign") {
           const found = intent.projectId === undefined && intent.projectName === undefined ? (currentFocus.projectId === undefined ? undefined : { ok: true as const, id: currentFocus.projectId, name: currentFocus.projectName ?? "" }) : await this.#projectByIntent(token, intent.projectId, intent.projectName);
@@ -530,7 +530,7 @@ export class ChatService {
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : undefined);
-      if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
+      if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started; the chat will not pick a time that could cancel work early. How long may it go on?" }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
@@ -743,7 +743,7 @@ export class ChatService {
     // A right is only what the owner said: the principal, the action, the grant and the scope must each appear in the message as a whole word, never as a part of a longer one.
     if (intent.op.startsWith("grant.")) {
       if (args["projectId"] !== undefined) return refuse("invalid_command", "projectId is not an argument of a right; its scope is `project`");
-      for (const key of ["grantee", "action", "grantId"] as const) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key === "grantId" ? "The right" : "The " + key} ${quotedText(args[key] as string, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which ${key === "grantId" ? "grant should it be, by its g- ID" : key === "action" ? "right did you mean?" : "principal did you mean?"}`);
+      for (const key of ["grantee", "action", "grantId"] as const) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key === "grantId" ? "The right" : "The " + key} ${quotedText(args[key] as string, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which ${key === "grantId" ? "grant did you mean, by its grt- ID?" : key === "action" ? "right did you mean?" : "principal did you mean?"}`);
       // A project the owner named by its name (already checked above to be in their own words) is the right's scope: the project with exactly that name, or a question when several have it.
       // A name and a different `project` together are two scopes, and which one the owner meant is asked rather than picked.
       const named = args["projectName"];
@@ -773,7 +773,9 @@ export class ChatService {
           args[key] = when;
         }
         // A right that would end before it ever starts is not a right: said here, rather than proposing something the records refuse when it is confirmed.
-        if (typeof args["notBefore"] === "string" && typeof args["expiresAt"] === "string" && args["expiresAt"] <= args["notBefore"]) return refuse("invalid_command", "That right would be over before it began, so nothing was drawn up: it would start and end on the same moment.");
+        if (typeof args["notBefore"] === "string" && typeof args["expiresAt"] === "string" && args["expiresAt"] <= args["notBefore"]) return refuse("invalid_command", `That right would be over before it began, so nothing was drawn up: it would end ${args["expiresAt"] === args["notBefore"] ? "on the same moment it starts" : "before it starts"}. Which days did you mean?`);
+        // An end already past is a right nobody could ever use: confirming it would leave the owner believing a right exists that does nothing (a day with no year read into the wrong year, say).
+        if (typeof args["expiresAt"] === "string" && Date.parse(args["expiresAt"]) <= Date.parse(this.#runner.now())) return refuse("invalid_command", `The day the right ends, ${args["expiresAt"]}, has already passed, so nothing was drawn up: the right could never be used. Which day should it end?`);
         args["basis"] = `owner chat: ${words}`.slice(0, 200);
         if (scope === "*") { /* every project: the proposal says so */ }
         else if (typeof scope === "string" && named !== undefined) { /* resolved from the name the owner said, above */ }
@@ -926,7 +928,7 @@ export class ChatService {
       const isAlternative = args["response"] === "alternative";
       if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
       // What to do next depends on why: the words are the owner's to rephrase, a topic is theirs to name, a conflict is theirs to settle.
-      const instead = (reason: string, next = "what you decide instead is not in your message"): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
+      const instead = (reason: string, next = "what do you decide instead?"): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}${next.endsWith("?") ? "" : "."}`);
       const said = typeof statement === "string" ? statement.trim() : "";
       if (isAlternative) {
         if (said === "") return refuse("invalid_command", "Nothing was proposed: no answer of yours is here to record. What do you decide instead?");

@@ -281,6 +281,14 @@ test("the owner grants and revokes rights through the state API and through the 
     const backwards = "give service:scanner the recovery.stall-scan right everywhere from 2030-02-01 until 2030-01-01";
     const reversed = await turn("c3n", backwards, [owner({ op: "grant.create", args: { ...args, notBefore: "2030-02-01T00:00:00.000Z", expiresAt: "2030-01-01T00:00:00.000Z" } }, backwards)]);
     assert.equal(reversed[0]!.status, "refused", JSON.stringify(reversed));
+    assert.match(reversed[0]!.message ?? "", /end before it starts/, "a window the wrong way round is not called the same moment");
+    assert.equal(await activeNow(), held);
+    // An end that has already passed is a right nobody could use: it is refused where it is drawn up, not proposed for the owner to confirm into a dead record.
+    const gone = "give service:scanner the recovery.stall-scan right everywhere until 2020-01-01";
+    const past = await turn("c3o", gone, [owner({ op: "grant.create", args: { ...args, expiresAt: "2020-01-01T00:00:00.000Z" } }, gone)]);
+    assert.equal(past[0]!.status, "refused", JSON.stringify(past));
+    assert.equal(past[0]!.proposalId, undefined, "nothing is proposed");
+    assert.match(past[0]!.message ?? "", /already passed.*\?$/, String(past[0]!.message));
     assert.equal(await activeNow(), held);
     // A sentence-ending full stop is not part of the word.
     const stop = "give service:scanner the recovery.stall-scan right everywhere permanently.";

@@ -277,7 +277,7 @@ export class PolicyEditService {
     const conditions = input.conditions.slice(0, 5);
     // Every free text of the change must be the owner's own words (or a record, or a fixed choice): a model cannot add what the owner never said.
     const foreign = foreignValue({ tool: "tool" in change ? change.tool : undefined, approveTool: "approve" in change ? change.approve.tool : undefined, projectName: "projectName" in change ? change.projectName : undefined, grantee: "grantee" in change ? change.grantee : undefined, audiences: "audiences" in change ? change.audiences : undefined, value: "value" in change ? change.value : undefined }, wording);
-    if (foreign !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` };
+    if (foreign !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `What was given for ${foreign} is not in your message, so it was not done. What did you mean instead?` };
     if (change.type === "grant") {
       const bad = (change.environments ?? []).find((e) => !(ENV_WORDS[e] as RegExp).test(wording));
       if (bad !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${bad} is not named in your message, so the grant was not drawn up with it. Which environments should it cover?` };
@@ -720,7 +720,7 @@ export class PolicyEditService {
       return matches[0] as ScopeRef;
     }
     if (focus !== undefined) return named(focus);
-    return { ask: { ok: false, kind: "ask", question: "Which project do you mean? There is none in focus. Name it, or say it applies to every project.", options: [] } };
+    return { ask: { ok: false, kind: "ask", question: "Which project do you mean, or is it every project? There is none in focus.", options: [] } };
   }
 
   async #agent(who: string): Promise<AgentRef | { ask: PolicyEditPrepared & { ok: false } }> {
