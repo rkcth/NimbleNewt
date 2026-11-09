@@ -32,7 +32,7 @@ export function safeSlice(value: string, max: number): string {
  * A line a source returned that holds anything like the controller's cut marker (an agent's text can say anything, and some readers break a line at U+2028, U+2029 or U+0085) is quoted as one JSON string,
  * with those characters escaped, so the only marker a reader sees is the one the controller put there.
  */
-export const neutralise = (line: string): string => (looksLikeMarker(line) ? `(an entry quoted, not a cut marker) ${quotedLine(line).replace(/\p{Cf}/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}` : line);
+export const neutralise = (line: string): string => (looksLikeMarker(line) ? `(an entry quoted, not a cut marker) ${quotedLine(line)}` : line);
 
 /**
  * Read as a reader would see the line: invisible format characters (zero-width spaces and joiners, bidi controls, soft hyphens) are dropped and compatibility forms folded (a full-width bracket or letter is

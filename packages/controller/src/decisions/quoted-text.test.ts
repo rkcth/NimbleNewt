@@ -25,3 +25,21 @@ test("a quoted line escapes what a reader cannot see: the controls from 0x7f, th
   assert.equal(quotedLine("all green"), "\"all green\"", "an honest summary is shown as it was written");
   assert.equal(JSON.parse(quotedLine(`host:rig${String.fromCodePoint(0x202e)}`)), `host:rig${String.fromCodePoint(0x202e)}`, "the escaping still reads back as the same words");
 });
+
+// Format characters above the basic multilingual plane: the tag characters (U+E0000 block, invisible by design) and the musical beam marks, which `\p{Cf}` with the `u` flag matches as ONE character written in TWO UTF-16 units.
+const ASTRAL = [0xe0041, 0xe0001, 0x1d173];
+
+test("a format character above the BMP is escaped as both halves of its surrogate pair, so the quoted line is still plain ASCII and reads back as the same words", () => {
+  for (const cp of ASTRAL) {
+    const ch = String.fromCodePoint(cp);
+    const line = quotedLine(`a${ch}b`);
+    assert.equal(line.includes(ch), false, `U+${cp.toString(16)} is not shown as itself: ${line}`);
+    // The old escape wrote `charCodeAt(0)` — the high surrogate alone — which left the line holding a broken character a reader (and JSON.parse) cannot use.
+    assert.ok(/^[\x20-\x7e]*$/.test(line), `the quoted line is printable ASCII, with no raw format character and no lone surrogate: ${JSON.stringify(line)}`);
+    const high = 0xd800 + ((cp - 0x10000) >> 10);
+    const low = 0xdc00 + ((cp - 0x10000) & 0x3ff);
+    assert.ok(line.includes(`\\u${high.toString(16).padStart(4, "0")}\\u${low.toString(16).padStart(4, "0")}`), `both halves of the pair are written: ${line}`);
+    // It reads back as the words that were written, and the escape itself carries nothing a reader cannot see.
+    assert.equal(JSON.parse(line), `a${ch}b`, `the escaped line round-trips to the words it quotes: ${line}`);
+  }
+});

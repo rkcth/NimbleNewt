@@ -247,9 +247,17 @@ export interface DecisionContext {
  * `JSON.stringify` leaves them as they are and a model may read them as a line break. So are the format characters (`\p{Cf}`: zero-width spaces, bidi overrides and isolates, the soft hyphen) — they show
  * nothing, so an owner or a model reading the line cannot see that a word was written backwards or that a character separates two letters that are not really next to each other (card X09b part 2 review).
  * `JSON.stringify` leaves DEL (0x7f) as it too, so the whole range of controls from 0x7f to 0x9f is escaped here.
+ *
+ * The class is matched with the `u` flag, so one match may be a character above U+FFFF (the U+E0000 tag characters, the musical formatting marks) and is held in the string as a surrogate PAIR. Each UTF-16 unit
+ * of the match is escaped, so such a character becomes `\uD8xx\uDCxx`: escaping only `charCodeAt(0)` would leave the high surrogate alone, which `JSON.parse` reads back as a different (and broken) string.
  */
 export function quotedLine(value: string): string {
-  return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return escapeInvisible(JSON.stringify(value));
+}
+
+/** The invisible characters of an already-JSON-quoted line, each written as the escape (or escapes) of its UTF-16 units, so the result is printable ASCII and reads back unchanged. */
+export function escapeInvisible(quoted: string): string {
+  return quoted.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (c) => c.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
 }
 
 /**
