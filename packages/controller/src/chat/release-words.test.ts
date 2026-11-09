@@ -6,7 +6,7 @@ import { foreignValue, platformsNamed, RELEASE_ID_KEYS, saysPlatform } from "./c
  * The checks behind the release commands that are not about wording (card X09b part 2 review, redone): a release or host ID needs whole-word matching, or a name that merely starts with it lets it
  * through, and a platform counts only when the owner's own words name it. Accepting a flaky pass is NOT a wording question any more: the chat proposes the approval showing the earlier failures the
  * gate lists, and the owner's confirmation of that shown proposal is the acceptance (see `release-owner-words.test.ts`). Landing on main with no human step is not a wording question either
- * (`landing-words.test.ts`). Nothing here scans the owner's sentence for an acceptance, and no message asks them to say a particular word.
+ * (`landing-proposal.test.ts`). Nothing here scans the owner's sentence for an acceptance, and no message asks them to say a particular word.
  */
 
 test("a release ID or a host ID only counts when the owner said it as a whole word, not as the start of a longer name", () => {
