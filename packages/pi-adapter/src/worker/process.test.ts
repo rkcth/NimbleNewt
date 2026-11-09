@@ -166,7 +166,7 @@ test("a refused bridge call is the model's tool result, not a crash; garbage on 
   h.send({ t: "run", requestId: "req-1", content: "say hello" });
   const bridge = await h.next("bridge");
   h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: false, code: "paused", message: "the task is paused" } });
-  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "saw: catalogue refusal" });
+  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "saw: catalogue refusal", endKind: "no-work-end", visibleChars: 22 });
   assert.equal(h.discovers.length, 1, "one snapshot of the declarations per request");
   h.send({ t: "tell", id: 1 } as never);
   const fault = await h.next("fault");
@@ -213,7 +213,7 @@ test("model calls go over the channel to the host's relay and nowhere else; the 
   h.send({ t: "fetch.head", id: call.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
   for (const c of chunks) h.send({ t: "fetch.chunk", id: call.id, data: Buffer.from(c).toString("base64") });
   h.send({ t: "fetch.end", id: call.id });
-  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "relayed answer" });
+  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "relayed answer", endKind: "no-work-end", visibleChars: 14 });
   // Anything but the relay's address fails inside the process, without a message to the host.
   const before = h.seen.length;
   await assert.rejects(fetch("https://example.com/"), /there is no network here/);
@@ -468,7 +468,7 @@ test("H08b: a fenced bridge answer makes the process ask whether the lease still
       h.send({ t: "lease.ok", id: ask.id, leaseMs: 20_000 });
       const second = await h.next("bridge", h.seen.indexOf(bridge) + 1);
       h.send({ t: "bridge.reply", id: second.id, reply: { ok: true, result: {} } });
-      assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "finished" });
+      assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "finished", endKind: "no-work-end", visibleChars: 8 });
       assert.equal(got.dog!.productive, true);
     } else {
       h.send({ t: "lease.fenced", id: ask.id, reason: "the attempt has been replaced" });
