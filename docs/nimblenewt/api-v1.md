@@ -5561,7 +5561,7 @@ Result: `{ revision }`.
 
 #### `release.approve`
 
-Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A platform that passed only after a failed attempt is shown as flaky in `release.gate`, and is approved only with `acknowledgeFlaky` true, said by the owner in their own words. A worker cannot.
+Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A platform that passed only after a failed attempt is shown as flaky in `release.gate`. Such a release is approved only by an approval that carries the earlier failures the gate lists (`acknowledgeFlaky` true with `expectedFailures` set to those attempt IDs); the chat draws that approval up from the gate and shows it first, so what the owner confirms is the list of failures itself, and no wording of theirs is scanned for a particular phrase. A worker cannot.
 
 Arguments:
 
