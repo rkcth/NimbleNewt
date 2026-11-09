@@ -688,6 +688,16 @@ for (const backend of backends) {
     assert.equal(await c.handoffs.archive(c.owner, { archiveId: h.id }), undefined);
   });
 
+  // Second review of card C07k: completed work of more entries than a digest keeps, that fits the section limit while its newest entries beside the marker would not, is given whole; it was archived and
+  // recorded as a cut of "0 of 0 entries left out", which the handoff status then reported as a section cut to fit.
+  suite("completed work that fits but whose digest would not is given whole, with no cut recorded (card C07k second review)", async (c) => {
+    const lines = ["Decision: old", ...Array.from({ length: 8 }, (_, i) => `Decision: dsk-${i} ${"x".repeat(470)}`)];
+    c.src.sections = { ...base, completedWork: lines.join("\n") };
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    assert.equal(h.package!.sections["completedWork"], lines.join("\n"));
+    assert.equal(h.package!.cuts, undefined);
+  });
+
   suite("a cut responsibilities list keeps its heading line, and a mark with quotes finds an old entry that was quoted for opening with a bracket (card C07j review, round 3)", async (c) => {
     const items = Array.from({ length: 200 }, (_, i) => `rsp-${String(i).padStart(4, "0")} "watch ${i}" (active): keep it green`);
     items[3] = '[rsp-0003] "nightly import" (active): runs "UTF-8 only"';

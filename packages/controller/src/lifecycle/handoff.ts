@@ -9,7 +9,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { cutSection, digestSection, neutralise, safeSlice, summarised, wellFormed } from "./handoff-cut.js";
+import { cutSection, digestSection, givenWhole, neutralise, safeSlice, wellFormed } from "./handoff-cut.js";
 import type { PauseScope, PauseService } from "./pause.js";
 import type { StopService } from "./stop.js";
 
@@ -104,7 +104,7 @@ export interface TaskHandoffBody {
   readonly history: readonly { readonly phase: HandoffPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
-/** A section cut to fit: `left` of its `total` entries were left out or shortened; the whole section (`chars` characters) is in the archive `archiveId`. */
+/** A section cut to fit (or summarised, card C07k): `left` of its `total` entries were left out or shortened; the whole section (`chars` characters) is in the archive `archiveId`. */
 export interface HandoffCut { readonly section: string; readonly archiveId: string; readonly left: number; readonly total: number; readonly chars: number; readonly archiveTruncated?: boolean }
 
 /** A section's original as archived when it was cut (card C07j), one part of it per read. */
@@ -678,7 +678,7 @@ export class HandoffService {
       const original = wellFormed(redactText(value));
       const shown = original.split("\n").map(neutralise).join("\n");
       const digested = DIGESTED_SECTIONS.includes(name);
-      if (shown.length <= HANDOFF_LIMITS.section && !(digested && summarised(shown, HANDOFF_LIMITS.digestWhole))) { sections[name] = shown; continue; }
+      if (digested ? givenWhole(shown, HANDOFF_LIMITS.digestWhole, HANDOFF_LIMITS.section) : shown.length <= HANDOFF_LIMITS.section) { sections[name] = shown; continue; }
       marks ??= await this.#marks(b.taskId);
       const archived = await this.#archive(handoffId, b, name, original);
       // A brief's title and the line saying what the responsibilities are and how to move them head their sections and stay with them; marks are looked for in the lines as the source wrote them.

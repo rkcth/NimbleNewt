@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CUT_MARKER, SHORTENED, cutSection, digestSection, neutralise, safeSlice, summarised, wellFormed } from "./handoff-cut.js";
+import { CUT_MARKER, SHORTENED, cutSection, digestSection, givenWhole, neutralise, safeSlice, summarised, wellFormed } from "./handoff-cut.js";
 
 // Card C07j: the cut of one hand-off section, on its own. The service tests (handoff.test.ts) check it with the archive in every store.
 const ARCHIVE = "hnd-abcdefghijklmnopqrst";
@@ -260,4 +260,63 @@ test("a digest whose newest entries do not fit beside the marker is cut to the l
 
 test("a digest that keeps no entry is refused", () => {
   assert.throws(() => digestSection("a\nb", 0, 4000, [], ARCHIVE), RangeError);
+});
+
+// Second review of card C07k: a section of more entries than a digest keeps, that fits the limit while its newest entries beside the marker would not, falls back to `cutSection` and is given whole.
+// The hand-off service asked only whether it had more entries, so it archived it and recorded a cut of "0 of 0 entries left out" for a section given whole.
+test("a section that fits but whose digest would not is given whole, and is known to be before anything is archived", () => {
+  const all = ["Decision: old", ...Array.from({ length: 8 }, (_, i) => `Decision: ${i}${"x".repeat(470)}`)];
+  const text = all.join("\n");
+  assert.ok(text.length <= 4000 && summarised(text, 8));
+  assert.deepEqual(digestSection(text, 8, 4000, [], ARCHIVE), { text });
+  assert.equal(givenWhole(text, 8, 4000), true);
+  assert.equal(givenWhole(work(1, 8).join("\n"), 8, 4000), false, "a short section of more entries is summarised");
+  assert.equal(givenWhole(work(1, 7).join("\n"), 8, 4000), true);
+  assert.equal(givenWhole(work(0, 300).join("\n"), 8, 4000), false);
+});
+
+// Second review of card C07k: a decision whose text reads like a marker is quoted by `neutralise`; its kind is read from the line as the source wrote it, so it is still the newest decision and counted as one.
+test("a digest reads each entry's kind from the line as the source wrote it", () => {
+  const original = ["Decision: see [cut: 3 of 4 entries]", ...work(0, 20), "Artifact: a-1", ...work(0, 7)];
+  const shown = original.map(neutralise);
+  assert.notEqual(shown[0], original[0], "the decision is quoted");
+  const out = digestSection(shown.join("\n"), 8, 4000, [], ARCHIVE, undefined, { matchOn: original });
+  assert.deepEqual(out.text.split("\n").slice(1), original.slice(-8));
+  assert.match(out.text, /^[^\n]*: 21 decisions left out/);
+});
+
+// Second review of card C07k: whatever the entries, kinds, lengths and marks, every entry is either shown whole, in its order, or counted on the marker (by kind), the newest of each kind and the newest
+// entries are shown whenever the digest is given, and the section stays within the limit; the archive keeps the whole section (checked with the service in handoff.test.ts and handoff-hops.test.ts).
+test("a digest never loses an entry: shown whole or counted, for random sections", () => {
+  let seed = 7;
+  const r = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  const pick = <T>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
+  for (let t = 0; t < 3000; t++) {
+    const n = 1 + Math.floor(r() * (r() < 0.5 ? 15 : 300));
+    const max = pick([5, 30, 100, 600, 2000]);
+    const all = Array.from({ length: n }, (_, i) => `${pick(["Artifact: ", "Decision: ", "", "Note: ", "Decision: \u{1F600}"])}e${i}-${"y".repeat(Math.floor(r() * max))}${r() < 0.1 ? "MARK" : ""}`);
+    const text = all.join("\n");
+    const out = digestSection(text, 8, 4000, r() < 0.5 ? ["mark"] : [], ARCHIVE);
+    const at = `case ${t}: ${n} entries up to ${max} characters`;
+    assert.ok(out.text.length <= 4000, at);
+    assert.equal(out.cut === undefined, givenWhole(text, 8, 4000), at);
+    if (out.cut === undefined) { assert.equal(out.text, text, at); continue; }
+    const lines = out.text.split("\n");
+    const m = CUT_MARKER.exec(lines[0]!);
+    assert.ok(m !== null, at);
+    let next = 0;
+    let whole = 0;
+    for (const line of lines.slice(1)) {
+      const i = all.indexOf(line, next);
+      if (i >= next) { next = i + 1; whole++; continue; }
+      assert.ok(line.endsWith(SHORTENED), `${at}: ${line.slice(0, 40)} is not an entry, in order`);
+    }
+    assert.deepEqual([Number(m[1]), Number(m[2]), out.cut.left, out.cut.total], [n - whole, n, n - whole, n], at);
+    if (!/Older entries are summarised/.test(lines[0]!)) continue;
+    const counted = [...lines[0]!.matchAll(/(\d+) (?:decisions?|artifacts?|other entr(?:y|ies))\b/g)].reduce((s, x) => s + Number(x[1]), 0);
+    assert.equal(counted, n - whole, `${at}: the counts by kind are what was left out`);
+    assert.equal(/: no entry left out/.test(lines[0]!), n === whole, at);
+    for (const p of ["Artifact: ", "Decision: "]) { const last = all.findLastIndex((e) => e.startsWith(p)); if (last >= 0) assert.ok(lines.includes(all[last]!), `${at}: the newest ${p}is shown`); }
+    for (let i = Math.max(0, n - 6); i < n; i++) assert.ok(lines.includes(all[i]!), `${at}: entry ${i}, among the newest, is shown`);
+  }
 });

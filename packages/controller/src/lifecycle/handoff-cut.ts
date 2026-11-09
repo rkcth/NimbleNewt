@@ -147,6 +147,13 @@ const newestKept = (kinds: readonly number[], keep: number): Set<number> => {
 export const summarised = (text: string, keep: number): boolean => text.split("\n").length > keep;
 
 /**
+ * Whether `digestSection` gives `text` as it is, with no marker (second review of card C07k): a section of `keep` entries or fewer that fits `limit`, and also one of more entries that fits `limit` while its
+ * newest entries beside the marker would not (it then falls back to `cutSection`, which gives a fitting section whole). The hand-off service asks this before it archives anything, so a section given whole is
+ * never recorded as cut ("0 of 0 entries left out"). The marker's size depends on the archive ID only by its length, which is fixed, so a placeholder of that length answers for every archive.
+ */
+export const givenWhole = (text: string, keep: number, limit: number): boolean => text.length <= limit && (!summarised(text, keep) || digestSection(text, keep, limit, [], "hnd-aaaaaaaaaaaaaaaaaaaa").cut === undefined);
+
+/**
  * Card C07k: a section that only grows across hand-offs (the run's completed work: every artifact and decision it has recorded) is summarised so the package does not grow with the number of hand-offs.
  * The newest `keep` entries (among them the newest of each kind) are shown whole, with the entries the owner marked (newest first, while the section stays within `limit`); the older ones are counted by kind on the marker line, which names the
  * archive that keeps the whole section, so every decision is still found by its reference there. The marker is the C07j cut marker, so every reader of a cut reads a digest the same way. A section of `keep`
@@ -156,8 +163,10 @@ export function digestSection(text: string, keep: number, limit: number, marks: 
   if (!Number.isSafeInteger(keep) || keep < 1) throw new RangeError("a digest keeps at least the newest entry");
   const entries = text.split("\n");
   const total = entries.length;
-  const kinds = entries.map(kindOf);
   if (!summarised(text, keep)) return cutSection(text, limit, marks, archiveId, archivedChars, options);
+  const matchOn = options.matchOn !== undefined && options.matchOn.length === total ? options.matchOn : entries;
+  // An entry's kind is read from the line as the source wrote it (second review of card C07k): a decision whose text reads like a marker is quoted by `neutralise`, and still counts as a decision.
+  const kinds = matchOn.map(kindOf);
   const chosen = newestKept(kinds, keep);
   // Sizes are kept as running sums (review of card C07k): rendering the whole section again for every marked entry made a long section with a broad mark take minutes.
   const left = new Map<number, number>();
@@ -168,7 +177,6 @@ export function digestSection(text: string, keep: number, limit: number, marks: 
   const size = (): number => header().length + body;
   if (size() > limit) return cutSection(text, limit, marks, archiveId, archivedChars, options);
   const marked = markedBy(marks);
-  const matchOn = options.matchOn !== undefined && options.matchOn.length === total ? options.matchOn : entries;
   for (let i = total - 1; i >= 0; i--) {
     if (chosen.has(i) || !marked(matchOn[i]!)) continue;
     const k = kinds[i]!;
