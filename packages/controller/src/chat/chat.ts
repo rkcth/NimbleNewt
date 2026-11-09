@@ -411,7 +411,7 @@ export class ChatService {
       if (intent.kind === "none") { push({ i, kind: "ignored", reason: intent.reason }); continue; }
       if (intent.kind === "answer") { push({ i, kind: "refused", code: "not_resumable", message: "an answer cannot be held" }); continue; }
       if (!trusted && (intent.basis === "quoted" || !evidenceInText(intent.evidence, words) || !evidenceStrong(intent.evidence))) {
-        push({ i, kind: "refused", code: "untrusted_authority", message: intent.basis === "quoted" ? "That instruction came from quoted text, which cannot ask for anything. Say it yourself if you want it." : "The words this was based on are not a phrase of your own message, so it was not done." });
+        push({ i, kind: "refused", code: "untrusted_authority", message: intent.basis === "quoted" ? "That instruction came from quoted text, which cannot ask for anything; only your own message can ask for something." : "The words this was based on are not a phrase of your own message, so it was not done." });
         continue;
       }
       if (intent.kind === "switch_focus") {
@@ -448,9 +448,9 @@ export class ChatService {
           const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
           // One exact match decides. Several, or only partial matches, are listed and the owner is asked; nothing is read until the owner says which.
           const candidates = exact.length > 0 ? exact : partial;
-          if (candidates.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no task called "${wanted.slice(0, 80)}" in that project` }); continue; }
+          if (candidates.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no task called ${quotedText(wanted, 80)} in that project` }); continue; }
           if (exact.length !== 1) {
-            push({ i, kind: "asked", question: exact.length > 1 ? `More than one task is called "${wanted.slice(0, 80)}". Which one?` : `No task is called "${wanted.slice(0, 80)}", but ${candidates.length === 1 ? "one task fits" : "these tasks fit"}. Which one do you mean?`, options: candidates.slice(0, CHAT_LIMITS.options).map((m) => `${m.id}: ${quotedText(m.title, 80)} (${m.state})`) });
+            push({ i, kind: "asked", question: exact.length > 1 ? `More than one task is called ${quotedText(wanted, 80)}. Which one?` : `No task is called ${quotedText(wanted, 80)}, but ${candidates.length === 1 ? "one task fits" : "these tasks fit"}. Which one do you mean?`, options: candidates.slice(0, CHAT_LIMITS.options).map((m) => `${m.id}: ${quotedText(m.title, 80)} (${m.state})`) });
             continue;
           }
           const matches = exact;
@@ -478,7 +478,7 @@ export class ChatService {
               const named = titles.filter((t) => looseMatch(words, t));
               if (named.length > 0) { push({ i, kind: "refused", code: "not_found", message: named.length === 1 ? `${quotedText(named[0]!, 60)} has no stand-up meeting yet, so nothing has been briefed for it` : `more than one stand-up of that project has no meeting yet: ${titleList(named)}` }); continue; }
               if (titles.length === 0) { push({ i, kind: "refused", code: "not_found", message: "there is no stand-up in that project" }); continue; }
-              push({ i, kind: "refused", code: "not_found", message: `no stand-up in that project is called "${words.slice(0, 80)}". It has ${titleList(titles)}.` }); continue;
+              push({ i, kind: "refused", code: "not_found", message: `no stand-up in that project is called ${quotedText(words, 80)}. It has ${titleList(titles)}.` }); continue;
             }
             const coming = matches.filter((m) => m["state"] === "planned").sort((a, b) => (String(a["startsAt"]) < String(b["startsAt"]) ? -1 : 1));
             // Words that fit several stand-ups ask; with no words, the next one coming up is meant.
@@ -491,7 +491,7 @@ export class ChatService {
             const wanted = agentName.trim().toLowerCase();
             const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
             const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
-            if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called "${agentName.trim().slice(0, 80)}"` }); continue; }
+            if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called ${quotedText(agentName.trim(), 80)}` }); continue; }
             if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) }); continue; }
             request["agent"] = String(found[0]!["principalId"]);
           }
@@ -504,7 +504,7 @@ export class ChatService {
         // What is said to the coordinator is the owner's own: its texts must be in the message, like any command's. The project is the one named or in focus.
         const texts = { ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: [...intent.routes] }) };
         const foreign = foreignValue(texts, words);
-        if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
+        if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
         let target: string | undefined;
         if (intent.action === "answer" || intent.action === "decompose" || intent.action === "assign") {
           const found = intent.projectId === undefined && intent.projectName === undefined ? (currentFocus.projectId === undefined ? undefined : { ok: true as const, id: currentFocus.projectId, name: currentFocus.projectName ?? "" }) : await this.#projectByIntent(token, intent.projectId, intent.projectName);
@@ -530,9 +530,9 @@ export class ChatService {
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : undefined);
-      if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
+      if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
-      if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long running work may go on, in your own words." }); continue; }
+      if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started; the chat will not pick a time that could cancel work early. How long may it go on?" }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
       // proposal that shows the exact earlier failures the gate lists, and the owner's confirmation of that shown proposal is the acceptance. No wording is a gate; the binding is the shown failures themselves.
       let command = intent;
@@ -543,7 +543,7 @@ export class ChatService {
       // os nor arch, and the interpreter's os and arch are dropped from it unless the owner's own words name them (item D4): sent as they are they would rewrite the platform on the record.
       if (intent.op === "release.host") {
         const withdrawing = intent.args["active"] === false;
-        const host = typeof intent.args["hostId"] === "string" ? `"${(intent.args["hostId"] as string).slice(0, 80)}"` : "that host";
+        const host = typeof intent.args["hostId"] === "string" ? quotedText(intent.args["hostId"] as string, 80) : "that host";
         const kinds = (["os", "arch"] as const)
           .map((key) => { const value = intent.args[key]; return typeof value === "string" ? { key, value, named: platformsNamed(words, key) } : undefined; })
           .filter((x): x is { key: "os" | "arch"; value: string; named: string[] } => x !== undefined);
@@ -551,8 +551,8 @@ export class ChatService {
         const gap = off.find((x) => !(withdrawing && x.named.length === 0));
         if (gap !== undefined) {
           const { key, value, named } = gap;
-          if (named.length > 1) { push({ i, kind: "refused", code: "unsupported_value", message: `${key} is not settled by your message, so nothing was changed for ${host}. Your own words name ${named.map((v) => `"${v}"`).join(" and ")}: which ${key} is ${host} authorized for (${platformChoices(key).join(", ")})? Say one of them and nothing about the others.` }); continue; }
-          if (named.length === 1) { push({ i, kind: "refused", code: "unsupported_value", message: `${key} is not in your message, so nothing was changed for ${host}. Your own words say ${key} "${named[0]}", not "${value}". Say which ${key} the host is authorized for (${platformChoices(key).join(", ")}), or that the platform is not what you meant.` }); continue; }
+          if (named.length > 1) { push({ i, kind: "refused", code: "unsupported_value", message: `${key} is not settled by your message, so nothing was changed for ${host}. Your own words name ${named.map((v) => quotedText(v, 30)).join(" and ")}: which ${key} is ${host} authorized for (${platformChoices(key).join(", ")})?` }); continue; }
+          if (named.length === 1) { push({ i, kind: "refused", code: "unsupported_value", message: `${key} is not in your message, so nothing was changed for ${host}. Your own words say ${key} ${quotedText(named[0]!, 30)}, not ${quotedText(value, 30)}. Which ${key} is ${host} authorized for (${platformChoices(key).join(", ")})?` }); continue; }
           push({ i, kind: "asked", intentIndex: n, field: key, choices: [...platformChoices(key)], options: [...platformChoices(key)], question: key === "os" ? `${host} is to be authorized for release tests, but your message does not say which platform it runs. Which one — ${platformChoices("os").join(", ")}?` : `${host} is to be authorized for release tests, but your message does not say which chip it has. Which one — ${platformChoices("arch").join(", ")}?` });
           continue;
         }
@@ -568,7 +568,7 @@ export class ChatService {
       // One message answers a waiting meeting decision once: a second answer to the same decision could only fail when confirmed.
       const answering = resolved.steps.find((st) => st.op === "meeting.record.owner-respond")?.args["decisionId"];
       if (typeof answering === "string") {
-        if (answeredHere.has(answering)) { push({ i, kind: "refused", code: "invalid_command", message: "That meeting decision is already answered in this message; a decision is answered once. Say which answer you mean, in a separate message." }); continue; }
+        if (answeredHere.has(answering)) { push({ i, kind: "refused", code: "invalid_command", message: "That meeting decision is already answered in this message, and a decision is answered once. Which answer did you mean? It needs a message of its own." }); continue; }
         answeredHere.add(answering);
       }
       projectId = resolved.projectId ?? projectId;
@@ -655,11 +655,11 @@ export class ChatService {
       const candidate = args["candidateId"];
       delete args["candidateId"];
       if (args["attemptId"] === undefined) {
-        if (typeof candidate !== "string") return refuse("invalid_command", "say which release test to cancel: its attempt ID, or the candidate when only one of its tests is running");
+        if (typeof candidate !== "string") return refuse("invalid_command", "Which release test should be cancelled? Nothing in your message names one: an attempt ID does, or the candidate when only one of its tests is running.");
         const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.attempts", args: { candidateId: candidate } });
         if (!found.ok) return refuse(found.error.code, found.error.message);
         const open = ((found.result["attempts"] ?? []) as { id: string; state: string }[]).filter((a) => a.state === "issued");
-        if (open.length !== 1) return refuse("invalid_command", open.length === 0 ? "no release test of that candidate is running" : `${open.length} release tests of that candidate are running; give the attempt ID of the one to cancel`);
+        if (open.length !== 1) return refuse("invalid_command", open.length === 0 ? "no release test of that candidate is running" : `${open.length} release tests of that candidate are running, so which one to cancel is not settled — which of them, by its attempt ID?`);
         args["attemptId"] = open[0]!.id;
       }
     }
@@ -668,7 +668,7 @@ export class ChatService {
     if (intent.op === "release.activate") {
       delete args["digest"];
       const wanted = args["candidateId"];
-      if (typeof wanted !== "string") return refuse("invalid_command", "say which staged release to activate");
+      if (typeof wanted !== "string") return refuse("invalid_command", "Which staged release should be activated? Nothing in your message names one.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.verify", args: { releaseId: wanted } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
       const digest = String(found.result["digest"]);
@@ -683,7 +683,7 @@ export class ChatService {
       delete args["expectedFailures"];
       delete args["acknowledgeFlaky"];
       // Without a candidate there is no gate to read, so nothing to show and nothing to bind: the approval is not drawn up.
-      if (typeof args["candidateId"] !== "string") return refuse("invalid_command", "say which release candidate to approve");
+      if (typeof args["candidateId"] !== "string") return refuse("invalid_command", "Which release candidate should be approved? Nothing in your message names one.");
     }
     if (intent.op === "release.approve" && typeof args["candidateId"] === "string") {
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.gate", args: { candidateId: args["candidateId"] } });
@@ -703,7 +703,7 @@ export class ChatService {
     if (intent.op === "backup.restore.apply") {
       delete args["confirm"];
       const wanted = args["name"];
-      if (typeof wanted !== "string") return refuse("invalid_command", "say which backup to restore, by the name backup.list shows");
+      if (typeof wanted !== "string") return refuse("invalid_command", "Which backup should be restored? Nothing in your message names one; backup.list shows the names.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "backup.restore.preview", args: { name: wanted } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
       const plan = found.result["item"] as { token: string; expiresAt?: string; name: string; createdAt: string; kind: string; rows: number; artifactFiles: number; piStores: number; piFiles: number; piStateIncluded: boolean; changesSinceBackup?: number; effectsToMarkUncertain?: number; deliveriesToResend?: number; steps: string[]; warnings: string[] };
@@ -728,7 +728,7 @@ export class ChatService {
     if (intent.op === "database.transfer.apply") {
       delete args["confirm"];
       const wanted = args["target"];
-      if (typeof wanted !== "string") return refuse("invalid_command", "say which database to move to, by the name database.transfer.status shows");
+      if (typeof wanted !== "string") return refuse("invalid_command", "Which database should it move to? Nothing in your message names one; database.transfer.status shows the names.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "database.transfer.preview", args: { target: wanted } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
       const plan = found.result["item"] as { token: string; direction: string; to: { name: string }; totalRows: number; ok: boolean; claimsReleased: number; uncertainEffects: number; findings: { severity: string; text: string }[]; steps: string[] };
@@ -743,7 +743,7 @@ export class ChatService {
     // A right is only what the owner said: the principal, the action, the grant and the scope must each appear in the message as a whole word, never as a part of a longer one.
     if (intent.op.startsWith("grant.")) {
       if (args["projectId"] !== undefined) return refuse("invalid_command", "projectId is not an argument of a right; its scope is `project`");
-      for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
+      for (const key of ["grantee", "action", "grantId"] as const) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key === "grantId" ? "The right" : "The " + key} ${quotedText(args[key] as string, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which ${key === "grantId" ? "grant should it be, by its g- ID" : key === "action" ? "right did you mean?" : "principal did you mean?"}`);
       // A project the owner named by its name (already checked above to be in their own words) is the right's scope: the project with exactly that name, or a question when several have it.
       // A name and a different `project` together are two scopes, and which one the owner meant is asked rather than picked.
       const named = args["projectName"];
@@ -751,10 +751,10 @@ export class ChatService {
       if (named !== undefined && intent.op !== "grant.create") return refuse("invalid_command", "projectName is not an argument of this operation");
       if (named !== undefined) {
         if (typeof named !== "string") return refuse("invalid_command", "projectName must be text");
-        if (!wholeWord(words, named.trim())) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Which project should this right cover?");
+        if (!wholeWord(words, named.trim())) return refuse("unsupported_value", `project ${quotedText(named.trim(), 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which project should this right cover?`);
         const found = await this.#projectByIntent(token, undefined, named);
         if (!found.ok) return found.kind === "ask" ? { ok: false, kind: "ask", question: found.question, options: found.options } : found;
-        if (args["project"] !== undefined && args["project"] !== found.id) return { ok: false, kind: "ask", question: `Should this right cover only "${found.name.slice(0, 80)}", or ${args["project"] === "*" ? "every project" : "another project"}?`, options: [] };
+        if (args["project"] !== undefined && args["project"] !== found.id) return { ok: false, kind: "ask", question: `Should this right cover only ${quotedText(found.name, 80)}, or ${args["project"] === "*" ? "every project" : "another project"}?`, options: [] };
         args["project"] = found.id;
         labels[found.id] = found.name;
       }
@@ -778,7 +778,7 @@ export class ChatService {
         if (scope === "*") { /* every project: the proposal says so */ }
         else if (typeof scope === "string" && named !== undefined) { /* resolved from the name the owner said, above */ }
         else if (typeof scope === "string") {
-          if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
+          if (!wholeWord(words, scope)) return refuse("unsupported_value", `project ${quotedText(scope, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which project should this right cover?`);
           const found = await this.#projectByIntent(token, scope, undefined);
           if (!found.ok) return found;
           labels[found.id] = found.name;
@@ -834,23 +834,23 @@ export class ChatService {
       if (title === undefined) continue;
       delete args[titleKey];
       if (typeof title !== "string" || title.length === 0) return refuse("invalid_command", `${titleKey} must be text`);
-      if (args[idKey] !== undefined) return refuse("invalid_command", `give either ${idKey} or ${titleKey}, not both`);
+      if (args[idKey] !== undefined) return refuse("invalid_command", `the message names the task twice over, as ${idKey} and as ${titleKey}; which one is meant has to be settled.`);
       const matches = await this.#tasksByTitle(token, projectId as string, title);
-      if (matches.length === 0) return refuse("not_found", `no task called "${title.slice(0, 80)}" in that project`);
-      if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called "${title.slice(0, 80)}". Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: idKey, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+      if (matches.length === 0) return refuse("not_found", `no task called ${quotedText(title, 80)} in that project`);
+      if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called ${quotedText(title, 80)}. Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: idKey, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args[idKey] = (matches[0] as { id: string }).id;
     }
     // An agenda item named by its words: exactly one open item of the project whose topic contains them, or the owner is asked.
     if (intent.op === "agenda.correct") {
       const named = args["agendaTopic"];
       delete args["agendaTopic"];
-      if (named !== undefined && args["itemId"] !== undefined) return refuse("invalid_command", "give either itemId or agendaTopic, not both");
+      if (named !== undefined && args["itemId"] !== undefined) return refuse("invalid_command", "the agenda item is named twice over, as itemId and as agendaTopic; which one is meant has to be settled.");
       if (args["itemId"] === undefined) {
         if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "agendaTopic must be text");
         const open = await this.#listAll(token, "agenda.list", { projectId });
         const words = typeof named === "string" ? named.trim().toLowerCase() : "";
         const matches = open.filter((i) => words === "" || String(i["topic"]).toLowerCase().includes(words));
-        if (matches.length === 0) return refuse("not_found", words === "" ? "there is no open agenda item in that project" : `no open agenda item about "${(named as string).slice(0, 80)}" in that project`);
+        if (matches.length === 0) return refuse("not_found", words === "" ? "there is no open agenda item in that project" : `no open agenda item about ${quotedText(named as string, 80)} in that project`);
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which agenda item do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["id"])} (${String(m["topic"]).slice(0, 60)})`), field: "itemId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["id"])) };
         args["itemId"] = String(matches[0]!["id"]);
       }
@@ -862,7 +862,7 @@ export class ChatService {
     if (intent.op === "standup.update") {
       const named = args["standupTitle"];
       delete args["standupTitle"];
-      if (named !== undefined && args["scheduleId"] !== undefined) return refuse("invalid_command", "give either scheduleId or standupTitle, not both");
+      if (named !== undefined && args["scheduleId"] !== undefined) return refuse("invalid_command", "the stand-up is named twice over, as scheduleId and as standupTitle; which one is meant has to be settled.");
       if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "standupTitle must be text");
       if (args["scheduleId"] !== undefined) {
         // An ID is looked at directly, so a project with many ended stand-ups cannot hide it.
@@ -880,9 +880,9 @@ export class ChatService {
           // Ended stand-ups are only looked up to explain a miss.
           const endedList = more ? undefined : await this.#get(token, "standup.list", { projectId, endedOnly: true, limit: 50 });
           const ended = ((endedList?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
-          if (ended.length > 0) return refuse("invalid_command", `the stand-up "${String(ended[0]!["title"]).slice(0, 80)}" has ended and cannot be changed or started again`);
-          if (more) return refuse("not_found", "the project has more than 50 active stand-ups and none of those looked at matches; give the stand-up's ID");
-          return refuse("not_found", words === "" ? "there is no stand-up in that project" : `no stand-up in that project is called "${words.slice(0, 80)}"`);
+          if (ended.length > 0) return refuse("invalid_command", `the stand-up ${quotedText(String(ended[0]!["title"]), 80)} has ended and cannot be changed or started again`);
+          if (more) return refuse("not_found", "the project has more than 50 active stand-ups and none of those looked at matches, so which stand-up is meant is not settled");
+          return refuse("not_found", words === "" ? "there is no stand-up in that project" : `no stand-up in that project is called ${quotedText(words, 80)}`);
         }
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["scheduleId"])} (${String(m["title"]).slice(0, 60)})`), field: "scheduleId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["scheduleId"])) };
         args["scheduleId"] = String(matches[0]!["scheduleId"]);
@@ -893,7 +893,7 @@ export class ChatService {
     if (intent.op === "owner.answer") {
       const named = args["questionTopic"];
       delete args["questionTopic"];
-      if (named !== undefined && args["inquiryId"] !== undefined) return refuse("invalid_command", "give either inquiryId or questionTopic, not both");
+      if (named !== undefined && args["inquiryId"] !== undefined) return refuse("invalid_command", "the question is named twice over, as inquiryId and as questionTopic; which one is meant has to be settled.");
       if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "questionTopic must be text");
       const open = await this.#listAll(token, "owner.questions", {});
       if (args["inquiryId"] !== undefined && !open.some((i) => i["inquiryId"] === args["inquiryId"])) return refuse("not_found", "that question is not waiting for your answer");
@@ -905,7 +905,7 @@ export class ChatService {
         if (words.length < 4) showFirst = "no question was clearly named, so you are shown the one it would answer first";
         const has = (i: Record<string, unknown>): boolean => [String(i["question"]), String((i["task"] as { title?: unknown } | undefined)?.title ?? "")].some((t) => t.toLowerCase().includes(words));
         const matches = open.filter((i) => words === "" || has(i));
-        if (matches.length === 0) return refuse("not_found", words === "" ? "no agent is waiting for your answer" : `no waiting question is about "${words.slice(0, 80)}"`);
+        if (matches.length === 0) return refuse("not_found", words === "" ? "no agent is waiting for your answer" : `no waiting question is about ${quotedText(words, 80)}`);
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which question are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["inquiryId"])} (${String(m["question"]).slice(0, 60)})`), field: "inquiryId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["inquiryId"])) };
         args["inquiryId"] = String(matches[0]!["inquiryId"]);
       }
@@ -922,14 +922,14 @@ export class ChatService {
       delete args["alternativeTopic"];
       if (!["agree", "decline", "alternative"].includes(String(args["response"]))) return refuse("invalid_command", "response must be agree, decline or alternative");
       if ((named !== undefined && typeof named !== "string") || (statement !== undefined && typeof statement !== "string") || (topicWords !== undefined && typeof topicWords !== "string")) return refuse("invalid_command", "decisionTopic, alternativeStatement and alternativeTopic must be text");
-      if (named !== undefined && args["decisionId"] !== undefined) return refuse("invalid_command", "give either decisionId or decisionTopic, not both");
+      if (named !== undefined && args["decisionId"] !== undefined) return refuse("invalid_command", "the meeting decision is named twice over, as decisionId and as decisionTopic; which one is meant has to be settled.");
       const isAlternative = args["response"] === "alternative";
       if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
       // What to do next depends on why: the words are the owner's to rephrase, a topic is theirs to name, a conflict is theirs to settle.
-      const instead = (reason: string, next = "say what you decide instead, in your own words — a plain sentence of at least two words"): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
+      const instead = (reason: string, next = "what you decide instead is not in your message"): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
       const said = typeof statement === "string" ? statement.trim() : "";
       if (isAlternative) {
-        if (said === "") return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
+        if (said === "") return refuse("invalid_command", "Nothing was proposed: no answer of yours is here to record. What do you decide instead?");
         if (!evidenceStrong(said)) return instead("a decision needs at least two words and at least six characters");
         if (said.length > 150) return instead("it is too long to show whole before you confirm (150 characters at most)");
         const notDecision = notADecision(said) ?? notADecisionIn(words, said);
@@ -940,9 +940,9 @@ export class ChatService {
       // A project the owner named narrows the decisions to that project.
       const waiting = projectId === undefined ? everyone : everyone.filter((d) => d["projectId"] === projectId);
       const cut = waitingList?.["truncated"] === true;
-      const tooMany = "More meeting decisions wait for you than could be read at once; say more of the words of the one you mean.";
+      const tooMany = "More meeting decisions wait for you than could be read at once, and the words do not say which one. Which is it?";
       let chosen: Record<string, unknown> | undefined;
-      if (waiting.length === 0) return refuse("not_found", cut ? "More meeting decisions exist than could be read at once, and none of those read waits for you; say more of the words of the one you mean." : everyone.length > 0 ? "no meeting decision of that project is waiting for your answer" : "no meeting decision is waiting for your answer");
+      if (waiting.length === 0) return refuse("not_found", cut ? "More meeting decisions exist than could be read at once, and none of those read waits for you; which one is meant cannot be told from the words." : everyone.length > 0 ? "no meeting decision of that project is waiting for your answer" : "no meeting decision is waiting for your answer");
       // Decisions of several projects are told apart by the project's name.
       const names = new Map<string, string>();
       if (new Set(waiting.map((d) => String(d["projectId"]))).size > 1) for (const id of new Set(waiting.map((d) => String(d["projectId"])))) names.set(id, ((await this.#get(token, "project.get", { projectId: id }))?.["name"] as string | undefined)?.slice(0, 40) ?? id);
@@ -958,7 +958,7 @@ export class ChatService {
         const text = (d: Record<string, unknown>): string => `${String(d["text"])} ${String(d["topic"] ?? "")}`;
         let matches = waiting.filter((d) => decisionWordsMatch(typed, text(d), true));
         if (matches.length === 0) matches = waiting.filter((d) => decisionWordsMatch(typed, text(d), false));
-        if (matches.length === 0) return refuse("not_found", cut ? tooMany : `no waiting meeting decision is about "${typed.slice(0, 80)}"`);
+        if (matches.length === 0) return refuse("not_found", cut ? tooMany : `no waiting meeting decision is about ${quotedText(typed, 80)}`);
         if (matches.length > 1) return askWhich(matches);
         chosen = matches[0]!;
         args["decisionId"] = String(chosen["id"]);
@@ -976,11 +976,11 @@ export class ChatService {
         // What the decision service would refuse on the topic is read now, so nothing bound to fail is proposed: another kind of decision on the topic, a conflict not yet settled, the same words already decided.
         const history = ((await this.#get(token, "decision.history", { projectId: chosen["projectId"], topic })) as unknown as Record<string, unknown>[] | undefined) ?? [];
         const kindHeld = history.find((e) => typeof e["category"] === "string" && e["category"] !== "decision");
-        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours, in your own words");
+        if (kindHeld !== undefined) return instead(`the topic ${quotedText(topic, 80)} holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours, in your own words");
         const live = history.filter((e) => e["state"] !== "superseded");
         // Any unsettled conflict on the topic stops a project-wide decision, a task's own included.
-        if (live.some((e) => e["state"] === "disputed")) return instead(`the topic "${topic}" has a conflict between two of your instructions`, "settle that conflict first, or decline the meeting's decision");
-        if (live.some((e) => e["taskId"] === undefined && typeof e["statement"] === "string" && normalText(e["statement"]) === normalText(said) && e["gate"] === undefined)) return instead(`you have already decided exactly this on the topic "${topic}"; it stands`, "decline the meeting's decision if that is what you mean, or say something different");
+        if (live.some((e) => e["state"] === "disputed")) return instead(`the topic ${quotedText(topic, 80)} has a conflict between two of your instructions`, "that conflict has to be settled first, or the meeting's decision declined");
+        if (live.some((e) => e["taskId"] === undefined && typeof e["statement"] === "string" && normalText(e["statement"]) === normalText(said) && e["gate"] === undefined)) return instead(`you have already decided exactly this on the topic ${quotedText(topic, 80)}; it stands`, "the meeting's decision is declined if that is what you mean, or the two are settled together");
         const alt: Record<string, unknown> = { projectId: chosen["projectId"], category: "decision", topic, statement: said, wording: said };
         const base = await this.#revisionFor(token, "decision", alt, undefined, new Map());
         if (!base.ok) return base;
@@ -997,8 +997,8 @@ export class ChatService {
       delete args["agentName"];
       const isNote = intent.op === "standup.add-statement";
       if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) return refuse("invalid_command", "meetingTopic and agentName must be text");
-      if (topic !== undefined && args["occurrenceId"] !== undefined) return refuse("invalid_command", "give either occurrenceId or meetingTopic, not both");
-      if (agentName !== undefined && args["briefId"] !== undefined) return refuse("invalid_command", "give either briefId or agentName, not both");
+      if (topic !== undefined && args["occurrenceId"] !== undefined) return refuse("invalid_command", "the meeting is named twice over, as occurrenceId and as meetingTopic; which one is meant has to be settled.");
+      if (agentName !== undefined && args["briefId"] !== undefined) return refuse("invalid_command", "the brief is named twice over, as briefId and as agentName; which one is meant has to be settled.");
       if (typeof args["briefId"] === "string") {
         // A brief picked from the owner's answer (or named by ID): it must be in this project, and its revision is read now.
         if (!isNote) return refuse("invalid_command", "preparing a stand-up takes the stand-up, not a brief");
@@ -1028,7 +1028,7 @@ export class ChatService {
           const named = words === "" ? [] : titles.filter((t) => looseMatch(words, t));
           if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(named[0]!, 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
           if (open.length === 0) return refuse("not_found", noneReady());
-          if (matches.length === 0) return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
+          if (matches.length === 0) return { ok: false, kind: "ask", question: `No stand-up here is called ${quotedText(words, 80)}. Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
           if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
           occurrence = matches[0]!;
           args["occurrenceId"] = String(occurrence["occurrenceId"]);
@@ -1040,10 +1040,10 @@ export class ChatService {
           const agents = await this.#listAll(token, "agent.list", { state: "active" });
           const nameOf = (id: unknown): string => String(agents.find((a) => a["principalId"] === id)?.["friendlyName"] ?? id);
           const wanted = typeof agentName === "string" ? agentName.trim().toLowerCase() : "";
-          if (wanted === "") return refuse("invalid_command", "say which agent's brief the note is for");
+          if (wanted === "") return refuse("invalid_command", "Which agent's brief is the note for? Nothing in your message names one.");
           const exact = briefs.filter((b) => nameOf(b["agent"]).trim().toLowerCase() === wanted);
           const chosen = exact.length > 0 ? exact : briefs.filter((b) => looseMatch(wanted, nameOf(b["agent"])));
-          if (chosen.length === 0) return refuse("not_found", `no brief in that stand-up is for an agent called "${wanted.slice(0, 80)}"`);
+          if (chosen.length === 0) return refuse("not_found", `no brief in that stand-up is for an agent called ${quotedText(wanted, 80)}`);
           if (chosen.length > 1) return { ok: false, kind: "ask", question: "Whose brief do you mean?", options: chosen.slice(0, CHAT_LIMITS.options).map((b) => `${String(b["id"])} (${nameOf(b["agent"]).slice(0, 60)})`), field: "briefId", choices: chosen.slice(0, CHAT_LIMITS.options).map((b) => String(b["id"])) };
           args["briefId"] = String(chosen[0]!["id"]);
           args["expectedRevision"] = chosen[0]!["revision"];
@@ -1060,8 +1060,8 @@ export class ChatService {
       const agentName = args["agentName"];
       delete args["meetingTopic"];
       delete args["agentName"];
-      if (topic !== undefined && args["occurrenceId"] !== undefined) return refuse("invalid_command", "give either occurrenceId or meetingTopic, not both");
-      if (agentName !== undefined && args["agent"] !== undefined) return refuse("invalid_command", "give either agent or agentName, not both");
+      if (topic !== undefined && args["occurrenceId"] !== undefined) return refuse("invalid_command", "the meeting is named twice over, as occurrenceId and as meetingTopic; which one is meant has to be settled.");
+      if (agentName !== undefined && args["agent"] !== undefined) return refuse("invalid_command", "the agent is named twice over, as agent and as agentName; which one is meant has to be settled.");
       if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) return refuse("invalid_command", "meetingTopic and agentName must be text");
       if (typeof args["occurrenceId"] === "string") {
         const planned = await this.#listAll(token, "meeting.planned", { projectId });
@@ -1071,15 +1071,15 @@ export class ChatService {
         const planned = await this.#listAll(token, "meeting.planned", { projectId });
         const words = typeof topic === "string" ? topic.trim().toLowerCase() : "";
         const matches = planned.filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
-        if (matches.length === 0) return refuse("not_found", words === "" ? "no meeting is planned in that project" : `no planned meeting is called "${words.slice(0, 80)}"`);
+        if (matches.length === 0) return refuse("not_found", words === "" ? "no meeting is planned in that project" : `no planned meeting is called ${quotedText(words, 80)}`);
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which meeting do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["id"])} (${String(m["title"]).slice(0, 60)}, ${String(m["startsAt"])})`), field: "occurrenceId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["id"])) };
         args["occurrenceId"] = String(matches[0]!["id"]);
       }
       if (args["agent"] === undefined) {
-        if (typeof agentName !== "string" || agentName.trim() === "") return refuse("invalid_command", "say which agent should attend");
+        if (typeof agentName !== "string" || agentName.trim() === "") return refuse("invalid_command", "Which agent should attend? Nothing in your message names one.");
         const agents = await this.#listAll(token, "agent.list", { state: "active" });
         const named = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === agentName.trim().toLowerCase());
-        if (named.length !== 1) return refuse(named.length === 0 ? "not_found" : "invalid_command", named.length === 0 ? `no active agent called "${agentName.slice(0, 80)}"` : `more than one agent is called "${agentName.slice(0, 80)}"`);
+        if (named.length !== 1) return refuse(named.length === 0 ? "not_found" : "invalid_command", named.length === 0 ? `no active agent called ${quotedText(agentName, 80)}` : `more than one agent is called ${quotedText(agentName, 80)}`);
         args["agent"] = String(named[0]!["principalId"]);
         labels[String(args["agent"])] = agentName.trim();
       }
@@ -1093,7 +1093,7 @@ export class ChatService {
       delete args["watchProject"];
       if (wholeProject !== undefined && wholeProject !== true && wholeProject !== false) return refuse("invalid_command", "watchProject must be true or false");
       if (wholeProject === true) {
-        if (args["stream"] !== undefined || watched !== undefined || args["watchedTaskId"] !== undefined) return refuse("invalid_command", "give either watchProject or the task to watch, not both");
+        if (args["stream"] !== undefined || watched !== undefined || args["watchedTaskId"] !== undefined) return refuse("invalid_command", "what to watch is given twice over, as watchProject and as the task to watch; only one of them can be used.");
         args["stream"] = `project:${projectId}`;
       }
       if (typeof args["watchedTaskId"] === "string" && args["stream"] === undefined) {
@@ -1102,15 +1102,15 @@ export class ChatService {
         args["stream"] = `task:${args["watchedTaskId"]}`;
       }
       delete args["watchedTaskId"];
-      if (args["stream"] !== undefined && watched !== undefined) return refuse("invalid_command", "give either stream or watchedTaskTitle, not both");
-      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's owner should be told");
+      if (args["stream"] !== undefined && watched !== undefined) return refuse("invalid_command", "what to watch is given twice over, as stream and as watchedTaskTitle; only one of them can be used.");
+      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "Which task's owner should be told? Nothing in your message names one.");
       if (args["stream"] === undefined) {
         if (watched === undefined) args["stream"] = `task:${args["taskId"]}`;
         else {
           if (typeof watched !== "string" || watched.length === 0) return refuse("invalid_command", "watchedTaskTitle must be text");
           const matches = await this.#tasksByTitle(token, projectId as string, watched);
-          if (matches.length === 0) return refuse("not_found", `no task called "${watched.slice(0, 80)}" in that project`);
-          if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called "${watched.slice(0, 80)}". Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: "watchedTaskId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+          if (matches.length === 0) return refuse("not_found", `no task called ${quotedText(watched, 80)} in that project`);
+          if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called ${quotedText(watched, 80)}. Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: "watchedTaskId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
           args["stream"] = `task:${(matches[0] as { id: string }).id}`;
         }
       }
@@ -1124,7 +1124,7 @@ export class ChatService {
         showFirst = "the watch comes from an ID, not from the task you named, so it is shown first";
       }
       else {
-        if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's watch should end");
+        if (typeof args["taskId"] !== "string") return refuse("invalid_command", "Which task's watch should end? Nothing in your message names one.");
         const mine = active.filter((w) => w["taskId"] === args["taskId"] && inScope(w));
         if (mine.length === 0) return refuse("not_found", "no watch is active for that task");
         if (mine.length > 1) return { ok: false, kind: "ask", question: "More than one watch tells that task's owner. Which one?", options: mine.slice(0, CHAT_LIMITS.options).map((w) => `${String(w["id"])} (${String(w["stream"])})`), field: "watchId", choices: mine.slice(0, CHAT_LIMITS.options).map((w) => String(w["id"])) };
@@ -1144,7 +1144,7 @@ export class ChatService {
     if (intent.op === "catalog.revoke") {
       // ASSUMPTION (2026-11-07): a choice is taken without asking only when the owner said the word; a choice the model supplied that the owner did not say is dropped, so the question below is asked instead of the move being refused.
       if (args["runningCalls"] !== undefined && !(typeof args["runningCalls"] === "string" && ["finish", "cancel", "pause"].includes(args["runningCalls"]) && SAID_CHOICE[args["runningCalls"] as "finish" | "cancel" | "pause"].test(words))) delete args["runningCalls"];
-      if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "say which tool and which version to revoke");
+      if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "Which tool should be revoked, and which version of it? Nothing in your message names them.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "catalog.running", args: { name: args["name"], version: args["version"] } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
       const running = (found.result["items"] ?? []) as { attemptId: string; callId: string; taskId: string; agentId: string }[];
@@ -1169,12 +1169,12 @@ export class ChatService {
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
       delete args["toAgentName"];
-      if (named !== undefined && args["to"] !== undefined) return refuse("invalid_command", "give either to or toAgentName, not both");
+      if (named !== undefined && args["to"] !== undefined) return refuse("invalid_command", "the new owner is named twice over, as to and as toAgentName; which one is meant has to be settled.");
       if (args["to"] === undefined) {
-        if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "say which agent should take the task");
+        if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "Which agent should take the task? Nothing in your message names one.");
         const agents = await this.#listAll(token, "agent.list", { state: "active" });
         const found = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === named.trim().toLowerCase());
-        if (found.length !== 1) return refuse(found.length === 0 ? "not_found" : "invalid_command", found.length === 0 ? `no active agent called "${named.slice(0, 80)}"` : `more than one agent is called "${named.slice(0, 80)}"`);
+        if (found.length !== 1) return refuse(found.length === 0 ? "not_found" : "invalid_command", found.length === 0 ? `no active agent called ${quotedText(named, 80)}` : `more than one agent is called ${quotedText(named, 80)}`);
         args["to"] = { kind: "agent", id: String(found[0]!["id"]) };
         labels[String(found[0]!["id"])] = named.trim();
       }
@@ -1182,7 +1182,7 @@ export class ChatService {
     if (intent.op === "resume.retry" || intent.op === "resume.cancel") {
       // The owner names the task; the check is always the one the task has now, so what is shown (the task) and what is acted on (its check) are the same. A check ID the interpreter put in is
       // never acted on by itself: it must be the named task's current check. Nothing is guessed when the task has none.
-      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's resume check you mean");
+      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "Which task's resume check is this about? Nothing in your message names one.");
       const current = await this.#get(token, "resume.for-task", { taskId: args["taskId"] });
       if (current === undefined) return refuse("not_found", "that task has no resume check");
       if (args["checkId"] !== undefined && args["checkId"] !== current["id"]) return refuse("invalid_command", "that resume check is not the named task's current one; name the task only");
@@ -1193,7 +1193,7 @@ export class ChatService {
     }
     if (intent.op === "handoff.complete" || intent.op === "handoff.cancel") {
       if (args["handoffId"] === undefined) {
-        if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's hand-off you mean");
+        if (typeof args["taskId"] !== "string") return refuse("invalid_command", "Which task's hand-off is this about? Nothing in your message names one.");
         const going = await this.#get(token, "handoff.for-task", { taskId: args["taskId"] });
         if (going === undefined) return refuse("not_found", "that task has no hand-off going");
         args["handoffId"] = String(going["id"]);
@@ -1237,7 +1237,7 @@ export class ChatService {
     // A running task keeps its checkout: a different repository for a task that is in progress or has an owner is refused, and otherwise it is a proposal (it is an authority field).
     if (intent.op === "task.update" && typeof args["repositoryId"] === "string" && task !== undefined && args["repositoryId"] !== task.repositoryId) {
       const assignment = await this.#get(token, "assignment.get", { taskId: args["taskId"] });
-      if (task.state === "in_progress" || (assignment !== undefined && assignment["state"] === "assigned")) return refuse("task_running", `"${task.title}" is being worked on and keeps its repository; release it first if it must move`);
+      if (task.state === "in_progress" || (assignment !== undefined && assignment["state"] === "assigned")) return refuse("task_running", `${quotedText(task.title, 80)} is being worked on and keeps its repository; release it first if it must move`);
       pins.push({ taskId: args["taskId"] as string, projectId: task.projectId, idle: true });
     }
 
@@ -1251,7 +1251,7 @@ export class ChatService {
         const repos = ((project?.["repositories"] ?? []) as { id: string }[]).map((r) => r.id);
         if (chosen !== undefined && repos.includes(chosen)) repositoryId = chosen;
         else if (repos.length === 1) repositoryId = repos[0] as string;
-        else return { ok: false, kind: "ask", question: `Which repository should "${task.title}" work in?${repos.length === 0 ? " The project has none; add one first." : ""}`, options: repos.slice(0, CHAT_LIMITS.options), ...(repos.length === 0 ? {} : { field: "repositoryId", choices: repos.slice(0, CHAT_LIMITS.options) }) };
+        else return { ok: false, kind: "ask", question: `Which repository should ${quotedText(task.title, 80)} work in?${repos.length === 0 ? " The project has none; add one first." : ""}`, options: repos.slice(0, CHAT_LIMITS.options), ...(repos.length === 0 ? {} : { field: "repositoryId", choices: repos.slice(0, CHAT_LIMITS.options) }) };
         steps.push({ op: "task.update", args: { taskId: args["taskId"], expectedRevision: task.revision + (pending.get(`task:${args["taskId"] as string}`) ?? 0), repositoryId }, commandId: "", key: "repo" });
         pins.push({ taskId: args["taskId"] as string, projectId: task.projectId, repositoryId, repositoryFromStep: "repo", idle: true });
       } else pins.push({ taskId: args["taskId"] as string, projectId: task.projectId, repositoryId });
@@ -1262,7 +1262,7 @@ export class ChatService {
     if (intent.op === "resource.bind" && args["locator"] === undefined) {
       const label = typeof args["label"] === "string" ? args["label"].trim().toLowerCase() : "";
       const old = label === "" || typeof args["projectId"] !== "string" ? [] : (await this.#unboundResources(token, args["projectId"])).filter((r) => String(r["label"]).trim().toLowerCase() === label);
-      if (old.length !== 1) return { ok: false, kind: "ask", question: `Where is "${String(args["label"] ?? "it").slice(0, 80)}"? Give its location (a path or address).`, options: [] };
+      if (old.length !== 1) return { ok: false, kind: "ask", question: `Where is ${quotedText(typeof args["label"] === "string" ? args["label"] : "it", 80)}? Nothing in your message gives its location (a path or an address).`, options: [] };
       args["locator"] = old[0]!["locator"];
       if (args["kind"] === undefined) args["kind"] = old[0]!["kind"];
       fromRecord = true;
@@ -1274,9 +1274,9 @@ export class ChatService {
       for (const raw of args["participants"] as unknown[]) {
         const entry = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : undefined;
         if (entry === undefined || entry["agentName"] === undefined) { resolved.push(raw); continue; }
-        if (entry["principalId"] !== undefined || typeof entry["agentName"] !== "string") return refuse("invalid_command", "name a participant by agentName or principalId, not both");
+        if (entry["principalId"] !== undefined || typeof entry["agentName"] !== "string") return refuse("invalid_command", "a participant is named both as agentName and as principalId; which one is meant has to be settled.");
         const matches = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === (entry["agentName"] as string).trim().toLowerCase());
-        if (matches.length !== 1) return refuse(matches.length === 0 ? "not_found" : "invalid_command", matches.length === 0 ? `no active agent called "${(entry["agentName"] as string).slice(0, 80)}"` : `more than one agent is called "${(entry["agentName"] as string).slice(0, 80)}"; use the agent's ID`);
+        if (matches.length !== 1) return refuse(matches.length === 0 ? "not_found" : "invalid_command", matches.length === 0 ? `no active agent called ${quotedText(entry["agentName"] as string, 80)}` : `more than one agent is called ${quotedText(entry["agentName"] as string, 80)}, so which one is meant is not settled`);
         delete entry["agentName"];
         entry["principalId"] = matches[0]!["principalId"];
         resolved.push(entry);
@@ -1285,7 +1285,7 @@ export class ChatService {
     }
     // An environment change request (card A09): named by an ID the owner said; deciding it is bound to the request as it is now (its digest and revision are read from the record, never said), and the owner sees what it asks for.
     if (intent.op === "maintenance.decide" || intent.op === "maintenance.revoke" || intent.op === "maintenance.apply") {
-      if (typeof args["maintenanceId"] !== "string") return refuse("invalid_command", "say which request: its maintenance ID");
+      if (typeof args["maintenanceId"] !== "string") return refuse("invalid_command", "Which maintenance request is this about? Nothing in your message names one, and the chat will not invent an ID.");
       const item = await this.#get(token, "maintenance.get", { maintenanceId: args["maintenanceId"] });
       if (item === undefined) return refuse("not_found", "no such maintenance request");
       extraTargets.push(args["maintenanceId"]);
@@ -1485,8 +1485,8 @@ export class ChatService {
     const wanted = (projectName ?? "").trim().toLowerCase();
     const all = await this.#listAll(token, "project.list", {});
     const matches = all.filter((p) => (p["name"] as string).trim().toLowerCase() === wanted);
-    if (matches.length === 0) return { ok: false, kind: "refuse", code: "not_found", message: `no project called "${(projectName ?? "").slice(0, 80)}"` };
-    if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one project is called "${(projectName ?? "").slice(0, 80)}". Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((p) => p["id"] as string), field: "projectId", choices: matches.slice(0, CHAT_LIMITS.options).map((p) => p["id"] as string) };
+    if (matches.length === 0) return { ok: false, kind: "refuse", code: "not_found", message: `no project called ${quotedText(projectName ?? "", 80)}` };
+    if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one project is called ${quotedText(projectName ?? "", 80)}. Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((p) => p["id"] as string), field: "projectId", choices: matches.slice(0, CHAT_LIMITS.options).map((p) => p["id"] as string) };
     return { ok: true, id: (matches[0] as { id: string })["id"] as string, name: (matches[0] as { name: string })["name"] as string };
   }
 
@@ -1626,7 +1626,7 @@ export class ChatService {
     const inv = parseInvocation(item.typed);
     const op = inv?.namespace === "nimblenewt" ? BUILTIN_COMMANDS.operationOf(`nimblenewt.${inv.name}`) : undefined;
     if (op !== undefined && op.kind !== "query" && !RECOVERY_OPS.has(op.name)) {
-      return { i: item.i, status: "refused", code: "needs_confirmation", message: `/nimblenewt.${inv!.name} changes things, so it is not run from a typed line: say what you want in words and it is shown to you first (or send command.run through the API).` };
+      return { i: item.i, status: "refused", code: "needs_confirmation", message: `/nimblenewt.${inv!.name} changes things, so a typed line does not run it. Asked for in a message, the same thing is drawn up for you to confirm first (or sent as command.run through the API).` };
     }
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op: "command.run", commandId: `${turnId}-c${item.i}`, args: { typed: item.typed } });
     if (!response.ok) return { i: item.i, status: "refused", code: response.error.code, message: response.error.message };
@@ -1688,7 +1688,7 @@ export class ChatService {
             const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
             const src = done?.["source"] as { turnId?: string } | undefined;
             if (done === undefined || src?.turnId !== sourceTurn) return undefined;
-            const text = done["state"] === "disputed" ? `Recorded decision version ${String(done["version"])}, but it conflicts with a decision made after the version it was based on: nothing on that topic is in force until you choose.` : `Recorded decision version ${String(done["version"])} on "${String(done["topic"] ?? "the gate")}": ${String(done["statement"] ?? "")}`;
+            const text = done["state"] === "disputed" ? `Recorded decision version ${String(done["version"])}, but it conflicts with a decision made after the version it was based on: nothing on that topic is in force until you choose.` : `Recorded decision version ${String(done["version"])} on ${quotedText(String(done["topic"] ?? "the gate"), 80)}: ${quotedText(String(done["statement"] ?? ""), 200)}`;
             return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: done["id"] as string, shown: [text.slice(0, 600)], accepted: true, completed: true } as Record<string, unknown>;
           };
           const already = await known();
@@ -1702,7 +1702,7 @@ export class ChatService {
           // The same turn was sent twice at once and the other copy recorded this step between the look and the send: it is done.
           const recorded = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
           const src = recorded?.["source"] as { turnId?: string } | undefined;
-          if (recorded !== undefined && src?.turnId === (typeof item.args["sourceTurnId"] === "string" ? item.args["sourceTurnId"] : turnId)) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on "${String(recorded["topic"] ?? "the gate")}".`], accepted: true, completed: true } as never;
+          if (recorded !== undefined && src?.turnId === (typeof item.args["sourceTurnId"] === "string" ? item.args["sourceTurnId"] : turnId)) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on ${quotedText(String(recorded["topic"] ?? "the gate"), 80)}.`], accepted: true, completed: true } as never;
         }
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
         return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
@@ -1842,7 +1842,7 @@ export class ChatService {
         // A decision step is based on the version of its topic when it was shown, but decisions of the same message applied before it do not count as the topic having moved. A step already recorded (this apply run again) is answered from the record.
         const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, step.commandId)) });
         if (done !== undefined) {
-          results.push({ op: step.op, id: done["id"] as string, shown: [`Recorded decision version ${String(done["version"])} on "${String(done["topic"] ?? "the gate")}".`], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true });
+          results.push({ op: step.op, id: done["id"] as string, shown: [`Recorded decision version ${String(done["version"])} on ${quotedText(String(done["topic"] ?? "the gate"), 80)}.`], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true });
           continue;
         }
         const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
@@ -2115,7 +2115,7 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
   const lines: string[] = [];
   for (const o of outcomes) {
     // A policy edit says what it means in plain words, what stays as it is, and what was not applied.
-    const edit = o.editId === undefined ? "" : [...(o.preview ?? []), ...(o.explanation ?? []), ...(o.unapplied ?? []).map((u) => `Not applied: "${u}".`)].join(" ");
+    const edit = o.editId === undefined ? "" : [...(o.preview ?? []), ...(o.explanation ?? []), ...(o.unapplied ?? []).map((u) => `Not applied: ${quotedText(u, 120)}.`)].join(" ");
     switch (o.status) {
       case "asked": lines.push(`${o.question ?? ""}${o.options !== undefined && o.options.length > 0 ? ` (${o.options.join("; ")})` : ""}`); break;
       case "held": lines.push(o.message ?? "Held."); break;
