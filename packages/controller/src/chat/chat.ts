@@ -980,13 +980,10 @@ export class ChatService {
         const titles = await this.#standupTitles(token, projectId);
         const noneReady = (): string => titles.length === 0
           ? `no stand-up is set up in this project, so there is nothing to ${isNote ? "write into" : "prepare"}`
-          : titles.length === 1
-            ? `the stand-up ${quotedText(titles[0]!, 60)} has no meeting to ${isNote ? "write into" : "prepare"} yet`
-            : `this project has ${titles.map((t) => quotedText(t, 60)).join(", ")}, but none of them has a meeting to ${isNote ? "write into" : "prepare"} yet`;
+          : `${titleList(titles)} ${titles.length === 1 ? "has" : "have"} no meeting to ${isNote ? "write into" : "prepare"} yet`;
         const recent = await this.#get(token, "standup.recent", { projectId, limit: 50 });
         const open = ((recent?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => (isNote ? i["state"] === "planned" : i["state"] === "planned" || i["state"] === "reported"));
         const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${String(i["title"]).slice(0, 60)}, ${String(i["startsAt"])})`;
-
         let occurrence: Record<string, unknown> | undefined;
         if (typeof args["occurrenceId"] === "string") {
           occurrence = open.find((i) => i["occurrenceId"] === args["occurrenceId"]);
@@ -998,9 +995,7 @@ export class ChatService {
           const named = words === "" ? [] : titles.filter((t) => looseMatch(words, t));
           if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(named[0]!, 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
           if (open.length === 0) return refuse("not_found", noneReady());
-          if (matches.length === 0) {
-            return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
-          }
+          if (matches.length === 0) return { ok: false, kind: "ask", question: `No stand-up here is called "${words.slice(0, 80)}". Which one do you mean?`, options: open.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: open.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
           if (matches.length > 1) return { ok: false, kind: "ask", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map(pick), field: "occurrenceId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["occurrenceId"])) };
           occurrence = matches[0]!;
           args["occurrenceId"] = String(occurrence["occurrenceId"]);

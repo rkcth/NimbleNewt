@@ -296,7 +296,7 @@ for (const backend of backends) {
     assert.equal(wide.status, "refused", JSON.stringify(wide));
     assert.match(String(wide.message), /"Morning sync"/);
     assert.match(String(wide.message), /"Evening wrap"/);
-    assert.match(String(wide.message), /none of them has a meeting to prepare yet/);
+    assert.match(String(wide.message), /"Evening wrap" and "Morning sync" have no meeting to prepare yet/);
 
     // A note for an agent meets the same answer on the briefs side.
     const note = await said("Tell the morning agent to look at the cache.", cmd("standup.add-statement", { meetingTopic: "morning", agentName: "morning", section: "note", text: "look at the cache" }, "Tell the morning agent to look at the cache"));
