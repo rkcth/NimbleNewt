@@ -396,9 +396,37 @@ export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"
 
 /**
  * True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action (card X09b part 2 review: "host:rig2" said by the owner is not "host:rig").
- * A word may be joined to a full stop that ends the sentence, but to nothing else that could be part of a name.
+ * Punctuation that cannot be part of a name is a boundary (card X09b part 2 review 2, item 6): markdown bold or a backtick around an ID, a colon before it ("candidate:rcn-1a2b"), a quote, a comma, a
+ * bracket, or a full stop, colon or underscore that ends it. What still joins two names is a letter, a digit, or a dash, underscore, dot or colon with more of the name after it, so `host:rig2` is not
+ * `host:rig`, `rcn-1a2bc` is not `rcn-1a2b` and `rcn-1a2b_old` is not `rcn-1a2b`.
  */
-export const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
+export const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(?<![A-Za-z0-9._-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])(?![\-_.:][A-Za-z0-9])`, "i").test(text);
+
+/**
+ * How an owner names a platform (card X09b part 2 review 2, item 3): `os` and `arch` are fixed choices the words check lets through, so the chat checks them itself, and an owner writes "my mac" or
+ * "linux-x64" rather than "darwin x64". Each choice is therefore written down here with the ways people spell it.
+ */
+const PLATFORM_WORDS: Readonly<Record<"os" | "arch", Readonly<Record<string, readonly string[]>>>> = {
+  os: { linux: ["linux"], darwin: ["darwin", "macos", "mac os", "mac", "macbook", "imac", "mac mini"], win32: ["win32", "windows"] },
+  arch: { x64: ["x64", "x86_64", "x86-64", "amd64"], arm64: ["arm64", "aarch64", "apple silicon"] },
+};
+/** A name standing on its own: what sits before and after it is not a letter or a digit, so a hyphen, slash, colon or underscore between two names does not join them into one. */
+const namedWord = (words: string, alias: string): boolean => new RegExp(`(?<![A-Za-z0-9])${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "i").test(words);
+
+/** Whether the owner's own words name this platform: `linux-x64` and `linux/x64` name both, a mac (or macOS) is darwin, windows is win32, x86_64 and amd64 are x64, and aarch64 is arm64. */
+export function saysPlatform(words: string, key: "os" | "arch", value: string): boolean {
+  const wanted = value.trim().toLowerCase();
+  return (PLATFORM_WORDS[key][wanted] ?? [wanted]).some((alias) => namedWord(words, alias));
+}
+
+/** Another platform of the same kind the owner did name — so a refusal can say what they said instead — or undefined when their message names none of that kind (then they are asked, not refused). */
+export function otherPlatform(words: string, key: "os" | "arch", value: string): string | undefined {
+  const wanted = value.trim().toLowerCase();
+  return Object.keys(PLATFORM_WORDS[key]).find((v) => v !== wanted && PLATFORM_WORDS[key]![v]!.some((alias) => namedWord(words, alias)));
+}
+
+/** The platforms of this kind the operation accepts, as the choices to offer the owner. */
+export const platformChoices = (key: "os" | "arch"): readonly string[] => Object.keys(PLATFORM_WORDS[key]);
 
 /** Keys whose value is a machine or record name rather than a sentence: the owner must have said it as a whole word, not merely as the start of a longer one. Release IDs (which `foreignValue`'s `strict` set makes checked) are matched the same way. */
 export const WHOLE_WORD_KEYS: ReadonlySet<string> = new Set(["hostId"]);

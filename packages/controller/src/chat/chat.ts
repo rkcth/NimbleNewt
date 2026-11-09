@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, saysAcknowledgeFlaky, wholeWord, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, saysAcknowledgeFlaky, wholeWord, saysPlatform, otherPlatform, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -525,10 +525,21 @@ export class ChatService {
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
       // Accepting a platform that passed only after earlier failures is the owner's own word, never the interpreter's (card X09b part 2 review): `acknowledgeFlaky` is refused unless their message says it.
-      // Which machine, and which platform of it, a destructive release test may run on is the owner's choice: `os` and `arch` are fixed choices, so the words check lets them through and they are checked here (card X09b part 2 review).
-      if (intent.op === "release.host") {
-        const platform = (["os", "arch"] as const).find((key) => typeof intent.args[key] === "string" && !wholeWord(words, intent.args[key] as string));
-        if (platform !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${platform} is not in your message, so no host was authorized. Say which ${platform} the host is authorized for (linux, darwin or win32; x64 or arm64).` }); continue; }
+      // Which machine, and which platform of it, a destructive release test may run on is the owner's choice: `os` and `arch` are fixed choices, so the words check lets them through and they are checked here
+      // (card X09b part 2 review, item 3). The owner's own spelling counts (linux-x64, my mac, x86_64); naming no platform of a kind is a question, and naming another one is refused. Withdrawing a host
+      // (`active: false`) picks no platform for a machine — it takes one off the list — so it asks for neither os nor arch.
+      if (intent.op === "release.host" && intent.args["active"] !== false) {
+        const host = typeof intent.args["hostId"] === "string" ? `"${(intent.args["hostId"] as string).slice(0, 80)}"` : "that host";
+        const gap = (["os", "arch"] as const).map((key) => {
+          const value = intent.args[key];
+          if (typeof value !== "string" || saysPlatform(words, key, value)) return undefined;
+          return { key, value, said: otherPlatform(words, key, value) };
+        }).find((x) => x !== undefined);
+        if (gap !== undefined) {
+          if (gap.said !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${gap.key} is not in your message, so nothing was changed for ${host}. Your own words say ${gap.key} "${gap.said}", not "${gap.value}". Say which ${gap.key} the host is authorized for (${platformChoices(gap.key).join(", ")}), or that the platform is not what you meant.` }); continue; }
+          push({ i, kind: "asked", intentIndex: n, field: gap.key, choices: [...platformChoices(gap.key)], options: [...platformChoices(gap.key)], question: gap.key === "os" ? `${host} is to be authorized for release tests, but your message does not say which platform it runs. Which one — ${platformChoices("os").join(", ")}?` : `${host} is to be authorized for release tests, but your message does not say which chip it has. Which one — ${platformChoices("arch").join(", ")}?` });
+          continue;
+        }
       }
       if (intent.op === "release.approve" && intent.args["acknowledgeFlaky"] !== undefined && intent.args["acknowledgeFlaky"] !== false && !saysAcknowledgeFlaky(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "A release that passed only after earlier failures is approved only when your own words accept those failures (for example \"I have read the gate and accept the earlier failures, approve it with acknowledgeFlaky\"). The interpreter's acknowledgeFlaky was not used." }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
@@ -597,8 +608,8 @@ export class ChatService {
       return { work, quoted: old.quotedCount > 0 };
     }
     args[asked.field] = choice;
-    // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word: it counts as said, like the project-creation answers.
-    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" ? `${target.text}. ${choice}` : target.text };
+    // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word, as is the platform (or chip) they name for a host: it counts as said, like the project-creation answers.
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 

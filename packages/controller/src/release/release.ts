@@ -118,10 +118,28 @@ const ISSUERIDX = "release-issuer";
 export const RELEASE_KINDS = { candidate: CANDIDATE, approval: APPROVAL } as const;
 const SETTINGS: AggregateRef = { kind: "release-settings", id: "main" };
 /** How many candidate records one page of the owner's candidate scan holds, and how many pages it reads at most (so a list never reads unbounded). */
-const CANDIDATE_SCAN_PAGE = 200;
+export const CANDIDATE_SCAN_PAGE = 200;
 const CANDIDATE_SCAN_PAGES = 25;
 /** The most candidate records one `candidates()` call reads: `CANDIDATE_SCAN_PAGE * CANDIDATE_SCAN_PAGES`. */
 export const CANDIDATE_SCAN = CANDIDATE_SCAN_PAGE * CANDIDATE_SCAN_PAGES;
+/**
+ * Read a store page by page: `list(after, limit)` gives the records after `after` (the record IDs order them, which for a digest ID says nothing about when they were written). It stops after `pages` full
+ * pages, and then reads ONE more record: a store of exactly `limit * pages` records ends on the last page and is read to the end, so `scanLimited` is true only when something was really left unread
+ * (card X09b part 2 review 2, item 4 — at exactly the bound the old loop said the bound had been reached).
+ */
+export async function scanPages<T extends { id: string }>(list: (after: string | undefined, limit: number) => Promise<readonly T[]>, limit: number, pages: number): Promise<{ readonly rows: T[]; readonly scanLimited: boolean }> {
+  const rows: T[] = [];
+  let after: string | undefined;
+  for (let read = 0; read < pages; read++) {
+    const chunk = await list(after, limit);
+    for (const row of chunk) rows.push(row);
+    // A short page is the end of the store: everything was read, so what is left out is counted exactly.
+    if (chunk.length < limit) return { rows, scanLimited: false };
+    after = chunk[chunk.length - 1]!.id;
+  }
+  return { rows, scanLimited: (await list(after, 1)).length > 0 };
+}
+
 const ROLE = /^[a-z][a-z0-9-]{0,39}$/;
 
 /** The issuer settings with the profile's default under any field not set. Pure. */
@@ -216,19 +234,29 @@ export class ReleaseService {
     return { candidateId, replayed: done.replayed };
   }
 
-  /** The owner allows a host to run destructive release tests for one platform. A machine used for production work is not authorized by that. Withdrawing the authorization (or moving it to another platform) ends what is open on the host at once. */
-  async authorizeHost(owner: Principal, command: NoActor & { hostId: string; os: Cell["os"]; arch: Cell["arch"]; active?: boolean }): Promise<void> {
+  /**
+   * The owner allows a host to run destructive release tests for one platform. A machine used for production work is not authorized by that. Withdrawing the authorization (or moving it to another platform)
+   * ends what is open on the host at once. Withdrawing names no platform (card X09b part 2 review 2, item 3): the owner takes the machine off the release machines, and which platform it stood for is what the
+   * authorization on record says — the owner is not made to recite it, and the interpreter is not allowed to pick it.
+   */
+  async authorizeHost(owner: Principal, command: NoActor & { hostId: string; os?: Cell["os"]; arch?: Cell["arch"]; active?: boolean }): Promise<void> {
     this.#owner(owner, "authorize a host for release tests");
     onlyKnown(command, ["commandId", "hostId", "os", "arch", "active"]);
     const hostId = text(command.hostId, "hostId", { min: 1, max: 80 });
-    const cell = checkCell({ os: command.os, arch: command.arch }, "platform");
     const active = command.active !== false;
+    const given = command.os !== undefined || command.arch !== undefined;
+    if (active && !given) throw new DomainError("invalid_command", "os and arch say which platform the host is authorized for; a withdrawal may leave them out", { field: "os" });
+    const cell = given ? checkCell({ os: command.os, arch: command.arch }, "platform") : undefined;
     const ref: AggregateRef = { kind: HOST, id: `rhs-${sha(hostId).slice(0, 24)}` };
     await this.#runner.command("release.host", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { hostId, platform: cellKey(cell), active },
+      payload: { hostId, platform: cell === undefined ? "any (the platform the authorization on record names)" : cellKey(cell), active },
       build: async (): Promise<Built> => {
         const existing = await this.#runner.get(HOST, ref.id);
-        const body: HostAuthBody = { hostId, os: cell.os, arch: cell.arch, active, by: owner.id, at: this.#runner.now() };
+        const was = existing?.body as unknown as HostAuthBody | undefined;
+        // A withdrawal that names no platform is the record's own platform; there is nothing to withdraw when there is no record.
+        const where = cell ?? (was === undefined ? undefined : { os: was.os, arch: was.arch });
+        if (where === undefined) throw new DomainError("not_found", `${hostId} is not authorized for release tests, so there is nothing to withdraw`, { field: "hostId" });
+        const body: HostAuthBody = { hostId, os: where.os, arch: where.arch, active, by: owner.id, at: this.#runner.now() };
         const changes: Change[] = [existing === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: existing.revision, body: body as unknown as JsonObject }];
         // What the host was running under the authorization that ends is ended with it, so the destructive test stops (a host picked-up job is told to stop in its next fetch).
         const idx = (await this.#runner.get(HOSTIDX, hostIdxId(hostId)))?.body as unknown as HostIndexBody | undefined;
@@ -236,7 +264,7 @@ export class ReleaseService {
         for (const id of idx?.open ?? []) {
           const found = await this.#runner.get(ATTEMPT, id);
           const attempt = found?.body as unknown as AttemptBody | undefined;
-          if (found !== undefined && attempt !== undefined && attempt.state === "issued" && (!active || attempt.cell.os !== cell.os || attempt.cell.arch !== cell.arch)) ending.push({ found, attempt });
+          if (found !== undefined && attempt !== undefined && attempt.state === "issued" && (!active || attempt.cell.os !== where.os || attempt.cell.arch !== where.arch)) ending.push({ found, attempt });
         }
         if (ending.length > 0) changes.push(...(await this.#endChanges(hostId, ending, "interrupted", owner.id, "the host's authorization was withdrawn")));
         return { ref, creates: existing === undefined, changes, detail: { hostId, active, ended: ending.length } };
@@ -755,16 +783,8 @@ export class ReleaseService {
     this.#owner(owner, "list release candidates");
     const limit = page.limit ?? 5;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) bad("limit", "must be a whole number from 1 to 20");
-    const scanned: { candidateId: string; submittedAt: string; submittedBy: string }[] = [];
-    let after: string | undefined;
-    let scanLimited = true;
-    for (let read = 0; read < CANDIDATE_SCAN_PAGES; read++) {
-      const chunk = await this.#runner.list(CANDIDATE, { ...(after === undefined ? {} : { afterId: after }), limit: CANDIDATE_SCAN_PAGE });
-      for (const a of chunk) { const body = a.body as unknown as CandidateBody; scanned.push({ candidateId: a.id, submittedAt: body.submittedAt, submittedBy: body.submittedBy }); }
-      // A short page is the end of the store: everything was read, so what is left out is counted exactly.
-      if (chunk.length < CANDIDATE_SCAN_PAGE) { scanLimited = false; break; }
-      after = chunk[chunk.length - 1]!.id;
-    }
+    const { rows, scanLimited } = await scanPages((after, limit) => this.#runner.list(CANDIDATE, { ...(after === undefined ? {} : { afterId: after }), limit }), CANDIDATE_SCAN_PAGE, CANDIDATE_SCAN_PAGES);
+    const scanned = rows.map((a) => { const body = a.body as unknown as CandidateBody; return { candidateId: a.id, submittedAt: body.submittedAt, submittedBy: body.submittedBy }; });
     scanned.sort((x, y) => (x.submittedAt === y.submittedAt ? (x.candidateId < y.candidateId ? -1 : 1) : x.submittedAt < y.submittedAt ? 1 : -1));
     // Whether a candidate is approved is not read here: the view reads each candidate's gate, which says it, so a list of N candidates costs no extra approval records.
     return { candidates: scanned.slice(0, limit), more: scanLimited || scanned.length > limit, scanLimited };

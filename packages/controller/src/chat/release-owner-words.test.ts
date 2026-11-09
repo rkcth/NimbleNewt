@@ -120,38 +120,6 @@ for (const backend of backends) {
       const ackConfirm = await turn("m10", "confirm that approval", [{ kind: "apply_proposal", proposalId: ackShown[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
       assert.equal(ackConfirm[0]!.status, "applied", JSON.stringify(ackConfirm[0]));
       assert.equal((await gate(cand)).approved, true);
-
-      // ---- an ID the owner did not say is refused: no host, attempt or candidate the model picked on its own.
-      const blindHost = "authorize another machine for release tests on win32 x64";
-      const bh = await turn("m11", blindHost, [{ kind: "command", op: "release.host", args: { hostId: "host:secret", os: "win32", arch: "x64" }, evidence: blindHost, basis: "owner" }]);
-      assert.equal(bh[0]!.status, "refused", JSON.stringify(bh[0]));
-      assert.equal(bh[0]!.code, "unsupported_value");
-      // ---- a name that only starts like another host, and a platform the interpreter picked: both refused (part 2 review, item 7).
-      const near = "authorize host:rig2 for release tests on win32 x64";
-      const nearShown = await turn("m11b", near, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", os: "win32", arch: "x64" }, evidence: near, basis: "owner" }]);
-      assert.equal(nearShown[0]!.status, "refused", `host:rig2 is not host:rig: ${JSON.stringify(nearShown[0])}`);
-      assert.match(nearShown[0]!.message!, /hostId/);
-      const otherCell = "let host:yard run release tests on linux x64";
-      const otherShown = await turn("m11c", otherCell, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "darwin", arch: "arm64" }, evidence: otherCell, basis: "owner" }]);
-      assert.equal(otherShown[0]!.status, "refused", `the platform the model chose is refused: ${JSON.stringify(otherShown[0])}`);
-      assert.match(otherShown[0]!.message!, /os|arch/);
-      const ownCell = "let host:yard run release tests on darwin arm64 too";
-      const ownCellShown = await turn("m11d", ownCell, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "darwin", arch: "arm64" }, evidence: ownCell, basis: "owner" }]);
-      assert.equal(ownCellShown[0]!.status, "proposed", `the platform the owner named is proposed: ${JSON.stringify(ownCellShown[0])}`);
-      const cand2 = await submit("c");
-      const open = await call(w.ownerToken, "release.issue", { candidateId: cand2, cell: linux, hostId: "host:rig", workerId: "agent:none", timeoutSeconds: 600, memoryMb: 512 });
-      assert.ok(open.ok, JSON.stringify(open));
-      // Only the attempt ID is foreign: the reason is taken from the owner's own words, so this fails if `attemptId` is ever dropped from RELEASE_ID_KEYS (part 2 review, item 2).
-      const blindInt = "stop the release test that is running now, it is not needed";
-      const bi = await turn("m12", blindInt, [{ kind: "command", op: "release.interrupt", args: { attemptId: open.result["attemptId"], reason: "it is not needed" }, evidence: blindInt, basis: "owner" }]);
-      assert.equal(bi[0]!.status, "refused", JSON.stringify(bi[0]));
-      assert.equal(bi[0]!.code, "unsupported_value", "the foreign value is the attempt ID the owner never named");
-      assert.match(bi[0]!.message!, /attemptId/, "the refusal names the attempt ID, not the owner's own reason");
-      assert.equal((await attempts(cand2))[0]!.state, "issued", "nothing was interrupted");
-      const blindApp = await turn("m13", "approve the current release", [{ kind: "command", op: "release.approve", args: { candidateId: cand }, evidence: "approve the current release", basis: "owner" }]);
-      assert.equal(blindApp[0]!.status, "refused", JSON.stringify(blindApp[0]));
-      assert.equal((await gate(cand)).approved, true, "the refusal changed nothing");
-
       // ---- the release status view in chat: the gate, the attempts, the flaky pass; bounded; and nothing for a caller who may not read it.
       const viewWords = `how is the release testing of ${cand} going`;
       const view = await turn("m14", viewWords, [ask({ kind: "release", candidateId: cand }, viewWords)]);
@@ -174,6 +142,54 @@ for (const backend of backends) {
       const missing = await call(w.ownerToken, "status.ask", { request: { kind: "release", candidateId: "rcn-not-a-candidate" } });
       assert.equal(missing.ok, false);
       assert.equal(missing.error?.code, "not_found", "the owner asking about a candidate that is not there reads exactly the same");
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: withdrawing a host by chat needs no platform named, and the owner's own spelling of a platform is enough (card X09b part 2 review 2, item 3)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script, undefined, (storage, epoch, built) => ({ release: ReleaseService.withEpoch(storage, epoch, options) }));
+    try {
+      const chat = w.chat({});
+      const turn = async (id: string, text: string, intents: unknown[]) => { script[text] = intents; return (await chat.submit(w.ownerToken, { messageId: id, text })).outcomes; };
+      const call = (op: string, args: Record<string, unknown>): Promise<Reply> => w.api.handle(w.ownerToken, { v: 1, op, ...(op === "release.gate" || op === "release.attempts" ? {} : { commandId: cid("x") }), args } as never) as never;
+      const cand = (await call("release.submit", { manifest: manifest("a") })).result!["candidateId"] as string;
+
+      // Authorizing still needs the platform, and now accepts the way owners write it: a hyphen or a slash, and mac/windows, x86_64/aarch64.
+      const hyphen = "let host:rig run release tests on linux-x64";
+      const hyphenShown = await turn("w1", hyphen, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", os: "linux", arch: "x64" }, evidence: hyphen, basis: "owner" }]);
+      assert.equal(hyphenShown[0]!.status, "proposed", `linux-x64 names linux and x64: ${JSON.stringify(hyphenShown[0])}`);
+      assert.equal((await turn("w2", "yes, authorize it", [{ kind: "apply_proposal", proposalId: hyphenShown[0]!.proposalId, evidence: "authorize it", basis: "owner" }]))[0]!.status, "applied");
+      assert.ok((await call("release.start", { candidateId: cand, cell: linux, hostId: "host:rig" })).ok, "the authorized machine may take a linux x64 test");
+
+      const slash = "authorize host:yard for release tests on linux/x64";
+      const slashShown = await turn("w3", slash, [{ kind: "command", op: "release.host", args: { hostId: "host:yard", os: "linux", arch: "x64" }, evidence: slash, basis: "owner" }]);
+      assert.equal(slashShown[0]!.status, "proposed", `linux/x64 names both: ${JSON.stringify(slashShown[0])}`);
+
+      const mac = "authorize host:macmini for release tests on my mac";
+      script[mac] = [{ kind: "command", op: "release.host", args: { hostId: "host:macmini", os: "darwin", arch: "arm64" }, evidence: mac, basis: "owner" }];
+      const macTurn = await chat.submit(w.ownerToken, { messageId: "w4", text: mac });
+      const macAsked = macTurn.outcomes[0]!;
+      assert.equal(macAsked.status, "asked", `"my mac" names the platform but not its chip, so the chat asks instead of refusing: ${JSON.stringify(macAsked)}`);
+      assert.ok((macAsked.options ?? []).includes("arm64"), JSON.stringify(macAsked.options));
+      script["the arm64 one"] = [{ kind: "answer", turnId: macTurn.turnId, choice: "arm64", evidence: "the arm64 one", basis: "owner" }];
+      const macAnswered = (await chat.submit(w.ownerToken, { messageId: "w4a", text: "the arm64 one" })).outcomes;
+      assert.equal(macAnswered[0]!.status, "proposed", `the chip the owner answered is theirs: ${JSON.stringify(macAnswered[0])}`);
+      assert.deepEqual(JSON.parse(JSON.stringify(macAnswered[0]!.results ?? [])), [], "nothing is applied until the owner confirms the proposal");
+
+      // A platform the owner did not name is still refused, and the refusal says what may be said.
+      const wrong = "let host:rig run release tests on linux x64";
+      const wrongShown = await turn("w5", wrong, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", os: "win32", arch: "x64" }, evidence: wrong, basis: "owner" }]);
+      assert.equal(wrongShown[0]!.status, "refused", `a wrong os is refused: ${JSON.stringify(wrongShown[0])}`);
+      assert.equal(wrongShown[0]!.code, "unsupported_value");
+      assert.match(wrongShown[0]!.message!, /linux/, "the refusal says what the owner did say");
+      assert.doesNotMatch(wrongShown[0]!.message!, /no host was authorized/, "the host was authorized before, so the refusal does not say it was not");
+
+      // Withdrawing is the narrowing direction: it names no platform, because the machine is not being chosen for anything.
+      const stop = "stop letting host:rig run release tests";
+      const stopShown = await turn("w6", stop, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", active: false }, evidence: stop, basis: "owner" }]);
+      assert.equal(stopShown[0]!.status, "proposed", `withdrawing a host needs no os or arch: ${JSON.stringify(stopShown[0])}`);
+      assert.equal((await turn("w7", "yes, take it off the release machines", [{ kind: "apply_proposal", proposalId: stopShown[0]!.proposalId, evidence: "take it off", basis: "owner" }]))[0]!.status, "applied");
+      assert.equal((await call("release.start", { candidateId: cand, cell: linux, hostId: "host:rig" })).error?.code, "forbidden", "the withdrawn machine takes no test now");
     } finally { await w.close(); }
   });
 

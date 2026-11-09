@@ -5,9 +5,35 @@ import { ProjectService } from "../domain/service.js";
 import { CommandRunner, type Built } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { ReleaseService, candidateIdOf, checkManifest, jobPayload, type Cell } from "./index.js";
+import { CANDIDATE_SCAN, CANDIDATE_SCAN_PAGE, ReleaseService, candidateIdOf, checkManifest, jobPayload, scanPages, type Cell } from "./index.js";
 
 after(stopServer);
+
+/** A store of `count` records read through the same paging the owner's candidate list uses, so the bound's edge is tested without writing 5,000 records (card X09b part 2 review 2, item 4). */
+const pagedStore = (count: number) => {
+  const all = Array.from({ length: count }, (_, i) => ({ id: `rcn-${i.toString(36).padStart(6, "0")}` }));
+  return (after: string | undefined, limit: number) => Promise.resolve(all.slice(after === undefined ? 0 : all.findIndex((r) => r.id === after) + 1, (after === undefined ? 0 : all.findIndex((r) => r.id === after) + 1) + limit));
+};
+
+test("the candidate scan reads a store of exactly its bound to the end, and says it stopped only when something was really left unread (card X09b part 2 review 2, item 4)", async () => {
+  // The same shape as the real one (pages of 200, 25 of them), at a size a test can hold: bound = 2 * 3 = 6 records.
+  const short = await scanPages(pagedStore(5), 2, 3);
+  assert.deepEqual([short.rows.length, short.scanLimited], [5, false], "a store below the bound is read to the end");
+  const exact = await scanPages(pagedStore(6), 2, 3);
+  assert.deepEqual([exact.rows.length, exact.scanLimited], [6, false], "a store of EXACTLY the bound is read to the end: the old loop said the bound was reached");
+  const oneMore = await scanPages(pagedStore(7), 2, 3);
+  assert.deepEqual([oneMore.rows.length, oneMore.scanLimited], [6, true], "one record past it is the first case where something is left unread");
+  const empty = await scanPages(pagedStore(0), 2, 3);
+  assert.deepEqual([empty.rows.length, empty.scanLimited], [0, false], "an empty store says nothing was left out");
+  const onePage = await scanPages(pagedStore(6), 200, 25);
+  assert.deepEqual([onePage.rows.length, onePage.scanLimited], [6, false], "a store that fits in the first page");
+  // The real bound, at the real page size: a store of exactly CANDIDATE_SCAN records, and one more.
+  const at = await scanPages(pagedStore(CANDIDATE_SCAN), CANDIDATE_SCAN_PAGE, 25);
+  assert.deepEqual([at.rows.length, at.scanLimited], [CANDIDATE_SCAN, false], "5,000 candidates are read to the end");
+  const past = await scanPages(pagedStore(CANDIDATE_SCAN + 1), CANDIDATE_SCAN_PAGE, 25);
+  assert.deepEqual([past.rows.length, past.scanLimited], [CANDIDATE_SCAN, true], "5,001 are not");
+});
+
 
 const options = { clock: () => "2026-10-30T12:00:00.000Z", pause: async () => undefined };
 let n = 0;
@@ -149,6 +175,7 @@ for (const backend of backends) {
     assert.equal((await c.rel.gate(c.owner, c.candidate)).approved, true);
     await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true }), /already approved/);
   });
+
 
   suite("X09b: two settings writes from the same revision cannot both win, a host's two pick-ups at once are one, and a platform has a bounded number of attempts", async (c) => {
     const [a, b] = await Promise.allSettled([
@@ -305,6 +332,27 @@ for (const backend of backends) {
     assert.equal(small.candidates.length, 20, "at most `limit` are listed whatever the store holds");
     assert.equal(small.candidates[0]!.candidateId, few.candidateId);
     assert.equal(small.more, true);
+  });
+
+  suite("X09b part 2 review 2, item 3: withdrawing a host names no platform, and a worker may not withdraw one", async (c) => {
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9", os: "linux", arch: "x64" });
+    const open = await issue(c.rel, c.owner, c.candidate, linux, "lx9", c.w1);
+    // The owner takes the machine off the release machines; which platform it stood for is what the record says, not something they have to recite (or the model has to pick).
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9", active: false });
+    await refuses("forbidden", () => issue(c.rel, c.owner, c.candidate, linux, "lx9", c.w1), /not authorized/);
+    assert.equal((await c.rel.attempts(c.owner, c.candidate)).find((a) => a.id === open.attemptId)!.state, "interrupted", "what it had open ends with the authorization");
+    // Authorizing still says which platform; withdrawing something that was never authorized says there is nothing to withdraw.
+    await refuses("invalid_command", () => c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9" } as never), /os and arch/);
+    await refuses("invalid_command", () => c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9", os: "linux" } as never), /os and arch|platform\.(os|arch)/);
+    await refuses("not_found", () => c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "never-set-up", active: false } as never), /nothing to withdraw/);
+    await refuses("forbidden", () => c.rel.authorizeHost(c.w1, { commandId: cid("a"), hostId: "lx9", active: false } as never), /only the owner|may not/);
+  });
+
+  suite("X09b part 2 review 2, item 5: candidates() is the owner's own read at the service itself, not only in the status view", async (c) => {
+    await refuses("forbidden", () => c.rel.candidates(c.w1), /may not list release candidates/);
+    await refuses("forbidden", () => c.rel.candidates(c.w2, { limit: 3 }), /may not list release candidates/);
+    const rows = await c.rel.candidates(c.owner, { limit: 5 });
+    assert.equal(rows.candidates[0]!.candidateId, c.candidate, "the owner reads them");
   });
 
   suite("X09b part 2 review: candidates() lists what is there and says nothing is left out when everything fits", async (c) => {
