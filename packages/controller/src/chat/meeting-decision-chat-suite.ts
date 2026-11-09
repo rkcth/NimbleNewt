@@ -291,7 +291,9 @@ export function defineMeetingDecisionChatTests(backendName: string): void {
         assert.deepEqual([refused.status, refused.code], ["refused", "invalid_command"], `${text}: ${JSON.stringify(refused)}`);
         assert.match(String(refused.message), /^Nothing was proposed: /);
         assert.match(String(refused.message), reason);
-        assert.match(String(refused.message), /The meeting decision still waits for your answer; say what you decide instead as its own sentence \(for example "Keep the staging server until May\."\)/);
+        assert.match(String(refused.message), /The meeting decision still waits for your answer; say what you decide instead, in your own words/);
+        // The owner is told what is missing, never given a form of words to copy.
+        assert.equal(/for example|say it exactly|only say/i.test(String(refused.message)), false, `a refusal dictates a phrase to the owner: ${JSON.stringify(refused)}`);
       }
       assert.equal((await ctl.decision(b.id)).ownerResponse, "pending", "nothing was changed");
       // An alternative without words, and one too long to show whole.

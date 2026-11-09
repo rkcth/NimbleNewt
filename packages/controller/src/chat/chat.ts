@@ -15,8 +15,8 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
-import { profileDefaults } from "../policy/integration-policy.js";
+import { wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
@@ -522,10 +522,8 @@ export class ChatService {
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
-      const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
-      if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
-      if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
+      if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long running work may go on, in your own words." }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
       // proposal that shows the exact earlier failures the gate lists, and the owner's confirmation of that shown proposal is the acceptance. No wording is a gate; the binding is the shown failures themselves.
       let command = intent;
@@ -767,6 +765,11 @@ export class ChatService {
       if (q !== undefined) return q;
       // "default" means the owner chose what the installation default or the profile gives; it is not sent.
       const kept = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== "default"));
+      // The section is shown on the proposal line, so only real settings are: an unknown field or a value the policy does not take is refused here, never displayed.
+      for (const [key, value] of Object.entries(kept)) {
+        const ok = key === "landing" ? (LANDINGS as readonly unknown[]).includes(value) : key === "integrator" ? (INTEGRATORS as readonly unknown[]).includes(value) : key === "requiredChecks" ? Array.isArray(value) && value.every((x) => (CHECKS as readonly unknown[]).includes(x)) : key === "refreshRounds" ? Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10 : false;
+        if (!ok) return refuse("invalid_command", `integration.${/^[A-Za-z]{1,30}$/.test(key) ? key : "?"} is not a setting the project takes (landing ${LANDINGS.join(", ")}; integrator ${INTEGRATORS.join(" or ")}; requiredChecks a list of ${CHECKS.join(", ")}; refreshRounds 0 to 10)`);
+      }
       if (Object.keys(kept).length === 0) delete args["integration"]; else args["integration"] = kept;
     }
 
@@ -893,7 +896,7 @@ export class ChatService {
       const isAlternative = args["response"] === "alternative";
       if (!isAlternative && (statement !== undefined || topicWords !== undefined)) return refuse("invalid_command", "alternativeStatement and alternativeTopic go only with response alternative");
       // What to do next depends on why: the words are the owner's to rephrase, a topic is theirs to name, a conflict is theirs to settle.
-      const instead = (reason: string, next = 'say what you decide instead as its own sentence (for example "Keep the staging server until May.")'): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
+      const instead = (reason: string, next = "say what you decide instead, in your own words — a plain sentence of at least two words"): Resolved & { ok: false } => refuse("invalid_command", `Nothing was proposed: ${reason}. The meeting decision still waits for your answer; ${next}.`);
       const said = typeof statement === "string" ? statement.trim() : "";
       if (isAlternative) {
         if (said === "") return refuse("invalid_command", "say what you decide instead (alternativeStatement)");
@@ -937,13 +940,13 @@ export class ChatService {
       if (isAlternative) {
         // The topic is the owner's words or the topic the decision answered; the wording of a motion (an agent's text) is never made into a topic.
         const raw = typeof topicWords === "string" && topicWords.trim() !== "" ? topicWords : typeof chosen["topic"] === "string" ? chosen["topic"] : undefined;
-        if (raw === undefined) return instead("the decision has no topic of its own", "name a topic for yours (for example: topic staging server), or decline the meeting's decision");
+        if (raw === undefined) return instead("the decision has no topic of its own", "name a topic for yours in your own words (a short phrase), or decline the meeting's decision");
         const topic = normalTopic(raw.replace(/[^\p{L}\p{N} ._/-]+/gu, " ")).replace(/^[^a-z0-9]+/, "").slice(0, 80).trim();
-        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit", "name one (for example: topic staging server)");
+        if (!TOPIC.test(topic)) return instead("the topic of your decision must be 1 to 80 letters, digits or spaces starting with a letter or digit", "name one in your own words — a short phrase of letters, digits or spaces");
         // What the decision service would refuse on the topic is read now, so nothing bound to fail is proposed: another kind of decision on the topic, a conflict not yet settled, the same words already decided.
         const history = ((await this.#get(token, "decision.history", { projectId: chosen["projectId"], topic })) as unknown as Record<string, unknown>[] | undefined) ?? [];
         const kindHeld = history.find((e) => typeof e["category"] === "string" && e["category"] !== "decision");
-        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours (for example: topic hosting plan)");
+        if (kindHeld !== undefined) return instead(`the topic "${topic}" holds ${String(kindHeld["category"]).slice(0, 20)} decisions, not decisions of this kind`, "name another topic for yours, in your own words");
         const live = history.filter((e) => e["state"] !== "superseded");
         // Any unsettled conflict on the topic stops a project-wide decision, a task's own included.
         if (live.some((e) => e["state"] === "disputed")) return instead(`the topic "${topic}" has a conflict between two of your instructions`, "settle that conflict first, or decline the meeting's decision");
@@ -1260,6 +1263,41 @@ export class ChatService {
       }
     }
     if (intent.op === "maintenance.site.set" && typeof args["site"] === "string") extraTargets.push(args["site"]);
+    // Landing finished work on main with no human step (card P08b, redone the way the flaky release approval was): the owner's wording is never
+    // scanned for a phrase and no refusal tells them one to say. The change is drawn up as a proposal that says plainly what will happen and what
+    // gates it (the project's own required checks, read from its record) and whether the installation lock stands; confirming that shown proposal
+    // is the consent, and nothing is applied until they do.
+    if ((intent.op === "integration.set" || intent.op === "integration.default.set" || intent.op === "project.create") && landingOf(args) === "main-automatic") {
+      // Whatever form the checks were given in is judged here, so the proposal never shows the record's checks while sending something else: a single check name is that one check, anything else not a list is refused.
+      if (typeof args["requiredChecks"] === "string" && (CHECKS as readonly unknown[]).includes(args["requiredChecks"])) args["requiredChecks"] = [args["requiredChecks"]];
+      const given = args["requiredChecks"] !== undefined ? args["requiredChecks"] : (args["integration"] as { requiredChecks?: unknown } | undefined)?.requiredChecks;
+      // The checks are shown in the proposal, so only the policy's own check names are: anything else is not a check and is refused here, never displayed.
+      if (given !== undefined && (!Array.isArray(given) || given.some((x) => !(CHECKS as readonly unknown[]).includes(x)))) return refuse("invalid_command", `requiredChecks must be a list of ${CHECKS.join(", ")}`);
+      // An empty list would show the record's checks but set none, which the policy refuses for this landing: it is refused now, before anything is shown.
+      if (Array.isArray(given) && given.length === 0) return refuse("invalid_command", "landing on main with no human step needs at least one required check");
+      // Shown as the policy stores them: each once, in the policy's order.
+      const named = Array.isArray(given) ? CHECKS.filter((c) => (given as unknown[]).includes(c)).join(", ") : undefined;
+      const listed = (value: unknown): string | undefined => (Array.isArray(value) && value.length > 0 ? value.map((x) => String(x)).join(", ") : undefined);
+      const record = named === undefined && intent.op === "integration.set" && typeof args["project"] === "string" && /^proj-[a-z2-7]{20}$/i.test(args["project"]) ? await this.#get(token, "integration.get", { project: args["project"] }) : undefined;
+      const defItem = await this.#get(token, "integration.default.get", {});
+      // The checks shown are the ones that will gate the landing when the owner confirms: a project's own record (pinned by its revision, so a change
+      // to it in between refuses the stale proposal), else for a new project or the default, the installation default's (pinned likewise) or the profile's.
+      let fromRecord: string | undefined;
+      if (named === undefined && intent.op === "integration.set" && record !== undefined) {
+        fromRecord = listed(record["requiredChecks"]);
+        if (typeof record["revision"] === "number") args["expectedRevision"] = record["revision"];
+      } else if (named === undefined && intent.op !== "integration.set") {
+        fromRecord = listed(defItem?.["requiredChecks"]) ?? listed(profileDefaults(profile).requiredChecks);
+        if (intent.op === "integration.default.set" && typeof defItem?.["revision"] === "number") args["expectedRevision"] = defItem["revision"];
+        // A default with no checks of its own follows the profile, which the revision above does not pin: the profile's checks that were shown are set with it.
+        if (intent.op === "integration.default.set" && fromRecord !== undefined && listed(defItem?.["requiredChecks"]) === undefined) args["requiredChecks"] = fromRecord.split(", ");
+        // A new project has no record to pin: the checks shown are written into its section, so what is created is what was shown.
+        if (intent.op === "project.create" && fromRecord !== undefined) args["integration"] = { ...(args["integration"] as Record<string, unknown>), requiredChecks: fromRecord.split(", ") };
+      }
+      const who = intent.op === "project.create" ? "the new project's" : intent.op === "integration.default.set" ? "every new project's" : "this project's";
+      const locked = defItem?.["forbidMainAutomatic"] === true;
+      fillNotes.push(`What this means: ${who} finished work goes to main on its own once ${named !== undefined ? `its checks (${named})` : fromRecord !== undefined ? `its checks (${fromRecord})` : "the checks it requires"} pass — no person approves each one, so anything that only passed on the integration branch is on main. Confirming this proposal is what turns it on.${locked ? " The installation currently forbids landing on main automatically, so it is refused while that lock stands." : ""}`);
+    }
     steps.push({ op: intent.op, args, commandId: "" });
     const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
     const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: (intent.op !== "host.move-work" || (typeof args["hostId"] === "string" && ordersHostMove(words, args["hostId"]))) && ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(intent.op === "host.move-work" && typeof args["hostId"] === "string" ? [args["hostId"]] : []).concat(extraTargets)) });
@@ -1368,9 +1406,9 @@ export class ChatService {
     const ask = (field: string, question: string, rows: { choice: string; says: string }[]) => ({ ok: false as const, kind: "ask" as const, question, options: rows.map((r) => `${r.choice}: ${r.says}`), field: `integration.${field}`, choices: rows.map((r) => r.choice) });
     if (given["landing"] === undefined) {
       const rows = [
-        { choice: "integration-branch", says: "finished work is merged onto a separate integration branch; nothing reaches main until you or an integrator promotes it" },
-        { choice: "human-promotes", says: "finished work waits for a person to promote it" },
-        ...(locked ? [] : [{ choice: "main-automatic", says: "finished work goes to main by itself once its required checks pass, with no human step" }]),
+        { choice: "integration-branch", says: LANDING_MEANS["integration-branch"]! },
+        { choice: "human-promotes", says: LANDING_MEANS["human-promotes"]! },
+        ...(locked ? [] : [{ choice: "main-automatic", says: LANDING_MEANS["main-automatic"]! }]),
         { choice: "default", says: `use the installation default (or the ${profile} profile's, which is ${rec.landing})` },
       ];
       return ask("landing", `How should finished work land on this project? I suggest ${rec.landing}.`, rows);

@@ -2580,7 +2580,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `integration.set`
 
-The owner changes how finished work lands in a project (owner only); fields left out stay. `main-automatic` is refused while the installation forbids it.
+The owner changes how finished work lands in a project (owner only); fields left out stay. `main-automatic` is refused while the installation forbids it. In chat this is always shown first as a proposal that says in plain words what the chosen landing does to the project's work (and what gates it, read from the project's own settings); it is applied only when the owner confirms that proposal, whatever words they used to ask.
 
 Arguments:
 
@@ -2597,7 +2597,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `integration.default.set`
 
-The owner sets what new projects start with (existing projects keep theirs) and may forbid `main-automatic` installation-wide (owner only).
+The owner sets what new projects start with (existing projects keep theirs) and may forbid `main-automatic` installation-wide (owner only). In chat it is shown first as a proposal that says what the chosen landing does to every new project, and applied only on the owner's confirmation of that proposal.
 
 Arguments:
 
@@ -4810,7 +4810,7 @@ Arguments:
 - `name`: the name
 - `goal` (optional): what it is for
 - `repositories` (optional): list of `{ id, location, label? }`
-- `integration` (optional): how finished work lands, `{ landing?, integrator?, requiredChecks?, refreshRounds? }` (owner only; otherwise the installation default or the profile's)
+- `integration` (optional): how finished work lands, `{ landing?, integrator?, requiredChecks?, refreshRounds? }` (owner only; otherwise the installation default or the profile's). Drafted in chat the section is shown as settings with what the chosen landing does to the new project's work; it is created only when the owner confirms the draft.
 
 Result: `{ id, revision, replayed }`.
 
