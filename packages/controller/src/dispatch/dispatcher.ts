@@ -343,6 +343,14 @@ export class DispatcherService {
   readonly #instance = randomUUID().slice(0, 8);
   /** Usage reports made per attempt by this dispatcher, so two turns with identical figures are two records. */
   readonly #usageSeq = new Map<string, number>();
+  /** How each attempt's last turn ended (card W02), held from the turn's result until the write that ends or parks the attempt records it. */
+  readonly #turnEnds = new Map<string, NonNullable<DispatchBody["turnEnd"]>>();
+  /** The turn's ending held for `attemptId`, as fields for the record (taken: it is recorded once). */
+  #takeTurnEnd(attemptId: string): { turnEnd?: NonNullable<DispatchBody["turnEnd"]> } {
+    const te = this.#turnEnds.get(attemptId);
+    this.#turnEnds.delete(attemptId);
+    return te === undefined ? {} : { turnEnd: te };
+  }
   readonly #ending = new Set<Promise<unknown>>();
   #endHook: EndHook | undefined;
   #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean; readonly signal: AbortSignal }) => Promise<void>) | undefined;
@@ -2028,11 +2036,10 @@ export class DispatcherService {
             await this.#update(attemptId, (b) => ({ ...b, usageError: why })).catch(() => undefined);
           });
         }
-        // How the turn ended (card W02) is recorded on the attempt before anything else is decided; it decides nothing yet (W03). A result that says no kind (an older or remote worker) is recorded as unknown, never as normal.
-        // A record that cannot be written leaves the end as it was: the outcome below does not depend on it.
-        const endKind = turnEndKindOf(result.endKind);
+        // How the turn ended (card W02) goes on the attempt with the write that ends or parks it (no write of its own: two writes from one revision would share a command ID). It decides nothing yet (W03).
+        // A result that says no kind (an older or remote worker) is recorded as unknown, never as normal.
         const visibleChars = Number.isSafeInteger(result.visibleChars) && result.visibleChars! >= 0 ? result.visibleChars : undefined;
-        await this.#update(attemptId, (b) => (b.state !== "running" ? b : { ...b, turnEnd: { endKind, ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now() } })).catch((error: unknown) => { if (isDomainError(error, "stale_epoch")) throw error; this.#options.onError?.(error); });
+        this.#turnEnds.set(attemptId, { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now() });
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
@@ -2043,7 +2050,7 @@ export class DispatcherService {
       } catch (error) {
         // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
         if (isDomainError(error, "stale_epoch")) return;
-      }
+      } finally { this.#turnEnds.delete(attemptId); }
     })();
     const turn: Promise<void> = done.finally(() => { if (this.#live.get(attemptId)?.turn === turn) this.#live.delete(attemptId); });
     return turn;
@@ -2057,11 +2064,12 @@ export class DispatcherService {
     // The run on the route is over until the attempt goes on (card R04c): a later start begins a new model call.
     await this.#endCall(attemptId, "succeeded", "the turn ended with calls waiting for an approval");
     this.#path.forget(attemptId, b.parked);
+    const turnEnd = this.#takeTurnEnd(attemptId);
     if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-yield:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "every call of the attempt waits for an approval" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#update(attemptId, (x) => {
       const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
       // The attempt goes on where it was: the native store of its conversation is owned by that host.
-      return { ...rest, state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
+      return { ...rest, ...turnEnd, state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
     });
   }
 
@@ -2190,7 +2198,8 @@ export class DispatcherService {
       return Object.keys(late).length === 0 ? undefined : late;
     };
     let settleLate: string | undefined;
-    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
+    const turnEnd = this.#takeTurnEnd(attemptId);
+    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), ...turnEnd, state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() }, ...(late === undefined ? {} : { lateHeld: late }) }; },
       async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
     if (settleLate !== undefined && finished.reservationId === settleLate) { const { releasingId: _r, ...rest } = finished; void _r; await this.#settleReservation(rest, options.lost === true, `:${settleLate}`); }
     // A worker registered while this end was running (its start answered after the end began) is let go too.
