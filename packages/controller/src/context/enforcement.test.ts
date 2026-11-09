@@ -824,8 +824,8 @@ for (const backend of backends) {
     assert.deepEqual(await enf.latestHandoffFor(owner, t), { id: late.id, attemptId: "att-1", source: "attempt" }, "the read names the note the next attempt's first call points at");
     const whole = (await enf.readHandoff(owner, h.id))!;
     assert.deepEqual([whole.id, whole.taskId, whole.attemptId, whole.source, whole.text], [h.id, t, "att-1", "controller", h.text], "the whole note as written, credentials removed");
-    assert.equal(await enf.readHandoff(owner, "ctx-handoff-bbbbbbbbbbbbbbbbbbbb"), undefined, "a note that is not there reads as nothing");
-    assert.equal(await enf.readHandoff(owner, "hof-notanote"), undefined, "an ID that is not a hand-off note's reads as nothing");
+    assert.equal(await enf.readHandoff(owner, "hof-bbbbbbbbbbbbbbbbbbbbbbbb"), undefined, "a note that is not there reads as nothing");
+    assert.equal(await enf.readHandoff(owner, "ctx-note-bbbbbbbbbbbbbbbbbbbb"), undefined, "an ID that is not a hand-off note's reads as nothing");
     await refuses("not_found", () => enf.latestHandoffFor(owner, "task-aaaaaaaaaaaaaaaaaaaa"), (e) => assert.ok(e.message.length > 0));
   });
 
