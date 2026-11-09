@@ -469,10 +469,12 @@ export class ChatService {
             const recent = await this.#get(token, "standup.recent", { projectId: currentFocus.projectId, limit: 50 });
             const all = (recent?.["items"] as Record<string, unknown>[] | undefined) ?? [];
             const words = typeof topic === "string" ? topic : "";
-            const matches = all.filter((m) => looseMatch(words, String(m["title"])));
+            // A meeting is named by its own title or by the title its stand-up has now (a stand-up renamed after its meeting was made is still that stand-up).
+            const setUp = await this.#standups(token, currentFocus.projectId);
+            const titles = setUp.titles;
+            const matches = all.filter((m) => looseMatch(words, String(m["title"])) || looseMatch(words, setUp.titleOf.get(String(m["scheduleId"])) ?? ""));
             if (matches.length === 0) {
               // The project's stand-ups are read from the schedules, so a stand-up that has not met yet is answered about itself rather than called a name that fits nothing (card M03h).
-              const titles = await this.#standupTitles(token, currentFocus.projectId);
               const named = titles.filter((t) => looseMatch(words, t));
               if (named.length > 0) { push({ i, kind: "refused", code: "not_found", message: named.length === 1 ? `${quotedText(named[0]!, 60)} has no stand-up meeting yet, so nothing has been briefed for it` : `more than one stand-up of that project has no meeting yet: ${titleList(named)}` }); continue; }
               if (titles.length === 0) { push({ i, kind: "refused", code: "not_found", message: "there is no stand-up in that project" }); continue; }
@@ -480,7 +482,7 @@ export class ChatService {
             }
             const coming = matches.filter((m) => m["state"] === "planned").sort((a, b) => (String(a["startsAt"]) < String(b["startsAt"]) ? -1 : 1));
             // Words that fit several stand-ups ask; with no words, the next one coming up is meant.
-            if (words.trim() !== "" && new Set(matches.map((m) => String(m["title"]))).size > 1) { push({ i, kind: "asked", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["title"]).slice(0, 60)}, ${String(m["startsAt"])}`) }); continue; }
+            if (words.trim() !== "" && new Set(matches.map((m) => String(m["title"]))).size > 1) { push({ i, kind: "asked", question: "Which stand-up do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${quotedText(String(m["title"]), 60)}, ${String(m["startsAt"])}`) }); continue; }
             request["occurrenceId"] = String((coming[0] ?? matches[0])!["occurrenceId"]);
           }
           if (request["agent"] === undefined && typeof agentName === "string" && agentName.trim() !== "") {
@@ -977,20 +979,22 @@ export class ChatService {
         labels[String(args["briefId"])] = `${String(brief["agent"]).slice(0, 80)}'s brief`;
       } else {
         // The stand-ups the project has set up are read from the schedules, because a stand-up made this morning is one of them even before it has met (card M03h); the meeting to prepare, or to write into, is the one its latest occurrence is.
-        const titles = await this.#standupTitles(token, projectId);
+        const setUp = await this.#standups(token, projectId);
+        const titles = setUp.titles;
         const noneReady = (): string => titles.length === 0
           ? `no stand-up is set up in this project, so there is nothing to ${isNote ? "write into" : "prepare"}`
           : `${titleList(titles)} ${titles.length === 1 ? "has" : "have"} no meeting to ${isNote ? "write into" : "prepare"} yet`;
         const recent = await this.#get(token, "standup.recent", { projectId, limit: 50 });
         const open = ((recent?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((i) => (isNote ? i["state"] === "planned" : i["state"] === "planned" || i["state"] === "reported"));
-        const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${String(i["title"]).slice(0, 60)}, ${String(i["startsAt"])})`;
+        const pick = (i: Record<string, unknown>): string => `${String(i["occurrenceId"])} (${quotedText(String(i["title"]), 60)}, ${String(i["startsAt"])})`;
         let occurrence: Record<string, unknown> | undefined;
         if (typeof args["occurrenceId"] === "string") {
           occurrence = open.find((i) => i["occurrenceId"] === args["occurrenceId"]);
           if (occurrence === undefined) return refuse("not_found", isNote ? "that stand-up is not coming up in this project, so its briefs are closed" : "that stand-up is not one that can be prepared in this project");
         } else {
           const words = typeof topic === "string" ? topic : "";
-          const matches = open.filter((i) => looseMatch(words, String(i["title"])));
+          // A meeting is named by its own title or by the title its stand-up has now (a stand-up renamed after its meeting was made is still that stand-up).
+          const matches = open.filter((i) => looseMatch(words, String(i["title"])) || looseMatch(words, setUp.titleOf.get(String(i["scheduleId"])) ?? ""));
           // Words that fit one of the project's own stand-ups are answered about that stand-up, even when it has no meeting to work on: asking which one the owner meant would be odd when they named it.
           const named = words === "" ? [] : titles.filter((t) => looseMatch(words, t));
           if (matches.length === 0 && named.length === 1) return refuse("not_found", `${quotedText(named[0]!, 60)} is set up in this project but has no meeting to ${isNote ? "write into" : "prepare"} right now`);
@@ -1486,12 +1490,16 @@ export class ChatService {
     } catch { return true; }
   }
 
-  /** The titles of the stand-ups a project has set up, ended ones left out (card M03h). A stand-up made this morning is one of them even before it has met, which is why this is not read from the meetings. */
-  async #standupTitles(token: string, projectId: string | undefined): Promise<string[]> {
-    if (projectId === undefined) return [];
+  /**
+   * The stand-ups a project has set up, ended ones left out (card M03h): their titles, sorted, and each one's title now by its schedule. A stand-up made this morning is one of them even before it has met, which is why this is not read
+   * from the meetings; and a meeting keeps the title its stand-up had when it was made, so a renamed stand-up is found by its schedule.
+   */
+  async #standups(token: string, projectId: string | undefined): Promise<{ titles: string[]; titleOf: Map<string, string> }> {
+    if (projectId === undefined) return { titles: [], titleOf: new Map() };
     const listed = await this.#get(token, "standup.list", { projectId, limit: 50 });
+    const running = ((listed?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((s) => s["state"] !== "ended");
     // Sorted, because the order records come back in is not something the owner should see change between one answer and the next.
-    return (((listed?.["items"] as Record<string, unknown>[] | undefined) ?? []).filter((s) => s["state"] !== "ended").map((s) => String(s["title"]))).sort();
+    return { titles: running.map((s) => String(s["title"])).sort(), titleOf: new Map(running.map((s) => [String(s["scheduleId"]), String(s["title"])])) };
   }
 
   async #get(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {

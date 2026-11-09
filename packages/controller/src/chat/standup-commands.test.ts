@@ -373,5 +373,44 @@ for (const backend of backends) {
     assert.equal(misplaced.status, "refused", JSON.stringify(misplaced));
     assert.match(String(misplaced.message), /no brief in that stand-up is for an agent called/);
   });
-}
 
+  suite("a stand-up renamed after its meeting was made is still reached by the title it has now, and is never told it has no meeting (review of card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    const morning = await ctl.sched(a, "Morning sync", when);
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 1, "the stand-up has its meeting planned");
+    // The meeting keeps the title it was made with; the stand-up is renamed afterwards.
+    const renamed = await w.api.handle(w.ownerToken, { v: 1, op: "standup.update", commandId: cid("rn"), args: { scheduleId: morning, expectedRevision: (await ctl.schedule(morning)).revision, title: "Daybreak check" } } as never) as { ok: boolean };
+    assert.equal(renamed.ok, true, JSON.stringify(renamed));
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const said = async (text: string, intent: unknown): Promise<Outcome> => { script[text] = [intent]; return only((await say(w, chat, text)).outcomes); };
+
+    const ready = await said("Get the daybreak check ready.", cmd("standup.prepare", { meetingTopic: "daybreak check" }, "Get the daybreak check ready"));
+    assert.equal(ready.status, "proposed", JSON.stringify(ready));
+    assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: ready.proposalId! })).applied, true);
+    const note = await said("Tell the morning agent at the daybreak check: the demo is at four.", cmd("standup.add-statement", { meetingTopic: "daybreak", agentName: "morning", section: "note", text: "the demo is at four" }, "Tell the morning agent at the daybreak check: the demo is at four"));
+    assert.equal(note.status, "proposed", JSON.stringify(note));
+    const brief = await said("What did the daybreak check brief say?", { kind: "status", request: { kind: "standup_briefs", meetingTopic: "daybreak check" }, evidence: "What did the daybreak check brief say", basis: "owner" });
+    assert.equal(brief.status, "answered", JSON.stringify(brief));
+    assert.doesNotMatch(JSON.stringify(brief), /has no stand-up meeting yet/);
+  });
+
+  suite("the stand-ups answer tells the meeting ahead of every stand-up, however many meetings the project has planned (review of card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    await ctl.sched(a, "Morning sync", when);
+    await ctl.sched(a, "Evening wrap", when);
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 2);
+    // The planned meetings are read a page at a time; with a page of one, the second stand-up's meeting is on the second page.
+    const meetings = w.meetings as unknown as { planned: (v: unknown, p: string, page?: { afterId?: string; limit?: number }) => Promise<unknown> };
+    const original = meetings.planned.bind(meetings);
+    meetings.planned = (v, p, page = {}) => original(v, p, { ...page, limit: 1 });
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    script["What stand-ups do we have?"] = [{ kind: "status", request: { kind: "standups" }, evidence: "What stand-ups do we have?", basis: "owner" }];
+    const lines = only((await say(w, chat, "What stand-ups do we have?")).outcomes).lines!.map((l) => l.text);
+    assert.equal(lines.filter((l) => l.startsWith("next one ")).length, 2, JSON.stringify(lines));
+  });
+}

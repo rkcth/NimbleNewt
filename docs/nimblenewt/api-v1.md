@@ -1019,9 +1019,9 @@ A project's stand-ups by their latest occurrence (when each ran or is planned, a
 Arguments:
 
 - `projectId`: the project
-- `limit` (optional): most items, 1 to 100, default 20
+- `limit` (optional): most items, 1 to 50, default 20
 
-Result: `{ item: { items: [{ occurrenceId, revision, title, startsAt, state }], more } }`.
+Result: `{ item: { items: [{ occurrenceId, revision, title, startsAt, state, scheduleId }], more } }`.
 
 #### `standup.list`
 
