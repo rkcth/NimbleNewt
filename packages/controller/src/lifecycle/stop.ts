@@ -8,6 +8,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { PauseScope, PauseService } from "./pause.js";
+import { PAUSE_LIMITS } from "./pause.js";
 
 /** `suspend` stops at a durable checkpoint; `stop` goes on to end execution; `force-stop` skips preparation. */
 export type StopMode = "suspend" | "stop" | "force-stop";
@@ -402,14 +403,23 @@ export class StopService {
 
   /**
    * What the latest suspension or stop of a scope has spent on cleanup, for the owner to read (card L02d): the figure the request counted, what the runtime reported and the budgets were charged for each attempt the
-   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist); `undefined` when no request was made for exactly this scope (one made through its agent, team or the installation is recorded on that scope). `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass that went stale is not in it), not the full cost.
+   * request saw, and whether a charge is still unpaid. Read only; whoever may control the scope may ask (anyone else is refused: `forbidden`, or `not_found` for a scope that does not exist). When nothing was asked for
+   * exactly this scope, the latest request made for a scope that covers it is answered instead (card L02e): a task is covered by its agent, a team above that agent, a swarm parent or the installation, an agent by its team and
+   * the installation, a team by a team above it and the installation; the answer then carries `through`, naming that scope, and its figures are the whole wider scope's. `undefined` when no request was made for the scope or
+   * for any scope above it, or the asker may control none of them. `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass
+   * that went stale is not in it), not the full cost.
    */
-  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; /** The request was made for this wider scope, which covers the one asked about (card L02e); every figure here is that scope's, not only the asked scope's. */ through?: { kind: string; id: string }; /** When that request was asked for. */ requestedAt?: string; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
     // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
     await this.#pauses.authorizeControl(viewer, scope);
-    const id = await this.#activeId(scope);
-    const found = id === undefined ? undefined : (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
+    const ownId = await this.#activeId(scope);
+    const mine = ownId === undefined ? undefined : await this.#runner.get(KIND, ownId);
+    // Nothing was asked for this scope itself: a stop of a scope above it reached it too, so that request's cleanup is what the owner is asking about (card L02e).
+    const above = mine === undefined ? await this.#coveringRequest(viewer, scope) : undefined;
+    const id = ownId ?? above?.id;
+    const found = (mine?.body ?? above?.body) as unknown as StopIntentBody | undefined;
     if (found === undefined || id === undefined) return undefined;
+    const through = mine === undefined && above !== undefined ? above.through : undefined;
     const attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] = [];
     // A figure the request's own pass could not record elsewhere is its debt too.
     let ownPending = (found.owed?.length ?? 0) > 0;
@@ -447,7 +457,49 @@ export class StopService {
     // Only a request this build marked (`ended`) or one an open entry lists has its mark cleared by a sweep (see `sweep`); an older record's mark on no entry is kept for good.
     const scanCut = !complete;
     const markKept = marked && !ownPending && !scanCut && found.ended !== true && !listed;
-    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
+    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, requestedAt: found.requestedAt, ...(through === undefined ? {} : { through }), ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
+  }
+
+  /**
+   * The scopes whose stop reaches this one, besides the scope itself: those above it (a task's assignee agent and the teams above that, an agent's teams, a team's parent teams) and, for a task, its swarm parents, whose
+   * Stop ends the children's work (card L02e). The whole installation comes last, since it covers everything and explains least. Cycles and over-long chains end the walks; nothing is listed twice.
+   */
+  async #covering(scope: PauseScope): Promise<PauseScope[]> {
+    const here = scopeKey(scope);
+    const near: PauseScope[] = [];
+    const whole: PauseScope[] = [];
+    const seen = new Set<string>([here]);
+    const add = (s: PauseScope): void => { const k = scopeKey(s); if (k === here || seen.has(k)) return; seen.add(k); (s.kind === "installation" ? whole : near).push(s); };
+    for (const s of await this.#pauses.chain(scope)) add(s);
+    for (let at = scope.kind === "task" ? scope.id : undefined, hops = 0; at !== undefined && hops < PAUSE_LIMITS.chain; hops++) {
+      const up = ((await this.#runner.get("swarm-link", at))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
+      if (typeof up !== "string") break;
+      if (seen.has(scopeKey({ kind: "task", id: up }))) break;
+      add({ kind: "task", id: up });
+      at = up;
+    }
+    return [...near, ...whole];
+  }
+
+  /** The latest request made for any scope that covers this one; a request on a scope the asker may not control is not shown to them at all, and is not even said to exist. */
+  async #coveringRequest(viewer: Principal, scope: PauseScope): Promise<{ id: string; body: StopIntentBody; through: { kind: string; id: string } } | undefined> {
+    let best: { id: string; body: StopIntentBody; through: { kind: string; id: string }; at: number } | undefined;
+    for (const s of await this.#covering(scope)) {
+      const id = await this.#activeId(s);
+      if (id === undefined) continue;
+      const rec = await this.#runner.get(KIND, id);
+      if (rec === undefined) continue;
+      try { await this.#pauses.authorizeControl(viewer, s); } catch (error) {
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) continue;
+        throw error;
+      }
+      const body = rec.body as unknown as StopIntentBody;
+      // The newest request wins; on equal times the nearest scope, which is the one looked at first, is kept.
+      const at = Date.parse(body.requestedAt);
+      if (best !== undefined && !(at > best.at)) continue;
+      best = { id, body, at, through: { kind: s.kind, id: s.id } };
+    }
+    return best;
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------

@@ -67,13 +67,22 @@ class Runtime implements StopPorts {
   count(call: string): number { return this.calls.filter((c) => c === call).length; }
 }
 
+/** Says a task is a child of another in the swarm, the way the spawn service records it, so a stop of the parent reaches the child's work (card L02e). */
+const swarmLink = async (runner: CommandRunner, child: string, parent: string, projectId: string): Promise<void> => {
+  const ref = { kind: "swarm-link", id: child };
+  await runner.command("test.link", { commandId: cid("link"), actor: "system" }, async () => ({
+    payload: { child, parent },
+    build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: { parentTaskId: parent, projectId, createdBy: "user:rob", createdAt: "2026-10-28T10:00:00.000Z" } } as never], detail: {} }),
+  }));
+};
+
 /** The stop and suspend tests (cards L02, L02d, L06) on the backend of this name. The four test files lifecycle/stop*.test.ts run one backend each, so that no file nears the per-file time limit on a slow CI machine (the whole set took about 930 s on a Windows runner against the 600 s limit). */
 export function defineStopTests(backendName: string): void {
   after(stopServer);
   for (const backend of backendsNamed(backendName)) {
     const suite = (name: string, body: (c: {
-      owner: Principal; mgr: Principal; ann: Principal; task: string; agentA: string; rt: Runtime; stops: StopService; pauses: PauseService; reopen(): StopService;
-      assignments: AssignmentService; projects: ProjectService; runner: CommandRunner; storage: unknown; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
+      owner: Principal; mgr: Principal; ann: Principal; task: string; agentA: string; project: string; rt: Runtime; stops: StopService; pauses: PauseService; reopen(): StopService;
+      assignments: AssignmentService; projects: ProjectService; agents: AgentService; runner: CommandRunner; storage: unknown; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
     }) => Promise<void>) =>
       test(`${backend.name}: ${name}`, async () => {
         now = Date.parse("2026-10-28T10:00:00.000Z");
@@ -104,7 +113,7 @@ export function defineStopTests(backendName: string): void {
           };
           mayHoldHook = async () => true;
           const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, { ...options, mayHold: (by, t) => mayHoldHook(by, t) });
-          await body({ owner, mgr, ann, task, agentA, rt, stops: make(), pauses, reopen: make, assignments, projects, edit, runner: new CommandRunner(world.storage, epoch, options), storage: world.storage });
+          await body({ owner, mgr, ann, task, agentA, project, rt, stops: make(), pauses, reopen: make, assignments, projects, agents, edit, runner: new CommandRunner(world.storage, epoch, options), storage: world.storage });
         } finally { await world.close(); }
       });
     const scopeOf = (task: string) => ({ kind: "task", id: task }) as const;
@@ -500,6 +509,61 @@ export function defineStopTests(backendName: string): void {
       await c.stops.advance(c.owner, { intentId: r.intentId });
       await refuses("forbidden", () => c.stops.cleanupSpend(c.ann, scopeOf(c.task)));
       await refuses("not_found", () => c.stops.cleanupSpend(c.owner, scopeOf("task-aaaaaaaaaaaaaaaaaaaa")));
+    });
+
+    suite("a task that was never stopped itself is answered by the stop that covers it: its agent's, and after that its own (card L02e)", async (c) => {
+      c.rt.seenAttempts = ["att-agent"];
+      c.rt.items = [{ kind: "foreground", ref: "att-agent/c1", state: "running" }];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-agent", costMicros: 40, computeMs: 3 }] }];
+      const byAgent = await c.stops.request(c.owner, { commandId: cid("s"), scope: agentScope(c), mode: "stop", reason: "the agent is stopped" });
+      await c.stops.advance(c.owner, { intentId: byAgent.intentId });
+      const seen = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+      assert.deepEqual([seen?.intentId, seen?.through, seen?.spent], [byAgent.intentId, { kind: "agent", id: c.agentA }, 40], "the task's view finds the stop made through its agent and names the scope it came through");
+      assert.deepEqual(seen?.attempts, [{ attemptId: "att-agent", costMicros: 40, computeMs: 3, pending: false }], "and the attempts that stop charged");
+      assert.equal(await c.stops.cleanupSpend(c.mgr, scopeOf(c.task)), undefined, "whoever may control the task but not the agent is told nothing of the agent's stop");
+      // Once the task has a request of its own, that is the answer, wider or not.
+      const own = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "the task itself" });
+      await c.stops.advance(c.owner, { intentId: own.intentId });
+      const after = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+      assert.deepEqual([after?.intentId, after?.through], [own.intentId, undefined], "the task's own request is the answer, not the agent's");
+    });
+
+    suite("a stop of the whole installation, of the team above the agent or of a swarm parent of the task answers for the task too, the newest of them first (card L02e)", async (c) => {
+      assert.equal(await c.stops.cleanupSpend(c.owner, scopeOf(c.task)), undefined, "nothing has been asked for any scope yet");
+      // The whole installation is stopped: every task and agent without a request of its own is answered from it.
+      c.rt.seenAttempts = ["att-inst"];
+      c.rt.items = [{ kind: "foreground", ref: "att-inst/c1", state: "running" }];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-inst", costMicros: 80, computeMs: 2 }] }];
+      const byInstallation = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "installation", id: "installation" }, mode: "stop", reason: "shutting down" });
+      await c.stops.advance(c.owner, { intentId: byInstallation.intentId });
+      const inst = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+      assert.deepEqual([inst?.intentId, inst?.through, inst?.spent, inst?.requestedAt], [byInstallation.intentId, { kind: "installation", id: "installation" }, 80, inst?.requestedAt], "the task's view finds the stop of the installation and names it");
+      const ofAgent = await c.stops.cleanupSpend(c.owner, agentScope(c));
+      assert.deepEqual([ofAgent?.intentId, ofAgent?.through?.kind], [byInstallation.intentId, "installation"], "an agent the installation stopped says so; the figures are the installation's, not the agent's alone");
+      // The agent joins a team, and the team is stopped later: the newer request that reaches the task answers.
+      now += 60_000;
+      const team = (await c.agents.createTeam(c.owner, { commandId: cid("team"), name: "Team One" })).id;
+      const agent = await c.agents.get(c.owner, c.agentA);
+      await c.agents.update(c.owner, { commandId: cid("mv"), agentId: c.agentA, expectedRevision: agent!.revision, teamId: team });
+      c.rt.seenAttempts = ["att-team"];
+      c.rt.items = [{ kind: "foreground", ref: "att-team/c1", state: "running" }];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-team", costMicros: 30, computeMs: 2 }] }];
+      const byTeam = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "team", id: team }, mode: "stop", reason: "the team is stopped" });
+      await c.stops.advance(c.owner, { intentId: byTeam.intentId });
+      const byTeamSeen = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+      assert.deepEqual([byTeamSeen?.intentId, byTeamSeen?.through, byTeamSeen?.spent], [byTeam.intentId, { kind: "team", id: team }, 30], "the stop of the team its agent joined answers, not the older one of the installation");
+      // A swarm parent stopped later still: the parent's Stop ends the child's work, so its cleanup is the child's answer.
+      now += 60_000;
+      const parent = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "parent" })).id;
+      await swarmLink(c.runner, c.task, parent, c.project);
+      assert.equal(((await c.runner.get("swarm-link", c.task))?.body as unknown as { parentTaskId?: string }).parentTaskId, parent, "the task is recorded as the parent's child");
+      c.rt.seenAttempts = ["att-parent"];
+      c.rt.items = [{ kind: "foreground", ref: "att-parent/c1", state: "running" }];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-parent", costMicros: 60, computeMs: 2 }] }];
+      const byParent = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(parent), mode: "stop", reason: "the parent is stopped" });
+      await c.stops.advance(c.owner, { intentId: byParent.intentId });
+      const byParentSeen = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+      assert.deepEqual([byParentSeen?.intentId, byParentSeen?.through], [byParent.intentId, { kind: "task", id: parent }], "the newest request that reaches the task is the answer");
     });
 
     suite("cleanupSpend lists the attempts the ending charged when preparation never saw them: a Force Stop, and a Stop that reuses a finished Suspend's checkpoint (card L02d review)", async (c) => {
