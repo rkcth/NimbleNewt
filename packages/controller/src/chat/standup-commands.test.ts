@@ -233,4 +233,44 @@ for (const backend of backends) {
     assert.match(wrong, /No brief has been prepared|no brief/i);
   });
 
+  suite("what stand-ups the project has is answered from the schedules and their meetings, asked in ordinary words; the project comes from the focus and ended ones are counted, not listed (card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    // Both stand-ups are at 11:30 London (10:30 UTC) and the world's clock reads 10:00 UTC, so each has a planned occurrence.
+    const when = { time: "11:30", windowFrom: "08:00", windowTo: "13:00" };
+    const morning = await ctl.sched(a, "Morning sync", when);
+    await ctl.sched(a, "Evening wrap", when);
+    assert.equal((await w.meetings.tick(w.owner)).created.length, 2, "both have a meeting planned");
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const asked = async (text: string): Promise<string> => JSON.stringify(only((await say(w, chat, text)).outcomes));
+
+    script["What stand-ups do we have?"] = [{ kind: "status", request: { kind: "standups" }, evidence: "What stand-ups do we have?", basis: "owner" }];
+    const first = only((await say(w, chat, "What stand-ups do we have?")).outcomes);
+    assert.equal(first.status, "answered", JSON.stringify(first));
+    const lines = first.lines!.map((l) => l.text);
+    assert.equal(lines.length, 4, `two lines per stand-up: ${JSON.stringify(lines)}`);
+    assert.match(lines[0]!, /^"Evening wrap": active, daily at 11:30 Europe\/London, 30 minutes, held between 08:00 and 13:00\. On the roster: agent:/);
+    assert.match(lines[1]!, /^next one 2026-10-22T10:30:00\.000Z; it has not met yet; 1 meeting of it so far\.$/);
+    assert.match(lines[2]!, /^"Morning sync": active, daily at 11:30 Europe\/London/);
+    assert.ok(first.lines!.every((l) => l.cites.some((x) => x.kind === "project" && x.id === a)), "every line cites the project");
+    assert.ok(first.lines![0]!.cites.some((x) => x.kind === "meeting-schedule"), "the schedule line cites the schedule it reads");
+    assert.ok(first.lines![1]!.cites.some((x) => x.kind === "meeting"), "the meeting line cites the occurrence it names");
+
+    // A narrower ask is a page, and the answer says it cut the rest.
+    script["Just the first stand-up, please."] = [{ kind: "status", request: { kind: "standups", limit: 1 }, evidence: "Just the first stand-up, please", basis: "owner" }];
+    assert.match(await asked("Just the first stand-up, please."), /There are more stand-ups than shown\./);
+
+    // A stand-up that has ended is not one the project is running, but it is counted; a paused one is shown as paused.
+    await w.api.handle(w.ownerToken, { v: 1, op: "standup.update", commandId: cid("end"), args: { scheduleId: morning, expectedRevision: (await ctl.schedule(morning)).revision, state: "ended" } } as never);
+    assert.match(await asked("What stand-ups do we have?"), /1 ended stand-up of this project is left out\./);
+    assert.ok(!(await asked("What stand-ups do we have?")).includes("Morning sync"), "the ended stand-up is not listed");
+
+    // Another project the owner has, with no stand-up of its own, says so plainly (the focus moves, and the answer follows it).
+    const quiet = await w.project("Quiet");
+    const other = w.chat({ status: ctl.status() });
+    await other.setFocus(w.ownerToken, { commandId: cid("f"), projectId: quiet });
+    assert.match(JSON.stringify((await say(w, other, "What stand-ups do we have?", cid("m"))).outcomes), /No stand-up is set up in this project\./);
+  });
 }
+

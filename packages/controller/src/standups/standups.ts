@@ -10,7 +10,7 @@ import type { Availability } from "../conversations/index.js";
 import type { InquiryBody } from "../inquiries/inquiries.js";
 import type { ItemBody } from "../notifications/notifications.js";
 import type { ArtifactBody } from "../artifacts/service.js";
-import { categoryOf, authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody, type ScheduleBody } from "../meetings/meetings.js";
+import { categoryOf, authorityOf, MEETING_LIMITS, type AgendaBody, type MeetingService, type OccurrenceBody, type ScheduleBody } from "../meetings/meetings.js";
 import { isLocalTime } from "../meetings/zones.js";
 import type { Recurrence } from "../meetings/zones.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -144,6 +144,49 @@ export interface StandupOptions extends RunnerOptions {
 }
 
 export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25 } as const;
+
+/**
+ * One stand-up of a project, as the stand-ups status answer tells it (card M03h): the schedule as it stands, and the two meetings the owner asks about — the one coming up next and the last one this stand-up made. Everything on these lines
+ * comes from the schedule and occurrence records.
+ */
+export interface StandupSummary {
+  readonly scheduleId: string;
+  readonly revision: number;
+  readonly title: string;
+  /** `active`, `paused` or `ended`. */
+  readonly state: string;
+  /** The wall-clock time it starts at, in `timeZone`. */
+  readonly time: string;
+  readonly timeZone: string;
+  /** How it repeats, in words: `daily`, `weekly on Mon, Wed`, `once on 2026-11-02`. */
+  readonly recurrence: string;
+  /** The hours of the local day it must lie within, when the stand-up has a window. */
+  readonly window?: { readonly from: string; readonly to: string };
+  readonly durationMinutes: number;
+  /** The agents it is set up for (principal names, as the schedule keeps them). */
+  readonly roster: readonly string[];
+  /** How many meetings this stand-up has made so far. */
+  readonly occurrences: number;
+  /** The date the schedule stops making meetings, when it has one. */
+  readonly endsOn?: string;
+  /** The meeting coming up next, when one is planned. */
+  readonly nextAt?: string;
+  readonly nextOccurrenceId?: string;
+  readonly nextRevision?: number;
+  /** The last meeting this stand-up was through (never the one still ahead of it), and how it ended. */
+  readonly lastAt?: string;
+  readonly lastState?: string;
+  readonly lastOccurrenceId?: string;
+  readonly lastRevision?: number;
+}
+
+/** How a schedule's repeat is said in one line: `daily`, `weekly on Mon, Wed`, `once on 2026-11-02` (weekdays are 0 = Sunday, as the meeting records keep them). */
+function recurrenceWords(recurrence: Recurrence): string {
+  if (recurrence.kind === "daily") return "daily";
+  if (recurrence.kind === "once") return `once on ${recurrence.date}`;
+  const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return `weekly on ${[...new Set(recurrence.days)].sort((a, b) => a - b).map((d) => names[d] ?? `day ${d}`).join(", ")}`;
+}
 const BRIEF_ID = /^sbr-[a-z2-7]{20}$/;
 const SCHEDULE_ID = /^msc-[a-z2-7]{20}$/;
 const OCCURRENCE_ID = /^mto-[a-z2-7]{20}$/;
@@ -330,6 +373,71 @@ export class StandupService {
     }
     items.sort((x, y) => (x.startsAt !== y.startsAt ? (x.startsAt < y.startsAt ? 1 : -1) : x.occurrenceId < y.occurrenceId ? -1 : 1));
     return { items: items.slice(0, limit), more: items.length > limit };
+  }
+
+  /**
+   * The project's stand-ups as the owner asks about them (card M03h): each schedule as it stands — its state, how often and at what time it is held, how long it lasts and who is on its roster — with the meeting coming up next and how the
+   * last one ended. Unlike `recent`, a stand-up that has not made a meeting yet is shown (a stand-up set up this morning is one of the project's stand-ups), and ended ones are counted but left out unless asked for. For someone who may read
+   * the project's meetings; anyone else gets undefined, as for a project with none. Found the same way as `list` (every stand-up record of the installation; there is no per-project index). At most `limit` (default 20, at most 50) are returned,
+   * the ones with a meeting coming up first (soonest first), then the rest by title; `more` says some of the shown kind were left out.
+   */
+  async overview(viewer: Principal, projectId: string, options: { includeEnded?: boolean; limit?: number } = {}): Promise<{ items: StandupSummary[]; more: boolean; ended: number } | undefined> {
+    const project = checkProjectId(projectId);
+    const limit = options.limit === undefined ? 20 : whole(options.limit, "limit", 1, STANDUP_LIMITS.agendaPage);
+    // The right to read the project's meetings is asked directly, and the same read gives the meetings still ahead: a readable project with no stand-ups answers an empty list, not undefined.
+    const planned = await this.#meetings.planned(viewer, project, { limit: MEETING_LIMITS.page });
+    if (planned === undefined) return undefined;
+    // The meeting coming up for each schedule: the earliest of the planned ones that belong to it.
+    const nextOf = new Map<string, View<OccurrenceBody>>();
+    for (const o of planned.items) {
+      const scheduleId = o.scheduleId;
+      if (scheduleId === undefined) continue;
+      const seen = nextOf.get(scheduleId);
+      if (seen === undefined || o.startsAt < seen.startsAt) nextOf.set(scheduleId, o);
+    }
+    const items: StandupSummary[] = [];
+    let ended = 0;
+    let after: string | undefined;
+    for (;;) {
+      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      if (chunk.length === 0) break;
+      for (const c of chunk) {
+        if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
+        const found = await this.#meetings.schedule(viewer, c.id);
+        if (found === undefined) continue;
+        const s = found;
+        if (s.state === "ended" && options.includeEnded !== true) {
+          ended += 1;
+          continue;
+        }
+        const next = nextOf.get(c.id);
+        let last: View<OccurrenceBody> | undefined;
+        if (s.lastOccurrenceId !== undefined) {
+          // The last meeting this stand-up made, when it is one of this project's occurrences. The schedule's latest occurrence may be the meeting still ahead of it: that one has not been held, so it is told once, as the next one.
+          const held = await this.#runner.get("meeting-occurrence", s.lastOccurrenceId);
+          const body = held?.body as unknown as OccurrenceBody | undefined;
+          const foundLast = held === undefined || body === undefined || body.projectId !== project ? undefined : view<OccurrenceBody>(held);
+          last = foundLast !== undefined && foundLast.id !== next?.id ? foundLast : undefined;
+        }
+        items.push({
+          scheduleId: c.id, revision: found.revision, title: s.title, state: s.state, time: s.time, timeZone: s.timeZone, recurrence: recurrenceWords(s.recurrence),
+          durationMinutes: s.durationMinutes, roster: s.roster, occurrences: s.occurrences,
+          ...(s.window === undefined ? {} : { window: { from: s.window.from, to: s.window.to } }),
+          ...(s.endDate === undefined ? {} : { endsOn: s.endDate }),
+          ...(next === undefined ? {} : { nextAt: next.startsAt, nextOccurrenceId: next.id, nextRevision: next.revision }),
+          ...(last === undefined ? {} : { lastAt: last.startsAt, lastState: last.state, lastOccurrenceId: last.id, lastRevision: last.revision }),
+        });
+      }
+      after = chunk[chunk.length - 1]!.id;
+      if (chunk.length < 100) break;
+    }
+    const lower = (t: string): string => t.toLowerCase();
+    items.sort((x, y) =>
+      (x.nextAt === undefined ? 1 : 0) - (y.nextAt === undefined ? 1 : 0)
+      || (x.nextAt !== undefined && y.nextAt !== undefined && x.nextAt !== y.nextAt ? (x.nextAt < y.nextAt ? -1 : 1) : 0)
+      || (lower(x.title) !== lower(y.title) ? (lower(x.title) < lower(y.title) ? -1 : 1) : 0)
+      || (x.scheduleId !== y.scheduleId ? (x.scheduleId < y.scheduleId ? -1 : 1) : 0));
+    return { items: items.slice(0, limit), more: items.length > limit, ended };
   }
 
   // ---- preparation ---------------------------------------------------------------------------------------------------------------

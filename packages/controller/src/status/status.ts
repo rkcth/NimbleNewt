@@ -227,6 +227,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
   agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
+  standups: { keys: ["projectId", "limit"], about: "a project's stand-ups themselves: each one's title, whether it is active, paused or ended, how often and at what time it is held, how long, who is on its roster, its next meeting and how its last one ended (planned meetings are the meetings kind, topics waiting are the agenda kind, what a stand-up prepared is the standup_briefs kind)" },
   explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
   replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"], about: "a replay of a task's recorded run, read only: a summary (lines of work and agents to follow) and a window of steps, narrowed to one line (lane), one agent, one kind of step (stepKind) or a time span (since, until: times with their zone such as 2026-11-01T08:00:00Z, or dates meaning midnight UTC; both ends included); with seq, one step in full with what led to it" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
@@ -244,6 +245,19 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
   owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
 };
+
+/**
+ * One stand-up as the `standups` answer tells it (card M03h): the schedule as it stands, plus the meeting coming up next and the last one held. The stand-up service keeps these records; this is only the view of them (the same shape as
+ * its own `StandupSummary`, declared here so the status service does not depend on that package).
+ */
+export interface StandupSummaryView {
+  readonly scheduleId: string; readonly revision: number; readonly title: string; readonly state: string;
+  readonly time: string; readonly timeZone: string; readonly recurrence: string;
+  readonly window?: { readonly from: string; readonly to: string };
+  readonly durationMinutes: number; readonly roster: readonly string[]; readonly occurrences: number; readonly endsOn?: string;
+  readonly nextAt?: string; readonly nextOccurrenceId?: string; readonly nextRevision?: number;
+  readonly lastAt?: string; readonly lastState?: string; readonly lastOccurrenceId?: string; readonly lastRevision?: number;
+}
 
 /** The parts of a stand-up brief the status answer reads (a brief is a record kept by the stand-up service; this is only the view of it). */
 export interface StandupBriefView {
@@ -287,6 +301,7 @@ export type StatusRequest =
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
+  | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "reconnect"; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
@@ -352,8 +367,12 @@ export interface StatusDeps {
     archive?(by: Principal, query: { archiveId: string; part?: number }): Promise<{ readonly handoffId: string; readonly taskId: string; readonly section: string; readonly chars: number; readonly parts: number; readonly text: string; readonly truncated?: boolean } | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
-  /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer. Absent: they are not listed. */
-  readonly standups?: { recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>; briefs?(viewer: Principal, occurrenceId: string): Promise<readonly StandupBriefView[]> };
+  /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer, and the stand-ups themselves (card M03h): the `standups` view. Absent: they are not listed. */
+  readonly standups?: {
+    recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>;
+    briefs?(viewer: Principal, occurrenceId: string): Promise<readonly StandupBriefView[]>;
+    overview?(viewer: Principal, projectId: string, page?: { limit?: number; includeEnded?: boolean }): Promise<{ items: readonly StandupSummaryView[]; more?: boolean; ended?: number } | undefined>;
+  };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text?: string; topic?: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
@@ -391,6 +410,8 @@ export interface StatusOptions extends RunnerOptions {
 export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, since: 40 } as const;
 /** How many references or links one replay chat line names before it counts the rest (card U09): a step may cite up to 100, which would make one line many kilobytes once quoted. */
 const REPLAY_LINE_ITEMS = 12;
+/** How many names of one stand-up's roster the stand-ups answer lists before counting the rest (card M03h): a roster may hold 50 principals. */
+const STANDUP_ROSTER_LISTED = 10;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const HANDLING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const TASK_ID_IN_TEXT = /task-[a-z2-7]{20}/g;
@@ -570,6 +591,7 @@ export class StatusService {
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
+      case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
@@ -1181,6 +1203,44 @@ export class StatusService {
         if (recent.more === true) lines.push(line("There are more stand-ups than shown.", cite("project", projectId)));
       }
     }
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * A project's stand-ups themselves (card M03h), two lines each. The first is the schedule: its title (quoted, because one set up by an agent is that agent's wording), whether it is active, paused or ended, how often and at what time it is
+   * held, how long it lasts, the hours of the day it must lie within and who is on its roster. The second is its meetings: the one coming up next, the last one held and how many it has made. Ended stand-ups are left out but counted, so the
+   * answer says when it did. Nothing for a project the caller may not read, and nothing when the stand-up service is not running.
+   */
+  async standupLines(by: Principal, request: { projectId: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const source = this.#deps.standups;
+    if (source?.overview === undefined) return undefined;
+    const projectId = checkProjectId(request.projectId);
+    const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 25 ? request.limit : invalid("limit", "must be 1 to 25");
+    if (by.kind === "owner" && (await this.#runner.get("project", projectId)) === undefined) return undefined;
+    const page = await source.overview(by, projectId, { limit });
+    if (page === undefined) return undefined;
+    const ended = page.ended === undefined ? 0 : page.ended;
+    const lines: Line[] = [];
+    for (const s of page.items) {
+      const cites = [cite("meeting-schedule", s.scheduleId, s.revision), cite("project", projectId)];
+      const listed = s.roster.slice(0, STANDUP_ROSTER_LISTED).map((a) => shown(a));
+      const roster = s.roster.length === 0
+        ? "Nothing is on its roster."
+        : `On the roster: ${listed.join(", ")}${s.roster.length > listed.length ? `, and ${s.roster.length - listed.length} more` : ""}.`;
+      lines.push(line(`${quoted(s.title)}: ${s.state}, ${s.recurrence} at ${s.time} ${shown(s.timeZone)}, ${s.durationMinutes} minutes${s.window === undefined ? "" : `, held between ${s.window.from} and ${s.window.to}`}. ${roster}`, ...cites));
+      const occ: Cite[] = [];
+      if (s.nextOccurrenceId !== undefined) occ.push(cite("meeting", s.nextOccurrenceId, s.nextRevision));
+      if (s.lastOccurrenceId !== undefined) occ.push(cite("meeting", s.lastOccurrenceId, s.lastRevision));
+      const ahead = s.nextAt === undefined ? "nothing is planned for it ahead" : `next one ${s.nextAt}`;
+      const behind = s.lastAt === undefined ? "it has not met yet" : `its last meeting was ${s.lastAt}${s.lastState === undefined ? "" : `, ${s.lastState}`}`;
+      lines.push(line(`${ahead}; ${behind}; ${s.occurrences} meeting${s.occurrences === 1 ? "" : "s"} of it so far${s.endsOn === undefined ? "" : `, and no more after ${s.endsOn}`}.`, ...occ, ...cites));
+    }
+    if (lines.length === 0) {
+      lines.push(line(ended === 0 ? "No stand-up is set up in this project." : `This project has no stand-up running; ${ended} ended ${ended === 1 ? "one is" : "ones are"} not shown.`, cite("project", projectId)));
+      return { observedAt: this.#runner.now(), lines };
+    }
+    if (page.more === true) lines.push(line("There are more stand-ups than shown.", cite("project", projectId)));
+    if (ended > 0) lines.push(line(`${ended} ended stand-up${ended === 1 ? "" : "s"} of this project ${ended === 1 ? "is" : "are"} left out.`, cite("project", projectId)));
     return { observedAt: this.#runner.now(), lines };
   }
 
