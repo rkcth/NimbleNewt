@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **248 of 357 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **249 of 357 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -107,7 +107,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
-| Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 40% | 8 of 20 |
+| Pi runtime and inference caching | `▓▓▓▓▓░░░░░░░` 45% | 9 of 20 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
@@ -170,7 +170,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 </details>
 
 <details>
-<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓░░░░░░░░ 8 of 20</summary>
+<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓▓░░░░░░░ 9 of 20</summary>
 
 The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap.
 
@@ -185,7 +185,7 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 - [ ] **G10** · P27 · Benchmark native backend caching and branch markers _(needs C06)_
 - [ ] **G09** · P30 · Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
 - [ ] **W01** · P33 · Measure how often Pi agents finish their work: a completion eval bench with a recorded baseline _(needs H12k, C06b)_
-- [ ] **W02** · P34 · Tell how a Pi turn ended, from the worker to the dispatcher _(needs W01)_
+- [x] **W02** · P34 · Tell how a Pi turn ended, from the worker to the dispatcher _(needs W01)_
 - [ ] **W03** · P35 · A natural stop is not success: end the attempt stopped early and readmit it _(needs W02)_
 - [ ] **W04** · P35 · Continue a turn that stops early, a bounded number of times _(needs W02)_
 - [ ] **G11** · P36 · Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
