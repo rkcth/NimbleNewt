@@ -1927,6 +1927,170 @@
       }
     },
     {
+      "id": "W01",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Measure how often Pi agents finish their work: a completion eval bench with a recorded baseline",
+      "depends_on": [
+        "H12k",
+        "C06b"
+      ],
+      "deliverable": "Raised 2026-11-09 from an Opus design consultation on Pi agents that stop early (implementation-notes, Pi completion follow-ups): in about 25 Pi coding runs all 3 bad runs ended on a thinking-only turn with no visible text, while all 20 good ones ended with a report of 1.3k to 15k characters, and NimbleNewt counts any natural stop as succeeded. Before changing the worker, a bench measures it: scripts and a task set replayed from merged cards (small, medium and large), each run in a throwaway worktree at the card's base commit with the card's own tests held back from the agent and run only afterwards. Four variants: A the plain prompt; B a stepwise PLAN.md with a commit per step; C B plus the continuation hook of W04; D C plus a relaunch that reuses the stored session. Per run it records verified finish (the held-back tests pass), stopped early, a length stop, an empty visible ending, a false done (the agent said done and the held-back tests fail), wall time, tokens and nudges used; variants C and D run once W04 lands",
+      "acceptance_and_verification": "The bench runs from one documented command on a pinned task set with the hidden tests kept out of every agent worktree; a baseline run of variants A and B is recorded with its commit, route, model and results per run; the release gates are written down as: verified finish at least 90 percent for small, 85 percent for medium and 70 percent for large tasks, false done at most 5 percent, and no silent non-finish (every run that did not finish is classified with its ending); a deliberately broken agent (one that stops after its first turn) is scored stopped early, not finished",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W02",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Tell how a Pi turn ended, from the worker to the dispatcher",
+      "depends_on": [
+        "W01"
+      ],
+      "deliverable": "Today a turn's result says only completed, failed or cancelled (HostTurnResult, packages/worker/src/host/local.ts line 32), so a turn that ran out of tokens, one that ended on thinking with no visible text and one that ended with a full report look the same to the controller. Pi Durable answers on a length stop as on a normal stop (node_modules/@earendil-works/pi-durable/dist/harness/generation.js line 362). The Pi adapter worker (packages/pi-adapter/src/worker) classifies the ending of each turn as endKind: length, empty-visible-text, no-work-end (a natural stop without work.end), announced-step-without-tool-call (the last text says it will do something and no tool call follows), or normal, and HostTurnResult carries it with the visible text length",
+      "acceptance_and_verification": "Every turn result from the local worker carries an endKind; a fixture for each kind (a scripted provider that stops on length, ends thinking-only, ends without work.end, announces a step and stops, and ends normally) yields that kind through the real worker process and host; the classification is recorded on the attempt; a result without endKind from an older worker is read as unknown, never as normal",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W03",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "A natural stop is not success: end the attempt stopped early and readmit it",
+      "depends_on": [
+        "W02"
+      ],
+      "deliverable": "The dispatcher ends an attempt succeeded whenever the turn completed (packages/controller/src/dispatch/dispatcher.ts line 2020, the turn completed), and work-end resolveOnEnd (packages/controller/src/work-end/work-end.ts line 542) has no outcome for an agent that stopped without saying it was done. A turn that completed without work.end, or whose endKind is not normal, ends the attempt with a new outcome stopped-early: it is readmitted from its resumeFrom checkpoint on the same conversation and the same pinned host, at most twice per task, after which the task gets a visible blocker agent_stopped_early carrying the last visible text (bounded and quoted), the plan progress (checked and unchecked PLAN.md steps) and the diff stat of the workspace",
+      "acceptance_and_verification": "A fixture agent that stops without work.end is never recorded succeeded; it is readmitted from its checkpoint on the same conversation and host, twice, and then the task carries an agent_stopped_early blocker with the last text, plan progress and diff stat; a turn that ends with work.end done is unchanged; a controller restart between readmits keeps the count; an owner stop or emergency stop still wins over a readmit",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W04",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Continue a turn that stops early, a bounded number of times",
+      "depends_on": [
+        "W02"
+      ],
+      "deliverable": "Pi Durable offers an onYield hook (node_modules/@earendil-works/pi-durable/dist/harness/types.d.ts line 698) that NimbleNewt does not use. The Pi adapter installs it: when a turn yields without a tool call and without work.end, it continues the same turn with a user nudge of the form: Remaining: the unchecked plan steps. Make the next tool call now. At most 3 nudges per turn, the count kept in a Pi Durable document so that a worker or controller restart does not reset it; a stopReason of length is never accepted as the final answer (generation.js line 362 treats it like stop) but continued the same way",
+      "acceptance_and_verification": "A scripted provider that yields thinking-only twice and then calls a tool is continued twice and finishes; one that never calls a tool gets exactly 3 nudges and then ends with its endKind for W03; a restart between nudges resumes the count from the document; a length stop is continued and is not reported as the answer; the nudges used are recorded on the attempt; bench variant C is run and recorded",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W05",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Check work.end done against the task contract before calling it success",
+      "depends_on": [
+        "W03",
+        "W04"
+      ],
+      "deliverable": "An agent's work.end done ends the attempt succeeded (packages/controller/src/dispatch/dispatcher.ts line 786) on its word alone. A controller-side verifier checks it against the task contract first: the worktree clean or fully committed, at least one commit ahead of the base, every requiredEvidence of the contract (packages/controller/src/planning/contracts.ts line 27) present, and the contract's check commands run by the host in the sandbox, not by the agent. A failed check continues the attempt with the list of what failed instead of ending it succeeded. Builds on the work.end slice already shipped; the remaining parts of H12n are not needed",
+      "acceptance_and_verification": "A done with a dirty tree, no commit ahead of the base, a missing required evidence item or a failing check command is not recorded succeeded and the agent is given the failure list in the same attempt; a done that passes every check is recorded succeeded as before; the check commands run in the host sandbox with the task's limits and their output is bounded; an agent cannot mark a check passed itself; repeated failed dones count toward the W03 readmit limit, not around it",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W06",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Give every Pi agent a completion-rules section of its system prompt",
+      "depends_on": [
+        "W04",
+        "C06b"
+      ],
+      "deliverable": "A short, fixed section of the system prompt (packages/pi-adapter/src/prompt-layout.ts) that tells the agent how to finish: keep a PLAN.md with a checkbox per step, keep steps small, commit once per step, and end with work.end, never with prose alone. The section is placed so that it does not change between context switches and keeps the cached prefix (C06b)",
+      "acceptance_and_verification": "Every Pi agent's first call carries the section; the C06b prompt-cache tests still pass with the section added, and its text is the same across tasks, roles and context switches; bench variant B and C runs use it and are recorded",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W07",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Set a length and reasoning budget per route profile",
+      "depends_on": [
+        "W04",
+        "R01"
+      ],
+      "deliverable": "A route entry (packages/controller/src/routing/policy.ts line 14) sets no maximum output tokens or reasoning cap, and the --thinking medium setting tried on the Pi command line made no difference. Each route profile gets maxTokens and a reasoning cap that reach the provider request; on a length stop the turn is continued (W04) with the nudge: stop deliberating, act",
+      "acceptance_and_verification": "The route's maxTokens and reasoning cap appear in the request the provider receives (checked at the relay, not only in configuration); a route without them keeps today's behaviour; a scripted length stop is continued with the stop deliberating, act nudge and counts as a nudge; changing a route's budget applies from the next turn",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W08",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Show the owner how each attempt ended",
+      "depends_on": [
+        "W03",
+        "W04",
+        "W05",
+        "U05"
+      ],
+      "deliverable": "The owner can see, for each attempt of a task, its end kind, the nudges used, the plan progress (x of y steps) and the blocker if any. It is a status kind in STATUS_KINDS (packages/controller/src/status/status.ts line 213) so that the chat interpreter's prompt lists it (packages/controller/src/chat/model-interpreter.ts line 22) and it is reachable by free-form chat, with no magic words",
+      "acceptance_and_verification": "Free-form questions such as why did the last attempt stop, or how far did it get, reach the view through the chat interpreter in a test with the model interpreter; the view shows end kind, nudges, plan progress and the agent_stopped_early blocker with its last text; the status and browser views show the same figures; no fixed phrase is needed",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "W09",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Pass the completion gates on the real worker and on a Radiance route before release",
+      "depends_on": [
+        "W01",
+        "W05",
+        "W06",
+        "W07",
+        "W08"
+      ],
+      "deliverable": "The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on a local route and on a Radiance route whose model calls go through the controller's model relay (packages/pi-adapter/src/worker/relay-fetch.ts). This is a release gate",
+      "acceptance_and_verification": "A Radiance route is shown working end to end through the controller's relay (a real task from admission to a verified work.end); bench variants A to D are run on the real worker on both routes and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "C07",
       "parent": "N07",
       "existing_issue": "AII-257",
@@ -9581,7 +9745,8 @@
         "F04l",
         "F04m",
         "F04n",
-        "L02e"
+        "L02e",
+        "W09"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

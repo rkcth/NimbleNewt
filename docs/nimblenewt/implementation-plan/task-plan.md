@@ -30,7 +30,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F04n, F09 |
-| N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
+| N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b, W01, W02, W03, W04, W05, W06, W07, W08, W09 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L02e, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
@@ -724,6 +724,78 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** C06, F05, F06.
 - **Deliverable:** Owner decision 2026-10-22: the cache-ability of Pi Durable prompts is a serious performance issue to resolve, because context switching is the core of NimbleNewt. Audit and measure Pi Durable 1.3.0's actual prompt layout (Pi stores system sections and tool changes as appended positional entries, but before each request it replays them into one leading system message, so any change to a section or the tool set rewrites the head of the request and loses every cached prefix after it; the layout therefore suits an agent's growing history only while its sections and tools stay unchanged, and it shares no prefix between agents; pi-ai places Anthropic cache breakpoints on the system blocks, the last tool and the last user message and derives the OpenAI cache key from the session ID), then fix it on the NimbleNewt side or with a pinned, scoped Pi patch; model thinking on a context switch (owner decision 2026-10-22): when a conversation is resumed or switched, the model's thinking and reasoning items that the provider returned or requires are kept as part of the stored conversation and replayed to the model in order, so the model keeps its own reasoning and the provider accepts the history (for example Anthropic thinking blocks and OpenAI reasoning items, which are only valid in the conversation that produced them); stored thinking is readable only by the owner and never by peers, under the A10 inspection policy and with the same secret redaction as private scratch; its display in the owner's timeline (U09) and its deletion after the task (K06) are carried by those cards.
 - **Acceptance and verification:** The audit records what Pi renders first, how sections and tools are ordered, what changes between turns and what a suspend, resume, branch, inquiry or compaction does to the prefix; NimbleNewt orders every prompt stable-first (sorted tool declarations and a common preamble, then project context, then agent-specific sections, then volatile content) with no timestamps or random IDs early; agents that can share a prefix do, with the cache key chosen per shared prefix (for example per project or per meeting) and not per session; volatile content goes into appended user or context messages and never into system sections, and the system sections and tool set stay fixed for an agent's session and change only at deliberate boundaries; cache lifetime settings and session keys are set per backend profile (C06); compaction is bounded so it does not silently discard the prefix and its cost is reported; a test checks that the bytes of the provider request's prefix are unchanged across turns and context switches (not only the Pi log), and after a context switch the reusable prefix is reused on each qualified backend, measured with the backend's own hit fields and compared with the unmodified Pi layout; a change to Pi is a separate scoped patch against the pinned version with an upgrade test; results are recorded for G10; a resume after restart and after a harness change replays the stored thinking unchanged and the provider accepts the history; a provider that rejects stored thinking after a model change is handled by dropping only the invalid blocks and recording that; stored thinking is excluded from exports unless the owner turns that on; a peer or another conversation cannot read stored thinking and the A10 inspection policy and redaction apply to the owner's read.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W01 — Measure how often Pi agents finish their work: a completion eval bench with a recorded baseline
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** H12k, C06b.
+- **Deliverable:** Raised 2026-11-09 from an Opus design consultation on Pi agents that stop early (implementation-notes, Pi completion follow-ups): in about 25 Pi coding runs all 3 bad runs ended on a thinking-only turn with no visible text, while all 20 good ones ended with a report of 1.3k to 15k characters, and NimbleNewt counts any natural stop as succeeded. Before changing the worker, a bench measures it: scripts and a task set replayed from merged cards (small, medium and large), each run in a throwaway worktree at the card's base commit with the card's own tests held back from the agent and run only afterwards. Four variants: A the plain prompt; B a stepwise PLAN.md with a commit per step; C B plus the continuation hook of W04; D C plus a relaunch that reuses the stored session. Per run it records verified finish (the held-back tests pass), stopped early, a length stop, an empty visible ending, a false done (the agent said done and the held-back tests fail), wall time, tokens and nudges used; variants C and D run once W04 lands.
+- **Acceptance and verification:** The bench runs from one documented command on a pinned task set with the hidden tests kept out of every agent worktree; a baseline run of variants A and B is recorded with its commit, route, model and results per run; the release gates are written down as: verified finish at least 90 percent for small, 85 percent for medium and 70 percent for large tasks, false done at most 5 percent, and no silent non-finish (every run that did not finish is classified with its ending); a deliberately broken agent (one that stops after its first turn) is scored stopped early, not finished.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W02 — Tell how a Pi turn ended, from the worker to the dispatcher
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W01.
+- **Deliverable:** Today a turn's result says only completed, failed or cancelled (HostTurnResult, packages/worker/src/host/local.ts line 32), so a turn that ran out of tokens, one that ended on thinking with no visible text and one that ended with a full report look the same to the controller. Pi Durable answers on a length stop as on a normal stop (node_modules/@earendil-works/pi-durable/dist/harness/generation.js line 362). The Pi adapter worker (packages/pi-adapter/src/worker) classifies the ending of each turn as endKind: length, empty-visible-text, no-work-end (a natural stop without work.end), announced-step-without-tool-call (the last text says it will do something and no tool call follows), or normal, and HostTurnResult carries it with the visible text length.
+- **Acceptance and verification:** Every turn result from the local worker carries an endKind; a fixture for each kind (a scripted provider that stops on length, ends thinking-only, ends without work.end, announces a step and stops, and ends normally) yields that kind through the real worker process and host; the classification is recorded on the attempt; a result without endKind from an older worker is read as unknown, never as normal.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W03 — A natural stop is not success: end the attempt stopped early and readmit it
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W02.
+- **Deliverable:** The dispatcher ends an attempt succeeded whenever the turn completed (packages/controller/src/dispatch/dispatcher.ts line 2020, the turn completed), and work-end resolveOnEnd (packages/controller/src/work-end/work-end.ts line 542) has no outcome for an agent that stopped without saying it was done. A turn that completed without work.end, or whose endKind is not normal, ends the attempt with a new outcome stopped-early: it is readmitted from its resumeFrom checkpoint on the same conversation and the same pinned host, at most twice per task, after which the task gets a visible blocker agent_stopped_early carrying the last visible text (bounded and quoted), the plan progress (checked and unchecked PLAN.md steps) and the diff stat of the workspace.
+- **Acceptance and verification:** A fixture agent that stops without work.end is never recorded succeeded; it is readmitted from its checkpoint on the same conversation and host, twice, and then the task carries an agent_stopped_early blocker with the last text, plan progress and diff stat; a turn that ends with work.end done is unchanged; a controller restart between readmits keeps the count; an owner stop or emergency stop still wins over a readmit.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W04 — Continue a turn that stops early, a bounded number of times
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W02.
+- **Deliverable:** Pi Durable offers an onYield hook (node_modules/@earendil-works/pi-durable/dist/harness/types.d.ts line 698) that NimbleNewt does not use. The Pi adapter installs it: when a turn yields without a tool call and without work.end, it continues the same turn with a user nudge of the form: Remaining: the unchecked plan steps. Make the next tool call now. At most 3 nudges per turn, the count kept in a Pi Durable document so that a worker or controller restart does not reset it; a stopReason of length is never accepted as the final answer (generation.js line 362 treats it like stop) but continued the same way.
+- **Acceptance and verification:** A scripted provider that yields thinking-only twice and then calls a tool is continued twice and finishes; one that never calls a tool gets exactly 3 nudges and then ends with its endKind for W03; a restart between nudges resumes the count from the document; a length stop is continued and is not reported as the answer; the nudges used are recorded on the attempt; bench variant C is run and recorded.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W05 — Check work.end done against the task contract before calling it success
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W03, W04.
+- **Deliverable:** An agent's work.end done ends the attempt succeeded (packages/controller/src/dispatch/dispatcher.ts line 786) on its word alone. A controller-side verifier checks it against the task contract first: the worktree clean or fully committed, at least one commit ahead of the base, every requiredEvidence of the contract (packages/controller/src/planning/contracts.ts line 27) present, and the contract's check commands run by the host in the sandbox, not by the agent. A failed check continues the attempt with the list of what failed instead of ending it succeeded. Builds on the work.end slice already shipped; the remaining parts of H12n are not needed.
+- **Acceptance and verification:** A done with a dirty tree, no commit ahead of the base, a missing required evidence item or a failing check command is not recorded succeeded and the agent is given the failure list in the same attempt; a done that passes every check is recorded succeeded as before; the check commands run in the host sandbox with the task's limits and their output is bounded; an agent cannot mark a check passed itself; repeated failed dones count toward the W03 readmit limit, not around it.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W06 — Give every Pi agent a completion-rules section of its system prompt
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W04, C06b.
+- **Deliverable:** A short, fixed section of the system prompt (packages/pi-adapter/src/prompt-layout.ts) that tells the agent how to finish: keep a PLAN.md with a checkbox per step, keep steps small, commit once per step, and end with work.end, never with prose alone. The section is placed so that it does not change between context switches and keeps the cached prefix (C06b).
+- **Acceptance and verification:** Every Pi agent's first call carries the section; the C06b prompt-cache tests still pass with the section added, and its text is the same across tasks, roles and context switches; bench variant B and C runs use it and are recorded.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W07 — Set a length and reasoning budget per route profile
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W04, R01.
+- **Deliverable:** A route entry (packages/controller/src/routing/policy.ts line 14) sets no maximum output tokens or reasoning cap, and the --thinking medium setting tried on the Pi command line made no difference. Each route profile gets maxTokens and a reasoning cap that reach the provider request; on a length stop the turn is continued (W04) with the nudge: stop deliberating, act.
+- **Acceptance and verification:** The route's maxTokens and reasoning cap appear in the request the provider receives (checked at the relay, not only in configuration); a route without them keeps today's behaviour; a scripted length stop is continued with the stop deliberating, act nudge and counts as a nudge; changing a route's budget applies from the next turn.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W08 — Show the owner how each attempt ended
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W03, W04, W05, U05.
+- **Deliverable:** The owner can see, for each attempt of a task, its end kind, the nudges used, the plan progress (x of y steps) and the blocker if any. It is a status kind in STATUS_KINDS (packages/controller/src/status/status.ts line 213) so that the chat interpreter's prompt lists it (packages/controller/src/chat/model-interpreter.ts line 22) and it is reachable by free-form chat, with no magic words.
+- **Acceptance and verification:** Free-form questions such as why did the last attempt stop, or how far did it get, reach the view through the chat interpreter in a test with the model interpreter; the view shows end kind, nudges, plan progress and the agent_stopped_early blocker with its last text; the status and browser views show the same figures; no fixed phrase is needed.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W09 — Pass the completion gates on the real worker and on a Radiance route before release
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W01, W05, W06, W07, W08.
+- **Deliverable:** The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on a local route and on a Radiance route whose model calls go through the controller's model relay (packages/pi-adapter/src/worker/relay-fetch.ts). This is a release gate.
+- **Acceptance and verification:** A Radiance route is shown working end to end through the controller's relay (a real task from admission to a verified work.end); bench variants A to D are run on the real worker on both routes and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C07 — Implement context budgets, the startup builder and stall-proof helpers
@@ -3295,7 +3367,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
