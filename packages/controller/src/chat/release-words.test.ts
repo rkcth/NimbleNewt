@@ -86,6 +86,73 @@ test("a curly apostrophe is still a negation: phones type ’, and it must not t
   assert.equal(saysAcknowledgeFlaky(`approve ${cand}, I’m fine with the earlier failures`, cand), true, "a curly apostrophe in I’m still carries the acceptance");
 });
 
+test("an acceptance is a verb, in the owner's own mouth, unconditioned and about the candidate being approved (third review, D2)", () => {
+  const a = "rcn-1a2b3c4d5e6f7a8b9c0d1e2f";
+  const b = "rcn-9f9f9f9f9f9f9f9f9f9f9f9f";
+
+  // What an owner really says when they accept the earlier failures of the candidate they are approving.
+  const yes = [
+    `approve ${a}, I accept the earlier failures`,
+    `approve ${a} anyway, I accept that linux failed first`,
+    `approve ${a}. Yes accept the earlier failures`,
+    `approve ${a}. I accept the failures that came first`,
+    `approve ${a}: the acceptance suite failed on linux first and I accept that`,
+    `approve ${a}, go ahead despite the failures`,
+    `approve ${a}, acknowledge the flaky pass`,
+    `${a} failed before it passed and I accept that`,
+    `approve ${b} and ${a}, I accept the failures`,
+  ];
+  for (const words of yes) assert.equal(saysAcknowledgeFlaky(words, a), true, `"${words}" accepts the earlier failures of ${a}`);
+
+  // None of these accepts the earlier failures of `a` (third review, D2), each for the reason its group says.
+  const no: ReadonlyArray<readonly [string, string]> = [
+    // A noun is not an acceptance: the owner has to accept something, not mention acceptance or an acknowledgement.
+    [`approve ${a}; the acceptance suite failed on linux first`, "a noun"],
+    [`approve ${a}; the acknowledgement of the failures sits in the waiver file`, "a noun"],
+    // A condition is not an acceptance: the owner accepts nothing yet, something has to happen first.
+    [`approve ${a} once QA has accepted the failures`, "once"],
+    [`approve ${a} only after the failures are acknowledged`, "after"],
+    [`approve ${a} before the failures are acknowledged`, "before"],
+    [`approve ${a} until QA accepts the failures`, "until"],
+    [`approve ${a}. Ask QA whether they accept its failures`, "whether"],
+    [`approve ${a} when the team accepts the failures`, "when"],
+    [`approve ${a}, once I have read the log I accept the failures`, "once, and the owner's own mouth"],
+    [`approve ${a}; ask me whether I accept the failures`, "whether, and the owner's own mouth"],
+    [`approve ${a}, I accept the failures if only linux failed`, "if, even after the acceptance"],
+    [`approve ${a}, I accept the failures assuming only linux failed`, "assuming"],
+    // An acceptance of another candidate is not an acceptance of this one.
+    [`approve ${a} and ${b}; I accept the failures of ${b}`, "another candidate is nearer to the acceptance"],
+    [`approve ${a} and ${b}. I accept the failures of ${b}`, "another candidate is nearer to the acceptance"],
+    [`approve ${a} and ${b}, I accept the failures`, "the other candidate is the one nearest to the acceptance"],
+    // A question is not an acceptance, with or without its final mark.
+    [`approve ${a}, did you accept the failures`, "a question with no mark"],
+    [`approve ${a}, do you accept the failures`, "a question with no mark"],
+    [`approve ${a}, does QA accept the failures`, "a question with no mark"],
+    [`approve ${a}, would you accept the failures`, "a question with no mark"],
+    [`approve ${a}, should we accept the failures`, "a question with no mark"],
+    [`approve ${a}, could you accept the failures`, "a question with no mark"],
+    [`approve ${a}, can you accept the failures`, "a question with no mark"],
+    [`approve ${a}, will you accept the failures`, "a question with no mark"],
+    [`approve ${a}, the earlier failures were accepted?!`, "a question ending ?!"],
+    [`approve ${a}\uff1fI accept the earlier failures`, "a question with a full-width mark"],
+    // Somebody else's acceptance is not the owner's.
+    [`approve ${a}, Bob accepted the failures`, "another person accepted them"],
+    [`approve ${a}, QA has accepted the failures`, "another person accepted them"],
+    [`approve ${a}, they accepted the failures`, "another person accepted them"],
+    [`approve ${a}, the reviewer accepted the failures`, "another person accepted them"],
+  ];
+  for (const [words, why] of no) assert.equal(saysAcknowledgeFlaky(words, a), false, `"${words}" accepts nothing (${why})`);
+
+  // The binding is to the candidate the acceptance sits nearest to: this one is nearer, so it is the owner's acceptance of this one.
+  assert.equal(saysAcknowledgeFlaky(`approve ${b} and ${a}: I accept the failures of ${a}`, a), true, "the acceptance named for this candidate is for this candidate");
+  // D2b: a sentence that carries the acceptance but names no candidate belongs to the candidate of the sentence before it.
+  assert.equal(saysAcknowledgeFlaky(`approve ${a}. Accept the earlier failures`, a), true, "the acceptance after the candidate's name is about that candidate");
+  assert.equal(saysAcknowledgeFlaky(`is ${a} the flaky one? Accept the earlier failures of ${b}`, a), false, "and still nothing when the earlier sentence was about something else");
+  // With no candidate to bind to, the acceptance still has to be the owner's own unconditioned one.
+  assert.equal(saysAcknowledgeFlaky("I accept the earlier failures"), true, "an acceptance with no candidate named is still an acceptance");
+  assert.equal(saysAcknowledgeFlaky("Bob accepted the earlier failures"), false, "someone else's acceptance binds to nothing");
+});
+
 test("a release ID or a host ID only counts when the owner said it as a whole word, not as the start of a longer name", () => {
   const own = "authorize host:rig2 for release tests on linux x64";
   assert.equal(foreignValue({ hostId: "host:rig" }, own, "", RELEASE_ID_KEYS), "hostId", "host:rig2 does not say host:rig");

@@ -131,6 +131,24 @@ for (const backend of backends) {
       const curlyYes = `approve the release candidate ${cand}, I’m fine with the failures that came first`;
       const curlyYesShown = await turn("m7h", curlyYes, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: curlyYes, basis: "owner" }]);
       assert.equal(curlyYesShown[0]!.status, "proposed", `the owner's own acceptance with a typed apostrophe is read: ${JSON.stringify(curlyYesShown[0])}`);
+      // ---- an acceptance that is not the owner's own, is conditioned, is a question or belongs to another candidate is no acknowledgement at all (third review, D2).
+      const notAcceptance: ReadonlyArray<readonly [string, string]> = [
+        ["m7i", `approve the release candidate ${cand} and rcn-9f9f9f9f9f9f9f9f9f9f9f; I accept the failures of rcn-9f9f9f9f9f9f9f9f9f9f9f`],
+        ["m7j", `approve the release candidate ${cand}, did you accept the failures`],
+        ["m7k", `approve the release candidate ${cand}, Bob accepted the failures`],
+        ["m7l", `approve the release candidate ${cand} once QA has accepted the failures`],
+        ["m7m", `approve the release candidate ${cand}; the acceptance suite failed on linux first`],
+      ];
+      for (const [id, words] of notAcceptance) {
+        const shown = await turn(id, words, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: words, basis: "owner" }]);
+        assert.equal(shown[0]!.status, "refused", `"${words}" accepts nothing for ${cand}: ${JSON.stringify(shown[0])}`);
+        assert.equal(shown[0]!.code, "unsupported_value");
+        assert.equal((await gate(cand)).approved, false, "the refused acknowledgement approved nothing");
+      }
+      // An acceptance in the sentence after the candidate's name is the owner's acceptance of that candidate.
+      const nextSentence = `approve the release candidate ${cand}. Yes accept the earlier failures`;
+      const nextShown = await turn("m7n", nextSentence, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: nextSentence, basis: "owner" }]);
+      assert.equal(nextShown[0]!.status, "proposed", `the acceptance that follows the candidate's name is about it: ${JSON.stringify(nextShown[0])}`);
       const acceptWords = `the gate shows a flaky platform and I accept it; approve the release candidate ${cand}`;
       const acceptShown = await turn("m7e", acceptWords, [{ kind: "command", op: "release.approve", args: { candidateId: cand, acknowledgeFlaky: true }, evidence: acceptWords, basis: "owner" }]);
       assert.equal(acceptShown[0]!.status, "proposed", `the owner accepting the flaky pass is an acknowledgement: ${JSON.stringify(acceptShown[0])}`);
