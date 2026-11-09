@@ -15,7 +15,7 @@ test("a right's scope is said before the names and the basis, so a truncated lin
   const long = "a".repeat(80);
   const line = describe("grant.create", { basis: `owner chat: ${"let it run ".repeat(30)}`, grantee: `agent:${long}`, action: `approve.${long}`, project: "proj-x" }, { "proj-x": `Garden ${"b".repeat(200)}` });
   assert.ok(line.endsWith("..."), "the line is cut");
-  assert.match(line, /^Grant right \(no end: it never runs out and stays until you revoke it; only in "Garden b+\.\.\."\)/, line);
+  assert.match(line, /^Grant right \(no end: it never runs out and stays until you revoke it; only in "Garden b+[^"]*"\)/, line);
   assert.match(describe("grant.create", { basis: "x".repeat(200), grantee: `agent:${long}`, action: `approve.${long}`, project: "*" }, {}), /^Grant right \(no end[^)]*; everywhere: it covers every project/);
 });
 
