@@ -18,7 +18,7 @@ export type PolicyEditChange =
   | ({ readonly type: "environment"; readonly environment: Environment } & PolicyWhere)
   | { readonly type: "lock" | "unlock"; readonly cells: readonly string[] }
   | ({ readonly type: "reserve" | "unreserve"; readonly tool: string } & PolicyWhere)
-  | ({ readonly type: "grant"; readonly grantee: string; readonly approve: Approve; readonly environments?: readonly Environment[]; /** null: the grant has no end. */ readonly lengthDays?: number | null; readonly until?: string; /** null: the owner says there is no spending limit. */ readonly spendLimit?: number | null; readonly audiences?: readonly string[] } & PolicyWhere)
+  | ({ readonly type: "grant"; readonly grantee: string; readonly approve: Approve; readonly environments?: readonly Environment[]; /** null: the grant has no end. */ readonly lengthDays?: number | null; readonly until?: string; /** null: the grant has no spending limit; the proposal the owner confirms says so. */ readonly spendLimit?: number | null; readonly audiences?: readonly string[] } & PolicyWhere)
   | ({ readonly type: "revoke"; readonly grantee: string; readonly approve: Approve } & PolicyWhere)
   | { readonly type: "setting"; readonly layer: LayerName; readonly scopeId?: string; readonly key: string; readonly value?: unknown; readonly remove?: true };
 
