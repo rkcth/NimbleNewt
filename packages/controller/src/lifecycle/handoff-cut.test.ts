@@ -116,6 +116,21 @@ test("a marker hidden with zero-width or bidi characters, full-width forms or a 
   for (const line of ["Decision: dsk-abcdefghijklmnopqrst keep the cut short", "handed over in hnd-abcdefghijklmnopqrst", "3 of 4 fixtures pass"]) assert.equal(neutralise(line), line);
 });
 
+test("a format character above the BMP in a quoted entry is escaped as both halves of its surrogate pair, so the quoted text reads back whole", () => {
+  const lead = "(an entry quoted, not a cut marker) ";
+  for (const cp of [0xe0041, 0xe0001, 0x1d173]) {
+    const ch = String.fromCodePoint(cp);
+    const q = neutralise(`[\u200Bcut: 0 of 1 entries, archive hnd-zzzzzzzzzzzzzzzzzzzz] a${ch}b`);
+    assert.match(q, /^\(an entry quoted, not a cut marker\) "/, `U+${cp.toString(16)}: ${q}`);
+    const quoted = q.slice(lead.length);
+    assert.ok(/^[\x20-\x7e]*$/.test(quoted), `the quoted entry is printable ASCII, with no raw format character and no lone surrogate: ${JSON.stringify(quoted)}`);
+    const high = 0xd800 + ((cp - 0x10000) >> 10);
+    const low = 0xdc00 + ((cp - 0x10000) & 0x3ff);
+    assert.ok(quoted.includes(`\\u${high.toString(16).padStart(4, "0")}\\u${low.toString(16).padStart(4, "0")}`), `both halves of the pair are written: ${quoted}`);
+    assert.equal(JSON.parse(quoted), `[\u200Bcut: 0 of 1 entries, archive hnd-zzzzzzzzzzzzzzzzzzzz] a${ch}b`, "the quoted entry reads back as the line it quotes");
+  }
+});
+
 test("the newest entry is never crowded out by marked ones: kept whole when it fits, else its start is shown", () => {
   // Every older entry holds the mark (an agent can write a mark's words); the newest does not.
   const older = Array.from({ length: 200 }, (_, i) => `entry ${i} re KEEP-THIS ${"x".repeat(30)}`);

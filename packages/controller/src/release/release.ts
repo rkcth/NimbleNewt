@@ -52,6 +52,16 @@ export interface AttemptBody {
   readonly reason?: string;
 }
 export interface ApprovalBody { readonly candidateId: string; readonly by: string; readonly at: string; /** The earlier failed attempts the owner acknowledged when approving a release that passed only on a retry. */ readonly acknowledged?: readonly string[] }
+/** One submitted candidate as the owner's `release` status view lists them (card X09b part 2): what to ask about. Whether it is approved comes from its gate, which the view reads anyway. */
+export interface CandidateRow { readonly candidateId: string; readonly submittedAt: string; readonly submittedBy: string }
+/** The owner's candidate list: the newest kept, whether one is left out, and whether the whole store was read. */
+export interface CandidatePage {
+  readonly candidates: readonly CandidateRow[];
+  /** True when a submitted candidate is not listed. Exact while `scanLimited` is false; with a bounded scan it says "at least one, and possibly more that were never read". */
+  readonly more: boolean;
+  /** True when the scan stopped at its bound (`CANDIDATE_SCAN` records) before the end of the store, so candidates submitted earlier than those listed were not read at all. */
+  readonly scanLimited: boolean;
+}
 /** Index of the attempts of one platform of one candidate (so no list of all attempts is ever scanned). */
 export interface CellIndexBody { readonly candidateId: string; readonly cell: string; readonly attempts: readonly { readonly id: string; readonly n: number; readonly by: string }[] }
 /** Index of one host: the attempts still open on it and the recently ended ones it must stop. */
@@ -107,6 +117,29 @@ const ISSUERIDX = "release-issuer";
 /** The record kinds the activation part (K02) reads: it never writes them. */
 export const RELEASE_KINDS = { candidate: CANDIDATE, approval: APPROVAL } as const;
 const SETTINGS: AggregateRef = { kind: "release-settings", id: "main" };
+/** How many candidate records one page of the owner's candidate scan holds, and how many pages it reads at most (so a list never reads unbounded). */
+export const CANDIDATE_SCAN_PAGE = 200;
+const CANDIDATE_SCAN_PAGES = 25;
+/** The most candidate records one `candidates()` call reads: `CANDIDATE_SCAN_PAGE * CANDIDATE_SCAN_PAGES`. */
+export const CANDIDATE_SCAN = CANDIDATE_SCAN_PAGE * CANDIDATE_SCAN_PAGES;
+/**
+ * Read a store page by page: `list(after, limit)` gives the records after `after` (the record IDs order them, which for a digest ID says nothing about when they were written). It stops after `pages` full
+ * pages, and then reads ONE more record: a store of exactly `limit * pages` records ends on the last page and is read to the end, so `scanLimited` is true only when something was really left unread
+ * (card X09b part 2 review 2, item 4 — at exactly the bound the old loop said the bound had been reached).
+ */
+export async function scanPages<T extends { id: string }>(list: (after: string | undefined, limit: number) => Promise<readonly T[]>, limit: number, pages: number): Promise<{ readonly rows: T[]; readonly scanLimited: boolean }> {
+  const rows: T[] = [];
+  let after: string | undefined;
+  for (let read = 0; read < pages; read++) {
+    const chunk = await list(after, limit);
+    for (const row of chunk) rows.push(row);
+    // A short page is the end of the store: everything was read, so what is left out is counted exactly.
+    if (chunk.length < limit) return { rows, scanLimited: false };
+    after = chunk[chunk.length - 1]!.id;
+  }
+  return { rows, scanLimited: (await list(after, 1)).length > 0 };
+}
+
 const ROLE = /^[a-z][a-z0-9-]{0,39}$/;
 
 /** The issuer settings with the profile's default under any field not set. Pure. */
@@ -201,19 +234,29 @@ export class ReleaseService {
     return { candidateId, replayed: done.replayed };
   }
 
-  /** The owner allows a host to run destructive release tests for one platform. A machine used for production work is not authorized by that. Withdrawing the authorization (or moving it to another platform) ends what is open on the host at once. */
-  async authorizeHost(owner: Principal, command: NoActor & { hostId: string; os: Cell["os"]; arch: Cell["arch"]; active?: boolean }): Promise<void> {
+  /**
+   * The owner allows a host to run destructive release tests for one platform. A machine used for production work is not authorized by that. Withdrawing the authorization (or moving it to another platform)
+   * ends what is open on the host at once. Withdrawing names no platform (card X09b part 2 review 2, item 3): the owner takes the machine off the release machines, and which platform it stood for is what the
+   * authorization on record says — the owner is not made to recite it, and the interpreter is not allowed to pick it.
+   */
+  async authorizeHost(owner: Principal, command: NoActor & { hostId: string; os?: Cell["os"]; arch?: Cell["arch"]; active?: boolean }): Promise<void> {
     this.#owner(owner, "authorize a host for release tests");
     onlyKnown(command, ["commandId", "hostId", "os", "arch", "active"]);
     const hostId = text(command.hostId, "hostId", { min: 1, max: 80 });
-    const cell = checkCell({ os: command.os, arch: command.arch }, "platform");
     const active = command.active !== false;
+    const given = command.os !== undefined || command.arch !== undefined;
+    if (active && !given) throw new DomainError("invalid_command", "os and arch say which platform the host is authorized for; a withdrawal may leave them out", { field: "os" });
+    const cell = given ? checkCell({ os: command.os, arch: command.arch }, "platform") : undefined;
     const ref: AggregateRef = { kind: HOST, id: `rhs-${sha(hostId).slice(0, 24)}` };
     await this.#runner.command("release.host", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { hostId, platform: cellKey(cell), active },
+      payload: { hostId, platform: cell === undefined ? "any (the platform the authorization on record names)" : cellKey(cell), active },
       build: async (): Promise<Built> => {
         const existing = await this.#runner.get(HOST, ref.id);
-        const body: HostAuthBody = { hostId, os: cell.os, arch: cell.arch, active, by: owner.id, at: this.#runner.now() };
+        const was = existing?.body as unknown as HostAuthBody | undefined;
+        // A withdrawal that names no platform is the record's own platform; there is nothing to withdraw when there is no record.
+        const where = cell ?? (was === undefined ? undefined : { os: was.os, arch: was.arch });
+        if (where === undefined) throw new DomainError("not_found", `${hostId} is not authorized for release tests, so there is nothing to withdraw`, { field: "hostId" });
+        const body: HostAuthBody = { hostId, os: where.os, arch: where.arch, active, by: owner.id, at: this.#runner.now() };
         const changes: Change[] = [existing === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: existing.revision, body: body as unknown as JsonObject }];
         // What the host was running under the authorization that ends is ended with it, so the destructive test stops (a host picked-up job is told to stop in its next fetch).
         const idx = (await this.#runner.get(HOSTIDX, hostIdxId(hostId)))?.body as unknown as HostIndexBody | undefined;
@@ -221,7 +264,7 @@ export class ReleaseService {
         for (const id of idx?.open ?? []) {
           const found = await this.#runner.get(ATTEMPT, id);
           const attempt = found?.body as unknown as AttemptBody | undefined;
-          if (found !== undefined && attempt !== undefined && attempt.state === "issued" && (!active || attempt.cell.os !== cell.os || attempt.cell.arch !== cell.arch)) ending.push({ found, attempt });
+          if (found !== undefined && attempt !== undefined && attempt.state === "issued" && (!active || attempt.cell.os !== where.os || attempt.cell.arch !== where.arch)) ending.push({ found, attempt });
         }
         if (ending.length > 0) changes.push(...(await this.#endChanges(hostId, ending, "interrupted", owner.id, "the host's authorization was withdrawn")));
         return { ref, creates: existing === undefined, changes, detail: { hostId, active, ended: ending.length } };
@@ -675,28 +718,53 @@ export class ReleaseService {
     const candidate = (await this.#runner.get(CANDIDATE, String(candidateId)))?.body as unknown as CandidateBody | undefined;
     if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
     const attempts = await this.#attempts(candidateId, candidate.manifest.matrix);
-    const cells: GateCell[] = candidate.manifest.matrix.map((cell) => {
+    const approved = (await this.#runner.get(APPROVAL, candidateId)) !== undefined;
+    return this.#gateOf(candidateId, candidate.manifest.matrix, attempts, approved);
+  }
+
+  /**
+   * The gate and every attempt of one candidate from ONE read of its attempts (the owner's `release` status view needs both, and reading them separately reads every attempt record twice).
+   * The same `gate` and `attempts` answer, in the same order (oldest attempt first). Owner only.
+   */
+  async gateAndAttempts(owner: Principal, candidateId: string): Promise<{ gate: Gate; attempts: (AttemptBody & { id: string })[] }> {
+    this.#owner(owner, "read the release gate");
+    const candidate = (await this.#runner.get(CANDIDATE, String(candidateId)))?.body as unknown as CandidateBody | undefined;
+    if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
+    const attempts = (await this.#attempts(candidateId, candidate.manifest.matrix)).sort((a, b) => (a.n - b.n) || (a.id < b.id ? -1 : 1));
+    return { gate: this.#gateOf(candidateId, candidate.manifest.matrix, attempts, (await this.#runner.get(APPROVAL, String(candidateId))) !== undefined), attempts };
+  }
+
+  /** Where each platform stands, from the attempts already read. */
+  #gateOf(candidateId: string, matrix: readonly Cell[], attempts: readonly (AttemptBody & { id: string })[], approved: boolean): Gate {
+    const cells: GateCell[] = matrix.map((cell) => {
       const mine = attempts.filter((a) => cellKey(a.cell) === cellKey(cell)).sort((a, b) => a.n - b.n);
       const latest = mine.at(-1);
       const state: CellState = latest === undefined ? "missing" : latest.state === "issued" ? "running" : latest.state;
       const earlier: EarlierFailure[] = state !== "passed" ? [] : mine.filter((a) => a.state === "failed").map((a) => ({ id: a.id, n: a.n, ...(a.issuedBy === undefined ? {} : { issuedBy: a.issuedBy }), ...(a.result === undefined ? {} : { summary: a.result.summary }), ...(a.endedAt === undefined ? {} : { endedAt: a.endedAt }) }));
       return { cell, state, attempts: mine.length, ...(latest === undefined ? {} : { latest: latest.id }), flaky: earlier.length > 0, earlierFailures: earlier };
     });
-    const approved = (await this.#runner.get(APPROVAL, candidateId)) !== undefined;
     return { candidateId, ready: cells.every((c) => c.state === "passed"), needsAcknowledgement: cells.some((c) => c.flaky), approved, cells };
   }
 
   /** The owner's decision to release. A worker cannot make it, and nothing missing, failing, running or lost can pass it. A platform that passed only after failing needs `acknowledgeFlaky: true`. */
-  async approve(owner: Principal, command: NoActor & { candidateId: string; acknowledgeFlaky?: boolean }): Promise<void> {
+  async approve(owner: Principal, command: NoActor & { candidateId: string; acknowledgeFlaky?: boolean; expectedFailures?: readonly string[] }): Promise<void> {
     this.#owner(owner, "approve a release");
-    onlyKnown(command, ["commandId", "candidateId", "acknowledgeFlaky"]);
+    onlyKnown(command, ["commandId", "candidateId", "acknowledgeFlaky", "expectedFailures"]);
     if (command.acknowledgeFlaky !== undefined && typeof command.acknowledgeFlaky !== "boolean") bad("acknowledgeFlaky", "must be true or false");
+    const shown = command.expectedFailures;
+    if (shown !== undefined && (!Array.isArray(shown) || shown.length > 100 || shown.some((f) => typeof f !== "string" || f.length === 0 || f.length > 80))) bad("expectedFailures", "must be the list of attempt IDs release.gate listed as earlier failures");
     const ref: AggregateRef = { kind: APPROVAL, id: String(command.candidateId) };
     await this.#runner.command("release.approve", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { candidateId: command.candidateId, acknowledgeFlaky: command.acknowledgeFlaky === true },
+      payload: { candidateId: command.candidateId, acknowledgeFlaky: command.acknowledgeFlaky === true, ...(shown === undefined ? {} : { expectedFailures: [...shown] }) },
       build: async (): Promise<Built> => {
         const gate = await this.gate(owner, command.candidateId);
         if (!gate.ready) throw new DomainError("invalid_command", `the release is not ready: ${gate.cells.filter((c) => c.state !== "passed").map((c) => `${cellKey(c.cell)} ${c.state}`).join(", ")}`, { field: "candidateId" });
+        // The owner accepts the failures they were shown, so an approval that says which ones it was shown with is refused when the gate has gained or lost one since (card X09b part 2 review 2, item 1).
+        if (shown !== undefined) {
+          const now = gate.cells.flatMap((c) => c.earlierFailures.map((f) => f.id)).sort();
+          const was = [...shown].sort();
+          if (was.length !== now.length || was.some((id, k) => id !== now[k])) throw new DomainError("invalid_command", `the gate is not what this approval was shown with: it was shown ${was.length === 0 ? "no earlier failure" : was.join(", ")} and release.gate now shows ${now.length === 0 ? "no earlier failure" : now.join(", ")}. Read release.gate again, then approve with what it shows.`.slice(0, 500), { field: "expectedFailures" });
+        }
         const flaky = gate.cells.filter((c) => c.flaky);
         if (flaky.length > 0 && command.acknowledgeFlaky !== true) throw new DomainError("invalid_command", `passed only after failing: ${flaky.map((c) => `${cellKey(c.cell)} (${c.earlierFailures.length} earlier failure${c.earlierFailures.length === 1 ? "" : "s"}: ${c.earlierFailures.map((f) => f.id).join(", ")})`).join("; ")}. Read release.gate, then approve with acknowledgeFlaky true.`.slice(0, 500), { field: "acknowledgeFlaky" });
         if ((await this.#runner.get(APPROVAL, ref.id)) !== undefined) throw new DomainError("invalid_command", "that candidate is already approved", { field: "candidateId" });
@@ -712,6 +780,22 @@ export class ReleaseService {
     const candidate = (await this.#runner.get(CANDIDATE, String(candidateId)))?.body as unknown as CandidateBody | undefined;
     if (candidate === undefined) return [];
     return (await this.#attempts(candidateId, candidate.manifest.matrix)).sort((a, b) => (a.n - b.n) || (a.id < b.id ? -1 : 1));
+  }
+
+  /**
+   * The submitted candidates, newest submitted first (ties by ID): what the owner's `release` status view lists when no candidate is named.
+   * A candidate's ID is a digest, so ID order says nothing about when it was submitted: the list pages through the records (up to `CANDIDATE_SCAN` of them) and keeps the newest `limit` by submit time.
+   * `more` is exact unless `scanLimited` says the bound was reached. The gate and attempts of each listed candidate are read with `gate` and `attempts`. Owner only.
+   */
+  async candidates(owner: Principal, page: { limit?: number } = {}): Promise<CandidatePage> {
+    this.#owner(owner, "list release candidates");
+    const limit = page.limit ?? 5;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) bad("limit", "must be a whole number from 1 to 20");
+    const { rows, scanLimited } = await scanPages((after, limit) => this.#runner.list(CANDIDATE, { ...(after === undefined ? {} : { afterId: after }), limit }), CANDIDATE_SCAN_PAGE, CANDIDATE_SCAN_PAGES);
+    const scanned = rows.map((a) => { const body = a.body as unknown as CandidateBody; return { candidateId: a.id, submittedAt: body.submittedAt, submittedBy: body.submittedBy }; });
+    scanned.sort((x, y) => (x.submittedAt === y.submittedAt ? (x.candidateId < y.candidateId ? -1 : 1) : x.submittedAt < y.submittedAt ? 1 : -1));
+    // Whether a candidate is approved is not read here: the view reads each candidate's gate, which says it, so a list of N candidates costs no extra approval records.
+    return { candidates: scanned.slice(0, limit), more: scanLimited || scanned.length > limit, scanLimited };
   }
 
   /** Every attempt of a candidate, read through each platform's own index (no scan of all attempts). */

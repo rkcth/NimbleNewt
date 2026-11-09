@@ -206,6 +206,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "release.settings.set": { verb: "Change who may start release tests", mode: "propose" },
   "release.issuers.enable": { verb: "Let QA agents or their supervisors start release tests", mode: "propose" },
   "release.issuers.disable": { verb: "Stop QA agents or their supervisors starting release tests", mode: "apply" },
+  // The owner's other release controls (card X09b part 2). Authorizing a machine for destructive tests, approving a candidate (nothing activates without it) and interrupting a running test all
+  // decide what may run or what counts as released: shown first in every profile. Nothing here picks an ID for the owner — an attempt, candidate or host the owner did not name in their own words is refused.
+  "release.host": { verb: "Authorize a host for release tests (active false withdraws it)", mode: "propose" },
+  "release.approve": { verb: "Approve a release candidate", mode: "propose" },
+  "release.interrupt": { verb: "Interrupt a running release test", mode: "propose" },
   "difficulty.set": { verb: "Set difficulty of task", mode: "profile", revision: "contract", needsProject: true },
   // Environment changes an agent asked for (card A09). Deciding one lets something be installed, mounted or reached: always shown first, with the exact request. Widening the settings (turning a switch on, allowing a site,
   // preapproving a package) is shown first; narrowing (turning one off, denying a site, removing a package, revoking a change) applies at once, and a deny or a revoke only when the owner's own words say it and name the site or request.
@@ -227,9 +232,101 @@ export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId
 /** The owner's own words say that finished work goes to main with no human step (card P08b). Quoted or forwarded text is never part of `words`. */
 const MAIN_AUTOMATIC = /\bmain[\s-]*automatic(?:ally)?\b|\bautomatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main\b|\b(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main\b/i;
 /** A negation in the same sentence as the phrase (not, never, don't, without, no, stop): then it is not an order to turn it on. */
-const NEGATED = /\b(?:not|never|no|without|don'?t|do\s+not|won'?t|shouldn'?t|stop|disable|turn\s+off)\b/i;
+const NEGATED = /\b(?:not|never|no|nothing|without|neither|nor|don'?t|do\s+not|does'?n'?t|did'?n'?t|is'?n'?t|are'?n'?t|was'?n'?t|were'?n'?t|ha(?:s|ve|d)'?n'?t|could'?n'?t|should'?n'?t|would'?n'?t|can'?t|cannot|won'?t|hardly|stop|disable|turn\s+off)\b/i;
+/** Phones and keyboards type a curly or modifier apostrophe (’ ‘ ʼ) where the negations are written with `'`; every word check normalises them first, so "don’t" is checked exactly like "don't". */
+const plainApostrophes = (words: string): string => (words ?? "").replace(/[\u2018\u2019\u02bc]/g, "'");
+
 export function saysMainAutomatic(words: string): boolean {
-  return words.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
+  const said = plainApostrophes(words);
+  return said.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
+}
+
+/**
+ * Whether the owner's own words accept a release in which a platform passed only after earlier failures (card X09b part 2 review, sharpened by the second and third reviews): the acceptance of the
+ * failures, said by the owner themselves — "I accept the earlier failures", "acknowledge the flaky pass", "go ahead despite the failures". Naming the word `flaky` is not accepting anything, and neither
+ * is knowing about it or asking about it ("the gate shows a flaky platform", "I know it failed first" are not acceptances and are never treated as one). A negated sentence does not accept anything.
+ * The model's own `acknowledgeFlaky: true` is never enough: approving a flaky release is the owner accepting that a platform had to be retried before it went green.
+ */
+const FLAKY_WORD = /\b(?:flaky|fail|fails|failed|failing|failure\w*)\b/i;
+// An acceptance of what went wrong, in the owner's own mouth. "approve", "confirm", "know" and a bare "flaky" are deliberately not here: naming the flaky pass, knowing about it or asking about it is not accepting it.
+// Verbs only (third review, D2): "the acceptance suite", "the acknowledgement of the failures" and "the waiver file" name things, nobody accepting anything, so the nouns are not matched.
+const FLAKY_ACCEPT = /\b(?:accepts?|accepted|accepting|acknowledges?|acknowledged|acknowledging|waives?|waived|waiving)\b|\b(?:agrees?|agreed)\s+to\b|\b(?:fine|ok|okay|all\s+right)\s+with\b|\b(?:despite|notwithstanding)\b/i;
+/** Conditions that rule the sentence wherever they stand. */
+const FLAKY_CONDITIONAL = /\b(?:if|unless|only\s+if|only\s+when|provided|providing|as\s+long\s+as|in\s+case|assuming|when(?:ever)?)\b/i;
+/**
+ * Time and "whether" conditions (third review, D2): "once QA has accepted the failures", "only after the failures are acknowledged", "ask whether they accept them". They condition the acceptance when
+ * they stand in front of it with nothing closing their clause first; a time clause of its own only describes what happened — "rcn-a failed before it passed and I accept that" accepts, "accept it after
+ * QA has" does not.
+ */
+const FLAKY_TIME_CONDITION = /\b(?:once|after|before|until|whether)\b/i;
+const FLAKY_CLAUSE_END = /[,;:]|\b(?:and|but|so|then|yet|or)\b/i;
+/** A question asks whether something is so and accepts nothing (third review, D2): any question mark counts (a sentence may end "?!" or be typed \uFF1F), and so does the inverted order of an asking sentence typed without its mark ("did you accept the failures"). */
+const FLAKY_QUESTION = /[?\uFF1F]/;
+const FLAKY_QUESTION_OPENER = /(?:^|[,;:.(!\s])(?:did|do|does|would|should|could|can|will|shall)\s+(?:you|your|yours|i|we|our|it|they|this|that|these|those|someone|somebody|anyone|anybody|he|she|qa|the\s+\w+)\b/i;
+/** Whose acceptance it is (third review, D2): the owner's own is one that says I/we/my/our/me/us, or one that names nobody else and simply accepts ("accept the earlier failures", "go ahead despite the failures"). Where another person or body comes before the acceptance — "Bob accepted the failures", "QA has accepted them", "the reviewer accepted them", "they accepted them" — it is their acceptance and the chat refuses. */
+const FLAKY_FIRST_PERSON = /\b(?:i|we|my|our|us|me|mine|ours|myself|ourselves)\b/i;
+const FLAKY_OTHER_PERSON = /\b(?:he|she|they|them|his|hers|her|their|theirs|someone|somebody|anyone|anybody|everyone|everybody|nobody|no-one|qa|team|reviewer|tester|engineer|developer|worker|agent|user|customer|committee|group|board|suite)\b/i;
+/** How an owner's own order begins, capitalised as the first word of a sentence: these name no person, so they are not somebody else being named ahead of the acceptance (third review, D2). */
+const FLAKY_ORDER_WORDS = /^(?:approve|accept|acknowledge|agree|waive|ship|release|go|confirm|proceed|yes|yeah|ok|okay|sure|right|fine|then|so|and|but|or|let|now|tell|show|give|do)$/i;
+/** Candidate IDs named in a sentence, with their place in it, so an acceptance can be bound to the one it sits nearest to (third review, D2). */
+const CANDIDATE_IDS = /(?<![A-Za-z0-9._-])rcn-[A-Za-z0-9][A-Za-z0-9_-]*/gi;
+
+/** The candidate the acceptance at `at` belongs to: the one named nearest to it, or undefined when the sentence names none. */
+function nearestCandidate(text: string, at: number): string | undefined {
+  let best: { id: string; at: number } | undefined;
+  for (const m of text.matchAll(CANDIDATE_IDS)) {
+    const start = m.index ?? 0;
+    const distance = at <= start ? start - at : at - (start + m[0].length);
+    if (best === undefined || distance < best.at) best = { id: m[0], at: distance };
+  }
+  return best?.id;
+}
+
+/** Whether the acceptance at `at` is the owner's own rather than somebody else's: first person said before it, or nobody named before it (recorded heuristic: an unclaimed acceptance is read as the owner's, a claimed one is not). */
+function ownerAccepts(text: string, at: number): boolean {
+  const before = text.slice(0, at);
+  if (FLAKY_FIRST_PERSON.test(before)) return true;
+  if (FLAKY_OTHER_PERSON.test(before)) return false;
+  // A name is written with a capital letter: any capitalised word ahead of the acceptance (the sentence's own first word when it is the owner's order, and IDs like rcn-… which are lower case) is somebody else being named.
+  const named = before.replace(/\b[a-z]+-[a-z0-9][a-z0-9-]*/gi, " ").split(/\s+/).filter((t) => t !== "").map((t) => t.replace(/[^\p{L}\p{N}'-]/gu, ""));
+  return !named.some((t, i) => /^[\p{Lu}]/u.test(t) && !FLAKY_ACCEPT.test(t) && !(i === 0 && FLAKY_ORDER_WORDS.test(t)));
+}
+
+/**
+ * Whether the owner accepted the earlier failures themselves (card X09b part 2 review 2, item 1; third review, D2). `acknowledgeFlaky` lets a candidate through a gate whose platform failed before it went
+ * green, so the words have to carry a real acceptance. A sentence accepts only when ALL of these hold: it has an acceptance verb in it (accept/acknowledge/waive/agree to/fine with/despite — not the noun
+ * "acceptance") AND a failure in it; it is about the candidate being approved (that candidate named as a whole word, or the candidate of the sentence just before it); the acceptance sits nearer to that
+ * candidate than to any other candidate named; it asks nothing (a question mark anywhere, or an asking order like "did you accept"); it conditions nothing ("if", "unless", "once QA has", "only after",
+ * "whether"); it denies nothing ("isn't flaky", "nothing failed"); and the acceptance is the owner's own ("I accept", a bare "accept the failures") and not another person's ("Bob accepted the failures").
+ * So "approve rcn-a, the flaky test fixtures are fine", "approve rcn-a. Was rcn-b flaky?", "approve rcn-a unless it is flaky", "approve rcn-a if nothing failed", "approve rcn-a, it isn't flaky", "approve
+ * rcn-a once QA has accepted the failures", "approve rcn-a and rcn-b; I accept the failures of rcn-b" and "approve rcn-a, Bob accepted the failures" all say nothing, while "approve rcn-a, I accept the
+ * earlier failures", "approve rcn-a anyway, I accept that linux failed first" and "approve rcn-a. Yes accept the earlier failures" do. Without a `candidateId` to bind to, any sentence may carry it.
+ */
+export function saysAcknowledgeFlaky(words: string, candidateId?: string): boolean {
+  const said = plainApostrophes(words).replace(/\s+/g, " ").trim();
+  if (said === "") return false;
+  let previousNames = false;
+  for (const sentence of said.split(/(?<=[.?\uFF1F])\s+/)) {
+    const text = sentence.trim();
+    if (text === "") continue;
+    const names = candidateId === undefined || wholeWord(text, candidateId);
+    // A sentence that carries on from the one before it (the candidate of that sentence, or nothing named at all) is about the same candidate (D2b).
+    const about = names || previousNames;
+    previousNames = candidateId !== undefined && wholeWord(text, candidateId);
+    if (!about || FLAKY_QUESTION.test(text) || FLAKY_QUESTION_OPENER.test(text)) continue;
+    if (NEGATED.test(text) || !FLAKY_WORD.test(text)) continue;
+    const acceptance = FLAKY_ACCEPT.exec(text);
+    if (acceptance === null) continue;
+    const at = acceptance.index;
+    if (FLAKY_CONDITIONAL.test(text)) continue;
+    const when = text.slice(0, at).search(FLAKY_TIME_CONDITION);
+    if (when >= 0 && !FLAKY_CLAUSE_END.test(text.slice(when, at))) continue;
+    const nearest = nearestCandidate(text, at);
+    if (candidateId !== undefined && nearest !== undefined && nearest.toLowerCase() !== candidateId.toLowerCase()) continue;
+    if (!ownerAccepts(text, at)) continue;
+    return true;
+  }
+  return false;
 }
 
 const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
@@ -355,7 +452,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (spec.mode === "propose" && op === "retention.settings.set") return "retention settings decide what may be deleted and how much room is kept back, so they are shown first";
   if (spec.mode === "propose" && op.startsWith("retention.")) return "deleting, archiving or restoring records is shown first";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.
-  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : op.startsWith("release.") ? "a release action is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
   if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
@@ -377,6 +474,69 @@ export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candi
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 
+/**
+ * True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action (card X09b part 2 review: "host:rig2" said by the owner is not "host:rig").
+ * Punctuation that cannot be part of a name is a boundary (card X09b part 2 review 2, item 6): markdown bold or a backtick around an ID, a colon before it ("candidate:rcn-1a2b"), a quote, a comma, a
+ * bracket, or a full stop, colon or underscore that ends it. What still joins two names is a letter, a digit, or a dash, underscore, dot or colon with more of the name after it, so `host:rig2` is not
+ * `host:rig`, `rcn-1a2bc` is not `rcn-1a2b` and `rcn-1a2b_old` is not `rcn-1a2b`.
+ */
+export const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(?<![A-Za-z0-9._-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])(?![\-_.:][A-Za-z0-9])`, "i").test(text);
+
+/**
+ * How an owner names a platform (card X09b part 2 review 2, item 3): `os` and `arch` are fixed choices the words check lets through, so the chat checks them itself, and an owner writes "my mac" or
+ * "linux-x64" rather than "darwin x64". Each choice is therefore written down here with the ways people spell it.
+ */
+const PLATFORM_WORDS: Readonly<Record<"os" | "arch", Readonly<Record<string, readonly string[]>>>> = {
+  os: { linux: ["linux"], darwin: ["darwin", "macos", "mac os", "mac", "macbook", "imac", "mac mini"], win32: ["win32", "windows"] },
+  arch: { x64: ["x64", "x86_64", "x86-64", "amd64"], arm64: ["arm64", "aarch64", "apple silicon"] },
+};
+/** A name standing on its own: what sits before and after it is not a letter or a digit, so a hyphen, slash, colon or underscore between two names does not join them into one. */
+const namedWord = (words: string, alias: string): boolean => new RegExp(`(?<![A-Za-z0-9])${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "i").test(words);
+
+/**
+ * How an owner takes a platform away rather than naming it (card X09b part 2 review 3, item D3): "linux x64, not the mac" says one os, and the mac in it is the one they refuse. A denial counts only
+ * within its own clause and within a few words of the name, so "linux, not windows; and the mac mini too" still names the mac.
+ */
+const DENIAL = /\b(?:not|no|never|neither|nor|except|without|instead of|other than|rather than|exclude[sd]?|excluding|avoid(?:s|d)?|cannot|can['’]?t|couldn['’]?t|shouldn['’]?t|wouldn['’]?t|won['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t)\b[^.!?;\n]{0,30}$/i;
+/** The ordinary words an alias also spells (D3): a MAC address is a number printed on a sticker and says nothing about what system a machine runs. */
+const ORDINARY_AFTER: Readonly<Record<string, readonly string[]>> = { mac: ["address", "addresses"] };
+
+/** Whether this alias stands in the owner's own words as a name of its own: not denied just before it, and not the ordinary word it also spells. */
+function namesPlatform(words: string, alias: string): boolean {
+  const re = new RegExp(`(?<![A-Za-z0-9])${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "gi");
+  for (let m = re.exec(words); m !== null; m = re.exec(words)) {
+    if (DENIAL.test(words.slice(Math.max(0, m.index - 60), m.index))) continue;
+    if ((ORDINARY_AFTER[alias.toLowerCase()] ?? []).some((after) => new RegExp(`^\\s+${after}\\b`, "i").test(words.slice(m.index + m[0].length)))) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Which platforms of this kind the owner's own words name (card X09b part 2 review 3, item D3), in the order the choices are written down: `linux-x64` and `linux/x64` name a linux and an x64, a mac (or
+ * macOS) is darwin, windows is win32, x86_64 and amd64 are x64, and aarch64 is arm64. A name the owner denied ("not the mac") and an ordinary word that merely spells one ("its MAC address") name nothing.
+ */
+export function platformsNamed(words: string, key: "os" | "arch"): string[] {
+  return Object.entries(PLATFORM_WORDS[key]).filter(([, aliases]) => aliases.some((alias) => namesPlatform(words, alias))).map(([value]) => value);
+}
+
+/** Whether the owner's own words name this platform by some spelling of it; naming more than one of the same kind is the message being ambiguous, which `platformsNamed` shows. */
+export function saysPlatform(words: string, key: "os" | "arch", value: string): boolean {
+  const wanted = value.trim().toLowerCase();
+  return PLATFORM_WORDS[key][wanted] === undefined ? namedWord(words, wanted) : platformsNamed(words, key).includes(wanted);
+}
+
+/** Another platform of the same kind the owner did name — so a refusal can say what they said instead — or undefined when their message names none of that kind (then they are asked, not refused). */
+export function otherPlatform(words: string, key: "os" | "arch", value: string): string | undefined {
+  return platformsNamed(words, key).find((v) => v !== value.trim().toLowerCase());
+}
+
+/** The platforms of this kind the operation accepts, as the choices to offer the owner. */
+export const platformChoices = (key: "os" | "arch"): readonly string[] => Object.keys(PLATFORM_WORDS[key]);
+
+/** Keys whose value is a machine or record name rather than a sentence: the owner must have said it as a whole word, not merely as the start of a longer one. Release IDs (which `foreignValue`'s `strict` set makes checked) are matched the same way. */
+export const WHOLE_WORD_KEYS: ReadonlySet<string> = new Set(["hostId"]);
+
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 /** Fixed choices and record references of one command only: `response` is one of three choices and `decisionId` is checked against the decisions waiting for the owner (card M02h). */
 export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "decisionId"]);
@@ -392,7 +552,12 @@ export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: s
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
   const own = norm(ownText);
   const walk = (value: unknown, where: string, key: string): string | undefined => {
-    if (typeof value === "string") return ((EXEMPT.has(key) || alsoExempt.has(key)) && !strict.has(key)) || value.length === 0 || own.includes(norm(value)) ? undefined : where;
+    if (typeof value === "string") {
+      // A name (a host, a release ID the strict set makes checked) must stand as a whole word in the owner's message; a sentence (a reason, a summary) only has to be in it.
+      const exempt = (EXEMPT.has(key) || alsoExempt.has(key)) && !strict.has(key);
+      if (exempt || value.length === 0) return undefined;
+      return (strict.has(key) || WHOLE_WORD_KEYS.has(key) ? wholeWord(own, norm(value)) : own.includes(norm(value))) ? undefined : where;
+    }
     if (Array.isArray(value)) { for (const [i, v] of value.entries()) { const bad = walk(v, `${where}[${i}]`, key); if (bad !== undefined) return bad; } return undefined; }
     if (value !== null && typeof value === "object") { for (const [k, v] of Object.entries(value)) { const bad = walk(v, `${where}.${k}`, k); if (bad !== undefined) return bad; } }
     return undefined;

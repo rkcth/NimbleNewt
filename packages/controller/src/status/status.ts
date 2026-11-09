@@ -28,6 +28,7 @@ import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
+import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
@@ -235,6 +236,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
+  release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
@@ -282,6 +284,7 @@ export type StatusRequest =
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
   | { readonly kind: "capacity" }
+  | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
@@ -325,6 +328,12 @@ export interface StatusDeps {
     readonly quotas?: Pick<AdmissionService, "quotas">;
     readonly swarm?: Pick<SwarmLimitsService, "get">;
   };
+  /**
+   * Release testing (card X09b part 2): the same reads the API's `release.gate`, `release.attempts` and `release.status` make, and the candidate list for the owner's `release` status view.
+   * `gateAndAttempts` gives a candidate's gate and attempts from one read and is used when it is there (`gate` and `attempts` are the fallback for a service that has no such read);
+   * `status` is the staging and activation state; absent: the view says staging is not set up here. Absent altogether: the view is not offered.
+   */
+  readonly release?: Pick<ReleaseService, "gate" | "attempts" | "candidates"> & { gateAndAttempts?(by: Principal, candidateId: string): Promise<{ gate: Gate; attempts: readonly (ReleaseAttemptBody & { id: string })[] }>, status?(by: Principal): Promise<ActivationStatus> };
   /** Whether reconnected remote workers take their attempts up again by themselves, and the attempts that wait for the owner's decision (card H09b). Absent: the view is not offered. */
   readonly reconnect?: {
     get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: string | null; readonly profile: string; readonly effective: string; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }>;
@@ -567,6 +576,7 @@ export class StatusService {
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
+      case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
       case "jobs": { onlyKnown(request, ["kind", "limit"]); return this.jobLines(by, request.limit); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
@@ -795,6 +805,103 @@ export class StatusService {
           lines.push(line(`${name} (${capacityWord(name)}): ${words}${none}${!isDamaged && damaged.length > 0 ? " - not in force while the record is damaged" : ""}`, c));
         }
       }
+    }
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The owner's release view (card X09b part 2): one candidate, or the newest `limit` of them, each with the gate per platform (pass, flaky pass, fail, interrupted, timed out, running or not run)
+   * and its attempts with state, host and time (newest first, because what is open or just ended is what the owner is asking about), and what is staged and current when this controller stages
+   * releases. Every text a host or a candidate carries (a result summary, a host name, a platform name) is quoted on one line, never followed. Owner only: to anyone else this reads exactly like a view
+   * that does not exist. The answer stays inside 30 lines and the candidates stop being read once that is used up: the gate summary of everything shown, the staging line and (when anything was cut)
+   * the line saying how many lines are not shown and how to get the rest are always inside them.
+   */
+  async releaseLines(by: Principal, request: { candidateId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const release = this.#deps.release;
+    if (release === undefined || by.kind !== "owner") return undefined;
+    if (request.candidateId !== undefined && (typeof request.candidateId !== "string" || request.candidateId.trim() === "" || request.candidateId.length > 120)) invalid("candidateId", "needs the candidate's ID (the rcn- ID release.submit returned)");
+    const limit = request.limit ?? 5;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) invalid("limit", "must be a whole number from 1 to 10");
+    const platform = (cell: GateCell["cell"]): string => quoted(`${cell.os} ${cell.arch}${cell.osVersion === undefined ? "" : ` ${cell.osVersion}`}`, 60);
+    const gateWords = (cell: GateCell): string => {
+      const state = cell.state === "passed" ? cell.flaky ? `flaky pass (passed only after ${cell.earlierFailures.length} earlier failure${cell.earlierFailures.length === 1 ? "" : "s"})` : "pass" : cell.state === "failed" ? "fail" : cell.state === "missing" ? "not run" : cell.state === "timed_out" ? "timed out" : cell.state === "running" ? "running" : cell.state;
+      return `${state} (${cell.attempts} attempt${cell.attempts === 1 ? "" : "s"})`;
+    };
+    const attemptWords = (a: ReleaseAttemptBody & { id: string }): string => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quoted(a.hostId, 80)}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quoted(a.result.summary, 160)}`}${a.reason === undefined ? "" : `; reason: ${quoted(a.reason, 160)}`}`;
+    const body: Line[] = [];
+    let candidates: readonly CandidateRow[];
+    let moreCandidates = false;
+    let scanLimited = false;
+    if (request.candidateId !== undefined) candidates = [{ candidateId: request.candidateId, submittedAt: "", submittedBy: "" }];
+    else {
+      let got;
+      try { got = await release.candidates(by, { limit }); }
+      catch (error) {
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+        throw error;
+      }
+      candidates = got.candidates;
+      moreCandidates = got.more;
+      scanLimited = got.scanLimited;
+      if (candidates.length === 0) body.push(line("No release candidate has been submitted yet: release.submit is the start.", cite("release-candidates", "list")));
+    }
+    // What the owner always gets besides the candidates: the staging line and, when anything is cut, the line saying so (and the line saying candidates are left out). Reading stops once the rest is used up.
+    const max = 30;
+    const budget = max - 2 - (moreCandidates ? 1 : 0);
+    let lineDropped = 0;
+    let candidatesSkipped = 0;
+    for (const candidate of candidates) {
+      // The budget is gone: the rest of the candidates are not read at all (so a wide list costs one page of reads, not a hundred).
+      if (body.length >= budget) { candidatesSkipped++; continue; }
+      const c = cite("release-candidate", candidate.candidateId);
+      // One read where the service can give the gate and the attempts together; otherwise the two reads, as before.
+      let gate: Gate;
+      let attempts: (ReleaseAttemptBody & { id: string })[];
+      try {
+        if (release.gateAndAttempts !== undefined) {
+          const both = await release.gateAndAttempts(by, candidate.candidateId);
+          gate = both.gate;
+          attempts = [...both.attempts];
+        } else {
+          gate = await release.gate(by, candidate.candidateId);
+          attempts = await release.attempts(by, candidate.candidateId);
+        }
+      }
+      catch (error) {
+        if (error instanceof DomainError && error.code === "forbidden") return undefined;
+        if (error instanceof DomainError && error.code === "not_found") {
+          // A named candidate that is missing or unreadable reads like a missing subject; a listed one (it moved in the moment of the read) is simply skipped.
+          if (request.candidateId !== undefined) return undefined;
+          continue;
+        }
+        throw error;
+      }
+      const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: approving needs acknowledgeFlaky)" : ""}.`, c)];
+      for (const cell of gate.cells) block.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
+      // Newest first: what is running now, or the attempt that just ended, is what the owner is asking about.
+      for (const a of [...attempts].reverse()) block.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      for (const l of block) { if (body.length < budget) body.push(l); else lineDropped++; }
+    }
+    const lines: Line[] = [...body];
+    if (moreCandidates) lines.push(line(scanLimited ? "More candidates were submitted than are listed, and the list had to stop at its read bound, so some older ones were never read: name one (kind release with its candidateId) to read it directly." : "More candidates were submitted than are listed (the newest are first); ask again naming one (kind release with its candidateId) or with a larger limit (1 to 10).", cite("release-candidates", "list")));
+    const staging = cite("release-activation", "main");
+    if (release.status === undefined) lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
+    else {
+      try {
+        const st = await release.status(by);
+        lines.push(line(`Staging: ${st.current === undefined ? "nothing has been activated yet" : `the current release is ${quoted(st.current.id, 80)} since ${shown(st.current.at, 30)}`}${st.previous === undefined ? "" : `; going back would return to ${quoted(st.previous.id, 80)}`}; ${st.staged.length} staged release${st.staged.length === 1 ? "" : "s"}; activation ${st.settings.requireApproval ? "needs the candidate approved (release.approve)" : "does not need an approval right now"}${st.diverged ? `; WARNING: the launcher's pointer says ${quoted(st.pointer ?? "nothing", 80)}, not the release the record calls current` : ""}.`, staging));
+      } catch (error) {
+        if (!(error instanceof DomainError) || (error.code !== "forbidden" && error.code !== "unavailable")) throw error;
+        lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));
+      }
+    }
+    // The cut is said last, and says what the owner can actually do: someone who named a candidate is not told to name one.
+    const dropped = lineDropped + candidatesSkipped;
+    if (dropped > 0) {
+      const rest = request.candidateId === undefined
+        ? "ask again naming one candidate (kind release with its candidateId), or read release.attempts for one candidate's attempts (the newest are shown first)"
+        : "read release.attempts for every attempt of this candidate (the newest are shown here first)";
+      lines.push(line(`${dropped}${candidatesSkipped === 0 ? "" : " or more"} more line(s) are not shown: ${rest}.`, cite(request.candidateId === undefined ? "release-candidates" : "release-candidate", request.candidateId ?? "list")));
     }
     return { observedAt: this.#runner.now(), lines };
   }

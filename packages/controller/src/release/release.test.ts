@@ -5,9 +5,35 @@ import { ProjectService } from "../domain/service.js";
 import { CommandRunner, type Built } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { ReleaseService, jobPayload, type Cell } from "./index.js";
+import { CANDIDATE_SCAN, CANDIDATE_SCAN_PAGE, ReleaseService, candidateIdOf, checkManifest, jobPayload, scanPages, type Cell } from "./index.js";
 
 after(stopServer);
+
+/** A store of `count` records read through the same paging the owner's candidate list uses, so the bound's edge is tested without writing 5,000 records (card X09b part 2 review 2, item 4). */
+const pagedStore = (count: number) => {
+  const all = Array.from({ length: count }, (_, i) => ({ id: `rcn-${i.toString(36).padStart(6, "0")}` }));
+  return (after: string | undefined, limit: number) => Promise.resolve(all.slice(after === undefined ? 0 : all.findIndex((r) => r.id === after) + 1, (after === undefined ? 0 : all.findIndex((r) => r.id === after) + 1) + limit));
+};
+
+test("the candidate scan reads a store of exactly its bound to the end, and says it stopped only when something was really left unread (card X09b part 2 review 2, item 4)", async () => {
+  // The same shape as the real one (pages of 200, 25 of them), at a size a test can hold: bound = 2 * 3 = 6 records.
+  const short = await scanPages(pagedStore(5), 2, 3);
+  assert.deepEqual([short.rows.length, short.scanLimited], [5, false], "a store below the bound is read to the end");
+  const exact = await scanPages(pagedStore(6), 2, 3);
+  assert.deepEqual([exact.rows.length, exact.scanLimited], [6, false], "a store of EXACTLY the bound is read to the end: the old loop said the bound was reached");
+  const oneMore = await scanPages(pagedStore(7), 2, 3);
+  assert.deepEqual([oneMore.rows.length, oneMore.scanLimited], [6, true], "one record past it is the first case where something is left unread");
+  const empty = await scanPages(pagedStore(0), 2, 3);
+  assert.deepEqual([empty.rows.length, empty.scanLimited], [0, false], "an empty store says nothing was left out");
+  const onePage = await scanPages(pagedStore(6), 200, 25);
+  assert.deepEqual([onePage.rows.length, onePage.scanLimited], [6, false], "a store that fits in the first page");
+  // The real bound, at the real page size: a store of exactly CANDIDATE_SCAN records, and one more.
+  const at = await scanPages(pagedStore(CANDIDATE_SCAN), CANDIDATE_SCAN_PAGE, 25);
+  assert.deepEqual([at.rows.length, at.scanLimited], [CANDIDATE_SCAN, false], "5,000 candidates are read to the end");
+  const past = await scanPages(pagedStore(CANDIDATE_SCAN + 1), CANDIDATE_SCAN_PAGE, 25);
+  assert.deepEqual([past.rows.length, past.scanLimited], [CANDIDATE_SCAN, true], "5,001 are not");
+});
+
 
 const options = { clock: () => "2026-10-30T12:00:00.000Z", pause: async () => undefined };
 let n = 0;
@@ -150,6 +176,41 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true }), /already approved/);
   });
 
+  suite("an approval that acknowledges the flaky pass names the failures the owner was shown, and a gate that changed under it is refused (card X09b part 2 review 2, item 1)", async (c) => {
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx1", os: "linux", arch: "x64" });
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "wn1", os: "win32", arch: "x64" });
+    const sick = await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1);
+    await c.rel.report(c.w1, result(sick.attemptId, { outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "segfaulted" }));
+    const healthy = await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1);
+    await c.rel.report(c.w1, result(healthy.attemptId));
+    const win1 = await issue(c.rel, c.owner, c.candidate, win, "wn1", c.w2);
+    await c.rel.report(c.w2, result(win1.attemptId, { environment: { os: "win32", arch: "x64" } }));
+    assert.deepEqual((await c.rel.gate(c.owner, c.candidate)).cells.find((x) => x.cell.os === "linux")!.earlierFailures.map((f) => f.id), [sick.attemptId], "the one earlier failure the owner is shown");
+    // An approval that was shown no earlier failure does not carry a gate that has one.
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [] }), /shown/i);
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: ["rat-ffffffffffffffffffffffff"] }), /shown/i);
+    // Shown the failure it carries, it stands.
+    await c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId] });
+    assert.equal((await c.rel.gate(c.owner, c.candidate)).approved, true);
+  });
+
+  suite("an approval shown the earlier failures is refused when the gate gains one after it was drawn up (card X09b part 2 review 2, item 1)", async (c) => {
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx1", os: "linux", arch: "x64" });
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "wn1", os: "win32", arch: "x64" });
+    const sick = await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1);
+    await c.rel.report(c.w1, result(sick.attemptId, { outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "segfaulted" }));
+    await c.rel.report(c.w1, result((await issue(c.rel, c.owner, c.candidate, linux, "lx1", c.w1)).attemptId));
+    const winSick = await issue(c.rel, c.owner, c.candidate, win, "wn1", c.w2);
+    await c.rel.report(c.w2, result(winSick.attemptId, { environment: { os: "win32", arch: "x64" }, outcome: "fail", counts: { passed: 9, failed: 3, skipped: 0 }, summary: "one blue screen" }));
+    // The gate shows one earlier failure; the second is still to come.
+    assert.deepEqual((await c.rel.gate(c.owner, c.candidate)).cells.map((x) => x.earlierFailures.length), [1, 0]);
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId] }), /not ready/i);
+    await c.rel.report(c.w2, result((await issue(c.rel, c.owner, c.candidate, win, "wn1", c.w2)).attemptId, { environment: { os: "win32", arch: "x64" } }));
+    await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId] }), /shown/i);
+    await c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate, acknowledgeFlaky: true, expectedFailures: [sick.attemptId, winSick.attemptId] });
+    assert.equal((await c.rel.gate(c.owner, c.candidate)).approved, true, "shown every earlier failure, it stands");
+  });
+
   suite("X09b: two settings writes from the same revision cannot both win, a host's two pick-ups at once are one, and a platform has a bounded number of attempts", async (c) => {
     const [a, b] = await Promise.allSettled([
       c.rel.setSettings(c.owner, { commandId: cid("ss"), qaAgents: true, expectedRevision: 0 }),
@@ -250,5 +311,92 @@ for (const backend of backends) {
     const cell = gate.cells.find((x) => x.cell.os === "linux")!;
     assert.deepEqual([cell.state, cell.flaky, cell.earlierFailures.map((f) => [f.id, f.summary])], ["passed", true, [[first.attemptId, "2 failed"]]]);
     assert.equal(gate.needsAcknowledgement, true);
+    // The owner's status view needs the gate and every attempt: one read gives exactly what the two separate reads say (card X09b part 2 review).
+    const both = await c.rel.gateAndAttempts(c.owner, c.candidate);
+    assert.deepEqual(both.gate, gate, "the same gate from one read");
+    assert.deepEqual(both.attempts, await c.rel.attempts(c.owner, c.candidate), "and the same attempts, oldest first");
+    await refuses("not_found", () => c.rel.gateAndAttempts(c.owner, "rcn-not-a-candidate"));
+    await refuses("forbidden", () => c.rel.gateAndAttempts(c.w1, c.candidate), /may not/);
+  });
+
+  // ---- the owner's candidate list (card X09b part 2 review, item 3): it reads every candidate, so the newest by submit time is listed whatever order the digest IDs fall in.
+  const hoursAfter = (day: number): string => new Date(Date.parse("2026-11-01T00:00:00.000Z") + day * 3_600_000).toISOString();
+  const commitOf = (n: number): string => n.toString(16).padStart(40, "0");
+
+  suite("X09b part 2 review: candidates() pages past the 200-record scan so the newest by submit time is listed even when its ID is the highest, and more is exact", async (c) => {
+    const ids = [c.candidate];
+    for (let i = 0; i < 204; i++) ids.push((await c.at(hoursAfter(i)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(i) }) })).candidateId);
+    const top = ids.reduce((m, id) => (id > m ? id : m), "");
+    // The reviewer's probe: the newest candidate is submitted last and its ID is the highest of them all, so a list that reads 200 records in ID order and sorts them never sees it.
+    let newest: { candidateId: string } | undefined;
+    for (let i = 1; newest === undefined && i < 200_000; i++) {
+      const m = manifest({ sourceCommit: commitOf(0x10_0000 + i) });
+      if (candidateIdOf(checkManifest(m)) <= top) continue;
+      newest = await c.at(hoursAfter(5000)).submit(c.owner, { commandId: cid("s"), manifest: m });
+    }
+    assert.ok(newest !== undefined, "a manifest whose ID sorts above every other one was found");
+    assert.ok(newest.candidateId > top, "the newest candidate really does have the highest ID");
+
+    const got = await c.rel.candidates(c.owner, { limit: 5 });
+    assert.deepEqual(got.candidates.map((r) => r.candidateId), [newest.candidateId, ...ids.slice(1).reverse().slice(0, 4)].slice(0, 5), "the newest five by submit time, newest first");
+    assert.equal(got.candidates[0]!.candidateId, newest.candidateId, "the newest candidate is listed even though its ID is the highest");
+    assert.equal(got.more, true, "205 other candidates are not listed");
+    assert.equal(got.scanLimited, false, "the whole list was read: `more` is exact, not a scan bound");
+
+    const all = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.equal(all.candidates[0]!.candidateId, newest.candidateId);
+    assert.equal(all.candidates.length, 20);
+    assert.equal(all.more, true);
+    assert.equal(all.scanLimited, false);
+  });
+
+  suite("X09b part 2 review: candidates() reads a store of exactly 200 (and one below the old scan bound) to the end, so more says only what is truly left out", async (c) => {
+    // The suite's own candidate plus 199: exactly 200 records, the old bound. Every one of them is read, so `more` says that 180 are left out of the 20 asked for and nothing was left unscanned.
+    const ids = [c.candidate];
+    for (let i = 0; i < 199; i++) ids.push((await c.at(hoursAfter(i)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(i) }) })).candidateId);
+    assert.equal(ids.length, 200);
+    const got = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.deepEqual(got.candidates.map((r) => r.candidateId), ids.slice(1).reverse().slice(0, 20), "the newest 20 by submit time (the last 199 submitted, newest first)");
+    assert.equal(got.more, true);
+    assert.equal(got.scanLimited, false, "200 records are scanned to the end: the scan bound is no longer 200");
+
+    // A store with fewer candidates than the caller asked for lists them all and says nothing is left out.
+    const few = await c.at(hoursAfter(9000)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(0xff) }) });
+    const small = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.equal(small.candidates.length, 20, "at most `limit` are listed whatever the store holds");
+    assert.equal(small.candidates[0]!.candidateId, few.candidateId);
+    assert.equal(small.more, true);
+  });
+
+  suite("X09b part 2 review 2, item 3: withdrawing a host names no platform, and a worker may not withdraw one", async (c) => {
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9", os: "linux", arch: "x64" });
+    const open = await issue(c.rel, c.owner, c.candidate, linux, "lx9", c.w1);
+    // The owner takes the machine off the release machines; which platform it stood for is what the record says, not something they have to recite (or the model has to pick).
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9", active: false });
+    await refuses("forbidden", () => issue(c.rel, c.owner, c.candidate, linux, "lx9", c.w1), /not authorized/);
+    assert.equal((await c.rel.attempts(c.owner, c.candidate)).find((a) => a.id === open.attemptId)!.state, "interrupted", "what it had open ends with the authorization");
+    // Authorizing still says which platform; withdrawing something that was never authorized says there is nothing to withdraw.
+    await refuses("invalid_command", () => c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9" } as never), /os and arch/);
+    await refuses("invalid_command", () => c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx9", os: "linux" } as never), /os and arch|platform\.(os|arch)/);
+    await refuses("not_found", () => c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "never-set-up", active: false } as never), /nothing to withdraw/);
+    await refuses("forbidden", () => c.rel.authorizeHost(c.w1, { commandId: cid("a"), hostId: "lx9", active: false } as never), /only the owner|may not/);
+  });
+
+  suite("X09b part 2 review 2, item 5: candidates() is the owner's own read at the service itself, not only in the status view", async (c) => {
+    await refuses("forbidden", () => c.rel.candidates(c.w1), /may not list release candidates/);
+    await refuses("forbidden", () => c.rel.candidates(c.w2, { limit: 3 }), /may not list release candidates/);
+    const rows = await c.rel.candidates(c.owner, { limit: 5 });
+    assert.equal(rows.candidates[0]!.candidateId, c.candidate, "the owner reads them");
+  });
+
+  suite("X09b part 2 review: candidates() lists what is there and says nothing is left out when everything fits", async (c) => {
+    const second = await c.at(hoursAfter(1)).submit(c.owner, { commandId: cid("s"), manifest: manifest({ sourceCommit: commitOf(1) }) });
+    const got = await c.rel.candidates(c.owner, { limit: 20 });
+    assert.deepEqual(got.candidates.map((r) => r.candidateId), [second.candidateId, c.candidate], "newest first");
+    assert.equal(Object.prototype.hasOwnProperty.call(got.candidates[0]!, "approved"), false, "a listed row carries no approval record: the view reads the candidate's gate, which says it (part 2 review)");
+    assert.equal(got.more, false, "nothing was left out");
+    assert.equal(got.scanLimited, false);
+    assert.deepEqual((await c.rel.candidates(c.owner, { limit: 1 })).candidates.map((r) => r.candidateId), [second.candidateId]);
+    await refuses("invalid_command", () => c.rel.candidates(c.owner, { limit: 21 }), /1 to 20/);
   });
 }

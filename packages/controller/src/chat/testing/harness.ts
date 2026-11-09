@@ -6,6 +6,7 @@ import { BlockerService } from "../../domain/blockers.js";
 import { ProjectService } from "../../domain/service.js";
 import { WaitService } from "../../domain/waits.js";
 import type { Backend } from "../../domain/testing/backends.js";
+import type { ControllerStorage } from "../../storage/types.js";
 import { DecisionService } from "../../decisions/index.js";
 import { InquiryService } from "../../inquiries/index.js";
 import { MeetingService } from "../../meetings/index.js";
@@ -20,8 +21,11 @@ export const options = { clock: () => "2026-10-22T10:00:00.000Z", pause: async (
 let n = 0;
 export const cid = (label: string): string => `${label}-${n++}`;
 
+/** Extra StateApi dependencies: a plain object, or a function called once the store is open so a real service (e.g. ReleaseService, and a StatusService reading it) can be built on the same storage. */
+export type ApiExtra = Partial<ConstructorParameters<typeof StateApi>[0]> | ((storage: ControllerStorage, epoch: number, built: { assignments: AssignmentService; waits: WaitService; contracts: ContractService }) => Partial<ConstructorParameters<typeof StateApi>[0]>);
+
 /** Everything a chat test needs, over one backend: the services, the owner's token and a way to make agents. */
-export async function openWorld(backend: Backend, script: ConstructorParameters<typeof ScriptedInterpreter>[0] = {}, model: CoordinatorModel = { respond: async () => { throw new Error("no model"); } }, apiExtra: Partial<ConstructorParameters<typeof StateApi>[0]> = {}) {
+export async function openWorld(backend: Backend, script: ConstructorParameters<typeof ScriptedInterpreter>[0] = {}, model: CoordinatorModel = { respond: async () => { throw new Error("no model"); } }, apiExtra: ApiExtra = {}) {
   const world = await backend.open();
   const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
   const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
@@ -40,7 +44,8 @@ export async function openWorld(backend: Backend, script: ConstructorParameters<
   const responsibilities = ResponsibilityService.withEpoch(world.storage, projects.epoch, options);
   const meetings = MeetingService.withEpoch(world.storage, projects.epoch, { inquiries }, { availability: async () => "available", ...options });
   const decisions = DecisionService.withEpoch(world.storage, projects.epoch, {}, options);
-  const api = new StateApi({ decisions, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, meetings, ...apiExtra });
+  const extra = typeof apiExtra === "function" ? apiExtra(world.storage, projects.epoch, { assignments, waits, contracts }) : apiExtra;
+  const api = new StateApi({ decisions, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, meetings, ...extra });
   const ownerToken = (await principals.bootstrapOwner({ name: "rob" })).token;
   const owner = await principals.authenticate(ownerToken);
   const agent = async (name: string, grants: Grant[]): Promise<{ token: string; principal: Principal }> => {

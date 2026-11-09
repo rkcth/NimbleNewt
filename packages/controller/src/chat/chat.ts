@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, saysAcknowledgeFlaky, wholeWord, platformsNamed, platformChoices, durationInWords, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, ordersHostMove, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -209,8 +209,6 @@ type Resolved =
  */
 /** The owner saying a running-call choice in their own words, with its usual endings ("cancel", "cancelled", "cancels"; "finish", "finished"; "pause", "paused"). */
 const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { finish: /\bfinish(?:ed|es|ing)?\b/i, cancel: /\bcancel(?:l?ed|s|l?ing)?\b/i, pause: /\bpause(?:d|s)?\b|\bpausing\b/i };
-/** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
-const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
 
@@ -521,14 +519,48 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
       if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started. Say how long (for example \"drain it over the next hour\")." }); continue; }
-      const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
+      // Accepting a platform that passed only after earlier failures is the owner's own word, never the interpreter's (card X09b part 2 review): `acknowledgeFlaky` is refused unless their message says it.
+      let command = intent;
+      // Which machine, and which platform of it, a destructive release test may run on is the owner's choice: `os` and `arch` are fixed choices, so the words check lets them through and they are checked here
+      // (card X09b part 2 review, item 3). The owner's own spelling counts (linux-x64, my mac, x86_64); a platform they ruled out ("linux x64, not the mac") and an ordinary word that merely spells one
+      // ("its MAC address is on the sticker") name nothing (card X09b part 2 review 3, item D3). Naming no platform of a kind is a question, naming another one is refused, and naming two of the same kind
+      // is refused too, because the chat cannot tell which one the machine is. Withdrawing a host (`active: false`) picks no platform for a machine — it takes one off the list — so it asks for neither
+      // os nor arch, and the interpreter's os and arch are dropped from it unless the owner's own words name them (item D4): sent as they are they would rewrite the platform on the record.
+      if (intent.op === "release.host") {
+        const withdrawing = intent.args["active"] === false;
+        const host = typeof intent.args["hostId"] === "string" ? `"${(intent.args["hostId"] as string).slice(0, 80)}"` : "that host";
+        const kinds = (["os", "arch"] as const)
+          .map((key) => { const value = intent.args[key]; return typeof value === "string" ? { key, value, named: platformsNamed(words, key) } : undefined; })
+          .filter((x): x is { key: "os" | "arch"; value: string; named: string[] } => x !== undefined);
+        const off = kinds.filter(({ value, named }) => !(named.length === 1 && named[0] === value.trim().toLowerCase()));
+        const gap = off.find((x) => !(withdrawing && x.named.length === 0));
+        if (gap !== undefined) {
+          const { key, value, named } = gap;
+          if (named.length > 1) { push({ i, kind: "refused", code: "unsupported_value", message: `${key} is not settled by your message, so nothing was changed for ${host}. Your own words name ${named.map((v) => `"${v}"`).join(" and ")}: which ${key} is ${host} authorized for (${platformChoices(key).join(", ")})? Say one of them and nothing about the others.` }); continue; }
+          if (named.length === 1) { push({ i, kind: "refused", code: "unsupported_value", message: `${key} is not in your message, so nothing was changed for ${host}. Your own words say ${key} "${named[0]}", not "${value}". Say which ${key} the host is authorized for (${platformChoices(key).join(", ")}), or that the platform is not what you meant.` }); continue; }
+          push({ i, kind: "asked", intentIndex: n, field: key, choices: [...platformChoices(key)], options: [...platformChoices(key)], question: key === "os" ? `${host} is to be authorized for release tests, but your message does not say which platform it runs. Which one — ${platformChoices("os").join(", ")}?` : `${host} is to be authorized for release tests, but your message does not say which chip it has. Which one — ${platformChoices("arch").join(", ")}?` });
+          continue;
+        }
+        // A withdrawal's own: a platform the owner did not say is dropped rather than asked for, because the machine is being taken off the list, not chosen for a platform (item D4).
+        if (withdrawing && off.length > 0) {
+          const args = { ...intent.args };
+          for (const { key } of off) delete args[key];
+          command = { ...intent, args };
+        }
+      }
+      if (intent.op === "release.approve" && intent.args["acknowledgeFlaky"] !== undefined && intent.args["acknowledgeFlaky"] !== false) {
+        // What was accepted has to be about the candidate being approved, so the word check is given its ID (card X09b part 2 review 2, item 1).
+        const approved = typeof intent.args["candidateId"] === "string" ? (intent.args["candidateId"] as string) : undefined;
+        if (!saysAcknowledgeFlaky(words, approved)) { push({ i, kind: "refused", code: "unsupported_value", message: "A release that passed only after earlier failures is approved only when your own words accept those failures (for example \"I have read the gate and accept the earlier failures, approve it with acknowledgeFlaky\"). Naming the flaky platform, asking about it or ruling it out accepts nothing, and the interpreter's acknowledgeFlaky was not used." }); continue; }
+      }
+      const resolved = await this.#resolve(token, command, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       // One message answers a waiting meeting decision once: a second answer to the same decision could only fail when confirmed.
       const answering = resolved.steps.find((st) => st.op === "meeting.record.owner-respond")?.args["decisionId"];
@@ -594,8 +626,8 @@ export class ChatService {
       return { work, quoted: old.quotedCount > 0 };
     }
     args[asked.field] = choice;
-    // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word: it counts as said, like the project-creation answers.
-    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" ? `${target.text}. ${choice}` : target.text };
+    // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word, as is the platform (or chip) they name for a host: it counts as said, like the project-creation answers.
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -639,6 +671,22 @@ export class ChatService {
       const digest = String(found.result["digest"]);
       args["digest"] = digest;
       fillNotes.push(`Digest of the staged release, filled in from its record: ${digest}${found.result["ok"] === true ? "" : " (its files do not match this digest now; activation will refuse)"}`);
+    }
+    // An approval is shown with what the gate says just now, so a flaky candidate shows the owner which platform failed before it passed (card X09b part 2 review): their yes is bound to what they were told.
+    // And what they were told is written into the approval itself, so a gate that gains an earlier failure before the owner confirms is refused rather than slipped past them (card X09b part 2 review 2, item 1).
+    if (intent.op === "release.approve" && typeof args["candidateId"] === "string") {
+      delete args["expectedFailures"];
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.gate", args: { candidateId: args["candidateId"] } });
+      if (found.ok) {
+        const cells = (found.result["gate"] as { cells?: readonly { cell: { os: string; arch: string }; flaky?: boolean; earlierFailures?: readonly { id: string }[] }[] } | undefined)?.cells ?? [];
+        const flaky = cells.filter((x) => x.flaky === true);
+        if (flaky.length > 0) fillNotes.push(`release.gate just now: ${flaky.map((x) => `${x.cell.os} ${x.cell.arch} passed only after ${x.earlierFailures?.length ?? 0} earlier failure${(x.earlierFailures?.length ?? 0) === 1 ? "" : "s"} (${(x.earlierFailures ?? []).map((f) => f.id).join(", ")})`).join("; ")}. Approving accepts that these platforms had to be retried before they went green.${args["acknowledgeFlaky"] === undefined || args["acknowledgeFlaky"] === false ? " Without acknowledgeFlaky this approval is refused." : ""}`);
+        if (args["acknowledgeFlaky"] === true) {
+          const shown = cells.flatMap((x) => x.earlierFailures ?? []).map((f) => f.id);
+          if (shown.length === 0) fillNotes.push("release.gate just now: no platform failed before it passed. Your acceptance is bound to that: if a platform is retried and goes green before you confirm, this approval is refused and you are shown the gate as it is then.");
+          args["expectedFailures"] = shown;
+        }
+      } else if (args["acknowledgeFlaky"] === true) return refuse(found.error.code, found.error.message);
     }
     // A restore is proposed with the plan the controller computes NOW from the backup's record; the approval token comes from that plan (never from the interpreter's words), so the owner's yes is bound to exactly what is shown.
     if (intent.op === "backup.restore.apply") {
