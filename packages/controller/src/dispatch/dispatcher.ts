@@ -183,7 +183,7 @@ export interface DispatcherDeps {
    * It is asked once more as the worker is started (card C07g): the `view` it answers then (the kept pieces and the references of what was cut, for the new route) goes in the attempt's first prompt, with `measured` saying whether the route's
    * fixed part was measured (a worker that can measure its own process rebuilds a view that was not, before it is sent).
    */
-  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number, /** What the first prompt carries besides the task's own text and the view, in characters: what the task was handed with and the resume note, counted as they are rather than as a guess. */ readonly noteChars?: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
+  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string; /** The length of the task's own text the first prompt carries besides the view. */ readonly taskChars: number, /** The paragraph of what the task was handed with (card C07m), in characters, counted as it is: room for it is kept on top of the reserve for the notes not measured here (the rules, a resume note). */ readonly noteChars?: number }) => Promise<{ readonly ok: true; readonly view?: { readonly text: string; readonly measured: boolean } } | { readonly ok: false; readonly reason: string }>;
   /** The task is on the same route it last ran on: a refusal that an earlier move to another route left behind is closed (card C07f). */
   readonly routeKept?: (kept: { readonly taskId: string; /** The route the task is on (a refusal made for this same route is not stale). */ readonly route: string }) => Promise<void>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
@@ -1850,7 +1850,7 @@ export class DispatcherService {
       const previous = ((await this.#runner.get(PLACED_KIND, b.taskId))?.body as unknown as { route?: string } | undefined)?.route;
       if (previous !== undefined && previous !== b.route) {
         let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length, noteChars: handed.length + (b.resumeNote?.length ?? 0) + (reviewed?.length ?? 0) }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
+        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length, noteChars: handed.length }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (!moved.ok) { this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (moved.view !== undefined && moved.view.text !== "") view = moved.view;
       }
@@ -1973,10 +1973,10 @@ export class DispatcherService {
     });
   }
 
-  /** The blockers that hold this task up (one indexed read per type: a subject has at most one open blocker of each). A type that cannot be read is left out, never guessed at. */
+  /** The blockers that hold this task up (one indexed read per type: a subject has at most one open blocker of each). A type that cannot be read is left out, never guessed at, and the failure is reported. */
   async #openBlockersOf(taskId: string): Promise<readonly { id: string; type: string; summary: string; resolver: string }[]> {
     const subject = { kind: "task", id: taskId };
-    const found = await Promise.all(BLOCKER_TYPES.map(async (type) => await this.#deps.blockers.openFor(type, subject).catch((): undefined => undefined)));
+    const found = await Promise.all(BLOCKER_TYPES.map(async (type) => await this.#deps.blockers.openFor(type, subject).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; })));
     return found.filter((b) => b !== undefined)
       .sort((x, y) => (x.openedAt === y.openedAt ? (x.id < y.id ? -1 : x.id > y.id ? 1 : 0) : x.openedAt < y.openedAt ? -1 : 1))
       .map((b) => ({ id: b.id, type: b.type, summary: b.summary, resolver: b.resolver }));

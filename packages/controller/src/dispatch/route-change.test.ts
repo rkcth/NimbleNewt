@@ -245,3 +245,32 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: a route change is told the size of the hand-off paragraph the first prompt will carry, exactly (card C07m review)`, async () => {
+    const store = await backend.open();
+    try {
+      let current = "cloud/big";
+      const w = await buildWorld(store.storage, { route: async () => choice(current) });
+      const noteChars: (number | undefined)[] = [];
+      const dispatcher = w.restart({ routeChange: async (c) => { noteChars.push(c.noteChars); return { ok: true }; } }, {});
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const made = await w.task("Prune roses", ann);
+      const run = async (): Promise<void> => { await w.heartbeatHost(); await dispatcher.tick(); await dispatcher.idle(); };
+      await run();
+      // Something now holds the task up, and its next attempt runs on another route.
+      await w.blockers.openBlocker({ commandId: "c07m-rc-blk", actor: w.owner.id, type: "wait_overdue", subject: { kind: "task", id: made.taskId }, summary: "the hedge trimmer is at the shop", resolver: "owner" });
+      const a = (await w.assignments.getAssignment(made.taskId))!;
+      const second = (await w.assignments.admitAttempt({ commandId: "c07m-rc-again", actor: "inbox", taskId: made.taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" })).id;
+      current = "local/small";
+      await run();
+      const order = w.worker.starts.find((o) => o.attemptId === second);
+      assert.ok(order !== undefined, "the attempt started on the new route");
+      const at = order.content.indexOf("\n\n[What the controller hands you");
+      assert.ok(at > 0, `the first prompt carries the hand-off paragraph: ${order.content}`);
+      const paragraph = order.content.slice(at);
+      assert.ok(noteChars.length >= 1, "the route change was asked");
+      for (const n of noteChars) assert.equal(n, paragraph.length, "each ask counts the paragraph as it is, and nothing else");
+    } finally { await store.close(); }
+  });
+}

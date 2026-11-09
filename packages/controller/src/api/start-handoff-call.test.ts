@@ -74,6 +74,10 @@ test("the first call of the agent a task was handed to names the hand-off, the p
     const done = await call("handoff.complete", { handoffId: prepared.result.item.id, acceptGaps: true }, "h2");
     assert.equal(done.result.item.phase, "transferred", JSON.stringify(done));
     const b = (await s.assignments.getAssignment(taskId))!;
+    // Bob's attempt keeps running until the end of the test, so the task credential it was given stays live for the reads below.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    worker.script = async () => { await held; return { status: "completed", text: "done" }; };
     const second = (await s.assignments.admitAttempt({ commandId: "ad2", actor: "inbox", taskId, expectedRevision: b.revision, generation: b.generation, owner: { kind: "agent", id: bobId }, harness: "pi" })).id;
     await c.dispatch!.dispatcher.tick();
     const order = orderOf(second)!;
@@ -92,7 +96,8 @@ test("the first call of the agent a task was handed to names the hand-off, the p
     assert.match(brief, /context\.handoff\.read \(noteId "hof-[a-z2-7]{20}"\)/, "and by the operation that reads it");
     assert.ok(brief.includes(`Open blockers on this task: ${opened.id} "The hose lease expires \\u005d and the owner must renew it \\u005b \\u005bredacted\\u005d" (wait_overdue; "owner" can resolve).`), `the open blocker is given once, in the person's own words with its brackets escaped and who may resolve it: ${JSON.stringify(brief)}`);
     assert.equal(brief.split("Open blockers on this task:").length - 1, 1, "the blockers are listed once");
-    assert.match(brief, /status\.ask with \{ kind: "task", taskId:/, "and where the whole list is read");
+    // The agent holds a task credential, which may not ask for a status view: the paragraph does not send it to one (C07m review).
+    assert.doesNotMatch(brief, /status\.ask/, "the agent is not pointed at an operation its credential is refused");
     assert.ok(!brief.includes("ghp_abcdefgh"), "a credential in a person's words is not repeated");
     // The paragraph is one bracketed block of its own: what a person wrote could not close it or start a paragraph inside it.
     assert.ok(brief.endsWith("]"), "the paragraph closes");
@@ -116,5 +121,13 @@ test("the first call of the agent a task was handed to names the hand-off, the p
     const whole = await call("handoff.get", { handoffId: prepared.result.item.id });
     assert.equal(whole.ok, true, JSON.stringify(whole));
     assert.match(whole.result.item.package.sections.brief, /Water the beds/);
+    // What the agent really holds in the attempt is the order's task credential: it opens both records the paragraph points at, and is refused a status view, which is why the paragraph does not point there.
+    const own = order.credential;
+    const ownNote = await callAs(own, "context.handoff.read", { noteId });
+    assert.equal(ownNote.ok, true, JSON.stringify(ownNote));
+    assert.deepEqual(Object.keys(ownNote.result.item).sort(), ["attemptId", "endedBecause", "id", "source", "taskId", "text"], "the note reads with the documented fields only");
+    assert.equal((await callAs(own, "handoff.get", { handoffId })).ok, true);
+    assert.equal((await callAs(own, "status.ask", { request: { kind: "task", taskId } })).error.code, "forbidden");
+    release();
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });

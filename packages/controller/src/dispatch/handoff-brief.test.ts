@@ -31,7 +31,8 @@ test("the package, the note and the blockers are each named by the record and th
   assert.ok(brief.includes(PREVIOUS), "the attempt the note belongs to is named");
   assert.match(brief, /written by the controller when that attempt ended/);
   assert.match(brief, /blk-eeeeeeeeeeeeeeeeeeee "the fixture server is down" \(wait_overdue; "owner" can resolve\)/);
-  assert.match(brief, new RegExp(`status\\.ask with \\{ kind: "task", taskId: "${TASK}" \\}`));
+  // The agent's task credential may not ask for a status view: the paragraph does not send it there (C07m review).
+  assert.doesNotMatch(brief, /status\.ask/);
   assert.match(brief, /records about task task-aaaaaaaaaaaaaaaaaaaa/);
 });
 

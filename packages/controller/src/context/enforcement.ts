@@ -108,8 +108,8 @@ const viewHeader = (route: string, window: number): string => `[The owner's deci
 const viewFooter = (n: number): string => `[${n} item${n === 1 ? " was" : "s were"} cut or left out to fit this route. Nothing is lost: each names the digest of its full text (sha256:...); read it with the state API query context.route-archive.read, giving this task's ID and that digest (the owner's own items need the right to read the project's history).]`;
 /** What the header, the footer and the separators of a view add at most, in characters: the pieces are built with room for them, so the whole view stays within the startup share. */
 const viewFrameChars = (route: string, window: number, items: number): number => viewHeader(route, window).length + 4 + viewFooter(Math.max(2, items)).length + 2 * Math.max(0, items - 1);
-/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text when their exact size is not known yet (card C07g): the project's rules, and a resume note of its own bound. What the
-dispatcher does know — what the task was handed with (card C07m, bounded by `HANDOFF_BRIEF_LIMITS.chars`) and the resume note it carries — is counted as it is instead, and the larger of the two is what room is kept for. */
+/** Room kept in the first prompt beside the view for the notes the controller adds to the task's own text when their exact size is not known yet (card C07g): the project's rules and a resume note. The paragraph of what
+the task was handed with (card C07m, bounded by `HANDOFF_BRIEF_LIMITS.chars`) is measured by the dispatcher and room is kept for it on top of this. */
 export const PROMPT_NOTE_RESERVE_CHARS = 2000;
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
@@ -944,6 +944,7 @@ export class ContextEnforcementService {
     if (found === undefined) return undefined;
     const b = found.body as unknown as HandoffBody;
     if ((await this.#task(principal, b.taskId, true)) === undefined) return undefined;
-    return { id: found.id, ...b };
+    // Only what the operation documents: the record's project and who wrote it stay in the record.
+    return { id: found.id, taskId: b.taskId, attemptId: b.attemptId, source: b.source, endedBecause: b.endedBecause, text: b.text };
   }
 }

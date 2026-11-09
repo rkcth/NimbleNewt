@@ -45,8 +45,8 @@ const heading = (taskId: string): string => `What the controller hands you with 
 
 /**
  * The paragraph a first call ends with, or `""` when the controller has nothing to hand over (a task's first attempt, handed no package, left no note, holding nothing up).
- * One line per kind of thing, each naming the record and the operation that reads it: `handoff.get` for the package, `context.handoff.read` for the note, and the task's status view for the blockers, which is where
- * they are listed with the way out of each. When more blockers are open than the paragraph shows, it says how many are not listed.
+ * One line per kind of thing, each naming the record and the operation that reads it: `handoff.get` for the package, `context.handoff.read` for the note; the blockers are listed in the paragraph itself (the owner's task status view holds the whole
+ * list with the way out of each, which a task credential may not open, so the agent is not sent there). When more blockers are open than the paragraph shows, it says how many are not listed.
  */
 export function handoffBrief(facts: HandoffBriefFacts): string {
   const fixed = [heading(facts.taskId)];
@@ -65,7 +65,8 @@ export function handoffBrief(facts: HandoffBriefFacts): string {
   // The blockers take whatever room the paragraph has left; each line says how many are not shown, so a short list here is never mistaken for the whole of them.
   const shown = blockers.slice(0, HANDOFF_BRIEF_LIMITS.blockers);
   const more = (rest: number): string => (rest > 0 ? `; and ${rest} more not listed here` : "");
-  const where = ` status.ask with { kind: "task", taskId: ${JSON.stringify(facts.taskId)} } lists them each with the way out.`;
+  // The whole list is the owner's task status view: a task credential (what this attempt's agent holds) may not ask for a status view, so it is not pointed at one it cannot open.
+  const where = ` The owner sees them all, each with the way out, in the task's status view; it is not open to your task credential.`;
   const listAt = (max: number): string[] => [
     ...fixed,
     `Open blockers on this task: ${shown.map((b) => `${ref(b.id)} ${said(b.summary, max)} (${ref(b.type)}; ${said(b.resolver, HANDOFF_BRIEF_LIMITS.resolver)} can resolve)`).join("; ")}${more(blockers.length - shown.length)}.${where}`,

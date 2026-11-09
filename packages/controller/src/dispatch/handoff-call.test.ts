@@ -64,7 +64,7 @@ for (const backend of backends) {
       assert.ok(blocker !== undefined);
       assert.ok(content.includes(blocker.id), "the open blocker is not named by its ID");
       assert.ok(content.includes(`"${BLOCKER}"`), "the open blocker is not named by its words");
-      assert.match(content, /status\.ask with \{ kind: "task"/);
+      assert.doesNotMatch(content, /status\.ask/, "the agent is not pointed at an operation its task credential is refused");
       // And it is the controller's paragraph, not something an agent could pass off as one: the task's own text and rules come first.
       assert.match(content, /^Ship the importer\n\nRules that bind you in this project/);
       assert.ok(content.indexOf("What the controller hands you") > content.indexOf("Rules that bind you"), "what the agent was handed is said after the rules that bind it");
@@ -94,6 +94,29 @@ for (const backend of backends) {
       const content = w.worker.starts.at(-1)!.content;
       assert.doesNotMatch(content, new RegExp(HANDOFF), "a package this agent may not read is not named to them");
       assert.doesNotMatch(content, /hand-off note|handoff note/, `this attempt's own note is given to it as a hand-off from before:\n${content}`);
+    } finally { await store.close(); }
+  });
+
+  test(`${backend.name}: a read of what the attempt was handed that fails never keeps it from starting, leaves out only its own line, and is reported (C07m review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const errors: string[] = [];
+      const boom = (what: string) => async (): Promise<never> => { throw new Error(`${what} unreadable`); };
+      // The hand-off records, the note and one blocker type fail; another blocker type still reads.
+      const blockers = { openBlocker: w.blockers.openBlocker.bind(w.blockers), openFor: async (type: Parameters<typeof w.blockers.openFor>[0], subject: Parameters<typeof w.blockers.openFor>[1]) => (type === "manual_hold" ? await boom("manual_hold")() : await w.blockers.openFor(type, subject)) };
+      const context = { ensureHandoff: async () => ({ id: "hof-x", source: "controller" as const, text: "" }), reportOverflow: async () => undefined as never, resetOverflow: async () => undefined as never, latestHandoffFor: boom("note") };
+      const d = w.restart({ context: context as never, blockers: blockers as never, handedIn: boom("hand-off") }, { onError: (e) => { errors.push(String((e as Error).message)); } });
+      const ann = await w.agent("ann", workGrants(w.project));
+      const { taskId, attemptId } = await w.task("Ship the importer", ann);
+      await w.blockers.openBlocker({ commandId: "c07m-fail-blk", actor: w.owner.id, type: "wait_overdue", subject: { kind: "task", id: taskId }, summary: BLOCKER, resolver: "owner" });
+      await d.tick();
+      await d.idle();
+      const order = w.worker.starts.at(-1);
+      assert.equal(order?.attemptId, attemptId, "the attempt started although three reads failed");
+      assert.ok(order!.content.includes(`"${BLOCKER}"`), "the blocker that could be read is still named");
+      assert.doesNotMatch(order!.content, /Handed to you by|hand-off note/);
+      for (const what of ["hand-off unreadable", "note unreadable", "manual_hold unreadable"]) assert.ok(errors.includes(what), `a failed read is not reported: ${what} (${JSON.stringify(errors)})`);
     } finally { await store.close(); }
   });
 }
