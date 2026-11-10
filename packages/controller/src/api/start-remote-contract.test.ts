@@ -95,7 +95,7 @@ test("the owner's limits, best-effort setting and the task contract travel with 
     assert.deepEqual(last.enforcement.map((e: { limit: string; enforced: string }) => [e.limit, e.enforced]).sort(), [["memoryMb", "full"], ["processes", "full"], ["wallTimeMs", "full"]]);
     // Usage and the result come back through the same path and are charged once.
     await mine.usage({ turnSeq: 1, costMicros: 0, computeMs: 5 });
-    await mine.complete({ status: "completed", text: "done" });
+    await mine.complete({ status: "completed", endKind: "normal", text: "done" });
     await w.c.dispatch!.dispatcher.idle();
     assert.equal((await w.c.dispatch!.dispatcher.get(await w.c.services.principals.authenticate(w.ownerToken), first.attemptId))!.outcome?.status, "succeeded");
   } finally { await w.done(); }

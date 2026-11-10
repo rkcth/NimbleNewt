@@ -45,10 +45,14 @@ test("the composed controller with the real worker process: a project reuses its
   const plain = simulatedFetch(recording);
   const endpointFetch: typeof globalThis.fetch = async (input, init) => {
     const response = await plain(input, init);
-    if (!crash.armed || !/event-stream/.test(response.headers.get("content-type") ?? "")) return response;
+    if (!/event-stream/.test(response.headers.get("content-type") ?? "")) return response;
+    // Card W03: an agent's turn is done when it ends with work.end. The first call of each turn (no tool result in it yet) is answered with that call, keeping the server's figures; the call after it gets the server's text.
+    const opening = !(JSON.parse(typeof init?.body === "string" ? init.body : Buffer.from(init?.body as Buffer).toString("utf8")) as { messages: { role: string }[] }).messages.some((m) => m.role === "tool");
+    if (!crash.armed && !opening) return response;
     const events = (await response.text()).split("\n\n").filter((e) => e.startsWith("data: {")).map((e) => JSON.parse(e.slice(6)) as Record<string, unknown>);
-    crash.asked = true;
-    const call = { index: 0, id: "call_1", type: "function", function: { name: "nimblenewt__desk-read", arguments: JSON.stringify({ recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }) } };
+    if (crash.armed) crash.asked = true;
+    const call = crash.armed ? { index: 0, id: "call_1", type: "function", function: { name: "nimblenewt__desk-read", arguments: JSON.stringify({ recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }) } }
+      : { index: 0, id: "call_end", type: "function", function: { name: "nimblenewt__work-end", arguments: JSON.stringify({ result: "done", note: "seeds ordered" }) } };
     const out = [{ choices: [{ index: 0, delta: { role: "assistant", tool_calls: [call] } }] }, { ...events.at(-1), choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }];
     return new Response(`${out.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("")}data: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
@@ -153,7 +157,8 @@ test("the composed controller with the real worker process: a project reuses its
     assert.ok(second.answers.every((a) => a.slot === gardenSlot), "a project's agents share its slot");
     assert.ok(other.answers.every((a) => a.slot !== gardenSlot), "another project gets its own slot");
     assert.ok(sum(second.answers).cachedTokens > 0, `the project's second task reads the shared head from the slot (${JSON.stringify(second.answers)})`);
-    assert.equal(sum(other.answers).cachedTokens, 0, "the other project reads nothing, though its prompt is the same apart from the task");
+    // Its first call: the call after the agent's work.end reads that task's own head from its own slot.
+    assert.equal(other.answers[0]!.cached, 0, "the other project reads nothing, though its prompt is the same apart from the task");
 
     // What the server reported is what accounting has: per task (one usage report per turn), and per project.
     for (const r of [first, second, other]) assert.deepEqual(await charged({ taskId: r.taskId }), { ...sum(r.answers), calls: 1 }, `task ${r.taskId}`);

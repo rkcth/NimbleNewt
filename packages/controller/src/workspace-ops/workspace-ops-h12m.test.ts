@@ -28,7 +28,7 @@ for (const backend of backends) {
       ...(opts.workspace === undefined ? {} : { workspace: opts.workspace }),
       sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
       runtimes: { open: async (_o, _call: BoundCall) => ({
-        run: async () => { turn.started!(); await over; return { status: "completed", text: "done" }; },
+        run: async () => { turn.started!(); await over; return { status: "completed", text: "done", endKind: "normal" }; },
         checkpoint: async () => ({}), tell: async (text: string) => { told.push(text); }, close: async () => undefined,
       }) },
     });

@@ -52,7 +52,7 @@ test("a task whose attempts start larger at each hand-off raises one alert for t
               const start = size; size += 300;
               const rt: AttemptRuntime = {
                 firstCall: () => ({ systemPromptChars: 1000, toolSchemaChars: 1000, startupTokens: start, replyReserveTokens: 200 }),
-                run: async (content) => { ran.push(order.attemptId); contents.push(content); return { status: "completed", text: "done", checkpoint: {} }; },
+                run: async (content) => { ran.push(order.attemptId); contents.push(content); return { status: "completed", text: "done", checkpoint: {}, endKind: "normal" }; },
                 checkpoint: async () => ({}), close: async () => undefined,
               };
               return rt;

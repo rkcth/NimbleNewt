@@ -230,7 +230,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
   test("a stored conversation over the startup share is compacted once by the real process and then admitted; one that cannot fit is refused at start with the blocker, and nothing was sent to the model", async (t) => {
     const real = await launcher();
     if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
-    const big = (n: number): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(440));
+    const big = (n: number): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(400));
     const answer = await model([{ text: big(1) }, { text: big(2) }, { text: "continued" }]);
     const x = await rig(real, answer);
     x.window.value = 40960;
@@ -275,7 +275,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const g1 = gate(), g2 = gate(), g3 = gate(), g4 = gate();
     // The last call is held too, until the narrowed process has been looked at: answered at once, the turn could end and the process exit before the check saw it.
-    const answer = await model([{ hold: g1.promise, text: "never sent" }, { hold: g2.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { hold: g3.promise, text: "never sent" }, { hold: g4.promise, text: "all done after two restarts" }]);
+    const answer = await model([{ hold: g1.promise, text: "never sent" }, { hold: g2.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { hold: g3.promise, text: "never sent" }, { hold: g4.promise, call: { name: "nimblenewt__work-end", args: { result: "done", note: "seeds ordered" } } }, { text: "all done after two restarts" }]);
     const x = await rig(real, answer);
     try {
       const { attemptId } = await x.task(1, "Order seeds");

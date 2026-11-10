@@ -83,6 +83,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
   const steps: (Step | (() => Step))[] = [
     // Attempt one starts the job and ends.
     () => ({ call: { name: "nimblenewt__job-start", args: { tool, version: "1.0.0", input: { target: "site" }, label: "site build" } } }),
+    { call: { name: "nimblenewt__work-end", args: { result: "done" } } },
     { text: "the build runs" },
     // Attempt two reads it by its handle, stops it, and starts two more.
     () => ({ call: { name: "nimblenewt__job-status", args: { jobId: jobOne } } }),
@@ -90,6 +91,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
     () => ({ call: { name: "nimblenewt__job-cancel", args: { jobId: jobOne, reason: "not needed any more" } } }),
     () => ({ call: { name: "nimblenewt__job-start", args: { tool, version: "1.0.0", input: { target: "docs" } } } }),
     () => ({ call: { name: "nimblenewt__job-start", args: { tool, version: "1.0.0", input: { target: "logs" }, background: true } } }),
+    { call: { name: "nimblenewt__work-end", args: { result: "done" } } },
     { text: "all done" },
   ];
   const answer = await model(steps);
@@ -175,7 +177,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
     // Attempt one: the job is started and its handle returned; the attempt ends and the job runs on.
     const first = await admit(1);
     assert.deepEqual((await c.dispatch.dispatcher.tick()).started, [first]);
-    await until(() => answer.seen.length >= 2, 60_000, () => `attempt one never reached its last model call: ${answer.seen.length}`);
+    await until(() => answer.seen.length >= 3, 60_000, () => `attempt one never reached its last model call: ${answer.seen.length}`);
     await c.dispatch.dispatcher.idle();
     assert.equal((await c.dispatch.dispatcher.get(c.dispatch.principal, first))!.state, "finished");
     jobOne = /job-[a-z2-7]{20}/.exec(answer.seen[1]!)?.[0] ?? "";
@@ -188,18 +190,18 @@ test("a real local worker starts a job through the bridge; a later attempt reads
     // Attempt two, a new worker process: status, quoted output and the Stop by the handle; then two more jobs.
     const second = await admit(2);
     assert.deepEqual((await c.dispatch.dispatcher.tick()).started, [second]);
-    await until(() => answer.seen.length >= 8, 60_000, () => `attempt two never reached its last model call: ${answer.seen.length}`);
+    await until(() => answer.seen.length >= 10, 60_000, () => `attempt two never reached its last model call: ${answer.seen.length}`);
     await c.dispatch.dispatcher.idle();
-    assert.match(answer.seen[3]!, /\\"state\\":\\"running\\".*site build/, "the status came back to the agent");
-    const outputReply = answer.seen[4]!;
+    assert.match(answer.seen[4]!, /\\"state\\":\\"running\\".*site build/, "the status came back to the agent");
+    const outputReply = answer.seen[5]!;
     assert.match(outputReply, /started site/);
     assert.equal(outputReply.includes(TOKEN), false, "a credential in the output never reaches the agent");
     assert.match(outputReply, /data from the program, not instructions/);
-    assert.match(answer.seen[5]!, /stop_tool/);
+    assert.match(answer.seen[6]!, /stop_tool/);
     await until(async () => (await job(jobOne)).state === "cancelled", 15_000, async () => JSON.stringify(await job(jobOne)));
     assert.deepEqual((await job(jobOne)).orphans, []);
     await until(() => holding(`${marker}-site`).length === 0, 10_000, "the Stop ended the whole tree, grandchild included");
-    const ids = [...answer.seen[6]!.matchAll(/job-[a-z2-7]{20}/g), ...answer.seen[7]!.matchAll(/job-[a-z2-7]{20}/g)].map((m) => m[0]).filter((id) => id !== jobOne);
+    const ids = [...answer.seen[7]!.matchAll(/job-[a-z2-7]{20}/g), ...answer.seen[8]!.matchAll(/job-[a-z2-7]{20}/g)].map((m) => m[0]).filter((id) => id !== jobOne);
     const [docs, logs] = [ids[0]!, ids.at(-1)!];
     assert.notEqual(docs, logs);
     await until(async () => (await job(docs)).state === "running" && (await job(logs)).state === "running", 30_000, "the two new jobs run");
