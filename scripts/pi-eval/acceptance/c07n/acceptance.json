@@ -1,0 +1,19 @@
+{
+  "files": {
+    "packages/controller/src/dispatch/w01-acceptance-c07n-guards.test.ts": "w01-acceptance-c07n-guards.test.ts",
+    "packages/controller/src/dispatch/w01-acceptance-c07n-world.test.ts": "w01-acceptance-c07n-world.test.ts",
+    "packages/controller/src/api/w01-acceptance-c07n-start.test.ts": "w01-acceptance-c07n-start.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/dispatch/w01-acceptance-c07n-guards.test.js",
+    "dist/dispatch/w01-acceptance-c07n-world.test.js",
+    "dist/api/w01-acceptance-c07n-start.test.js"
+  ],
+  "allow": {
+    "\"the stored conversation is 30000 tokens, over 20000; starting fresh\"": "the test's own stub resume() reason (`the stored conversation is ${tokens} tokens, over 20000; starting fresh`) for a 30000-token checkpoint; the agent only has to carry the guard's reason into the note, as the base already does",
+    "/40000 tokens, over 2457 \\(60% of this model's 4096\\)/": "the base's resumeDecision wording (context/budget.ts: `the stored conversation is ${storedTokens} tokens, over ${resumeTokens} (${share}% of this model's ${window})`) for the fixture's 40000-token checkpoint on the routing table's 4096 window; the CONTRACT says this wording is unchanged and quotes the 30000 example",
+    "/40000 tokens, over 2457/": "the same base resumeDecision wording (context/budget.ts) for the embedder's reader that answers 40000 (the fixture), on the 4096 window",
+    "\":fresh\"": "the test's own label (`${attemptId}:fresh`) built inside the assertion from whether the runtime got a `from`; nothing the agent writes"
+  }
+}
