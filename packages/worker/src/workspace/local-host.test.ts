@@ -221,3 +221,39 @@ test("the diff stat runs no filter, diff driver or hook the agent's checkout nam
     assert.equal(existsSync(marker), false);
   } finally { await w.done(); }
 });
+
+test("doneState says what is not committed, the commits and changes ahead of the base, and whether each evidence path is a plain, non-empty file of the last commit (card W05)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    assert.equal(await w.ws.doneState(scope, []), undefined, "no checkout: nothing to say");
+    const made = await w.ws.ensure(scope);
+    const g = (...args: string[]): string => execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/nonexistent-hooks", "-c", "commit.gpgsign=false", ...args], { encoding: "utf8" });
+    assert.deepEqual(await w.ws.doneState(scope, []), { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0, evidence: [] }, "a fresh checkout: clean, nothing ahead");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await mkdir(join(made.checkout, "logs"));
+    await writeFile(join(made.checkout, "logs", "test.txt"), "12 passed\n");
+    await writeFile(join(made.checkout, ".gitignore"), "build/\n");
+    await mkdir(join(made.checkout, "build"));
+    await writeFile(join(made.checkout, "build", "out.js"), "ignored\n");
+    const before = g("status", "--porcelain");
+    const dirty = await w.ws.doneState(scope, ["logs/test.txt"]);
+    assert.deepEqual(dirty?.uncommitted.slice().sort(), [".gitignore", "logs/test.txt", "src/a.ts"], "changed and new files count; an ignored one does not");
+    assert.deepEqual([dirty?.uncommittedCount, dirty?.ahead, dirty?.changed], [3, 0, 3]);
+    assert.deepEqual(dirty?.evidence, [{ path: "logs/test.txt", present: false, why: "not in the last commit" }], "a file that is only in the checkout is not evidence yet");
+    assert.equal(g("status", "--porcelain"), before, "reading changes nothing in the checkout's index");
+    await writeFile(join(made.checkout, "empty.txt"), "");
+    await writeFile(join(made.checkout, "*"), "a star\n");
+    g("add", "-A"); g("commit", "-q", "-m", "work");
+    const clean = await w.ws.doneState(scope, ["logs/test.txt", "empty.txt", "logs", "missing.txt", "*", "src/*.ts"]);
+    assert.deepEqual([clean?.uncommittedCount, clean?.ahead, clean?.changed], [0, 1, 5]);
+    assert.deepEqual(clean?.evidence, [
+      { path: "logs/test.txt", present: true },
+      { path: "empty.txt", present: false, why: "empty" },
+      { path: "logs", present: false, why: "a folder, not a file" },
+      { path: "missing.txt", present: false, why: "not in the last commit" },
+      { path: "*", present: true },
+      { path: "src/*.ts", present: false, why: "not in the last commit" },
+    ], "paths are taken literally: a pattern matches no other file");
+  } finally { await w.done(); }
+});

@@ -22,7 +22,7 @@ import type { ScratchAttempt, ScratchCleanupService } from "./scratch-cleanup.js
  * - a call that had to be killed and was a write turns a submit into a plain end with the typed blocker `release_failed` (the tree cannot be trusted).
  * NOT here (remain): the real ports (dispatcher, GitBridge staging, Q01b submission records), the agent tool registration and its API operation.
  */
-export const WORK_END_LIMITS = { result: 40, note: 1000, message: 2000 } as const;
+export const WORK_END_LIMITS = { result: 40, note: 1000, message: 2000, evidence: 30, evidenceItem: 200, evidencePath: 300 } as const;
 /** The values `result` may take. Provisional (an owner question): the card names the field but not its vocabulary. */
 export const WORK_END_RESULTS = ["done", "blocked", "partial", "abandoned"] as const;
 export type WorkEndResult = (typeof WORK_END_RESULTS)[number];
@@ -71,6 +71,27 @@ export interface EndingAttempt {
   readonly generation?: number;
 }
 
+/** An evidence item the agent names (card W05): the item as the task contract says it, and the committed file of its checkout that holds it. */
+export interface WorkEndEvidence { readonly item: string; readonly path: string }
+
+/**
+ * The controller's check of a done (card W05), as the attempt port answers it: `skipped` (the task has no contract), `passed`, or not taken (`failed`/`unknown`) with the fixed-format `message` the agent is given and, once the task's
+ * go-ons are used up (`exhausted`), the `summary` the blocker carries.
+ */
+export type DoneCheck =
+  | { readonly state: "skipped" }
+  | { readonly state: "passed" }
+  | { readonly state: "failed"; readonly exhausted: boolean; readonly message: string; readonly summary: string }
+  | { readonly state: "unknown"; readonly exhausted: boolean; readonly message: string; readonly summary: string };
+
+/** A done the controller did not take (card W05): the call is refused with what did not pass, and the attempt goes on. */
+export class DoneNotVerified extends DomainError {
+  constructor(message: string) { super("invalid_command", message, { field: "result" }); this.name = "DoneNotVerified"; }
+}
+
+/** An evidence path: relative to the checkout, written with `/`, with no empty, `.` or `..` part. */
+const EVIDENCE_PATH = (v: string): boolean => !v.startsWith("/") && !v.includes("\\") && !/^[A-Za-z]:/.test(v) && v.split("/").every((p) => p !== "" && p !== "." && p !== "..");
+
 export interface SettleReport {
   /** Calls that had to be killed (they did not end when told to), with whether each could have changed the checkout. */
   readonly killed: readonly { readonly callId: string; readonly write: boolean; readonly reason: string }[];
@@ -88,6 +109,11 @@ export interface WorkEndDeps {
     /** `key` is stable per attempt (`workend:<attempt>:finished`): a repeat with it must be harmless. */
     /** `confirm` is asked once more right before the end; false means the ending was dropped in between and the attempt must not be ended (the answer is then `false`). */
     finish(attemptId: string, result: { readonly result: WorkEndResult; readonly note?: string; readonly submissionId?: string }, key: string, confirm?: () => Promise<boolean>): Promise<boolean | void>;
+    /**
+     * Checks a done against the task contract before it is recorded (card W05). `key` names the call (the same call asked again gets the same answer and is counted once). Absent: a done is taken on the agent's word, as before
+     * this card. It may take as long as the contract's checks run.
+     */
+    verify?(attemptId: string, request: { readonly key: string; readonly evidence: readonly WorkEndEvidence[]; readonly submit: boolean }): Promise<DoneCheck>;
   };
   /** True while the task is paused, stopped or suspended (any gate on its chain): the ending is not asked for or completed then, and a stop drops it. Absent: nothing is known to be paused. */
   readonly paused?: (taskId: string) => Promise<boolean>;
@@ -115,6 +141,15 @@ export interface WorkEndRecord {
   readonly result: WorkEndResult;
   readonly note?: string;
   readonly message?: string;
+  /** The evidence the agent named (card W05). */
+  readonly evidence?: readonly WorkEndEvidence[];
+  /** How the controller checked the done (card W05): `passed`, or `skipped` (no contract). Absent: not a done, or recorded before this card. */
+  readonly verified?: "passed" | "skipped";
+  /**
+   * Set when the done was not taken and the task's go-ons were used up (card W05): the attempt ends blocked (`done_unverified` blocker, with this list) instead of succeeded, and nothing is submitted. The agent's own `result`
+   * stays as it asked.
+   */
+  readonly unverified?: { readonly summary: string };
   /** For a submit, the base and head seen when it was checked. */
   readonly base?: string;
   readonly head?: string;
@@ -124,7 +159,7 @@ export interface WorkEndRecord {
   readonly outcome?: "submitted" | "ended" | "dropped";
   readonly submissionId?: string;
   /** Typed reason a submit became a plain end or a stop dropped the intent. */
-  readonly typed?: "release_failed" | "submit_unavailable" | "submit_refused" | "owner_stop" | "emergency_stop" | "attempt_ended";
+  readonly typed?: "release_failed" | "submit_unavailable" | "submit_refused" | "owner_stop" | "emergency_stop" | "attempt_ended" | "done_unverified";
   readonly blocker?: string;
   readonly summary?: string;
   /** True once the attempt was frozen (a replayed request retries the freeze while this is missing). */
@@ -138,6 +173,8 @@ export interface WorkEndSteps {
   readonly settled?: { /** Set when a write call had to be killed (the submit is not made). */ readonly summary?: string; readonly blocker?: string; /** How many write calls had to be killed (set whether or not a submit was asked for). */ readonly killedWrites?: number };
   readonly submitted?: { readonly submissionId?: string; readonly typed?: WorkEndRecord["typed"]; readonly summary?: string; readonly blocker?: string };
   readonly told?: true;
+  /** Card W05: the blocker of a done that was not taken once the go-ons were used up was opened (its ID, when it could be). */
+  readonly unverified?: { readonly blocker?: string };
   readonly finished?: true;
   /** The scratch cleanup ran: removed, or kept (with why). Written after `finished`; the ending is not done before it. */
   readonly "cleanup.scratch"?: { readonly state: "removed" | "kept"; readonly why?: string };
@@ -183,14 +220,15 @@ export class WorkEndService {
   }
 
   /** The agent's call. Checked now; answers with the recorded intent (state `requested`). Only the attempt's own agent may end it. */
-  async request(by: Principal, command: NoActor & { attemptId: string; submit?: boolean; result?: string; note?: string; message?: string }): Promise<WorkEndAnswer> {
-    onlyKnown(command, ["commandId", "attemptId", "submit", "result", "note", "message"]);
+  async request(by: Principal, command: NoActor & { attemptId: string; submit?: boolean; result?: string; note?: string; message?: string; evidence?: unknown }): Promise<WorkEndAnswer> {
+    onlyKnown(command, ["commandId", "attemptId", "submit", "result", "note", "message", "evidence"]);
     const attemptId = text(command.attemptId, "attemptId", { min: 1, max: 200 });
     const submit = command.submit === undefined ? false : command.submit === true || command.submit === false ? command.submit : invalid("submit", "must be true or false");
     const result = (command.result === undefined ? "done" : (WORK_END_RESULTS as readonly string[]).includes(command.result) ? command.result : invalid("result", `must be one of ${WORK_END_RESULTS.join(", ")}`)) as WorkEndResult;
     const note = command.note === undefined ? undefined : text(command.note, "note", { min: 1, max: WORK_END_LIMITS.note, multiline: true });
     const message = command.message === undefined ? undefined : text(command.message, "message", { min: 1, max: WORK_END_LIMITS.message, multiline: true });
     for (const [name, v] of [["note", note], ["message", message]] as const) if (v !== undefined && redactText(v) !== v) invalid(name, "looks like a credential or key; those are not recorded");
+    const evidence = command.evidence === undefined ? undefined : evidenceOf(command.evidence);
     if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not end an attempt`);
     const attempt = await this.#deps.attempts.get(attemptId);
     // The same answer for an unknown attempt and another agent's.
@@ -202,8 +240,8 @@ export class WorkEndService {
     const existing = await this.#get(id);
     if (existing !== undefined) {
       const b = existing.body;
-      if (b.submit !== submit || b.result !== result || b.note !== note || b.message !== message) {
-        throw new DomainError("command_conflict", `attempt ${attemptId} already has an ending request with different submit/result/note/message`);
+      if (b.submit !== submit || b.result !== result || b.note !== note || b.message !== message || JSON.stringify(b.evidence ?? []) !== JSON.stringify(evidence ?? [])) {
+        throw new DomainError("command_conflict", `attempt ${attemptId} already has an ending request with different submit/result/note/message/evidence`);
       }
       // The freeze is retried while the intent is still only requested and the freeze never completed.
       if (b.state === "requested" && b.frozen !== true && attempt.live) {
@@ -222,8 +260,16 @@ export class WorkEndService {
       if (overlapping.length > 0) throw new SubmitRefused(l.head, overlapping);
       base = l.base; head = l.head;
     }
-    const body: WorkEndRecord = clean({ attemptId, taskId: attempt.taskId, projectId: attempt.projectId, agentId: attempt.agentId, state: "requested" as const, submit, result, note, message, base, head, requestedAt: this.#runner.now() });
     const scoped = scopedCommandId(by.id, command.commandId);
+    // Card W05: a done is checked against the task contract before it is recorded. One that does not pass is refused with the list and the attempt goes on; once the task's go-ons are used up it is recorded, and ends the attempt blocked.
+    let verified: WorkEndRecord["verified"]; let unverified: WorkEndRecord["unverified"];
+    if (result === "done" && this.#deps.attempts.verify !== undefined) {
+      const check = await this.#deps.attempts.verify(attemptId, { key: scoped, evidence: evidence ?? [], submit });
+      if (check.state === "passed" || check.state === "skipped") verified = check.state;
+      else if (!check.exhausted) throw new DoneNotVerified(check.message);
+      else unverified = { summary: check.summary.slice(0, 1000) };
+    }
+    const body: WorkEndRecord = clean({ attemptId, taskId: attempt.taskId, projectId: attempt.projectId, agentId: attempt.agentId, state: "requested" as const, submit, result, note, message, evidence, verified, unverified, base, head, requestedAt: this.#runner.now() });
     // Indexed first: a crash between the two leaves an index entry without an intent (skipped), never an intent no sweep knows of.
     await this.#index(attemptId, undefined);
     try { await this.#create(by.id, scoped, id, body); } catch (error) {
@@ -312,8 +358,14 @@ export class WorkEndService {
       }
       body = (await step("settled", value)).body;
     }
+    // unverified (card W05): the done was not taken and the go-ons are used up: the blocker lists what did not pass, and nothing is submitted.
+    if (body.unverified !== undefined && body.steps?.unverified === undefined) {
+      await this.#guard(attemptId);
+      const blocker = await this.#blocker(body, `${attemptId}:done_unverified`, body.unverified.summary, "done_unverified", 1000);
+      body = (await step("unverified", clean({ blocker }))).body;
+    }
     // submitted
-    if (body.submit && body.steps?.settled?.summary === undefined && body.steps?.submitted === undefined && attempt !== undefined) {
+    if (body.submit && body.unverified === undefined && body.steps?.settled?.summary === undefined && body.steps?.submitted === undefined && attempt !== undefined) {
       await this.#guard(attemptId);
       let value: NonNullable<WorkEndSteps["submitted"]>;
       // The landing branch may have moved while the calls settled: the overlap is checked again before anything is staged.
@@ -346,7 +398,9 @@ export class WorkEndService {
       await this.#guard(attemptId);
       // Conditional: a drop that lands between the guard and the end is seen by the dispatcher right before it ends the attempt.
       const confirm = async (): Promise<boolean> => { const r = await this.#get(idOf(attemptId)); return r !== undefined && r.body.state !== "dropped" && r.body.claim?.instance === this.#instance; };
-      const ended = await this.#deps.attempts.finish(attemptId, clean({ result: body.result, note: body.note, submissionId: body.steps?.submitted?.submissionId }), stepKey(attemptId, "finished"), confirm);
+      const ended = await this.#deps.attempts.finish(attemptId, body.unverified !== undefined
+        ? { result: "blocked", note: "the done was not verified against the task contract and the task's go-ons are used up; see the done_unverified blocker" }
+        : clean({ result: body.result, note: body.note, submissionId: body.steps?.submitted?.submissionId }), stepKey(attemptId, "finished"), confirm);
       if (ended === false) { await this.#guard(attemptId); throw busy(); }
       body = (await step("finished", true)).body;
     }
@@ -365,9 +419,9 @@ export class WorkEndService {
     const written = await this.#mutate(attemptId, "workend.finish", (b) => {
       if (b.state === "dropped") return b;
       const s = b.steps;
-      const typed = s?.settled?.summary !== undefined ? "release_failed" as const : s?.submitted?.typed;
+      const typed = b.unverified !== undefined ? "done_unverified" as const : s?.settled?.summary !== undefined ? "release_failed" as const : s?.submitted?.typed;
       const submissionId = s?.submitted?.submissionId;
-      return clean<WorkEndRecord>({ ...b, state: "done" as const, outcome: submissionId !== undefined ? "submitted" as const : "ended" as const, submissionId, typed, blocker: s?.settled?.summary !== undefined ? s.settled.blocker : s?.submitted?.blocker, summary: s?.settled?.summary ?? s?.submitted?.summary, finishedAt: this.#runner.now() });
+      return clean<WorkEndRecord>({ ...b, state: "done" as const, outcome: submissionId !== undefined ? "submitted" as const : "ended" as const, submissionId, typed, blocker: b.unverified !== undefined ? s?.unverified?.blocker : s?.settled?.summary !== undefined ? s.settled.blocker : s?.submitted?.blocker, summary: b.unverified !== undefined ? b.unverified.summary.slice(0, 500) : s?.settled?.summary ?? s?.submitted?.summary, finishedAt: this.#runner.now() });
     });
     return { ...written.body, replayed: false };
   }
@@ -573,9 +627,9 @@ export class WorkEndService {
     return { ...written.body, replayed: false };
   }
 
-  async #blocker(body: WorkEndRecord, key: string, summary: string): Promise<string | undefined> {
+  async #blocker(body: WorkEndRecord, key: string, summary: string, type: "runtime_hold" | "done_unverified" = "runtime_hold", max = 500): Promise<string | undefined> {
     try {
-      return (await this.#deps.blockers.openBlocker({ commandId: `work-end-blk:${key}`, actor: "controller", type: "runtime_hold", subject: { kind: "task", id: body.taskId }, summary: summary.slice(0, 500), resolver: "owner" })).id;
+      return (await this.#deps.blockers.openBlocker({ commandId: `work-end-blk:${key}`, actor: "controller", type, subject: { kind: "task", id: body.taskId }, summary: summary.slice(0, max), resolver: "owner" })).id;
     } catch { return undefined; }
   }
 
@@ -617,6 +671,23 @@ export class WorkEndService {
       build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: json(body) }], detail: { taskId: body.taskId }, contention: async () => new DomainError("stale_revision", "the ending changed at the same moment") }),
     }));
   }
+}
+
+/** The evidence list of a work.end (card W05): at most `WORK_END_LIMITS.evidence` entries of `{ item, path }`, each item named once, each path relative to the checkout. */
+function evidenceOf(v: unknown): WorkEndEvidence[] {
+  if (!Array.isArray(v)) return invalid("evidence", "must be a list of { item, path }");
+  if (v.length > WORK_END_LIMITS.evidence) return invalid("evidence", `must have at most ${WORK_END_LIMITS.evidence} entries`);
+  const seen = new Set<string>();
+  return v.map((e, i) => {
+    if (e === null || typeof e !== "object" || Array.isArray(e)) return invalid(`evidence[${i}]`, "must be { item, path }");
+    onlyKnown(e as Record<string, unknown>, ["item", "path"]);
+    const item = text((e as Record<string, unknown>)["item"], `evidence[${i}].item`, { min: 1, max: WORK_END_LIMITS.evidenceItem, multiline: true });
+    const path = text((e as Record<string, unknown>)["path"], `evidence[${i}].path`, { min: 1, max: WORK_END_LIMITS.evidencePath });
+    if (!EVIDENCE_PATH(path)) invalid(`evidence[${i}].path`, "must be a path inside your checkout, relative and written with /, with no . or .. part");
+    if (seen.has(item)) invalid(`evidence[${i}].item`, "is named twice");
+    seen.add(item);
+    return { item, path };
+  });
 }
 
 function invalid(field: string, message: string): never { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); }

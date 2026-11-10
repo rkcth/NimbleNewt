@@ -25,10 +25,24 @@ export interface ContractFields {
   /** P (production: the requested deliverable and its necessary checks) or PC (improvement of how the team works). */
   readonly workClass: WorkClass;
   readonly requiredEvidence: readonly string[];
+  /**
+   * Commands the host runs in the attempt's sandbox when the agent ends its work with `work.end` done (card W05), before the attempt is recorded succeeded: each must exit 0. The agent never runs them for the controller and cannot
+   * mark one passed. `run` is the program and its arguments as the sandbox sees them (no shell unless the command names one); the working directory is the checkout.
+   */
+  readonly checks: readonly ContractCheck[];
   /** Action names the task's work may use, at most; it narrows, it never grants. Stored now; the tool path (cards T06 and H12) is what enforces it. */
   readonly permissions: readonly string[];
   /** What the task needs from its harness to be recovered after a restart (card F08); checked when an attempt is admitted. Durable by default. */
   readonly recovery: RecoveryRequirement;
+}
+
+/** One check command of a task contract (card W05). */
+export interface ContractCheck {
+  /** A short name the agent and the owner see (unique in the contract). */
+  readonly name: string;
+  readonly run: readonly string[];
+  /** How long it may run, in seconds (default `CONTRACT_LIMITS.checkSeconds`). */
+  readonly timeoutSeconds?: number;
 }
 
 export interface ContractBody extends ContractFields {
@@ -52,10 +66,10 @@ export interface DependencyBody {
   readonly createdBy: string;
 }
 
-export const DEFAULT_CONTRACT: ContractFields = { acceptanceCriteria: [], priority: 5, budget: {}, workClass: "P", requiredEvidence: [], permissions: [], recovery: "native-continuation" };
-export const CONTRACT_LIMITS = { result: 4000, criterion: 500, criteria: 50, evidence: 30, evidenceItem: 200, permissions: 100, scan: 5000, budgetMax: 1_000_000 } as const;
+export const DEFAULT_CONTRACT: ContractFields = { acceptanceCriteria: [], priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [], permissions: [], recovery: "native-continuation" };
+export const CONTRACT_LIMITS = { result: 4000, criterion: 500, criteria: 50, evidence: 30, evidenceItem: 200, permissions: 100, scan: 5000, budgetMax: 1_000_000, checks: 10, checkName: 80, checkArgs: 32, checkArg: 1000, checkSeconds: 600, checkMaxSeconds: 3600 } as const;
 const ACTION = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
-const FIELDS = ["expectedResult", "acceptanceCriteria", "priority", "difficulty", "budget", "workClass", "requiredEvidence", "permissions", "recovery"] as const;
+const FIELDS = ["expectedResult", "acceptanceCriteria", "priority", "difficulty", "budget", "workClass", "requiredEvidence", "checks", "permissions", "recovery"] as const;
 
 const TASK_ID = /^task-[a-z2-7]{20}$/;
 const taskIdAt = (v: unknown, field: string): string => (typeof v === "string" && TASK_ID.test(v) ? v : invalid(field, "is not a task ID"));
@@ -66,6 +80,28 @@ const list = (v: unknown, field: string, max: number, item: number): string[] =>
   return v.map((x, i) => text(x, `${field}[${i}]`, { min: 1, max: item, multiline: true }));
 };
 
+/** The check commands of a contract (card W05): at most `CONTRACT_LIMITS.checks`, each with a unique one-line name, a program and its arguments (no control characters), and an optional time limit in whole seconds. */
+export function parseChecks(v: unknown, field = "checks"): ContractCheck[] {
+  if (!Array.isArray(v)) return invalid(field, "must be a list");
+  if (v.length > CONTRACT_LIMITS.checks) return invalid(field, `must have at most ${CONTRACT_LIMITS.checks} entries`);
+  const names = new Set<string>();
+  return v.map((c, i) => {
+    const at = `${field}[${i}]`;
+    if (c === null || typeof c !== "object" || Array.isArray(c)) return invalid(at, "must be an object with name, run and optionally timeoutSeconds");
+    const o = c as Record<string, unknown>;
+    for (const k of Object.keys(o)) if (k !== "name" && k !== "run" && k !== "timeoutSeconds") invalid(`${at}.${k}`, "is not a check field (name, run, timeoutSeconds)");
+    const name = text(o["name"], `${at}.name`, { min: 1, max: CONTRACT_LIMITS.checkName });
+    if (names.has(name)) invalid(`${at}.name`, "is already the name of another check");
+    names.add(name);
+    const run = o["run"];
+    if (!Array.isArray(run) || run.length < 1 || run.length > CONTRACT_LIMITS.checkArgs) invalid(`${at}.run`, `must be a list of 1 to ${CONTRACT_LIMITS.checkArgs} arguments, the program first`);
+    const args = (run as unknown[]).map((a, j) => text(a, `${at}.run[${j}]`, { min: j === 0 ? 1 : 0, max: CONTRACT_LIMITS.checkArg }));
+    const t = o["timeoutSeconds"];
+    if (t !== undefined && (typeof t !== "number" || !Number.isSafeInteger(t) || t < 1 || t > CONTRACT_LIMITS.checkMaxSeconds)) invalid(`${at}.timeoutSeconds`, `must be a whole number from 1 to ${CONTRACT_LIMITS.checkMaxSeconds}`);
+    return { name, run: args, ...(t === undefined ? {} : { timeoutSeconds: t as number }) };
+  });
+}
+
 type Patch = { [K in (typeof FIELDS)[number]]?: ContractFields[K] | null };
 
 function parsePatch(source: Record<string, unknown>): Patch {
@@ -73,6 +109,7 @@ function parsePatch(source: Record<string, unknown>): Patch {
   if (source["expectedResult"] !== undefined) out["expectedResult"] = source["expectedResult"] === null ? null : text(source["expectedResult"], "expectedResult", { min: 1, max: CONTRACT_LIMITS.result, multiline: true });
   if (source["acceptanceCriteria"] !== undefined) out["acceptanceCriteria"] = list(source["acceptanceCriteria"], "acceptanceCriteria", CONTRACT_LIMITS.criteria, CONTRACT_LIMITS.criterion);
   if (source["requiredEvidence"] !== undefined) out["requiredEvidence"] = list(source["requiredEvidence"], "requiredEvidence", CONTRACT_LIMITS.evidence, CONTRACT_LIMITS.evidenceItem);
+  if (source["checks"] !== undefined) out["checks"] = parseChecks(source["checks"]);
   if (source["priority"] !== undefined) {
     const p = source["priority"];
     out["priority"] = typeof p === "number" && Number.isSafeInteger(p) && p >= 0 && p <= 9 ? p : invalid("priority", "must be a whole number from 0 to 9");

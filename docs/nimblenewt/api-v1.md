@@ -2672,7 +2672,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `work.end`
 
-An agent ends its own attempt: it is frozen at once, the calls in flight settle, and the controller then finishes the attempt with the result. With `submit` the attempt's changes are offered for landing (refused when the landing branch moved and changed files you changed). Only the attempt's own agent may call it (a credential scoped to another task cannot); it is unavailable while the task is paused, stopped or suspended, and an owner's stop drops it. Asking again for the same ending returns the recorded one. If your turn ends first, the ending is completed with your result.
+An agent ends its own attempt: it is frozen at once, the calls in flight settle, and the controller then finishes the attempt with the result. A `done` of a task with a contract is checked first (card W05): the checkout committed and clean with at least one commit ahead of its base (with `submit`, a change against the base is enough: the submission carries it), every required evidence item named with a committed file, and the contract's check commands passing when the host runs them in the sandbox; if any fails, the call is refused with the list and the attempt goes on (a failed done counts toward the attempt's go-ons; once they are used up the attempt ends blocked with that list). With `submit` the attempt's changes are offered for landing (refused when the landing branch moved and changed files you changed). Only the attempt's own agent may call it (a credential scoped to another task cannot); it is unavailable while the task is paused, stopped or suspended, and an owner's stop drops it. Asking again for the same ending returns the recorded one. If your turn ends first, the ending is completed with your result.
 
 Arguments:
 
@@ -2681,6 +2681,7 @@ Arguments:
 - `result` (optional): `done` (default), `blocked`, `partial` or `abandoned`
 - `note` (optional): up to 1,000 characters
 - `message` (optional): up to 2,000 characters for your supervisor
+- `evidence` (optional): list of `{ item, path }`: for each evidence item the task contract requires, the committed file of your checkout that holds it
 - `commandId`: required
 
 Result: `{ item }`: the ending (state, result, replayed).
@@ -4661,7 +4662,8 @@ Arguments:
 - `difficulty` (optional): `trivial`, `easy`, `medium`, `hard`, `expert` or null
 - `budget` (optional): `{ maxAttempts?, maxMinutes?, maxCost? }`
 - `workClass` (optional): `P` or `PC`
-- `requiredEvidence` (optional): list of text
+- `requiredEvidence` (optional): list of text: what the agent must name in work.end `evidence` (a committed file each) before its done is accepted
+- `checks` (optional): list of `{ name, run, timeoutSeconds? }`: commands the host runs in the attempt's sandbox (the checkout as working directory) when the agent says done; each must exit 0 (at most 10; `run` is the program and its arguments; default 600 seconds, at most 3,600)
 - `permissions` (optional): action names the work may use, at most
 - `recovery` (optional): `none`, `native-continuation` (default) or `portable-reconstruction`: what the task needs from its harness to be recovered
 

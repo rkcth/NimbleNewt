@@ -7,10 +7,10 @@ import { createServer, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRelay, PolicyService, startController, type ToolGateway, type WorkOrder } from "@nimblenewt/controller";
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
-import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
+import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, doneVerifier, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
 
-// Shared by the composed tests of cards W03 and W04: the composed controller with the real local worker (bubblewrap, the worker process running Pi), the real checkout layout and a scripted OpenAI-compatible endpoint.
+// Shared by the composed tests of cards W03, W04 and W05: the composed controller with the real local worker (bubblewrap, the worker process running Pi), the real checkout layout and a scripted OpenAI-compatible endpoint.
 export const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -88,6 +88,8 @@ export async function rig(launcher: SandboxLauncher, steps: Step[]) {
             capabilities: () => ({ os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] }) as never,
             // What the task's checkout holds, read by the worker package's checkout layout (card W03).
             progress: (scope) => ws.progress(scope),
+            // The check of a done (card W05): the checkout's state from the same layout, and the contract's checks run in the attempt's sandbox.
+            verify: doneVerifier({ workspaces: ws, checks: parts.checks }),
           });
           return local;
         },

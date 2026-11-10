@@ -99,6 +99,16 @@ export class LocalWorkspaces {
     return { ...(plan === undefined ? {} : { plan }), ...(diffStat === undefined ? {} : { diffStat }) };
   }
 
+  /**
+   * What a task's checkout holds when its agent says the work is done (card W05, `GitBridge.doneState`): uncommitted files, commits ahead of the base, files changed against the base, and whether each evidence path is a file of the last
+   * commit. `undefined`: this host holds no checkout for the task.
+   */
+  async doneState(call: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<Awaited<ReturnType<GitBridge["doneState"]>> | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    return this.#options.git.doneState({ gitDir: where.gitDir, checkout: where.checkout, paths });
+  }
+
   readonly #making = new Map<string, Promise<unknown>>();
 
   /**

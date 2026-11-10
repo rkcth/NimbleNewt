@@ -156,6 +156,7 @@ const HINTS: Readonly<Record<BlockerType, string>> = {
   missing_context: "supply the context the resume needs, or change the task so it does not need it",
   resume_churn: "look at what keeps changing under the task, settle it, then resume again",
   agent_stopped_early: "read what the agent last said, its plan and its changes, then assign the task again or change it",
+  done_unverified: "read what did not pass when the agent said it was done, then have it fixed, change the task's checks, or assign the task again",
 };
 
 /** The first words of the route: what kind of obstacle it is. */

@@ -14,6 +14,8 @@ import { open } from "node:fs/promises";
 
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** Bounds of `GitBridge.doneState` (card W05): the uncommitted files it names, and the evidence paths it looks at. */
+export const DONE_STATE_LIMITS = { named: 20, paths: 30 } as const;
 /** Where the commits made through a permit are listed: a file in the checkout's git directory (host side, outside the checkout the agent edits). Text in a commit message proves nothing; a commit counts as permitted only if `commit()` made it and listed it here. */
 export const permitLedgerPath = (gitDir: string): string => join(gitDir, "nn-permit-ledger");
 
@@ -318,6 +320,36 @@ export class GitBridge {
     } finally { await rm(index, { force: true }); }
     const ahead = Number.parseInt((await this.#run(["rev-list", "--count", `${base}..HEAD`], { gitDir: options.gitDir })).stdout.trim(), 10);
     return `${short === "" ? "no changes" : short} against the task's base; ${Number.isSafeInteger(ahead) ? ahead : "an unknown number of"} commit(s) ahead of the base`;
+  }
+
+  /**
+   * What the checkout holds when its agent says the work is done (card W05), read only: the files that differ from the last commit or are new (an ignore rule hides a file here, as it does from a commit; at most `DONE_STATE_LIMITS.named`
+   * are named), how many commits the head is ahead of the task's base, how many files differ from the base counting what is not committed (what a submit would carry), and for each evidence path whether it is a plain, non-empty file of the
+   * last commit. Paths are taken literally (no pattern), and nothing outside the checkout's own repository is read.
+   */
+  async doneState(options: { gitDir: string; checkout: string; paths: readonly string[] }): Promise<{ uncommitted: string[]; uncommittedCount: number; ahead: number; changed: number; evidence: { path: string; present: boolean; why?: string }[] }> {
+    const base = await this.#base(options.gitDir);
+    const status = (await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], { gitDir: options.gitDir, workTree: options.checkout })).stdout;
+    const uncommitted = status.split("\0").filter(Boolean).map((e) => e.slice(3));
+    const ahead = Number.parseInt((await this.#run(["rev-list", "--count", `${base}..HEAD`], { gitDir: options.gitDir })).stdout.trim(), 10);
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let changed: number;
+    try {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      changed = (await this.#run(["diff", "--cached", "--name-only", "-z", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter(Boolean).length;
+    } finally { await rm(index, { force: true }); }
+    const evidence: { path: string; present: boolean; why?: string }[] = [];
+    for (const path of options.paths.slice(0, DONE_STATE_LIMITS.paths)) {
+      const listed = (await this.#run(["--literal-pathspecs", "ls-tree", "-l", "-z", "HEAD", "--", path], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+      // `<mode> <type> <object> <size>\t<path>`: the entry must be this exact path, a plain (or executable) file, and not empty.
+      const entry = listed.map((l) => { const tab = l.indexOf("\t"); const [mode, type, , size] = l.slice(0, tab).split(/\s+/); return { mode, type, size: Number.parseInt(size ?? "", 10), path: l.slice(tab + 1) }; }).find((e) => e.path === path);
+      if (entry === undefined) evidence.push({ path, present: false, why: "not in the last commit" });
+      else if (entry.type !== "blob" || (entry.mode !== "100644" && entry.mode !== "100755")) evidence.push({ path, present: false, why: entry.type === "tree" ? "a folder, not a file" : "not a plain file" });
+      else if (!(entry.size > 0)) evidence.push({ path, present: false, why: "empty" });
+      else evidence.push({ path, present: true });
+    }
+    return { uncommitted: uncommitted.slice(0, DONE_STATE_LIMITS.named), uncommittedCount: uncommitted.length, ahead: Number.isSafeInteger(ahead) ? ahead : 0, changed, evidence };
   }
 
   /**

@@ -146,6 +146,8 @@ const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu;
 /** What a job's label may not hold: any control character, a line or paragraph separator, or an invisible format character (it is shown to the owner and to later attempts). */
 const plainText = (value: string): string => redactText(value).replace(CONTROL, "");
 const LABEL_BAD = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
+/** The most of a refused done's list of failures (card W05) the agent is given; the controller's own text stays well under it. */
+const DONE_REFUSAL_CHARS = 8000;
 const refusal = (code: string, message: string): BridgeResponse => ({ ok: false, code, message: redactText(message).slice(0, 600) });
 const ok = (result: JsonObject): BridgeResponse => ({ ok: true, result });
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -466,9 +468,12 @@ export class ToolExecutionService {
    */
   async #workEnd(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
-    onlyKnown(args, ["submit", "result", "note", "message"]);
+    onlyKnown(args, ["submit", "result", "note", "message", "evidence"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
-    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+    if (response.ok) return ok(response.result);
+    // Card W05: a done the controller did not take is refused with the whole list of what failed (the controller's own fixed-format text, already bounded and redacted), not cut at the usual length of a refusal.
+    if (response.error.code === "invalid_command" && response.error.message.startsWith("work.end done was not accepted:")) return { ok: false, code: response.error.code, message: redactText(response.error.message).slice(0, DONE_REFUSAL_CHARS) };
+    return refusal(response.error.code, response.error.message);
   }
 
   /**

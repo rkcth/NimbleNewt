@@ -5,6 +5,8 @@ import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import { buildWorld } from "../dispatch/testing/world.js";
 import { SubmitRefused, WorkEndService, type WorkEndDeps, overlapOf, type EndingAttempt, type Landed, type SettleReport } from "./index.js";
+import type { DoneCheck } from "./work-end.js";
+import { scopedCommandId } from "../security/credentials.js";
 
 after(stopServer);
 
@@ -26,6 +28,8 @@ for (const backend of backends) {
     /** Runs after the guard and before the dispatcher ends the attempt (a drop landing in that gap). */
     finishRace?: () => Promise<void> | void;
     settleFails?: string; settleGone?: boolean;
+    /** The check of a done (card W05); absent: the port has none, as before the card. */
+    verify?: (attemptId: string, request: { key: string; evidence: readonly { item: string; path: string }[]; submit: boolean }) => Promise<DoneCheck>;
   }
   const rig = async (opts: RigOpts = {}) => {
     const store = await backend.open();
@@ -51,6 +55,7 @@ for (const backend of backends) {
           if (!state.finished.some((f) => (f as { key: string }).key === key)) { state.finished.push({ id, key, ...result }); if (id === "att-1") state.attempt = { ...state.attempt, live: false }; else state.live2 = false; }
           if (opts.finishCrashOnce && !state.crashed) { state.crashed = true; throw new Error("crash after finish"); }
         },
+        ...(opts.verify === undefined ? {} : { verify: opts.verify }),
       },
       paused: async () => state.paused,
       landing: async () => { const ls = opts.landings; const i = state.landingCalls++; return ls ? ls[Math.min(i, ls.length - 1)]! : landed; },
@@ -369,4 +374,68 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+
+  test(`${backend.name}: a done the controller does not take is refused with its list and nothing is recorded or frozen; one that passes is recorded as checked; partial and blocked are not checked (W05)`, async () => {
+    const asked: { key: string; evidence: readonly { item: string; path: string }[]; submit: boolean }[] = [];
+    let answer: DoneCheck = { state: "failed", exhausted: false, message: "work.end done was not accepted: ...\n1. There is no commit ahead of the task's base.", summary: "s" };
+    const r = await rig({ verify: async (_id, request) => { asked.push(request); return answer; } });
+    try {
+      await assert.rejects(r.service.request(r.ann, { commandId: "d1", attemptId: "att-1", note: "all done", evidence: [{ item: "test log", path: "logs/test.txt" }] }), (e: unknown) => {
+        assert.ok(e instanceof DomainError); assert.equal(e.code, "invalid_command"); assert.equal(e.name, "DoneNotVerified"); assert.match(e.message, /^work\.end done was not accepted/); return true;
+      });
+      assert.equal(await r.service.get("att-1"), undefined, "nothing recorded");
+      assert.equal(r.state.frozen.length, 0, "the attempt goes on");
+      assert.deepEqual(asked, [{ key: scopedCommandId("agent:ann", "d1"), evidence: [{ item: "test log", path: "logs/test.txt" }], submit: false }], "the key is the call's command ID, scoped to the agent");
+      answer = { state: "passed" };
+      const taken = await r.service.request(r.ann, { commandId: "d2", attemptId: "att-1", submit: true, evidence: [{ item: "test log", path: "logs/test.txt" }] });
+      assert.equal(taken.state, "requested"); assert.equal(taken.verified, "passed");
+      assert.deepEqual(taken.evidence, [{ item: "test log", path: "logs/test.txt" }]);
+      assert.equal(asked[1]?.submit, true);
+      // A repeat names the same evidence; another list is another ending and is refused. A repeat is not checked again.
+      assert.equal((await r.service.request(r.ann, { commandId: "d3", attemptId: "att-1", submit: true, evidence: [{ item: "test log", path: "logs/test.txt" }] })).replayed, true);
+      await refuses("command_conflict", () => r.service.request(r.ann, { commandId: "d4", attemptId: "att-1", submit: true, evidence: [{ item: "test log", path: "logs/other.txt" }] }));
+      assert.equal(asked.length, 2);
+      // Partial and blocked endings are the agent's own account: not checked.
+      for (const result of ["partial", "blocked"]) {
+        const id = `many-${result}`;
+        assert.equal((await r.service.request(r.ann, { commandId: `p-${result}`, attemptId: id, result })).verified, undefined);
+      }
+      assert.equal(asked.length, 2);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: once the go-ons are used up a done that is not taken ends the attempt blocked with a done_unverified blocker, and nothing is submitted (W05)`, async () => {
+    const summary = "The agent's work.end done was not accepted (checks failed), and the task's go-ons are used up: 1. Check \"unit tests\" failed: it exited with code 1.";
+    const r = await rig({ verify: async () => ({ state: "failed", exhausted: true, message: "m", summary }) });
+    try {
+      const asked = await r.service.request(r.ann, { commandId: "x1", attemptId: "att-1", submit: true, note: "all green" });
+      assert.equal(asked.state, "requested");
+      assert.equal(asked.result, "done", "the agent's own result is kept");
+      assert.deepEqual(asked.unverified, { summary });
+      assert.equal(r.state.frozen.length, 1);
+      const done = await r.service.complete("att-1");
+      assert.equal(done.state, "done");
+      assert.equal(done.typed, "done_unverified");
+      assert.equal(done.outcome, "ended");
+      assert.equal(r.state.submits, 0, "nothing is submitted");
+      assert.equal((r.state.finished[0] as { result: string }).result, "blocked", "the attempt ends blocked, not succeeded");
+      const blocker = await r.w.blockers.openFor("done_unverified", { kind: "task", id: r.state.attempt.taskId });
+      assert.ok(blocker);
+      assert.equal(blocker.summary, summary);
+      assert.equal(done.blocker, blocker.id);
+      // A restart completing it again opens nothing more.
+      assert.equal((await r.second().complete("att-1")).replayed, true);
+      assert.equal(r.state.blockerIds.filter((b) => b.includes("done_unverified")).length, 1);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: the evidence of a work.end is a short list of items with paths inside the checkout (W05)`, async () => {
+    const r = await rig({ verify: async () => ({ state: "passed" }) });
+    try {
+      for (const evidence of [{}, [{ item: "a" }], [{ item: "a", path: "../x" }], [{ item: "a", path: "/etc/passwd" }], [{ item: "a", path: "a/./b" }], [{ item: "a", path: "a\\b" }], [{ item: "a", path: "x" }, { item: "a", path: "y" }], [{ item: "a", path: "x", extra: 1 }], Array.from({ length: 31 }, (_, i) => ({ item: `i${i}`, path: "x" }))]) {
+        await refuses("invalid_command", () => r.service.request(r.ann, { commandId: `ev-${JSON.stringify(evidence).length}`, attemptId: "att-1", evidence }));
+      }
+      assert.equal(await r.service.get("att-1"), undefined);
+    } finally { await r.store.close(); }
+  });
 }

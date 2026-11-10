@@ -1,7 +1,7 @@
-export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TERMINAL, operationKind, type DispatchBody, type DispatchRevisions, type DispatchState, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
-export { DispatcherService, type DispatchCheck, type DispatcherDeps, type DispatcherLoop, type AttemptDispatcherOptions, type DispatcherLimitFigures, type RecipeChange, type RouteChoice, type RouteResolver, type TickReport } from "./dispatcher.js";
+export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, DONE_VERIFY_LIMITS, TERMINAL, operationKind, type DispatchBody, type DoneVerification, type DispatchRevisions, type DispatchState, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
+export { DispatcherService, type DispatchCheck, type DoneVerdict, type DoneEvidence, doneRefusal, type DispatcherDeps, type DispatcherLoop, type AttemptDispatcherOptions, type DispatcherLimitFigures, type RecipeChange, type RouteChoice, type RouteResolver, type TickReport } from "./dispatcher.js";
 export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./network.js";
-export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork, WorkProgress } from "./ports.js";
+export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork, WorkProgress, DoneCheckRequest, DoneCheckReport, DoneCheckRun } from "./ports.js";
 export { TURN_END_KINDS, turnEndKindOf, type TurnEndKind } from "./ports.js";
 export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { type RouteProbes } from "./loops.js";

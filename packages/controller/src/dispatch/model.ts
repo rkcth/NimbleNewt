@@ -126,6 +126,12 @@ export interface DispatchBody {
    */
   readonly stoppedEarly?: readonly { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; readonly readmitted: boolean; /** Card W04: the nudges that run's turn was given before it stopped. */ readonly nudges?: number }[];
   readonly turnRound?: number;
+  /**
+   * The checks of the agent's work.end done (card W05), newest last (at most `DONE_VERIFY_LIMITS.kept`). Each is the controller's verdict, never the agent's: `passed`, `failed` (what failed is listed, bounded and redacted),
+   * or `unknown` (the checks could not be made, so the done was not taken as verified). `key` is the work.end call it answers (a repeat of that call gets the same verdict), `counted` says it counted toward the task's go-ons
+   * (`STOPPED_EARLY_READMITS`), and `exhausted` that they were used up, so the attempt ends blocked with the list.
+   */
+  readonly verifications?: readonly DoneVerification[];
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;
   /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */
@@ -186,6 +192,22 @@ export interface ToolOperationBody {
   /** The revisions the call was judged under. */
   readonly judgedAt: { readonly policy: { readonly installation: number; readonly project?: number }; readonly decisions: number };
 }
+
+/** One check of an agent's done (card W05); see `DispatchBody.verifications`. */
+export interface DoneVerification {
+  readonly key: string;
+  readonly at: string;
+  readonly state: "passed" | "failed" | "unknown";
+  /** What did not pass, in the controller's words (agent text and check output quoted once, redacted). Empty when passed. */
+  readonly failures: readonly string[];
+  /** Each check command as the host ran it: name, how it ended and how long it took (its output is only in `failures`). */
+  readonly checks: readonly { readonly name: string; readonly state: "passed" | "failed" | "not-run"; readonly exitCode?: number | null; readonly timedOut?: boolean; readonly ms?: number }[];
+  /** The contract version checked against. */
+  readonly contract: number;
+  readonly counted: boolean;
+  readonly exhausted: boolean;
+}
+export const DONE_VERIFY_LIMITS = { kept: 6, failures: 12, failure: 900, message: 6000, output: 600, files: 5, checkOutputBytes: 64 * 1024, waitMarginMs: 60_000 } as const;
 
 /** How many times a task's attempt is readmitted after it stopped early (card W03); the stop after them ends it with a blocker. Counted per task and assignment generation, in storage. */
 export const STOPPED_EARLY_READMITS = 2;

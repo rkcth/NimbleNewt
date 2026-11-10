@@ -39,10 +39,10 @@ import { quoted } from "../status/explain.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
+import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, type DispatchBody, type DoneVerification, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { sealContract } from "../remote/contract.js";
-import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress } from "./ports.js";
+import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
@@ -345,6 +345,18 @@ interface StoppedEarlyCount { readonly taskId: string; readonly generation: numb
 const PROGRESS_MS = 10_000;
 /** The bounds of what the blocker shows: the agent's last text, each plan step, and how many open steps are named. */
 const STOPPED_EARLY_SHOWN = { text: 300, step: 80, steps: 5, diff: 160 } as const;
+
+/**
+ * The controller's verdict on an agent's work.end done (card W05). `skipped`: the task has no contract, so the done is taken as before. `passed`: every check passed. `failed`/`unknown`: the done is not taken; `message` is the fixed-format
+ * text the agent is given (what did not pass, quoted once), `exhausted` says the task's go-ons are used up (the attempt then ends blocked with `summary`).
+ */
+export type DoneVerdict =
+  | { readonly state: "skipped" }
+  | { readonly state: "passed"; readonly contract: number }
+  | { readonly state: "failed"; readonly failures: readonly string[]; readonly exhausted: boolean; readonly message: string; readonly summary: string }
+  | { readonly state: "unknown"; readonly failures: readonly string[]; readonly exhausted: boolean; readonly message: string; readonly summary: string };
+/** An evidence item the agent names in work.end (card W05): the item as the contract says it, and the committed file of the checkout that holds it. */
+export interface DoneEvidence { readonly item: string; readonly path: string }
 
 export class DispatcherService {
   readonly #runner: CommandRunner;
@@ -848,6 +860,138 @@ export class DispatcherService {
     // lost to that: it ends the attempt now, so its submission and the attempt never disagree.
     if ((await this.#load(attemptId))?.body.state !== "finished") await this.#end(attemptId, outcome, summary, options);
     return true;
+  }
+
+  readonly #verifying = new Map<string, Promise<unknown>>();
+
+  /**
+   * Checks an agent's work.end done against the task contract before it is taken (card W05). A task with no stored contract is not checked (`skipped`: today's behaviour). Otherwise the host of the attempt reports, and the controller judges:
+   * the checkout has nothing uncommitted (new files an ignore rule does not match count), its head is at least one commit ahead of the task's base, every evidence item the contract requires is named by the agent with a file of its last
+   * commit, and every check command of the contract exits 0 when the host runs it in the attempt's sandbox (each within its time, its output cut). The agent cannot mark any of this passed: the verdict is the controller's, from the host's
+   * report. A host that cannot check, a check it could not run, or a host that does not answer makes the verdict `unknown`, never `passed`.
+   *
+   * The verdict is recorded on the attempt (`verifications`) under `key`, the work.end call it answers: the same call asked again (a retry, a restart in the middle) gets the recorded verdict and is counted once; checks of one attempt
+   * run one at a time. A done that is not taken counts toward the task's go-ons after an early stop (`STOPPED_EARLY_READMITS`, card W03), in the same commit as the verdict; once they are used up the verdict is `exhausted`.
+   */
+  async verifyDone(by: Principal, attemptId: string, request: { readonly key: string; readonly evidence?: readonly DoneEvidence[]; readonly submit?: boolean }): Promise<DoneVerdict> {
+    await this.#controlled(by, attemptId);
+    if (typeof request.key !== "string" || request.key.length < 1 || request.key.length > 300) invalid("key", "must be 1 to 300 characters");
+    const earlier = this.#verifying.get(attemptId) ?? Promise.resolve();
+    const run = earlier.catch(() => undefined).then(() => this.#verifyDone(attemptId, request));
+    const tail = run.catch(() => undefined);
+    this.#verifying.set(attemptId, tail);
+    try { return await run; } finally { if (this.#verifying.get(attemptId) === tail) this.#verifying.delete(attemptId); }
+  }
+
+  async #verifyDone(attemptId: string, request: { readonly key: string; readonly evidence?: readonly DoneEvidence[]; readonly submit?: boolean }): Promise<DoneVerdict> {
+    const d = await this.#load(attemptId);
+    if (d === undefined || d.body.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+    const recorded = d.body.verifications?.find((v) => v.key === request.key);
+    if (recorded !== undefined) return verdictOf(recorded);
+    const contract = await this.#doneContract(d.body);
+    if (contract === undefined) return { state: "skipped" };
+    const b = d.body;
+    const failures: string[] = [];
+    // What could not be looked at (the verdict is then `unknown` unless something definitely failed too).
+    let notChecked = 0;
+    const fail = (t: string): void => { failures.push(t); };
+    const cannot = (t: string): void => { notChecked++; failures.push(t); };
+    // The evidence the contract requires, as the agent named it: an item it did not name is missing without asking the host.
+    const named = new Map<string, string>();
+    for (const e of request.evidence ?? []) if (!named.has(e.item)) named.set(e.item, e.path);
+    const wanted: { item: string; path: string }[] = [];
+    for (const item of contract.requiredEvidence) {
+      const path = named.get(item);
+      if (path === undefined) fail(`Required evidence ${quoted(item, 200)} is not named: give it in work.end evidence as { item, path } with the committed file of your checkout that holds it.`);
+      else wanted.push({ item, path });
+    }
+    const checks = contract.checks.map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? CHECK_SECONDS) * 1000 }));
+    const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
+    let report: DoneCheckReport | undefined;
+    if (host?.verify === undefined) {
+      cannot(`The host this attempt runs on (${b.hostId ?? "none"}) cannot check work, so the checkout, the evidence and the checks could not be looked at.`);
+    } else {
+      const ask: DoneCheckRequest = { checks, evidence: [...new Set(wanted.map((w) => w.path))], maxOutputBytes: DONE_VERIFY_LIMITS.checkOutputBytes };
+      const limit = checks.reduce((n, c) => n + c.timeoutMs, 0) + DONE_VERIFY_LIMITS.waitMarginMs;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        report = await Promise.race([host.verify(attemptId, { taskId: b.taskId, projectId: b.projectId }, ask), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${Math.round(limit / 1000)} s`)), limit); })]);
+      } catch (error) {
+        this.#options.onError?.(error);
+        cannot(`The host could not check the work: ${quoted(errorText(error), 300)}.`);
+      } finally { if (timer !== undefined) clearTimeout(timer); }
+    }
+    const ran: DoneVerification["checks"][number][] = [];
+    if (report !== undefined) {
+      if (report.checkout !== true) {
+        // A task whose host holds no checkout has no tree to commit (not coding work): only the evidence, which lives in a checkout, cannot be looked at.
+        if (wanted.length > 0) { cannot("The host holds no checkout for this task, so the evidence files could not be looked at."); }
+      } else {
+        const tree = report.tree;
+        if (tree === undefined || !Number.isSafeInteger(tree.uncommittedCount) || !Number.isSafeInteger(tree.ahead)) { cannot("The host did not say whether the checkout is committed and ahead of its base."); }
+        else {
+          // Work the agent offers with `submit` is carried as it stands (staged from the checkout, committed after review), so with a submit nothing has to be committed first: it is enough that there is a change against the base.
+          const submit = request.submit === true;
+          if (tree.uncommittedCount > 0 && !submit) {
+            const names = (Array.isArray(tree.uncommitted) ? tree.uncommitted : []).filter((x): x is string => typeof x === "string").slice(0, DONE_VERIFY_LIMITS.files).map((f) => quoted(f, 120));
+            fail(`The checkout has ${tree.uncommittedCount} file(s) that are not committed${names.length === 0 ? "" : `: ${names.join(", ")}${tree.uncommittedCount > names.length ? ` and ${tree.uncommittedCount - names.length} more` : ""}`}. Commit them (or remove them) so the tree is clean, or end with submit true to offer them for review.`);
+          }
+          const changed = typeof tree.changed === "number" && Number.isSafeInteger(tree.changed) ? tree.changed : 0;
+          if (tree.ahead < 1 && !(submit && changed > 0)) fail(submit ? "Your checkout holds no change against the task's base, so there is nothing to submit." : "There is no commit ahead of the task's base. Commit your work, or end with submit true to offer your changes for review.");
+        }
+        for (const w of wanted) {
+          const seen = (report.evidence ?? []).find((e) => e.path === w.path);
+          if (seen === undefined) { cannot(`Required evidence ${quoted(w.item, 200)}: the host did not say whether ${quoted(w.path, 200)} is there.`); }
+          else if (seen.present !== true) fail(`Required evidence ${quoted(w.item, 200)}: ${quoted(w.path, 200)} is not a file of your last commit${seen.why === undefined ? "" : ` (${quoted(seen.why, 120)})`}. Commit it and name it again.`);
+        }
+      }
+      for (const c of checks) {
+        const r = (Array.isArray(report.checks) ? report.checks : []).find((x) => x?.name === c.name);
+        if (r === undefined || (r.state !== "passed" && r.state !== "failed" && r.state !== "not-run")) { ran.push({ name: c.name, state: "not-run" }); cannot(`Check ${quoted(c.name, 80)} was not run by the host.`); continue; }
+        ran.push({ name: c.name, state: r.state, ...(r.exitCode === undefined ? {} : { exitCode: r.exitCode }), ...(r.timedOut === true ? { timedOut: true } : {}), ...(typeof r.ms === "number" && Number.isFinite(r.ms) ? { ms: Math.max(0, Math.round(r.ms)) } : {}) });
+        if (r.state === "passed") continue;
+        if (r.state === "not-run") { cannot(`Check ${quoted(c.name, 80)} could not be run by the host: ${quoted(redactText(String(r.reason ?? "no reason given")), 300)}.`); continue; }
+        const how = r.timedOut === true ? `it ran longer than its ${Math.round(c.timeoutMs / 1000)} s and was stopped` : typeof r.signal === "string" && r.signal !== "" ? `it was ended by ${quoted(r.signal, 20)}` : `it exited with code ${typeof r.exitCode === "number" ? r.exitCode : "unknown"}`;
+        const out = typeof r.output === "string" ? redactText(r.output).trim() : "";
+        // The end of the output is where a test run says what failed: the last characters are kept, quoted once.
+        const tail = out.length > DONE_VERIFY_LIMITS.output ? out.slice(out.length - DONE_VERIFY_LIMITS.output) : out;
+        fail(`Check ${quoted(c.name, 80)} failed: ${how}. ${tail === "" ? "It wrote nothing." : `The end of its output (quoted): ${quoted(tail, DONE_VERIFY_LIMITS.output + 20)}.`}`);
+      }
+    }
+    const state: DoneVerification["state"] = failures.length === 0 ? "passed" : notChecked === failures.length ? "unknown" : "failed";
+    const at = this.#runner.now();
+    let used = 0;
+    let lost = false;
+    const entry = (exhausted: boolean): DoneVerification => ({ key: request.key, at, state, failures: failures.slice(0, DONE_VERIFY_LIMITS.failures).map((f) => clip(f, DONE_VERIFY_LIMITS.failure)), checks: ran, contract: contract.version, counted: state !== "passed", exhausted });
+    const written = await this.#update(attemptId, (x) => {
+      if (lost) return x;
+      return { ...x, verifications: [...(x.verifications ?? []).slice(-(DONE_VERIFY_LIMITS.kept - 1)), entry(state !== "passed" && used >= STOPPED_EARLY_READMITS)] };
+    }, async (x) => {
+      // Another process recorded a verdict for this call meanwhile: that one stands and nothing is counted again.
+      lost = x.verifications?.some((v) => v.key === request.key) === true;
+      if (lost || state === "passed") return [];
+      const counted = await this.#stoppedEarlyCount(x.taskId);
+      used = counted !== undefined && counted.body.generation === x.generation ? counted.body.readmits : 0;
+      return this.#stoppedEarlyChange(x);
+    });
+    const mine = written.verifications?.find((v) => v.key === request.key);
+    if (mine === undefined) throw new DomainError("unavailable", "the check of the done could not be recorded; call work.end again");
+    return verdictOf(mine);
+  }
+
+  /** The contract a done is checked against: the one stored now, except that a change made by the attempt's own agent after the attempt began does not count (the agent cannot loosen its own checks); `undefined`: none stored. */
+  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[] } | undefined> {
+    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[] };
+    let c = (await this.#runner.get("task-contract", b.taskId))?.body as unknown as Stored | undefined;
+    if (c === undefined) return undefined;
+    const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
+    const began = b.revisions?.contract ?? 0;
+    if (bare(c.changedBy) === bare(b.agentId) && (c.version ?? 0) > began) {
+      if (began === 0) return undefined;
+      c = (await this.#runner.get("task-contract-version", `${b.taskId}.${began}`))?.body as unknown as Stored | undefined;
+      if (c === undefined) return undefined;
+    }
+    return { version: c.version ?? 0, requiredEvidence: Array.isArray(c.requiredEvidence) ? c.requiredEvidence : [], checks: Array.isArray(c.checks) ? c.checks : [] };
   }
 
   /**
@@ -1995,7 +2139,7 @@ export class DispatcherService {
     const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     // Card C07i: what the first prompt is made of goes with the order, so the starting-size watch can name the largest contributors; the records the hand-off paragraph names are where their originals are kept.
     const taskText = await this.#contentOf(b.taskId);
-    const rules = await this.#policyNote(b);
+    const rules = (await this.#policyNote(b)) + (await this.#doneNote(b));
     const startParts = { task: taskText.length, rules: rules.length, handoff: handed.length, view: view === undefined ? 0 : view.text.length + 2, refs: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
@@ -2051,6 +2195,17 @@ export class DispatcherService {
       const agent = await this.#deps.credentials.principalOf(this.#deps.principal, b.attemptId);
       const context = await this.#deps.policy.contextFor(agent, b.projectId);
       return context === undefined ? "" : `\n\n${describePolicyContext(context)}`;
+    } catch { return ""; }
+  }
+
+  /** What a done of this task is checked against (card W05), told to the agent at the start when the contract asks for evidence or checks. The items and check names are the contract's words, quoted. Never stops the attempt. */
+  async #doneNote(b: DispatchBody): Promise<string> {
+    try {
+      const c = await this.#doneContract(b);
+      if (c === undefined || (c.requiredEvidence.length === 0 && c.checks.length === 0)) return "";
+      const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with a committed file that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
+      const checks = c.checks.length === 0 ? "" : ` The host then runs these checks in your sandbox, and each must pass: ${c.checks.map((x) => quoted(x.name, 80)).join(", ")}.`;
+      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must be committed and clean, at least one commit ahead of the task's base (or, with submit true, hold your change against the base).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
     } catch { return ""; }
   }
 
@@ -2345,7 +2500,7 @@ export class DispatcherService {
       await this.#endCall(attemptId, "succeeded", `the turn stopped early (${how}); the attempt goes on`);
       if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-early:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "the turn stopped early; the attempt waits to go on from its checkpoint" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
       const turnEnd = this.#takeTurnEnd(attemptId);
-      const note = `Your last turn ended before you said the work was done (it ended: ${early.endKind}; no work.end was called). This attempt goes on from where it stopped, in the same conversation (go-on ${round} of ${STOPPED_EARLY_READMITS}). Look at what is left in PLAN.md, do it, commit it, and end with work.end; a turn that ends in prose alone is not taken as done.`;
+      const note = `Your last turn ended before you said the work was done (it ended: ${early.endKind}; no work.end was accepted${b.verifications?.at(-1)?.state === "failed" || b.verifications?.at(-1)?.state === "unknown" ? ", and your last work.end done was refused with the list of what did not pass" : ""}). This attempt goes on from where it stopped, in the same conversation (go-on ${round} of ${STOPPED_EARLY_READMITS}). Look at what is left in PLAN.md, do it, commit it, and end with work.end; a turn that ends in prose alone is not taken as done.`;
       let readmitted = false;
       await this.#update(attemptId, (x) => {
         if (x.state !== "running" || x.turnRound === round) { readmitted = x.turnRound === round; return x; }
@@ -2613,3 +2768,34 @@ type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: strin
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */
 const exhausted = (limit: number, used: number): boolean => limit > 0 && used >= limit;
+
+/** The default time of a contract check, in seconds (`CONTRACT_LIMITS.checkSeconds`). */
+const CHECK_SECONDS = 600;
+
+/**
+ * The text an agent is given when its done is not taken (card W05): a fixed frame in the controller's words, the failures numbered (each already quotes what came from elsewhere once), and what to do next. Nothing the agent wrote is
+ * put into the instructions themselves.
+ */
+export function doneRefusal(v: Pick<DoneVerification, "state" | "failures" | "exhausted">): string {
+  // Bounded as a whole: past `DONE_VERIFY_LIMITS.message` characters the rest are counted, not shown.
+  const lines: string[] = [];
+  let size = 0;
+  for (const [i, f] of v.failures.entries()) {
+    const line = `${i + 1}. ${f}`;
+    if (size + line.length > DONE_VERIFY_LIMITS.message) { lines.push(`(${v.failures.length - i} more item(s) not shown.)`); break; }
+    lines.push(line); size += line.length + 1;
+  }
+  const head = v.state === "unknown"
+    ? `work.end done was not accepted: the controller could not check your work against the task contract (${v.failures.length} item(s)).`
+    : `work.end done was not accepted: the controller checked your work against the task contract and ${v.failures.length} item(s) did not pass.`;
+  const tail = v.exhausted
+    ? "The go-ons of this task are used up, so the attempt ends now, blocked, with this list for the owner."
+    : "Fix these, commit, and call work.end again; the controller checks again. A done that is not accepted counts toward this task's go-ons, and once they are used up the attempt ends blocked. If you cannot finish, end with work.end result blocked or partial and say why in the note.";
+  return [head, ...lines, tail].join("\n");
+}
+
+function verdictOf(v: DoneVerification): DoneVerdict {
+  if (v.state === "passed") return { state: "passed", contract: v.contract };
+  const rest = { failures: v.failures, exhausted: v.exhausted, message: doneRefusal(v), summary: clip(`The agent's work.end done was not accepted (${v.state === "unknown" ? "the checks could not be made" : "checks failed"}), and the task's go-ons are used up: ${v.failures.map((f, i) => `${i + 1}. ${f}`).join(" ")}`, 1000) };
+  return v.state === "unknown" ? { state: "unknown", ...rest } : { state: "failed", ...rest };
+}
