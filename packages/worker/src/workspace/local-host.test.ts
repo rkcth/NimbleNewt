@@ -277,6 +277,11 @@ test("doneState does not count the agent's plan file as a change: a checkout tha
     assert.equal((await w.ws.doneState(scope, []))?.changed, 1, "only the plan file at the top is left out");
     await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
     assert.equal((await w.ws.doneState(scope, []))?.changed, 2);
+    // Third review: the plan in another letter case is the same note (an agent's "plan.md", or a case-insensitive disk keeping that name).
+    const other = { taskId: "tsk-plan-case", projectId: "prj-one" };
+    const made2 = await w.ws.ensure(other);
+    await writeFile(join(made2.checkout, "plan.md"), "- [x] write the plan\n");
+    assert.equal((await w.ws.doneState(other, []))?.changed, 0, "a lower-case plan alone is no change");
   } finally { await w.done(); }
 });
 

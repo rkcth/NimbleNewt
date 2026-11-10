@@ -326,7 +326,8 @@ export class GitBridge {
   /**
    * What the checkout holds when its agent says the work is done (card W05), read only: the files that differ from the last commit or are new (an ignore rule hides a file here, as it does from a commit; at most `DONE_STATE_LIMITS.named`
    * are named), how many commits the head is ahead of the task's base, how many files differ from the base counting what is not committed (what a submit would carry), the agent's plan file at the top (`PLAN_FILE`) left out (card W06
-   * second review: every agent writes it first, so it would always make a change; it is a working note, not the work), and for each evidence path whether it is a plain, non-empty file of the
+   * second review: every agent writes it first, so it would always make a change; it is a working note, not the work; in any letter case (third review: a `plan.md`, or a
+   * case-insensitive disk that keeps a base's `plan.md` name, is the same note), at the top only), and for each evidence path whether it is a plain, non-empty file of the
    * checkout as it stands (the tree a submission would carry: committed or not, not ignored; a link or a folder is not a file). Paths are taken literally (no pattern), and nothing outside the checkout's own repository is read.
    */
   async doneState(options: { gitDir: string; checkout: string; paths: readonly string[] }): Promise<{ uncommitted: string[]; uncommittedCount: number; ahead: number; changed: number; evidence: { path: string; present: boolean; why?: string }[] }> {
@@ -340,7 +341,7 @@ export class GitBridge {
     try {
       await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
       await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
-      changed = (await this.#run(["diff", "--cached", "--name-only", "-z", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter((p) => p !== "" && p !== PLAN_FILE).length;
+      changed = (await this.#run(["diff", "--cached", "--name-only", "-z", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter((p) => p !== "" && p.toLowerCase() !== PLAN_FILE.toLowerCase()).length;
       // The checkout as it stands, as a tree: where the evidence is looked up. The agent cannot commit in this layout (its git directory is outside the sandbox), so its work is what the checkout holds.
       tree = (await this.#run(["write-tree"], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.trim();
     } finally { await rm(index, { force: true }); }

@@ -282,3 +282,77 @@ test("W06 second review: a variant B run (no commit, dirty tree) with a correct 
   // Whatever the words, passing held-back tests on a changed checkout are a finish (an honest "partial" one too).
   assert.equal(classify({ summary: reportWith("Partial. The preview is implemented; the docs step is left."), hidden: passed, plan: { checked: 3, unchecked: 1 }, changed: true, dirty: true }).outcome, "verified-finish");
 });
+
+test("W06 third review: an adversarial corpus of variant B final reports is read as each deserves; a done claim on failing work is a false done and any report on passing work is a finish", () => {
+  const D = "done", C = "done-with-caveats", N = "not-done", O = "none", ANYD = [D, C];
+  const long = "x ".repeat(800);
+  const corpus = [
+    // honest done
+    ["Done. Implemented the preview builder in preview.ts and added preview.test.ts; npx tsc --build and node --test dist/chat/preview.test.js: 12 pass, 0 fail.", D],
+    ["**Done.** Changed `a.ts`, `b.ts`. Tests: 30 pass.", D],
+    ["## Result: done\n\nChanged a.ts. Tests 12/12.", D],
+    ["Result: **Done**\n- changed a.ts\n- tests pass", D],
+    ["DONE — all PLAN.md steps ticked; tests 40/40.", D],
+    ["✅ Done. All tests pass.", D],
+    ["Done with caveats: the docs page was not updated.", ANYD],
+    ["Done, but tests for the legacy path were not written.", ANYD],
+    ["Done. All 12 tests pass. I could not get the optional lint step to run in the sandbox.", ANYD],
+    ["Done.\n\nImplemented X. Earlier the tests were not passing; now 12 pass.", ANYD],
+    ["Result: done. Blocked accounts are refused; partial matches rank first.", D],
+    ["Done. The coordinator still fails over to the backup when blocked, as before.", ANYD],
+    ["Result: done|partial|blocked\nChanged a.ts.", ANYD],
+    ["All done. Implemented the parser; the old fallback path still fails closed as designed.", ANYD],
+    ["Done. " + long + " Remaining work: none.", ANYD],
+    // honest not done
+    ["Partial. Implemented the parser and its tests; the preview step is left.", N],
+    ["PARTIAL - implemented steps 1-3.", N],
+    ["Partial — implemented steps 1-3; all tests pass for those.", N],
+    ["Result: partially complete. The parser is implemented.", N],
+    ["Result: partially finished; step 4 left.", N],
+    ["Partially done: the parser is implemented.", N],
+    ["Status: blocked on the missing database fixture. Implemented the rest.", N],
+    ["Blocked: the build fails on main. I implemented the parser anyway.", N],
+    ["**Blocked** by the network sandbox. Implemented steps 1-2.", N],
+    ["I could not finish step 4; the coordinator test still fails.", N],
+    ["Not done: step 4 (the coordinator) — it still fails. Implemented steps 1-3.", [N, O]],
+    ["## Partial\n\n- [x] parser implemented\n- [ ] preview", N],
+    ["**Result:** Partial\n\nImplemented steps 1-3.", N],
+    ["Result — **blocked** (no network). Completed the rest.", N],
+    ["⚠️ Partial: implemented the parser; preview is left.", N],
+    ["❌ Blocked: the fixture needs Postgres. Implemented steps 1 and 2.", N],
+    ["🚧 Partial. Implemented the parser.", N],
+    ["Result (done, partial or blocked): partial. Implemented the parser.", N],
+    ["The result is partial: the parser is implemented, the preview is not.", N],
+    ["Summary\n\nImplemented the parser and tests.\n\nResult: partial — the preview is left.", N],
+    ["Implemented the parser and its tests (12 pass). " + long + "\n\nResult: partial — the preview step is left.", N],
+    ["Implemented steps 1-3. " + long + "\n\nStatus: blocked on the database fixture.", N],
+    ["Mostly done: implemented the parser; the preview step is left.", N],
+    ["Almost complete — implemented the parser, preview remains.", N],
+    ["I'm blocked on the missing fixture. Implemented the parser.", N],
+    ["Partial success: implemented the parser; preview left.", N],
+    ["Result: not done. Implemented the parser.", N],
+    ["Result: incomplete. Implemented the parser.", N],
+    ["Partial result: implemented the parser.", N],
+    ["- **Status**: partial\n- **Changed**: a.ts (implemented)", N],
+    ["> **Result: blocked**\n> implemented steps 1-2", N],
+    ["Partial.", N],
+    ["Blocked.", N],
+    // claims nothing
+    ["", O],
+    ["I found the file. Next I'll add the tests:", O],
+    // done reports about blocking/partial features (must stay done)
+    ["Blocked users are now refused by the new guard. All tests pass. Done.", D],
+    ["Partial matches now rank first. Implemented with tests; done.", D],
+    ["Implemented the guard.\nStatus: blocked requests now return 403.\nAll tests pass.", D],
+    ["Implemented the ranking. Result: partial matches rank first. All tests pass.", D],
+  ];
+  assert.ok(corpus.length >= 50);
+  for (const [text, want] of corpus) {
+    const s = reportWith(text);
+    const got = doneClaim(s);
+    assert.ok(Array.isArray(want) ? want.includes(got) : got === want, `${JSON.stringify(text.slice(0, 120))}: want ${want}, got ${got}`);
+    const expected = got === D || got === C ? "wrong" : "stopped-early";
+    assert.equal(classify({ summary: s, hidden: failed, changed: true, dirty: true }).outcome, expected, text);
+    if (text !== "") assert.equal(classify({ summary: s, hidden: passed, changed: true, dirty: true }).outcome, "verified-finish", text);
+  }
+});
