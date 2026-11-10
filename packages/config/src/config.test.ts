@@ -449,6 +449,20 @@ test("the start gets the transfer destinations as written and a secret lookup th
   assert.equal(none.stateDirectory, join(config.installation.dataDir, "database-transfer"));
 });
 
+test("a PostgreSQL controller database may name its schema, so the configuration can point at a transfer destination's own schema after a move (card F04l)", () => {
+  const doc = parsed("private");
+  assert.equal(doc.controller.storage.kind, "postgres");
+  const plain = loadOk(doc).controller.storage;
+  assert.equal(plain.kind === "postgres" ? plain.schema : "not postgres", undefined, "no schema: the controller's default");
+  doc.controller.storage.schema = "nn_moved";
+  const config = loadOk(doc);
+  assert.equal(config.controller.storage.kind === "postgres" ? config.controller.storage.schema : undefined, "nn_moved");
+  for (const bad of ["Moved", "1abc", "a-b", "", "a".repeat(42)]) {
+    doc.controller.storage.schema = bad;
+    assert.ok(messages(loadConfig(doc)).some((m) => m.startsWith("controller.storage.schema")), JSON.stringify(bad));
+  }
+});
+
 test("transfer destinations in the configuration: a PostgreSQL address only as a secret reference (a plain address is refused unechoed), names unique and plain, at most 16, listed as a secret use, kept out of public profiles and exports (card F04l)", async () => {
   const address = "postgres://nnuser:s3cret-pw@db.internal:5432/nimble";
   const withTargets = (targets: unknown[], profile = "private") => { const doc = parsed(profile); doc.controller.databaseTransfer = { targets }; return doc; };
