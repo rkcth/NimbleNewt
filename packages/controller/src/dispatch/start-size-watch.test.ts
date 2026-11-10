@@ -6,7 +6,7 @@ import { RemoteWorkerHost } from "../remote/host.js";
 import type { RemoteWorkerService } from "../remote/service.js";
 import type { JsonObject } from "../storage/types.js";
 import type { WorkOrder } from "./ports.js";
-import { controllerGuards, estimatedFirstCall, usableWindow } from "./runtime-guards.js";
+import { controllerGuards, estimatedFirstCall, startSizeSample, usableWindow } from "./runtime-guards.js";
 import { buildWorld } from "./testing/world.js";
 
 after(stopServer);
@@ -93,3 +93,11 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+test("a startup limit of 0 (a window too small to have one) is no limit to the watch: the call is still recorded, with no share, not refused by the watch's own check", () => {
+  const order = { attemptId: "att-1", taskId: "task-1", projectId: "p", agentId: "agent:a", generation: 1, route: "local/tiny", credential: "", recipe: { revision: "r1", reach: [] }, content: "c", requestId: "r" } as unknown as WorkOrder;
+  const call = { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: 5, replyReserveTokens: 0, likelyToolOutputTokens: 0 };
+  const s = startSizeSample({ budget: () => ({ charsPerToken: 3 }) as never }, {}, order, call, "local", "1", { window: 2, tokens: 5, limit: 0, admitted: false });
+  assert.equal("limitTokens" in s, false);
+  assert.equal(s.window, 2);
+});

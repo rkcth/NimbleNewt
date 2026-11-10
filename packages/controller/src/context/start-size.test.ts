@@ -97,6 +97,15 @@ for (const backend of backends) {
     assert.ok(!("share" in read.points[0]!), "no share is stored, not 0");
   });
 
+  suite("a call of unknown window neither raises nor clears the share warning (unknown is not below the line)", async ({ watch, host, t }) => {
+    assert.deepEqual((await watch.record(host, sample(t, 0, 30_000))).opened.map((a) => a.kind), ["share"]);
+    assert.deepEqual((await watch.record(host, sample(t, 1, 29_000, { window: undefined, limitTokens: undefined, admitted: false }))).opened, []);
+    assert.equal((await watch.read(host, { taskId: t }))!.alerts.share!.state, "open", "an unknown share does not clear the warning");
+    assert.deepEqual((await watch.record(host, sample(t, 2, 31_000))).opened, [], "still above: not warned twice");
+    await watch.record(host, sample(t, 3, 10_000));
+    assert.equal((await watch.read(host, { taskId: t }))!.alerts.share!.state, "cleared");
+  });
+
   suite("the thresholds are the owner's, validated, and used from the next call", async ({ watch, owner, host, ann, t }) => {
     await refuses("forbidden", () => watch.changeSettings(ann, { commandId: cid("s"), set: { risingHandoffs: 2 } }));
     await refuses("forbidden", () => watch.getSettings(ann));

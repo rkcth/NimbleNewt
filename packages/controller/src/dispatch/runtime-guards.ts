@@ -109,7 +109,7 @@ export function startSizeSample(context: Pick<ContextEnforcementService, "budget
   const named = Object.values(parts).reduce((a, b) => a + (b ?? 0), 0);
   if (tokens > named) parts.other = tokens - named;
   const refs = [...(p?.refs ?? []), ...new Set(order.resumeNote?.match(/sha256:[0-9a-f]{64}/g) ?? [])];
-  return { taskId: order.taskId, attemptId: order.attemptId, key, route: order.route, worker, tokens, ...(judged.window === undefined ? {} : { window: judged.window }), ...(judged.window === undefined || judged.limit === undefined ? {} : { limitTokens: judged.limit }), admitted: judged.admitted, parts, refs };
+  return { taskId: order.taskId, attemptId: order.attemptId, key, route: order.route, worker, tokens, ...(judged.window === undefined ? {} : { window: judged.window }), ...(judged.window === undefined || judged.limit === undefined || !(judged.limit > 0) ? {} : { limitTokens: judged.limit }), admitted: judged.admitted, parts, refs };
 }
 
 export function controllerGuards(binding: GuardBinding): RuntimeGuards {

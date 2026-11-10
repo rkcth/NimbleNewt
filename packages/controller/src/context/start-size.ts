@@ -239,9 +239,10 @@ export class StartSizeService {
               if (run >= settings.risingHandoffs) {
                 if (alerts.trend?.state !== "open") { const first = points[points.length - 1 - run]!; open("trend", { tokens: points.slice(-(run + 1)).map((p) => p.tokens), contributors: largest(parts, first.parts) }); }
               } else clear("trend");
+              // A call whose route's window is not known says nothing about the share: an open warning stays open (unknown is not below the line), and none is raised.
               if (share !== undefined && share >= settings.warnPercent) {
                 if (alerts.share?.state !== "open") open("share", { tokens: [tokens], share, limitTokens: limitTokens!, contributors: largest(parts) });
-              } else clear("share");
+              } else if (share !== undefined) clear("share");
             }
             const body: StartSizeBody = { taskId, projectId: task.projectId, attempts: at >= 0 ? old!.attempts : (old?.attempts ?? 0) + 1, points, ...(rolled === undefined ? {} : { rolled }), alerts, raised };
             return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref, body: body as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { opened: opened.map((a) => a.kind) }, contention: async () => new DomainError("stale_revision", "the starting sizes of this task were recorded at the same moment") };
