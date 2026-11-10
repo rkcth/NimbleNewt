@@ -151,6 +151,12 @@ export class PostgresStorage implements ControllerStorage {
   #liveHold: pg.Client | undefined;
   #liveRetry: NodeJS.Timeout | undefined;
   #liveClient: (() => pg.Client) | undefined;
+  /** A retake of the live lock in progress (awaited by close and by the operations that wait for it). */
+  #liveTaking: Promise<void> | undefined;
+  /** The schema's identity (its pg_namespace oid) once opened: a retaken lock checks that the name still means the same schema. */
+  #schemaOid: string | undefined;
+  /** Set when the schema was found replaced under this storage (a restore swapped in while its lock was lost): every later call is refused. */
+  #replaced: StorageError | undefined;
 
   private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
     this.#pool = pool;
@@ -207,11 +213,15 @@ export class PostgresStorage implements ControllerStorage {
     store.#liveClient = () => new pg.Client({ connectionString: withControllerApplication(options.connectionString), application_name: CONTROLLER_APPLICATION, connectionTimeoutMillis: resolved.connectTimeoutMs, keepAlive: true,
       options: `-c statement_timeout=${resolved.statementTimeoutMs}` });
     try {
-      // Before anything else: from here until close, a restore is never swapped into (or out of) this schema (second review of card K01i).
-      await store.#holdLive();
-      await store.#verifyServer();
+      // Before anything touches the schema: from here until close, a restore is never swapped into (or out of) it (second review of card K01i). The server check only reads, so it is made
+      // meanwhile on the pool (an open costs one connection's setup, not two in a row); a failure of either ends the other (`#dropLive` waits for the lock's connection).
+      const holding = store.#holdLive();
+      store.#liveTaking = holding.catch(() => undefined);
+      await Promise.all([holding, store.#verifyServer()]);
+      store.#liveTaking = undefined;
       if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade);
       await store.#migrate(options.migrations ?? MIGRATIONS);
+      store.#schemaOid = await store.#schemaIdentity();
       return store;
     } catch (error) {
       await store.#dropLive();
@@ -236,31 +246,61 @@ export class PostgresStorage implements ControllerStorage {
         if (Date.now() >= until) throw new StorageError("unavailable", `a restore is being swapped into the schema ${this.#options.schema} right now; start again in a moment`);
         await new Promise((r) => setTimeout(r, 200));
       }
+      // Taken again after a loss: the name must still be the schema this storage opened. A restore swapped in during the loss renamed it (rename keeps the oid), so the name now means another schema.
+      if (this.#schemaOid !== undefined && !this.#closed) {
+        const now = (await client.query("SELECT oid::text AS o FROM pg_namespace WHERE nspname = $1", [this.#options.schema])).rows[0]?.o as string | undefined;
+        if (now !== this.#schemaOid) this.#replaced = new StorageError("unavailable", `the schema ${this.#options.schema} was replaced (a restore was swapped in) while this controller had it open; it is no longer used by this controller. Start the controller again.`);
+      }
     } catch (error) { await client.end().catch(() => undefined); throw error; }
-    if (this.#closed) { await client.end().catch(() => undefined); return; }
+    if (this.#closed || this.#replaced !== undefined) { await client.end().catch(() => undefined); return; }
     this.#liveHold = client;
     const lost = (): void => {
       if (this.#liveHold !== client) return;
       this.#liveHold = undefined;
       void client.end().catch(() => undefined);
-      this.#retakeLive();
+      this.#retakeLive(0);
     };
     client.on("error", lost);
     client.on("end", lost);
   }
 
-  #retakeLive(): void {
-    if (this.#closed || this.#liveRetry !== undefined) return;
-    this.#liveRetry = setTimeout(() => {
-      this.#liveRetry = undefined;
-      if (this.#closed || this.#liveHold !== undefined) return;
-      this.#holdLive().catch((error: unknown) => { this.#poolError = error instanceof Error ? error : new Error(String(error)); this.#retakeLive(); });
-    }, 3000);
+  /** A retake of the lost live lock: at once after a loss, then every 3 s while it fails, until the storage is closed. */
+  #retakeLive(delayMs = 3000): void {
+    if (this.#closed || this.#replaced !== undefined || this.#liveRetry !== undefined || this.#liveTaking !== undefined) return;
+    this.#liveRetry = setTimeout(() => { this.#liveRetry = undefined; void this.#takeLiveAgain(); }, delayMs);
     this.#liveRetry.unref?.();
+  }
+
+  #takeLiveAgain(): Promise<void> {
+    if (this.#liveTaking !== undefined) return this.#liveTaking;
+    if (this.#closed || this.#replaced !== undefined || this.#liveHold !== undefined) return Promise.resolve();
+    this.#liveTaking = this.#holdLive()
+      .catch((error: unknown) => { this.#poolError = error instanceof Error ? error : new Error(String(error)); })
+      .finally(() => { this.#liveTaking = undefined; if (this.#liveHold === undefined) this.#retakeLive(); });
+    return this.#liveTaking;
+  }
+
+  /** The schema's pg_namespace oid, as text. */
+  async #schemaIdentity(): Promise<string | undefined> {
+    return this.#read(async (tx) => (await tx.q("SELECT oid::text AS o FROM pg_namespace WHERE nspname = $1", [this.#options.schema]))[0]?.["o"] as string | undefined);
+  }
+
+  /**
+   * Before a call: the storage is open, its schema was not replaced, and it holds the live lock. A call made while a lost lock is being taken again waits for that (a moment, or as long as the server
+   * cannot be reached) instead of reading or writing a schema a restore could be renaming at that moment.
+   */
+  async #ready(): Promise<void> {
+    this.#usable();
+    if (this.#liveHold !== undefined || this.#schemaOid === undefined) return;
+    if (this.#liveRetry !== undefined) { clearTimeout(this.#liveRetry); this.#liveRetry = undefined; }
+    await this.#takeLiveAgain();
+    this.#usable();
+    if (this.#liveHold === undefined) throw new StorageError("unavailable", `this controller lost its hold on the schema ${this.#options.schema} (the connection that keeps it ended) and could not take it again; try again in a moment`);
   }
 
   async #dropLive(): Promise<void> {
     if (this.#liveRetry !== undefined) { clearTimeout(this.#liveRetry); this.#liveRetry = undefined; }
+    await this.#liveTaking;
     const client = this.#liveHold;
     this.#liveHold = undefined;
     if (client !== undefined) await client.end().catch(() => undefined);
@@ -418,10 +458,11 @@ export class PostgresStorage implements ControllerStorage {
 
   #usable(): void {
     if (this.#closed) throw new StorageError("unavailable", "the storage is closed");
+    if (this.#replaced !== undefined) throw this.#replaced;
   }
 
   async #read<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
-    this.#usable();
+    await this.#ready();
     let client: pg.PoolClient;
     try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
     const ignore = () => undefined; // a dropped connection also emits an error event; the failing query reports it
@@ -444,7 +485,7 @@ export class PostgresStorage implements ControllerStorage {
    * `retryable` for claims (safe to repeat because leases expire).
    */
   async #writeTransaction<T>(fn: (tx: Tx) => Promise<T>, onUnknownCommit: "uncertain_commit" | "retryable"): Promise<T> {
-    this.#usable();
+    await this.#ready();
     let client: pg.PoolClient;
     try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
     const ignore = () => undefined;
@@ -836,7 +877,7 @@ export class PostgresStorage implements ControllerStorage {
 
   /** A consistent copy: one repeatable-read, read-only transaction on a connection of its own, read a page at a time until the copy is closed. */
   async snapshot(): Promise<StorageSnapshot> {
-    this.#usable();
+    await this.#ready();
     let client: pg.PoolClient;
     try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
     const ignore = () => undefined;
@@ -900,8 +941,7 @@ export class PostgresStorage implements ControllerStorage {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    await this.#dropLive();
-    await this.#pool.end();
+    await Promise.all([this.#dropLive(), this.#pool.end()]);
   }
 
   /** Connections now open, idle and waiting for a free one: the pool pressure, for workload reports. */

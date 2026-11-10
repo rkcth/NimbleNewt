@@ -10,7 +10,7 @@ import { SqliteStorage } from "../storage/index.js";
 import { LIVE_LOCK_CLASS, PostgresStorage, liveLockKey, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { withControllerApplication } from "../storage/postgres/storage.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
-import { terminateLiveLockHolders } from "../storage/postgres/testing/live-lock.js";
+import { liveLockCount, terminateLiveLockHolders, terminateSharedLiveLockHolders } from "../storage/postgres/testing/live-lock.js";
 import { BackupService, MaintenanceBarrier, StagedRestore } from "./index.js";
 import { PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
 
@@ -303,4 +303,37 @@ test("the schemas earlier restores kept aside are listed in the restore status w
       assert.equal(await port.exists(aside), true);
     } finally { await c.close(); }
   } finally { rmSync(r.d, { recursive: true, force: true }); }
+});
+
+// Third review of card K01i: the live lock is lost for a moment when its connection ends. A call made then waits for it to be taken again, and a schema renamed during the loss (a restore swapped in by a
+// controller that saw no holder) is noticed when it is taken again: the name no longer means the schema this storage opened, so it stops reading and writing it.
+test("a call made while the live lock is being taken again waits for it, and a schema swapped in during the loss is refused from then on", async () => {
+  const url = (await pg()).url();
+  const { s, cleanup } = await names(url, "gap");
+  try {
+    const running = await PostgresStorage.open({ connectionString: url, schema: s.live });
+    try {
+      const epoch = await running.currentEpoch();
+      // A plain loss: the next call waits for the lock and goes on.
+      assert.equal(await terminateLiveLockHolders(url, s.live), 1);
+      const until = Date.now() + 10_000;
+      while (running.holdsLiveLock && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+      assert.equal(await running.currentEpoch(), epoch);
+      assert.equal(running.holdsLiveLock, true, "the call waited for the lock");
+      await withClient(url, async (swapper) => {
+        // Queued for the lock exclusively behind the storage's hold, so it is granted the moment that hold is lost, before the storage can take it again; then the schemas are renamed as a swap does.
+        const waiting = swapper.query("SELECT pg_advisory_lock($1, hashtext($2))", [LIVE_LOCK_CLASS, liveLockKey(s.live)]);
+        while ((await liveLockCount(url, s.live, "ExclusiveLock", false)) === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+        assert.equal(await terminateSharedLiveLockHolders(url, s.live), 1);
+        await waiting;
+        await swapper.query(`ALTER SCHEMA ${s.live} RENAME TO ${s.aside}`);
+        await swapper.query(`ALTER SCHEMA ${s.staged} RENAME TO ${s.live}`);
+        await swapper.query("SELECT pg_advisory_unlock($1, hashtext($2))", [LIVE_LOCK_CLASS, liveLockKey(s.live)]);
+      });
+      await assert.rejects(running.currentEpoch(), /was replaced \(a restore was swapped in\)/);
+      await assert.rejects(running.currentEpoch(), /was replaced/, "and stays refused");
+      assert.equal(running.holdsLiveLock, false, "the replaced schema's lock is not kept");
+      assert.equal(await liveLockCount(url, s.live, "ShareLock", true), 0);
+    } finally { await running.close(); }
+  } finally { await cleanup(); }
 });
