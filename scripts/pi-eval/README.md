@@ -67,7 +67,7 @@ The report alone, over everything recorded so far or one batch:
 node scripts/pi-eval/report.mjs [--batch batch-20261109T201108] [--variants A,B] [--strict]
 ```
 
-Check that the tasks are sound (no agent, no GPU; about 5 to 10 minutes per task): the acceptance tests must fail at the
+Check that the tasks are sound (no agent, no GPU; about 1 to 4 minutes per task, 21 minutes for all nine on 2026-11-10): the acceptance tests must fail at the
 base and pass at the solution, the spec fit must find nothing unexplained, and the shipped suites are run at the
 solution for the record (`--no-shipped` skips that part).
 
