@@ -2133,12 +2133,36 @@
       ],
       "deliverable": "Owner decision 2026-11-10 (Rob): a hard end date on a grant makes long unattended coding unreliable, because work stalls silently at an arbitrary moment. A standing grant (including one made through the chat) lapses only after it has gone unused for its window (the grants.defaultDays setting, for example 30 days) and each time a worker uses the grant to place or run a task that needs it the window restarts. An unused grant still closes by itself, so a forgotten right does not stay open. Chat grants get no absolute maximum: grants.maxDays stays an optional owner setting that is unset by default, and the chat no longer needs to cap or refuse a length for it. An owner who sets a grant with an explicit end date keeps that end date. When a grant lapses from non-use the owner gets one plain message that names the right and the last time it was used (agent and record text quoted once), and a task that stalls because a right has lapsed says so in its blocker instead of going quiet. Use is recorded where the grant is checked at placement (packages/controller/src/agents/agents.ts lines 417, 437 and 461 and packages/controller/src/dispatch/dispatcher.ts line 1478), written at most once per grant per day so busy work does not rewrite the principal for every call",
       "acceptance_and_verification": "A grant used by a task every few days is still live after 100 days; a grant left unused past its window is no longer applied and the owner is told once in plain words; a grant with an explicit end date still ends on that date; a chat grant of any length is not refused by a cap unless the owner set grants.maxDays; the recorded use is written at most once a day per grant (counted in a test) on every storage backend; a stalled task names the lapsed right in its blocker; no fixed phrase is needed anywhere in the owner's words; the existing standing-grant length choice (A07d) still offers lengths as the idle window",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "b3be26ab",
+          "ab6c4af4",
+          "e9bab098",
+          "6b23a2ae",
+          "1bfe88a3",
+          "26f404f8",
+          "3eb814d0",
+          "1526ab9b",
+          "9980bec8",
+          "edc57c8a",
+          "0645dd3b",
+          "22181ff6",
+          "bd04d753",
+          "1bee123c",
+          "4eafb11e",
+          "9517bae8"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A standing grant lapses only after it goes unused for its idle window and each use renews it (written when the recorded use is older than min(1 day, window/24)); explicit end dates and grants stored before this change behave as before; chat grants have no cap unless grants.maxDays is set; the owner gets one notice per lapsed grant and a task stalled by a lapsed right names it in its blocker; revocation is never blocked by a use; the A09 maintenance auto-approval counts as a use. Left: being listed as an available reviewer or decider does not count as a use; the running controller's lapse loop into the owner's inbox is not tested end to end; no Windows run. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "C07",
@@ -2374,12 +2398,25 @@
       ],
       "deliverable": "Split from C07h (2026-11-03): the repeated-handoff test proves the bound in a simulation; this card watches the real thing. Each attempt records the size of the first call it was given, keyed by task and by how many handoffs the task has had, with the limit for its route and the share of the limit used. The owner sees an alert, and the task gets a visible warning, when a task's starting size has risen over several consecutive handoffs or passes 80 percent of its limit, so a slowdown is noticed while it is still small. The alert names the task, the trend and the largest contributors (stored conversation, handoff package, notes, project rules) and links the archived originals, and it never trims, cuts or compacts anything itself, so watching cannot cost the agent information it needs",
       "acceptance_and_verification": "An attempt on a task whose starting size rises over a configurable number of consecutive handoffs raises one alert (not one per attempt) with the trend and the contributors; passing 80 percent of the limit raises a warning before the 25 percent refusal; a flat or falling trend raises nothing; the figure is recorded for local and remote workers and for a route with an unknown window, which is shown as unknown and not as zero; the alert thresholds are configurable and validated; the alert changes no task content and leaves every cut original retrievable; the recorded figures are read through the state API and bounded themselves (older points are rolled up, not kept without limit)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "874d2d9e",
+          "1ff478cf",
+          "af31a7e1",
+          "bbda40ea",
+          "74b8f712"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The controller watches each attempt's starting size (context/start-size.ts): one record per task with a point per attempt, a trend alert after a run of rising hand-offs and a warning past a share of the startup limit, both raised once, retried until the owner is told, and cleared when the condition ends; owner-set validated thresholds; state API reads and a start_size status view reachable by free-form chat; the task status shows a warning line. The watch never changes a decision and waits at most 2 seconds on the first call. Left: a remote first call's size is the controller's estimate; the alert goes to the owner and the task status, not into the running agent's context; no installation-wide list of open alerts beyond notifications. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "C07j",
