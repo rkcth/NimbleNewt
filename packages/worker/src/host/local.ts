@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { endKindOf, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
@@ -6,6 +7,7 @@ import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
 import { GUEST, normalizeRecipe, type ReadOnlyMount } from "../sandbox/recipe.js";
 import { MAX_RUN_PROCESSES, splitRunTree, type RunProcess } from "../sandbox/proc.js";
+import { removeTree } from "../sandbox/script.js";
 import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type RelayRequest, type RelayResponse } from "./process.js";
 
 /**
@@ -253,7 +255,16 @@ export interface LocalHostOptions<Call> {
   /** The address the process uses for model calls (default `http://relay.invalid`). */
   readonly relayBase?: string;
   readonly clock?: () => number;
+  /** Where a contract check (card W05) gets its own empty home and scratch for the run, removed afterwards (an absolute directory this host owns; default the system's temporary directory). */
+  readonly checkBase?: string;
 }
+
+/** One check command as the controller asks it to be run (card W05): the program and its arguments as the sandbox sees them, its time and the cap on each stream. */
+export interface HostCheck { readonly run: readonly string[]; readonly timeoutMs: number; readonly maxOutputBytes: number }
+/** How it ended. `not-run`: it could not be started (no sandbox open for the attempt, a launch refused, a program that does not start); `output` is the end of what it wrote, standard output then standard error. */
+export interface HostCheckResult { readonly state: "passed" | "failed" | "not-run"; readonly exitCode?: number | null; readonly signal?: string | null; readonly timedOut?: boolean; readonly output?: string; readonly reason?: string; readonly ms?: number }
+/** How much of a check's output is handed back (its end). */
+export const CHECK_OUTPUT_CHARS = 8000;
 
 /** Pi's own system prompt is not visible to the process; until it is measured the first call is counted with this many characters for it, so the check errs on the side of refusing. */
 const UNKNOWN_SYSTEM_PROMPT_CHARS = 8000;
@@ -267,6 +278,8 @@ interface Reserved {
   /** Every worker process launched in this sandbox (a restart of the runtime launches another), for Stop (card L02d). Bounded: past 16, the oldest ended one goes, its winding-down time kept in `foldedMs`. */
   readonly launched: WorkerProcess[];
   foldedMs: number;
+  /** Contract checks running in this sandbox now (card W05): ended with it. */
+  readonly checkRuns: Set<{ kill(): void }>;
 }
 
 /** What a sandbox still holds (card L02d), from its worker processes' run trees: see `HostSandboxSession.work`. */
@@ -303,6 +316,11 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   readonly runtimes: { open(order: HostOrder, call: Call, from: JsonObj | undefined, lease?: HostLease): Promise<HostRuntime> };
   /** True when the owner's limits, best-effort setting and launch record are all connected (`limits`, `bestEffort`, `onLaunch` given); pass it to the `LocalWorker` so the controller can tell. */
   readonly ownerPolicy: boolean;
+  /**
+   * Runs a contract check of an attempt (card W05) in a sandbox of its own made from the attempt's: the same checkout as working directory, the same read-only inputs, environment, network (none) and limits (the owner's too), but an empty home
+   * and scratch of its own, so the check cannot touch the agent's conversation. The run is ended at its time (or the owner's wall time, if smaller), each stream is cut at its cap, and nothing of it reaches the agent.
+   */
+  readonly checks: { run(attemptId: string, check: HostCheck): Promise<HostCheckResult> };
 } {
   const reserved = new Map<string, Reserved>();
   const hostPaths = options.guestPaths === "host";
@@ -337,18 +355,19 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
       const normalized = normalizeRecipe(recipe, planned.protectedPaths);
       // The recipe's own limits, when it states some, are the sandbox's limits (narrower or wider than the host's default); otherwise the workspace's.
-      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0 };
+      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0, checkRuns: new Set() };
       reserved.set(order.attemptId, entry);
       return {
         revision: normalized.revision,
         close: async () => {
           entry.closed = true;
           if (reserved.get(order.attemptId) === entry) reserved.delete(order.attemptId);
+          for (const r of entry.checkRuns) r.kill();
           // A process the OS could not end is not taken as gone (card L02d): the close says so, and the sandbox keeps listing it.
           await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; });
         },
         work: () => heldBy(entry.launched, entry.foldedMs),
-        end: async () => { await Promise.all(entry.launched.map((p) => p.forceEnd())); },
+        end: async () => { for (const r of entry.checkRuns) r.kill(); await Promise.all(entry.launched.map((p) => p.forceEnd())); },
       };
     },
   };
@@ -488,5 +507,62 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
     },
   };
 
-  return { sandbox, runtimes, ownerPolicy: options.limits !== undefined && options.bestEffort !== undefined && options.onLaunch !== undefined };
+  const checks = {
+    async run(attemptId: string, check: HostCheck): Promise<HostCheckResult> {
+      const entry = reserved.get(attemptId);
+      if (entry === undefined || entry.closed) return { state: "not-run", reason: "the attempt has no sandbox open on this host" };
+      if (!Array.isArray(check.run) || check.run.length === 0 || check.run.some((a) => typeof a !== "string" || a.includes("\0"))) return { state: "not-run", reason: "the check names no program" };
+      let requested: ResourceLimits;
+      let bestEffort: boolean;
+      try {
+        requested = strictestLimits(entry.limits, await options.limits?.(entry.order)) ?? {};
+        bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(entry.order)) === true;
+      } catch (error) { return { state: "not-run", reason: `the owner's limits could not be read: ${String((error as Error)?.message ?? error).slice(0, 200)}` }; }
+      const { wallTimeMs, ...processLimits } = requested;
+      const timeoutMs = Math.max(1, Math.min(MAX_RUN_MS, check.timeoutMs, wallTimeMs ?? MAX_RUN_MS));
+      const directory = realpathSync(mkdtempSync(join(options.checkBase ?? tmpdir(), "nn-check-")));
+      try {
+        const home = join(directory, "home"), scratch = join(directory, "scratch");
+        mkdirSync(home); mkdirSync(scratch);
+        let run;
+        try {
+          run = await options.launcher.launch({ recipe: { ...entry.recipe, home, scratch }, command: [...check.run], timeoutMs, maxOutputBytes: Math.max(1, Math.min(64 * 1024 * 1024, check.maxOutputBytes)), ...(Object.keys(processLimits).length === 0 ? {} : { limits: processLimits }), requireEnforced: !bestEffort });
+        } catch (error) { return { state: "not-run", reason: `the sandbox refused the check: ${String((error as Error)?.message ?? error).slice(0, 300)}` }; }
+        entry.checkRuns.add(run);
+        // A sandbox closed while the launch was being made: the check is ended at once.
+        if (entry.closed) run.kill();
+        let result;
+        try { result = await run.result; } finally { entry.checkRuns.delete(run); }
+        const both = `${result.stdout}${result.stdout !== "" && result.stderr !== "" && !result.stdout.endsWith("\n") ? "\n" : ""}${result.stderr}`;
+        const output = both.length > CHECK_OUTPUT_CHARS ? both.slice(both.length - CHECK_OUTPUT_CHARS) : both;
+        const shown = { exitCode: result.exitCode, signal: result.signal, ms: result.durationMs, ...(output === "" ? {} : { output }) };
+        if (result.releaseProblem !== undefined) return { state: "not-run", reason: `the sandbox could not be cleaned up after the check: ${result.releaseProblem.slice(0, 300)}`, ...shown };
+        if (result.exitCode === null && result.signal === null && !result.timedOut && !result.killed) return { state: "not-run", reason: `the check could not be started: ${result.stderr.replace(/^could not start: /, "").trim().slice(0, 300)}`, ms: result.durationMs };
+        if (result.timedOut) return { state: "failed", timedOut: true, ...shown };
+        return { state: result.exitCode === 0 && !result.killed ? "passed" : "failed", ...shown };
+      } finally { await removeTree(directory, undefined); }
+    },
+  };
+
+  return { sandbox, runtimes, checks, ownerPolicy: options.limits !== undefined && options.bestEffort !== undefined && options.onLaunch !== undefined };
+}
+
+/**
+ * The host side of the check of a done (card W05), for a `LocalWorker`'s `verify` option: the checkout's state from the worker package's checkout layout (`LocalWorkspaces.doneState`) and each contract check run, one after another, in the attempt's
+ * sandbox (`localWorkerParts(...).checks`). A check that throws is reported `not-run` with the reason; the controller never takes it as passed.
+ */
+export function doneVerifier(parts: {
+  readonly workspaces: { doneState(scope: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<{ uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean; evidence: readonly { path: string; present: boolean; why?: string }[] } | undefined> };
+  readonly checks: { run(attemptId: string, check: HostCheck): Promise<HostCheckResult> };
+}): (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: { readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number }) => Promise<{ checkout: boolean; tree?: { uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean }; evidence?: readonly { path: string; present: boolean; why?: string }[]; checks: ({ name: string } & HostCheckResult)[] }> {
+  return async (attemptId, scope, request) => {
+    const state = await parts.workspaces.doneState(scope, request.evidence);
+    const ran: ({ name: string } & HostCheckResult)[] = [];
+    for (const c of request.checks) {
+      try { ran.push({ name: c.name, ...(await parts.checks.run(attemptId, { run: c.run, timeoutMs: c.timeoutMs, maxOutputBytes: request.maxOutputBytes })) }); }
+      catch (error) { ran.push({ name: c.name, state: "not-run", reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
+    }
+    if (state === undefined) return { checkout: false, checks: ran };
+    return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence, checks: ran };
+  };
 }

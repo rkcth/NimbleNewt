@@ -138,6 +138,49 @@ export interface WorkProgress {
   readonly diffStat?: string;
 }
 
+/**
+ * What the controller asks a host to look at and run when an agent says its work is done (card W05). The host runs the checks itself, in the attempt's sandbox (the checkout as working directory, the attempt's limits), one
+ * after another, each cut off at its time and output limit; the agent has no part in it.
+ */
+export interface DoneCheckRequest {
+  readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[];
+  /** Paths (relative to the checkout, `/`-separated) that must be files in the checkout's last commit. */
+  readonly evidence: readonly string[];
+  /** Each check's standard output and error are cut at this many bytes. */
+  readonly maxOutputBytes: number;
+}
+
+/** One check as the host ran it. `not-run`: the host could not run it (no sandbox, a launch refused); `reason` says why. `output` is the tail of what it wrote (both streams), as the host cut it. */
+export interface DoneCheckRun {
+  readonly name: string;
+  readonly state: "passed" | "failed" | "not-run";
+  readonly exitCode?: number | null;
+  readonly signal?: string | null;
+  readonly timedOut?: boolean;
+  readonly output?: string;
+  readonly reason?: string;
+  readonly ms?: number;
+}
+
+/**
+ * What the host found (card W05). `checkout: false`: the host holds no checkout for the task (nothing is said about the tree or the evidence). `uncommitted` lists files that differ from the last commit or are new and not ignored
+ * (at most 20 are named, `uncommittedCount` is all of them); `ahead` is the number of commits the checkout's head is ahead of the task's base; `changed` the files that differ from the base, committed or not.
+ */
+export interface DoneCheckReport {
+  readonly checkout: boolean;
+  readonly tree?: {
+    readonly uncommitted: readonly string[]; readonly uncommittedCount: number; readonly ahead: number; /** Files that differ from the task's base, counting what is not committed (what a submit carries). */ readonly changed?: number;
+    /**
+     * False when the agent cannot commit in this checkout (the worker package's layout keeps the git directory outside the sandbox; the change is committed after review, H12o): its work is then what the checkout holds against the
+     * base, and the rules "committed and clean" and "a commit ahead" do not apply. Absent: the agent commits its own work.
+     */
+    readonly agentCommits?: boolean;
+  };
+  /** Whether each evidence path is a plain, non-empty file of the checkout as it stands (not ignored; what a submission would carry). */
+  readonly evidence?: readonly { readonly path: string; readonly present: boolean; readonly why?: string }[];
+  readonly checks: readonly DoneCheckRun[];
+}
+
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
 export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
 
@@ -178,6 +221,11 @@ export interface WorkerHost {
   endLocalWork?(attemptIds: readonly string[]): Promise<void>;
   /** What the attempt's checkout holds (card W03): its plan progress and diff stat. A host that cannot look leaves it out; one that fails throws (the blocker then says the host could not tell). */
   progress?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }): Promise<WorkProgress | undefined>;
+  /**
+   * Checks the attempt's work when its agent says it is done (card W05): the checkout's state against its last commit and the task's base, the evidence files, and the contract's check commands run in the attempt's sandbox. A host
+   * that cannot leaves it out, and a done of a task with a contract is then not taken as verified. One that fails throws.
+   */
+  verify?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest): Promise<DoneCheckReport>;
   /** The host's side of integration, landing, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }

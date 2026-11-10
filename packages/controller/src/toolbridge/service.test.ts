@@ -470,7 +470,7 @@ for (const backend of backends) {
     const seen: { state: unknown[]; messages: unknown[] } = { state: [], messages: [] };
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
-      state: { handle: async (token: unknown, raw: unknown) => { if ((raw as { args: { title?: string } }).args.title === "refused") return { v: 1, op: "x", ok: false, error: { code: "stale_revision", message: "x" } } as never; seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      state: { handle: async (token: unknown, raw: unknown) => { if ((raw as { args: { title?: string } }).args.title === "refused") return { v: 1, op: "x", ok: false, error: { code: "stale_revision", message: "x" } } as never; if ((raw as { args: { note?: string } }).args.note === "long") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `work.end done was not accepted: the controller checked your work against the task contract and 1 item(s) did not pass.\n1. ${"y".repeat(1500)} END` } } as never; if ((raw as { args: { note?: string } }).args.note === "other") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `${"z".repeat(1500)} END` } } as never; seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
       messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
       activity: async (step) => { steps.push(step); } });
     const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
@@ -493,6 +493,9 @@ for (const backend of backends) {
       // Card W02: the agent ends its attempt through the bridge; the attempt is the one the request came through, never one it names.
       out["workend-named"] = await send("work.end", { attemptId: "att-other", result: "done" }, "we0");
       out["workend"] = await send("work.end", { result: "partial", note: "two beds left" }, "we1");
+      // Card W05: a refused done carries the whole list of what failed; any other refusal is cut as before.
+      out["workend-long"] = await send("work.end", { result: "done", note: "long", evidence: [{ item: "test log", path: "logs/t.txt" }] }, "we2");
+      out["workend-other"] = await send("work.end", { result: "done", note: "other" }, "we3");
       // The step is best effort: an activity record that fails never changes the answer of the write.
       const failing = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async () => { throw new Error("activity down"); } });
       out["failing"] = await failing.handle(order.credential, gateway, { op: "desk.write", callId: "w9", args: { kind: "note", title: "still", body: "written", visibility: "shared", status: "accepted" } });
@@ -512,6 +515,8 @@ for (const backend of backends) {
     assert.deepEqual(calls.slice(0, 4).map((x) => [x.raw.op, x.raw.args.taskId]), [["task.update", taskId], ["task.transition", taskId], ["task.get", taskId], ["artifact.publish", taskId]]);
     assert.equal(bad(out["workend-named"]!).code, "invalid_command", "work.end names no attempt: it ends the one the request came through");
     good(out["workend"]!);
+    assert.match(bad(out["workend-long"]!).message, / END$/, "a refused done is given whole");
+    assert.equal(bad(out["workend-other"]!).message.length, 600, "another refusal is cut as before");
     const ending = calls.filter((x) => x.raw.op === "work.end");
     assert.equal(ending.length, 1);
     assert.deepEqual(ending[0]!.raw, { v: 1, op: "work.end", commandId: ending[0]!.raw.commandId, args: { result: "partial", note: "two beds left", attemptId: (ending[0]!.raw.args as unknown as { attemptId: string }).attemptId } });

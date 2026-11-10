@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { AdmissionService } from "../admission/service.js";
+import { BlockerService } from "../domain/blockers.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
 import { RemoteWorkerClient } from "../remote/index.js";
@@ -293,5 +294,46 @@ test("with landing but no stage the submit still ends plainly as submit_unavaila
     const rec = await c.services.workEnd.get(one.attempt);
     assert.deepEqual([rec?.outcome, rec?.typed], ["ended", "submit_unavailable"]);
     assert.ok(rec?.blocker !== undefined);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("work.end done of a task with a contract, through the controller: a host that cannot check work never makes it a success; each refusal is counted once and the third ends the attempt blocked with a done_unverified blocker (card W05)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  const { c, owner, project, state } = await world(d);
+  try {
+    const one = await attemptFor(c, owner, project, 1);
+    await c.services.contracts.setContract(owner, { commandId: "ct1", taskId: one.task, expectedVersion: 0, checks: [{ name: "unit tests", run: ["npm", "test"] }] } as never);
+    await c.dispatch!.dispatcher.tick();
+    const refused = await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done", note: "all green" }, "e1");
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, "invalid_command");
+    assert.match(refused.error.message, /^work\.end done was not accepted: the controller could not check your work against the task contract \(1 item\(s\)\)\.\n1\. The host this attempt runs on \(host:pc\) cannot check work/);
+    assert.equal(await c.services.workEnd.get(one.attempt), undefined, "nothing recorded: the attempt goes on");
+    assert.equal((await state(one.attempt)).frozen, undefined, "not frozen");
+    // The same call again is the same answer and is not counted twice.
+    assert.equal((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done", note: "all green" }, "e1")).error.message, refused.error.message);
+    assert.deepEqual((await state(one.attempt)).verifications?.map((v) => [v.state, v.counted, v.exhausted]), [["unknown", true, false]]);
+    // A second done is refused, the third ends it.
+    assert.equal((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done" }, "e2")).ok, false);
+    const last = await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done", note: "all green" }, "e3");
+    assert.ok(last.ok, JSON.stringify(last));
+    assert.equal(last.result.item.state, "requested");
+    assert.match(last.result.item.unverified.summary, /go-ons are used up: 1\. The host this attempt runs on \(host:pc\) cannot check work/);
+    await c.dispatch!.dispatcher.tick();
+    const after = await state(one.attempt);
+    assert.equal(after.state, "finished");
+    assert.equal(after.outcome?.status, "abandoned", "never succeeded");
+    assert.match(after.outcome?.summary ?? "", /blocked/);
+    assert.equal((await c.services.workEnd.get(one.attempt))?.typed, "done_unverified");
+    const blocker = await BlockerService.withEpoch(c.storage, c.epoch).openFor("done_unverified", { kind: "task", id: one.task });
+    assert.ok(blocker, "the owner has the list");
+    assert.match(blocker.summary, /cannot check work/);
+
+    // A task without a contract is ended on the agent's word, as before the card.
+    const two = await attemptFor(c, owner, project, 2);
+    await c.dispatch!.dispatcher.tick();
+    const plain = await call(c, two.token, "work.end", { attemptId: two.attempt, result: "done" }, "p1");
+    assert.ok(plain.ok, JSON.stringify(plain));
+    assert.equal(plain.result.item.verified, "skipped");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

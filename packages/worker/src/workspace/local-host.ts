@@ -99,6 +99,17 @@ export class LocalWorkspaces {
     return { ...(plan === undefined ? {} : { plan }), ...(diffStat === undefined ? {} : { diffStat }) };
   }
 
+  /**
+   * What a task's checkout holds when its agent says the work is done (card W05, `GitBridge.doneState`): uncommitted files, commits ahead of the base, files changed against the base, and whether each evidence path is a file of the
+   * checkout. `agentCommits` is false: in this layout the agent's git directory is outside its sandbox, so the agent cannot commit (its changes are committed after review, H12o) and its work is what the checkout holds against the base.
+   * `undefined`: this host holds no checkout for the task.
+   */
+  async doneState(call: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<(Awaited<ReturnType<GitBridge["doneState"]>> & { readonly agentCommits: false }) | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    return { ...(await this.#options.git.doneState({ gitDir: where.gitDir, checkout: where.checkout, paths })), agentCommits: false };
+  }
+
   readonly #making = new Map<string, Promise<unknown>>();
 
   /**

@@ -5,7 +5,7 @@ import type { Principal } from "../security/principals.js";
 import type { SubmissionService } from "../submissions/index.js";
 import type { EndingAttempt, WorkEndDeps } from "./work-end.js";
 
-type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped">;
+type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "verifyDone">>;
 
 /**
  * The attempt port of the ending (card H12n) bound to the real dispatcher: the attempt's state, its freeze, the settling of calls in flight (with the calls that had to be cut, and whether each could have changed the checkout), and its end
@@ -36,6 +36,13 @@ export function dispatcherEndingPorts(dispatch: () => { readonly dispatcher: Dis
     },
     confirmStopped: async (attemptId) => { const h = need(); return h.dispatcher.confirmStopped(h.principal, attemptId); },
     finish: async (attemptId, result, _key, confirm) => { const h = need(); return h.dispatcher.finishWith(h.principal, attemptId, { ...result, ...(confirm === undefined ? {} : { confirm }) }); },
+    // Card W05: a done is checked against the task contract by the dispatcher, which knows the attempt's host and keeps the task's go-ons count. A dispatcher without the check (a test double) takes a done as before.
+    verify: async (attemptId, request) => {
+      const h = need();
+      if (h.dispatcher.verifyDone === undefined) return { state: "skipped" };
+      const v = await h.dispatcher.verifyDone(h.principal, attemptId, request);
+      return v.state === "skipped" || v.state === "passed" ? { state: v.state } : v;
+    },
   };
 }
 

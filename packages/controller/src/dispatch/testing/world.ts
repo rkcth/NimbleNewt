@@ -69,6 +69,8 @@ export class ScriptedWorker implements WorkerHost {
   endsNormally = true;
   /** What the host says the attempt's checkout holds (card W03); absent: the host does not report it. */
   progress?: NonNullable<WorkerHost["progress"]>;
+  /** How the host checks a done (card W05); absent: the host cannot check work. */
+  verify?: NonNullable<WorkerHost["verify"]>;
   constructor(readonly hostId: string, public script: WorkerScript, readonly resources = { cpus: 1, memoryMb: 1024 }, private readonly version = "worker-1.0.0") {}
   async start(order: WorkOrder): Promise<WorkerHandle> {
     if (this.failToStart !== undefined) throw this.failToStart;

@@ -92,6 +92,24 @@ for (const backend of backends) {
     assert.equal(replay.replayed, false);
   });
 
+  suite("check commands (card W05): named once each, a program and its arguments, a bounded time; set with the contract's own authority, and older versions read with none", async (c) => {
+    const t = await c.task(c.a, "checked");
+    await c.contracts.setContract(c.owner, { commandId: cid("c"), taskId: t, expectedVersion: 0, priority: 6 });
+    assert.deepEqual((await c.contracts.get(c.owner, t))!.checks, [], "a version stored without checks reads with none");
+    await c.contracts.setContract(c.owner, { commandId: cid("c"), taskId: t, expectedVersion: 1, checks: [{ name: "unit tests", run: ["npm", "test"] }, { name: "lint", run: ["/bin/sh", "-c", "npm run lint"], timeoutSeconds: 120 }] } as never);
+    assert.deepEqual((await c.contracts.get(c.owner, t))!.checks, [{ name: "unit tests", run: ["npm", "test"] }, { name: "lint", run: ["/bin/sh", "-c", "npm run lint"], timeoutSeconds: 120 }]);
+    for (const [checks, why] of [
+      [[{ name: "a", run: [] }], /1 to 32 arguments/], [[{ name: "a", run: ["x"] }, { name: "a", run: ["y"] }], /already the name/], [[{ name: "", run: ["x"] }], /name/], [[{ name: "a\nb", run: ["x"] }], /control/],
+      [[{ name: "a", run: ["x\u0000"] }], /control/], [[{ name: "a", run: ["x"], timeoutSeconds: 0 }], /1 to 3600/], [[{ name: "a", run: ["x"], timeoutSeconds: 3601 }], /1 to 3600/], [[{ name: "a", run: ["x"], shell: true }], /not a check field/],
+      [Array.from({ length: 11 }, (_, i) => ({ name: `c${i}`, run: ["x"] })), /at most 10/], [{ name: "a" }, /must be a list/],
+    ] as const) {
+      await refuses("invalid_command", () => c.contracts.setContract(c.owner, { commandId: cid("c"), taskId: t, expectedVersion: 2, checks } as never), (e) => assert.match(e.message, why));
+    }
+    // Who may set them: the general contract right, as for the evidence.
+    const ann = await c.agent("ann-checks", [{ action: "task.read", project: c.a }]);
+    await refuses("forbidden", () => c.contracts.setContract(ann, { commandId: cid("c"), taskId: t, expectedVersion: 2, checks: [] } as never));
+  });
+
   suite("each kind of change needs its own authority: difficulty, priority and the P or PC class are separate", async (c) => {
     const t = await c.task(c.a, "t");
     const editor = await c.agent("editor", writer(c.a, "task.contract.write"));
