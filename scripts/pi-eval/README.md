@@ -149,7 +149,7 @@ descend from one that is seen, is missed; on other systems only the agent's own 
    start if the solution is reachable or a hidden file already holds the solution's content. `node_modules` (root and
    per package) are copied from this checkout, and the repository is built (`tsc --build --force`).
 2. The prompt is the variant's template (`prompts/variant-a.md`, `prompts/variant-b.md`) with the task text
-   (`tasks/<id>.md`) put in; it is saved beside the log, outside the checkout.
+   (`tasks/<id>.md`) and, for B to D, the completion rules (see Variants) put in; it is saved beside the log, outside the checkout.
 3. The agent (`pi-agent.mjs`: `pi -p --no-session --no-approve --provider radiance --model qwen3.8-flash-next-iq4r
    --thinking medium --mode json`, the same flags as `~/.local/pi-cli/runcard.sh`) runs in the checkout under the task's
    wall-clock limit (S 60, M 120, L 180 minutes); at the limit its process group is stopped.
@@ -184,9 +184,15 @@ descend from one that is seen, is missed; on other systems only the agent's own 
 ## Variants
 
 - **A** the plain prompt (task, rules, build and test commands, "end with a short report").
-- **B** A plus: write PLAN.md with a checkbox per small step, tick and commit after each step, do not stop with a box
-  unchecked.
-- **C** B plus the bounded continuation of W04, and **D** C plus a relaunch that reuses the stored session
+- **B** A plus the completion rules every NimbleNewt Pi agent has in its system prompt (card W06), word for word: a
+  PLAN.md with a checkbox per small step, no commit (the checkout is scored as it stands), done only when every step is
+  done and checked, blocked or partial with a reason otherwise, never an ending in prose alone. The template has the
+  placeholder `{{COMPLETION_RULES}}`; the runner fills it from this checkout's built pi-adapter
+  (`packages/pi-adapter/dist/prompt-layout.js`, `COMPLETION_RULES`; build first) and records the text's digest and size in
+  the result (`completionRules: { sha256, chars }`). A short note in front says what differs on the Pi command line: no
+  `nimblenewt__work-end` tool (end with a report that starts with the result instead) and nothing checks the checkout.
+  Until W06, B was "tick and commit after each step"; results of earlier batches carry no `completionRules`.
+- **C** B (the same prompt, with the completion rules) plus the bounded continuation of W04, and **D** C plus a relaunch that reuses the stored session
   (`PI_EVAL_SESSION_ID` makes `pi-agent.mjs` pass `--session-id`). Both are refused with "needs W04" until W04 lands.
 
 ## The release gates

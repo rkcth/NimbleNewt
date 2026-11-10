@@ -10,6 +10,8 @@ import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRel
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, jobLauncher, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
+import { PI_AGENT_LAYOUT, sharedSystemText } from "@nimblenewt/pi-adapter";
+import { JOB_WAKE_RULE } from "@nimblenewt/controller";
 
 // Card W11, end to end: a real local worker (bubblewrap and the worker process running Pi, composed by startController) starts a catalogue tool as a long-running job through its tool bridge, is told in the reply that the task is woken
 // when the job ends, and ends its turn without work.end. The turn is not nudged on (a job of the task runs), the attempt parks for the job, the job runs to its end through the real job launcher, and the next tick readmits the same
@@ -197,6 +199,15 @@ test("an agent that starts a job and ends its turn is woken once in the same con
     await c.dispatch.dispatcher.tick();
     await c.dispatch.dispatcher.idle();
     assert.equal(answer.seen.length, 5);
+    // Card W06: every call of both processes (the first attempt's run and the woken one) has the completion rules as its one system message, the same bytes, with JOB_WAKE_RULE in them.
+    for (const [i, raw] of answer.seen.entries()) {
+      const messages = JSON.parse(raw) as { role: string; content: unknown }[];
+      const system = messages.filter((m) => m.role === "system" || m.role === "developer");
+      assert.equal(system.length, 1, `call ${i + 1}: one system message`);
+      const text = typeof system[0]!.content === "string" ? system[0]!.content : (system[0]!.content as { text: string }[]).map((b) => b.text).join("");
+      assert.equal(text, sharedSystemText(PI_AGENT_LAYOUT), `call ${i + 1} carries exactly the completion rules`);
+      assert.ok(text.includes(JOB_WAKE_RULE));
+    }
     const items = (await c.storage.listAggregates("notification-item", { limit: 1000 })).map((a) => a.body as unknown as { ref: { kind: string; id: string }; level?: string; label: string; detail?: string; count: number }).filter((i) => i.ref.kind === "job");
     assert.equal(items.length, 1);
     assert.equal(items[0]!.count, 1);

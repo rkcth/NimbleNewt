@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRelay, PolicyService, startController, type WorkOrder } from "@nimblenewt/controller";
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
 import { SandboxLauncher, appFromRepository, localWorkerParts } from "@nimblenewt/worker";
+import { PI_AGENT_LAYOUT, sharedSystemText } from "@nimblenewt/pi-adapter";
 import { endpoint, loopbackFetch } from "./h12-worker-support.js";
 
 // Card C07g through the composed controller and the real worker process (Pi in the real sandbox): a task that last ran on another route starts on a route nobody has measured. The dispatcher builds the owner's context
@@ -113,11 +114,11 @@ test("a task that moves to a route nobody has measured: the real process is meas
     const assumedView = order.content.slice(order.content.length - order.startupView!.chars);
     assert.ok(assumedView.startsWith(`\n\n${HEADER}`));
 
-    // The process was measured before its first call: the route's figure is the process's own (no system prompt of its own, the bridge tools' schemas), and the move was decided again on it.
+    // The process was measured before its first call: the route's figure is the process's own (its system prompt, which is the completion rules of card W06, and the bridge tools' schemas), and the move was decided again on it.
     const fixed = (await c.storage.listAggregates("ctx-route-fixed", { limit: 10 })).map((x) => x.body as unknown as { route: string; samples: { systemPromptChars: number; toolSchemaChars: number; attemptId: string }[] });
     assert.equal(fixed.length, 1);
     const sample = fixed[0]!.samples.find((x) => x.attemptId === attemptId)!;
-    assert.ok(sample.toolSchemaChars > 0 && sample.systemPromptChars === 0, JSON.stringify(sample));
+    assert.ok(sample.toolSchemaChars > 0 && sample.systemPromptChars === sharedSystemText(PI_AGENT_LAYOUT).length, JSON.stringify(sample));
     const moves = (await c.storage.listAggregates("ctx-admission", { limit: 50 })).map((x) => x.body as unknown as { type: string; attemptId: string; basis: string; admit: boolean; startupTokens: number }).filter((x) => x.type === "route-change" && x.attemptId === attemptId);
     assert.deepEqual(moves.map((m) => [m.basis, m.admit]).sort(), [["estimated", true], ["unmeasured", true]], "decided on the assumed figure, then again on the measured one");
 

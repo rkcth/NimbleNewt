@@ -6,8 +6,6 @@ TASK ({{TASK_ID}}):
 
 Build and test: `npx tsc --build`, then from packages/controller: `NIMBLENEWT_REQUIRE_SANDBOX=1 node --import {{WORKTREE_URL}}/scripts/offline-guard.mjs --test <the dist test files you need, e.g. dist/chat/*.test.js>`.
 
-HOW TO WORK:
-1. Before changing any code, write PLAN.md at the repository root: one Markdown checkbox line (`- [ ] ...`) per small step, in order. Keep each step small (one change and its tests). The last step is the full build and test run. Commit PLAN.md.
-2. Work the steps in order. After each step, tick its box (`- [x] ...`) and commit the code and PLAN.md together, one commit per step.
-3. Do not stop while a box is unchecked. If a step cannot be done, write why under it, tick it, and go on to the next one.
-4. When every box is ticked, end with a short report of what you changed and the tests you ran.
+HOW TO WORK: the rules below are the completion rules every NimbleNewt Pi agent has in its system prompt (card W06), word for word. This run is the Pi command line, not the NimbleNewt worker, so two things differ: there is no nimblenewt__work-end tool and no job tools, and nothing checks your checkout for you. Where the rules say to end with nimblenewt__work-end, end instead with a short final report that starts with the result (done, partial or blocked) and says what you changed and the tests you ran. You do not need to commit; your checkout is scored as it stands.
+
+{{COMPLETION_RULES}}

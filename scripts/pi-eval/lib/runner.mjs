@@ -3,6 +3,7 @@
 // Windows-safe: commands are spawned without a shell, paths are built with node:path, and the agent is stopped with
 // child.kill() where process groups do not exist.
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -10,7 +11,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
-import { expandArgv, renderPrompt } from "./taskset.mjs";
+import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
 
 const IS_WIN = process.platform === "win32";
 
@@ -303,7 +304,13 @@ export async function runOne(ctx, task, variantName, repeat) {
       record.setupExitCode = s.code;
     }
     const template = await readFile(variant.promptPath, "utf8");
-    const prompt = renderPrompt(template, { task, taskText: await readFile(task.promptPath, "utf8"), worktreeUrl: pathToFileURL(dir).href });
+    // Card W06: a variant whose prompt carries the agents' completion rules gets the words the worker sends, and the run records which text it was (digest and size).
+    let completionRules;
+    if (template.includes(COMPLETION_RULES_PLACEHOLDER)) {
+      completionRules = ctx.completionRules ?? await loadCompletionRules();
+      record.completionRules = { sha256: createHash("sha256").update(completionRules).digest("hex").slice(0, 16), chars: completionRules.length };
+    }
+    const prompt = renderPrompt(template, { task, taskText: await readFile(task.promptPath, "utf8"), worktreeUrl: pathToFileURL(dir).href, completionRules });
     const promptFile = join(artifacts, "prompt.md");
     await writeFile(promptFile, prompt);
     const logFile = join(artifacts, "agent.jsonl");

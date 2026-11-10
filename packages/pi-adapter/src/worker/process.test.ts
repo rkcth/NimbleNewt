@@ -5,6 +5,8 @@ import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@ear
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { LeaseWatchdog, LineDecoder, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { createOfflineModels } from "../testing/offline.js";
+import { rig, wireBody } from "../testing/wire.js";
+import { COMPLETION_RULES } from "../prompt-layout.js";
 import { WORK_END_TOOL } from "../bridge.js";
 import { durabilityOf, runWorker, type WorkerHooks } from "./process.js";
 import { LENGTH_NUDGE_LEAD, NUDGE_TEXT } from "./nudge.js";
@@ -736,6 +738,9 @@ test("W04: a restart between nudges resumes the count from the conversation's do
   const dir = mkdtempSync(join(tmpdir(), "nn-w04-"));
   try {
     const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    // A window large enough that Pi starts no background compaction of its own (on 32,768 tokens its background threshold is below zero, so once the system prompt of card W06 and the tools leave a cut past the kept tenth, the
+    // resumed process would first ask for a summary): this test counts the turn's own model calls.
+    const start = { ...relayed, model: { ...relayed.model, contextWindow: 131072 } };
     const answer = (h: ReturnType<typeof host>, id: number, kind: "thinking" | "work-end"): void => {
       h.send({ t: "fetch.head", id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
       for (const c of sseReply(kind)) h.send({ t: "fetch.chunk", id, data: Buffer.from(c).toString("base64") });
@@ -773,5 +778,48 @@ test("W04: a restart between nudges resumes the count from the conversation's do
     assert.equal(second.seen.filter((m) => m.t === "fetch").length, 3, "the resumed call and two nudged ones; no fourth nudge");
     second.send({ t: "close" });
     await second.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Card W06: every Pi agent this process runs carries the completion rules as its system text, the same bytes for every task, role and context switch.
+test("W06: the first model call of every agent carries the completion rules as its system text, the same bytes across agents, tasks, a readmit, a wake and a restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-w06-"));
+  try {
+    const world = rig("openai-completions", "llama", "local");
+    const systemOf = async (i: number): Promise<string> => {
+      const messages = (await wireBody(world.seen[i]!))["messages"] as { role: string; content: unknown }[];
+      assert.ok(messages[0]!.role === "system" || messages[0]!.role === "developer", "the head is the first message");
+      assert.equal(messages.filter((m) => m.role === "system" || m.role === "developer").length, 1, "one system message");
+      return typeof messages[0]!.content === "string" ? messages[0]!.content : JSON.stringify(messages[0]!.content);
+    };
+    const run = async (s: ChannelStart, requests: readonly string[], storage: NonNullable<WorkerHooks["storage"]>): Promise<number> => {
+      const h = host({ models: () => world.models, storage });
+      h.send({ t: "start", v: 1, start: s });
+      const ready = await h.next("ready");
+      for (const [i, id] of requests.entries()) {
+        const mark = h.seen.length;
+        h.send({ t: "run", requestId: id, content: `work on step ${i + 1}` });
+        const r = await h.next("result", mark); assert.equal(r.status, "completed", JSON.stringify(r));
+      }
+      h.send({ t: "close" });
+      await h.done;
+      return ready.systemPromptChars ?? -1;
+    };
+    // Agent one, a role on one task. A process runs one turn; the attempt's next turns (a stopped-early readmit, W03; a job wake, W11; a restart or a model-change resume) are new processes on the same store. (A compaction keeps the head: prompt-cache.test.ts, with the rules in the layout.)
+    world.reply("first", "second", "third");
+    const store = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const chars = await run(start, ["req-1"], store);
+    await run(start, ["req-1:se1"], store);
+    await run(start, ["req-1:se1:wk1"], store);
+    // Agent two: another agent (another role), task and namespace, its own new store.
+    world.reply("other agent");
+    await run({ ...start, attemptId: "att-9", agentId: "agent:bob", namespaceId: "fedcba9876543210" }, ["req-7"], () => new MemoryStorage());
+    assert.equal(world.seen.length, 4);
+    assert.ok(JSON.stringify(world.seen[2]!.context.messages).includes("work on step 1"), "the third turn is the same conversation, resumed from the store");
+    const expected = `<nn_completion>\n${COMPLETION_RULES}\n</nn_completion>`;
+    const systems = await Promise.all(world.seen.map((_, i) => systemOf(i)));
+    for (const [i, text] of systems.entries()) assert.equal(text, expected, `request ${i + 1} carries exactly the completion rules`);
+    assert.equal(chars, expected.length, "the ready message gives the size of the system text the model is sent");
+    for (const needle of ["PLAN.md", WORK_END_TOOL, "You do not commit", "blocked or partial", "Never end with prose alone"]) assert.ok(systems[0]!.includes(needle), needle);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

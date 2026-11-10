@@ -1,6 +1,7 @@
 // Loading and checking the pinned task set (card W01).
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SIZES } from "./stats.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -82,9 +83,24 @@ function loadAcceptance(root, t, where, problems) {
   return { dir, files, support, testFiles, testNamePatterns: a.testNamePatterns ?? [], allow };
 }
 
-/** Fills a prompt template. Only the named placeholders are replaced; the task text is inserted as it is. */
-export function renderPrompt(template, { task, taskText, worktreeUrl }) {
-  return template.replaceAll("{{TASK_ID}}", task.id).replaceAll("{{WORKTREE_URL}}", worktreeUrl).replace("{{TASK}}", () => taskText.trim());
+/** The placeholder a variant's template puts where the completion rules of the agents' system prompt go (card W06). */
+export const COMPLETION_RULES_PLACEHOLDER = "{{COMPLETION_RULES}}";
+
+/**
+ * The completion rules every NimbleNewt Pi agent has in its system prompt (card W06), from this checkout's built pi-adapter, so a variant that uses them gets the same words the worker sends. The repository must be built (`npx tsc --build`).
+ */
+export async function loadCompletionRules() {
+  const url = new URL("../../../packages/pi-adapter/dist/prompt-layout.js", import.meta.url);
+  let text;
+  try { ({ COMPLETION_RULES: text } = await import(url.href)); } catch (error) { throw new Error(`the completion rules could not be read from ${fileURLToPath(url)} (build the repository first: npx tsc --build): ${error?.message ?? error}`); }
+  if (typeof text !== "string" || text.trim() === "") throw new Error("the built pi-adapter has no COMPLETION_RULES");
+  return text;
+}
+
+/** Fills a prompt template. Only the named placeholders are replaced; the task text and the completion rules are inserted as they are. A template that asks for the completion rules needs them. */
+export function renderPrompt(template, { task, taskText, worktreeUrl, completionRules }) {
+  if (template.includes(COMPLETION_RULES_PLACEHOLDER) && (typeof completionRules !== "string" || completionRules === "")) throw new Error("this variant's prompt uses the completion rules, and none were given");
+  return template.replaceAll("{{TASK_ID}}", task.id).replaceAll("{{WORKTREE_URL}}", worktreeUrl).replace(COMPLETION_RULES_PLACEHOLDER, () => completionRules).replace("{{TASK}}", () => taskText.trim());
 }
 
 /** Expands a command spec's placeholders: {{WORKTREE}}, {{WORKTREE_URL}} and {{TEST_FILES}} (which becomes several arguments). */

@@ -11,7 +11,8 @@ import { git, prepareCheckout, runOne, calibrateOne, foreignPaths, killProcesses
 import { spawn } from "node:child_process";
 import { symlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { loadTaskset } from "./lib/taskset.mjs";
+import { COMPLETION_RULES_PLACEHOLDER, loadCompletionRules, loadTaskset, renderPrompt } from "./lib/taskset.mjs";
+import { createHash } from "node:crypto";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "pi-eval-test-"));
@@ -289,4 +290,25 @@ test("a control run: one repeat per task with another agent (--agent, --label) i
   const out = execFileSync(process.execPath, [join(here, "compare.mjs"), "--results", results], { encoding: "utf8" });
   assert.match(out, /\| tiny\s+\| S\s+\| A\s+\| 0\/1 S\s+\| 1\/1 F\s+\|/);
   assert.match(out, /control-stand-in: 1\/1 verified finish, 0 false done, 0 interface mismatch, 0 other; shipped wording \(informational\) 1\/1/);
+});
+
+test("W06: a variant whose prompt carries the completion rules gets the worker's words from the built pi-adapter, and the run records which text it was", async () => {
+  const { COMPLETION_RULES } = await import(new URL("../../packages/pi-adapter/dist/prompt-layout.js", import.meta.url).href);
+  assert.equal(await loadCompletionRules(), COMPLETION_RULES);
+  const shipped = loadTaskset(join(here, "taskset.json"));
+  for (const v of ["B", "C", "D"]) assert.ok(readFileSync(shipped.variants[v].promptPath, "utf8").includes(COMPLETION_RULES_PLACEHOLDER), `variant ${v} uses the completion rules`);
+  assert.ok(!readFileSync(shipped.variants.A.promptPath, "utf8").includes(COMPLETION_RULES_PLACEHOLDER), "variant A stays the plain prompt");
+  const task = { id: "t1" };
+  const text = renderPrompt(readFileSync(shipped.variants.B.promptPath, "utf8"), { task, taskText: "Do {{COMPLETION_RULES}} nothing.", worktreeUrl: "file:///w", completionRules: COMPLETION_RULES });
+  assert.ok(text.includes(COMPLETION_RULES) && text.includes("Do {{COMPLETION_RULES}} nothing."), "the rules go where the template says; the task text is inserted as it is");
+  assert.throws(() => renderPrompt("{{COMPLETION_RULES}}", { task, taskText: "x", worktreeUrl: "file:///w" }), /completion rules/);
+  // A run of such a variant in the tiny repository records the digest of the rules it was given.
+  const bench = dirname(set.variants.A.promptPath);
+  writeFileSync(join(bench, "b.md"), "Task {{TASK_ID}}:\n{{TASK}}\n\n{{COMPLETION_RULES}}\n");
+  const withB = { ...set, variants: { ...set.variants, B: { prompt: "prompts/b.md", promptPath: join(bench, "b.md") } } };
+  const r = await runOne({ ...ctx("solve"), set: withB, completionRules: "RULES TEXT" }, set.tasks[0], "B", 1);
+  assert.deepEqual(r.completionRules, { sha256: createHash("sha256").update("RULES TEXT").digest("hex").slice(0, 16), chars: 10 });
+  assert.ok(readFileSync(join(r.artifacts, "prompt.md"), "utf8").includes("RULES TEXT"));
+  const plain = await runOne(ctx("solve"), set.tasks[0], "A", 1);
+  assert.equal(plain.completionRules, undefined, "variant A records none");
 });
