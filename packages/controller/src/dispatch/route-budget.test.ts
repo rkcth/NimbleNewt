@@ -53,7 +53,9 @@ test("on Anthropic's Messages API the reply limit is max_tokens and the reasonin
   assert.deepEqual(apply({ ...thinks, thinking: { type: "enabled", budget_tokens: 2000 } }, "messages", "claude", { reasoningTokens: 4000 }).body["thinking"], { type: "enabled", budget_tokens: 2000 });
   // A call that does not reason is not made to.
   const plain = apply({ model: "c", messages: [], max_tokens: 64_000 }, "messages", "claude", { reasoningTokens: 4000 });
-  assert.deepEqual([plain.body["thinking"], plain.sent, plain.notSent], [undefined, {}, []]);
+  assert.deepEqual([plain.body["thinking"], plain.sent], [undefined, {}]);
+  // Without a thinking setting a current Claude model still reasons as it decides: the cap was not applied, and that is said rather than dropped silently (second review).
+  assert.match(plain.notSent.join(), /reasoning cap \(4000 tokens\) was not sent: this call sets no reasoning budget/);
   assert.deepEqual(apply({ ...thinks, thinking: { type: "disabled" } }, "messages", "claude", { reasoningTokens: 4000 }).body["thinking"], { type: "disabled" });
   // Below the provider's smallest reasoning budget, reasoning is turned off, which stays within the cap, and that is said.
   const low = apply(thinks, "messages", "claude", { reasoningTokens: 500 });
@@ -102,7 +104,7 @@ test("the relay puts the route's budget in every call it sends, read at each cal
   const attempt = relay.forAttempt({ route: "localp/small", budget: async () => { asked++; return budget; }, gate: async () => { gated++; return undefined; }, onBudget: (a) => applied.push(a) });
   await attempt.relay(call("chat/completions", PI_BODY));
   assert.deepEqual(JSON.parse(bodies[0]!), { ...PI_BODY, max_tokens: 4000, thinking_token_budget: 1500 }, "the provider receives the route's figures");
-  assert.deepEqual(applied[0], { sent: { max_tokens: 4000, thinking_token_budget: 1500 }, notSent: [] });
+  assert.deepEqual(applied[0], { sent: { max_tokens: 4000, thinking_token_budget: 1500 }, notSent: [], added: "thinking_token_budget" });
   budget = { maxTokens: 6000 };
   await attempt.relay(call("chat/completions", PI_BODY));
   assert.deepEqual(JSON.parse(bodies[1]!), { ...PI_BODY, max_tokens: 6000 }, "the next call carries the changed budget");
@@ -139,4 +141,40 @@ test("an endpoint of unknown kind is sent no figure and the relay says so; a bud
   await assert.rejects(relay.forAttempt({ route: "localp/small", budget: async () => { throw new Error("store down"); } }).relay(call("chat/completions", PI_BODY)), /budget could not be read/);
   await assert.rejects(relay.forAttempt({ route: "localp/small", budget: () => ({ maxTokens: 10 }) }).relay({ ...call("chat/completions", PI_BODY), body: Buffer.from("not json") }), /not JSON/);
   assert.equal(bodies.length, 2, "nothing was sent for the refused calls");
+});
+
+test("a reasoning field the relay added is reported, a budget the runtime sent is only lowered, and once refused the field is not added (second review)", () => {
+  assert.equal(apply({ max_tokens: 3000 }, "chat/completions", "vllm", { reasoningTokens: 400 }).added, "thinking_token_budget");
+  assert.equal(apply({ max_tokens: 3000, thinking_token_budget: 900 }, "chat/completions", "vllm", { reasoningTokens: 400 }).added, undefined, "the runtime sent it: the server takes it");
+  const off = applyRouteBudget({ max_tokens: 3000 }, "chat/completions", "vllm", { maxTokens: 2000, reasoningTokens: 400 }, { addReasoning: false });
+  assert.deepEqual([off.sent, off.added], [{ max_tokens: 2000 }, undefined]);
+  assert.match(off.notSent.join(), /reasoning cap \(400 tokens\) was not sent: the server refused the thinking_token_budget field/);
+  const lowered = { max_tokens: 3000, thinking_token_budget: 900 };
+  applyRouteBudget(lowered, "chat/completions", "vllm", { reasoningTokens: 400 }, { addReasoning: false });
+  assert.equal(lowered.thinking_token_budget, 400, "a budget the runtime sent is still lowered");
+});
+
+test("a vLLM server without a reasoning parser refuses thinking_token_budget: the call is sent again without it, and the attempt's later calls leave it out, so the route keeps working (second review)", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const fetch: typeof globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(Buffer.from(init!.body as Buffer).toString("utf8")) as Record<string, unknown>;
+    bodies.push(body);
+    // vLLM's own refusal (vllm/v1/engine/input_processor.py), as its OpenAI server returns it.
+    if ("thinking_token_budget" in body) return new Response(JSON.stringify({ error: { message: "thinking_token_budget is set but reasoning_config is not configured. Please set --reasoning-parser and/or --reasoning-config to use thinking_token_budget.", type: "BadRequestError", code: 400 } }), { status: 400, headers: { "content-type": "application/json" } });
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const relay = new ModelRelay({ endpoint: () => ({ url: "http://vllm.internal/v1", kind: "vllm" }), fetch });
+  const told: { notSent: readonly string[] }[] = [];
+  const attempt = relay.forAttempt({ route: "localp/small", budget: () => ({ maxTokens: 4000, reasoningTokens: 1500 }), onBudget: (a) => told.push(a) });
+  const first = await attempt.relay(call("chat/completions", PI_BODY));
+  assert.equal(first.status, 200, "the runtime sees the call succeed");
+  assert.deepEqual(bodies.map((b) => [b["max_tokens"], b["thinking_token_budget"]]), [[4000, 1500], [4000, undefined]], "sent once more with the reply limit and without the refused field");
+  await attempt.relay(call("chat/completions", PI_BODY));
+  assert.deepEqual(bodies.slice(2).map((b) => [b["max_tokens"], "thinking_token_budget" in b]), [[4000, false]], "a later call of the attempt is sent without it at once");
+  assert.match(told.map((t) => t.notSent.join()).join("\n"), /server refused the thinking_token_budget field/);
+  // Any other refusal is passed on as it is, and nothing is sent again.
+  const other: Record<string, unknown>[] = [];
+  const refusing = new ModelRelay({ endpoint: () => ({ url: "http://vllm.internal/v1", kind: "vllm" }), fetch: async (_i, init) => { other.push(JSON.parse(Buffer.from(init!.body as Buffer).toString("utf8")) as Record<string, unknown>); return new Response('{"error":{"message":"maximum context length exceeded"}}', { status: 400 }); } });
+  const r = await refusing.forAttempt({ route: "localp/small", budget: () => ({ reasoningTokens: 100 }) }).relay(call("chat/completions", PI_BODY));
+  assert.deepEqual([r.status, other.length], [400, 1]);
 });
