@@ -64,7 +64,7 @@ test("one conversation, one worker start: a real Pi agent writes a script to its
           run: async (g) => {
             gateway = g;
             const result = await (await adapter.root().submit({ kind: "input", requestId: requestId(order.requestId), content: order.content })).result();
-            return { status: result.status === "completed" ? "completed" : "failed", ...("text" in result && typeof result.text === "string" ? { text: result.text } : {}) };
+            return { status: result.status === "completed" ? "completed" : "failed", ...(result.status === "completed" ? { endKind: "normal" as const } : {}), ...("text" in result && typeof result.text === "string" ? { text: result.text } : {}) };
           },
           checkpoint: async () => ({}), restart: async () => undefined, stop: async () => { await adapter.close(); },
         };
