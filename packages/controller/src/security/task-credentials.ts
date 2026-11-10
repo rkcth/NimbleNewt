@@ -5,7 +5,8 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { credentialIdOf, hashSecret, newSecret, scopedCommandId, verifySecret, type StoredCredential } from "./credentials.js";
 import { ActionCatalog } from "../policy/catalog.js";
-import { effectiveOf } from "./grants.js";
+import { effectiveOf, noteUseOf } from "./grants.js";
+import { allows } from "./access.js";
 import type { NoActor, Principal, PrincipalBody } from "./principals.js";
 import { redactText } from "./redact.js";
 
@@ -119,14 +120,14 @@ export class TaskCredentialService {
    * The agent as the credential issued for this attempt presents it: the same principal `authenticate` would return, for the dispatcher's own use (reviews, MCP authorization and grant checks are
    * made as the agent, never as the dispatcher). With `limit: false` the contract's limit on tools is left off: the tool path judges a call beyond the contract's ceiling by asking, not by refusing. Refused unless that credential is active, unexpired and for this attempt, and the task is open.
    */
-  async principalOf(service: Principal, attemptId: string, options: { limit?: boolean } = {}): Promise<Principal> {
+  async principalOf(service: Principal, attemptId: string, options: { limit?: boolean; uses?: readonly string[] } = {}): Promise<Principal> {
     await this.#requireDispatcher(service);
     const attempt = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? attemptId : invalid("attemptId", "is not an attempt ID");
     const held = await this.#attemptRecord(attempt);
     const found = await this.#runner.get("task-credential", derivedId("tcr", `${held.taskId}|${held.agentId}`));
     const body = found?.body as unknown as TaskCredentialBody | undefined;
     if (found === undefined || body === undefined || body.state !== "active" || body.attemptId !== attempt) throw refusal();
-    return this.#present(body, options.limit !== false);
+    return this.#present(body, options.limit !== false, options.uses);
   }
 
   /**
@@ -211,14 +212,23 @@ export class TaskCredentialService {
   }
 
   /** The agent as it is now, acting for the credential's task, under the credential's limit. Refused (like a bad token) when the task has ended or the agent is gone or disabled. */
-  async #present(body: TaskCredentialBody, withLimit = true): Promise<Principal> {
+  /**
+   * `uses`: actions the caller is about to use for the task (the access a tool asks for); when the agent holds all of them, their grants count as used too.
+   * Every presentation is a use of the grants the running attempt rests on (`attempt.work` and `task.read` on its task, card A07h): a grant with an idle window does not lapse under an attempt that
+   * runs for longer than the window. Recorded at most once an hour per grant here (`noteUseOf`); a failure to record never refuses the request.
+   */
+  async #present(body: TaskCredentialBody, withLimit = true, uses: readonly string[] = []): Promise<Principal> {
     const now = this.#runner.now();
     if (body.expiresAt !== undefined && body.expiresAt <= now) throw refusal();
     const task = (await this.#runner.get("task", body.taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined || task.projectId !== body.projectId || task.state === "done" || task.state === "cancelled") throw refusal();
     const agent = (await this.#runner.get("principal", body.agentId))?.body as unknown as PrincipalBody | undefined;
     if (agent === undefined || agent.kind !== "agent" || agent.state !== "active") throw refusal();
-    return effectiveOf(this.#runner, { id: body.agentId, kind: "agent", name: agent.name, grants: agent.grants, credentialId: credentialIdOf(body.credential), taskScope: { taskId: body.taskId, projectId: body.projectId, ...(!withLimit || body.limit === undefined ? {} : { limit: body.limit }) } }, now);
+    const principal = await effectiveOf(this.#runner, { id: body.agentId, kind: "agent", name: agent.name, grants: agent.grants, credentialId: credentialIdOf(body.credential), taskScope: { taskId: body.taskId, projectId: body.projectId, ...(!withLimit || body.limit === undefined ? {} : { limit: body.limit }) } }, now);
+    const resource = { kind: "task", id: body.taskId };
+    const asked = uses.length > 0 && uses.every((a) => allows(principal, a, body.projectId, { resource, now })) ? uses : [];
+    await noteUseOf(this.#runner, DISPATCHER_PRINCIPAL, principal, ["attempt.work", "task.read", ...asked], body.projectId, now, resource);
+    return principal;
   }
 
   /** Only the dispatcher's service principal, as it is now: enrolled, a service, active, and the credential it authenticated with is the current one. */

@@ -245,6 +245,19 @@ test("the owner grants and revokes rights through the state API and through the 
     assert.equal(asked[0]!.status, "refused", JSON.stringify(asked));
     assert.match(asked[0]!.message ?? "", /\?$/, "it asks which project");
     assert.doesNotMatch(asked[0]!.message ?? "", /\bsay\b/i);
+    // Card A07h: an idle window is a length the owner's own words give, in any words; one the model added is refused, nothing drawn up.
+    const idleSaid = "Let service:scanner do recovery.stall-scan everywhere, and let it lapse once it has gone unused for two weeks.";
+    const idle = await turn("c3idle", idleSaid, [owner({ op: "grant.create", args: { ...args, idleDays: 14 } }, idleSaid)]);
+    assert.equal(idle[0]!.status, "proposed", JSON.stringify(idle));
+    assert.match((idle[0]!.preview ?? []).join(" "), /no end date; lapses once unused for 14 days, each use renews it/);
+    const plainSaid = "Let service:scanner do recovery.stall-scan everywhere.";
+    const invented = await turn("c3idle2", plainSaid, [owner({ op: "grant.create", args: { ...args, idleDays: 30 } }, plainSaid)]);
+    assert.equal(invented[0]!.status, "refused", JSON.stringify(invented));
+    assert.match(invented[0]!.message ?? "", /\?$/);
+    const fractionSaid = "Let service:scanner do recovery.stall-scan everywhere until unused for 1.5 days.";
+    const fraction = await turn("c3idle3", fractionSaid, [owner({ op: "grant.create", args: { ...args, idleDays: 1.5 } }, fractionSaid)]);
+    assert.equal(fraction[0]!.status, "refused", JSON.stringify(fraction));
+    assert.equal(await activeNow(), held, "nothing granted by any of these");
     // A right for a day the owner wrote is drawn up as a proposal that says the day it ends on, and nothing is granted until that line is confirmed; the record then holds the moment that was shown.
     const until = "give service:scanner the recovery.stall-scan right everywhere until 2030-01-01";
     const dated = await turn("c3i", until, [owner({ op: "grant.create", args: { ...args, expiresAt: "2030-01-01T00:00:00.000Z" } }, until)]);

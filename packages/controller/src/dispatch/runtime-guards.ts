@@ -8,6 +8,8 @@ import type { AgentMessageService } from "../messaging/index.js";
 import type { Principal } from "../security/principals.js";
 import type { DeliverableMessage, MessageBoundaryName, RuntimeGuards } from "./local-worker.js";
 import type { WorkOrder } from "./ports.js";
+import type { StartPart, StartSizeSample } from "../context/start-size.js";
+import { checkpointStoredTokens } from "./local-worker.js";
 
 /**
  * Binds the controller's services to the local worker's guards (card H12f). The worker holds none of the services: it holds these functions, each bound here to the principal the call needs (the agent as the attempt presents it for
@@ -42,6 +44,12 @@ export interface GuardBinding {
    * not kept for a `confirm` that never comes (one map entry per remote attempt for the controller's lifetime otherwise).
    */
   readonly confirms?: boolean;
+  /**
+   * Card C07i: the starting-size watch. Every first call these guards judge (admitted or refused, a route of unknown window too) is given to it with its size, the route's startup limit and what the call is made of; `worker` says
+   * which kind of host the attempt is on. It only records and tells: it never changes the call, and a failure of it never changes the decision. The guards wait for it at most `waitMs` (default
+   * `START_SIZE_WAIT_MS`): a watch held up (a database that does not answer) goes on by itself, and the first call is not kept waiting for it.
+   */
+  readonly startSize?: { readonly worker: "local" | "remote"; record(sample: StartSizeSample): Promise<void>; readonly waitMs?: number };
 }
 
 /** The most admitted rounds kept for `confirm` at once; the oldest is forgotten past it (an attempt whose host never confirmed: it lost its process, or was refused after admission). Its usage is then not calibrated. */
@@ -64,21 +72,48 @@ function framed(id: string, sender: string, purpose: string, text: string): stri
 /** Card C07n review: a figure that is a context window — a positive safe integer. Anything else (0, negative, fractional, NaN, infinite, not a number) is no window, from the host or the routing table alike. */
 export const usableWindow = (w: unknown): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
 
+/** How long the guards wait for the starting-size watch before a first call goes on without it (card C07i): it only records and tells. */
+export const START_SIZE_WAIT_MS = 2_000;
+
+/** The window whose characters-per-token figure sizes a call on a route of unknown window for the watch (the budget's own figure does not depend on the window). */
+const NOMINAL_WINDOW = 131_072;
+
 export const unknownWindowReason = (route: string): string => `route ${routeNamed(route)} has no context window the controller knows (its host states none for it and the routing table gives it no contextTokens); set its window before work runs on it`;
 
 /**
  * Card C07o: the first call of an attempt as the controller can know it before a remote host's process is up — the text the host is given and the stored conversation it carries, plus the route's fixed part (system prompt
  * and tool schemas) as first calls on the route measured it. A route nobody has measured counts no fixed part: it is not refused on a guess (as at a route move, C07f). The figures are passed as tokens, with no system-prompt
  * or tool-schema characters, so this estimate is never kept as a measurement of the route. No reply reserve: the controller does not know the host's model settings. With no window the guards refuse the call before the
- * estimate is used, so it is all zeros.
+ * estimate is judged; it is still the text and the stored conversation (no fixed part), so the starting-size watch (card C07i) records the call's size and not zero.
  */
 export function estimatedFirstCall(context: Pick<ContextEnforcementService, "budget" | "fixedPartOf">, windowOf: (order: WorkOrder) => Promise<number | undefined>): (order: WorkOrder, text: string, storedTokens: number) => Promise<FirstCall> {
   return async (order, text, storedTokens) => {
     const window = usableWindow(await windowOf(order));
-    if (window === undefined) return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: 0, replyReserveTokens: 0 };
+    if (window === undefined) return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: tokensOf(text.length, context.budget(NOMINAL_WINDOW)) + storedTokens, replyReserveTokens: 0 };
     const fixed = await context.fixedPartOf(order.route, window, order.harness);
     return { systemPromptChars: 0, toolSchemaChars: 0, startupTokens: tokensOf(text.length, context.budget(window)) + storedTokens + (fixed?.tokens ?? 0), replyReserveTokens: 0 };
   };
+}
+
+/**
+ * Card C07i: one first call as the starting-size watch records it — its size in tokens (the decision's figure when the call was judged, else the same estimate made without a window), the route's startup limit (none when the
+ * window is not known: the share is unknown, not zero) and the parts the controller can tell apart. `other` is what is left once the named parts are taken away.
+ */
+export function startSizeSample(context: Pick<ContextEnforcementService, "budget">, binding: Pick<GuardBinding, "storedTokens">, order: WorkOrder, call: FirstCall, worker: "local" | "remote", key: string, judged: { readonly window?: number; readonly tokens?: number; readonly limit?: number; readonly admitted: boolean }): StartSizeSample {
+  const budget = context.budget(judged.window ?? NOMINAL_WINDOW);
+  const fixed = tokensOf(call.systemPromptChars + call.toolSchemaChars, budget);
+  const tokens = judged.tokens ?? Math.max(fixed + call.startupTokens, call.reportedInputTokens ?? 0);
+  let conversation: number | undefined;
+  try { conversation = order.resumeFrom === undefined ? undefined : (binding.storedTokens?.(order.resumeFrom) ?? checkpointStoredTokens(order.resumeFrom)); } catch { conversation = undefined; }
+  const p = order.startParts;
+  const parts: Partial<Record<StartPart, number>> = {
+    fixed, conversation: conversation ?? 0, notes: tokensOf(order.resumeNote?.length ?? 0, budget),
+    task: tokensOf(p?.task ?? 0, budget), rules: tokensOf(p?.rules ?? 0, budget), handoff: tokensOf(p?.handoff ?? 0, budget), view: tokensOf(p?.view ?? 0, budget),
+  };
+  const named = Object.values(parts).reduce((a, b) => a + (b ?? 0), 0);
+  if (tokens > named) parts.other = tokens - named;
+  const refs = [...(p?.refs ?? []), ...new Set(order.resumeNote?.match(/sha256:[0-9a-f]{64}/g) ?? [])];
+  return { taskId: order.taskId, attemptId: order.attemptId, key, route: order.route, worker, tokens, ...(judged.window === undefined ? {} : { window: judged.window }), ...(judged.window === undefined || judged.limit === undefined || !(judged.limit > 0) ? {} : { limitTokens: judged.limit }), admitted: judged.admitted, parts, refs };
 }
 
 export function controllerGuards(binding: GuardBinding): RuntimeGuards {
@@ -111,8 +146,20 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
     context: {
       async admit(order, call, round, retry, launch) {
         const window = await windowOf(order);
+        const key = `${round}${launch === undefined ? "" : `~${launch}`}`;
+        // Card C07i: the watch is told of every call judged here; it never changes the decision.
+        const watch = async (judged: Parameters<typeof startSizeSample>[6]): Promise<void> => {
+          const watcher = binding.startSize;
+          if (watcher === undefined) return;
+          // The watch reports its own failures; the decision stands. It is awaited (so its record is in order with the call) but only so long.
+          let pending: Promise<unknown>;
+          try { pending = watcher.record(startSizeSample(context, binding, order, call, watcher.worker, key, judged)).catch(() => undefined); } catch { return; }
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([pending, new Promise<void>((resolve) => { timer = setTimeout(resolve, watcher.waitMs ?? START_SIZE_WAIT_MS); })]);
+          clearTimeout(timer);
+        };
         // Card C07n: a route of unknown window is never admitted unchecked. A compaction cannot make a window known, so this refusal says it is final.
-        if (window === undefined) return await refuseUnknownWindow(order, "first call");
+        if (window === undefined) { const refused = await refuseUnknownWindow(order, "first call"); await watch({ admitted: false }); return refused; }
         const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: contextRouteKey(order.route), ...(order.route.length <= 500 ? { routeName: order.route } : {}), ...(order.harness === undefined ? {} : { harness: order.harness }), call, ...(retry === true ? { retry: true } : {}) });
         if (decision.admit && binding.confirms !== false) {
           // Kept for this attempt's `confirm`, newest last; bounded, so attempts whose confirm never comes cannot grow it for the controller's lifetime.
@@ -120,6 +167,7 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
           rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
           while (rounds.size > KEPT_ROUNDS) rounds.delete(rounds.keys().next().value!);
         }
+        if (binding.startSize !== undefined) await watch({ window, tokens: decision.startupTokens, ...(decision.limits?.startup === undefined ? {} : { limit: decision.limits.startup }), admitted: decision.admit });
         return { admit: decision.admit, reasons: decision.reasons };
       },
       async confirm(order, usage) {

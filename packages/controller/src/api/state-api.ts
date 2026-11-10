@@ -36,6 +36,7 @@ import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { ContextRouteSettingsService } from "../context/route-settings.js";
+import type { StartSizeService } from "../context/start-size.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
@@ -167,6 +168,7 @@ export interface StateApiDeps {
   readonly swarmLimits?: Pick<SwarmLimitsService, "get" | "change">;
   readonly streamSettings?: Pick<StreamSettingsService, "get" | "change">;
   readonly contextRouteSettings?: Pick<ContextRouteSettingsService, "get" | "change">;
+  readonly startSizes?: Pick<StartSizeService, "read" | "getSettings" | "changeSettings">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** Which event sources are watched (card H13f). */
@@ -326,6 +328,7 @@ export class StateApi {
         ...(this.#deps.swarmLimits === undefined ? {} : { swarmLimits: this.#deps.swarmLimits }),
         ...(this.#deps.streamSettings === undefined ? {} : { streamSettings: this.#deps.streamSettings }),
         ...(this.#deps.contextRouteSettings === undefined ? {} : { contextRouteSettings: this.#deps.contextRouteSettings }),
+        ...(this.#deps.startSizes === undefined ? {} : { startSizes: this.#deps.startSizes }),
         ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),

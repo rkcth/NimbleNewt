@@ -32,7 +32,8 @@ function piWorker(directory: string, faux: ReturnType<typeof fauxProvider>, mode
           gateway = g;
           const handle = await adapter.root().submit({ kind: "input", requestId: requestId(order.requestId), content: order.content });
           const result = await handle.result();
-          return { status: result.status === "completed" ? "completed" : "failed", ...("text" in result && typeof result.text === "string" ? { text: result.text } : {}), checkpoint: JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never };
+          // This host stands for a worker whose agent ended its turn properly (card W03 judges a turn by its end kind; this test is about dispatch, not about how turns end).
+          return { status: result.status === "completed" ? "completed" : "failed", ...(result.status === "completed" ? { endKind: "normal" as const } : {}), ...("text" in result && typeof result.text === "string" ? { text: result.text } : {}), checkpoint: JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never };
         },
         checkpoint: async () => JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never,
         restart: async () => undefined,

@@ -149,7 +149,7 @@ test("a new primary does not renew a remote attempt it did not start until it ha
       const beat = await again.heartbeat();
       assert.ok(beat.until >= adopted.lease!.until);
       assert.equal((await dispatchOf(second, s.attemptId)).heartbeats, beats + 1, "the worker's own heartbeat counts now");
-      await again.complete({ status: "completed" } as never);
+      await again.complete({ status: "completed", endKind: "normal" } as never);
       await second.dispatch!.dispatcher.idle();
       const done = await dispatchOf(second, s.attemptId);
       assert.deepEqual([done.state, done.outcome?.status], ["finished", "succeeded"]);
@@ -219,7 +219,7 @@ test("a turn's figures the old primary already charged are not charged again whe
     assert.ok(first.dispatch?.workerUrl !== undefined, first.dispatchProblem);
     const s = await setup(first);
     const { attempt } = await placed(first, s);
-    await attempt.complete({ status: "completed", usage: { costMicros: 700 } } as never);
+    await attempt.complete({ status: "completed", endKind: "normal", usage: { costMicros: 700 } } as never);
     second = await Promise.race([takenOver, new Promise<never>((_, reject) => { setTimeout(() => reject(new Error("the old primary never charged the turn")), 60_000).unref(); })]);
     await first.dispatch!.dispatcher.idle();
     assert.equal((await placementOf(second, s.attemptId)).state, "completed");
@@ -285,7 +285,7 @@ test("a new primary ends a remote attempt whose run is gone (only offered when t
         await resumed.accept();
         // Before the takeover the heartbeat is refused as a passing condition (ask again), not as the end of the attempt.
         await rejectsWith("unavailable", () => resumed.heartbeat());
-        await resumed.complete({ status: "completed" } as never);
+        await resumed.complete({ status: "completed", endKind: "normal" } as never);
         assert.equal((await placementOf(third, replacement)).state, "completed");
         const taken = await third.dispatch!.dispatcher.tick();
         assert.deepEqual(taken.adopted, [replacement], JSON.stringify(taken));

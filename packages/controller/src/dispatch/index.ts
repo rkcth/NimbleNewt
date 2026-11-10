@@ -1,11 +1,11 @@
-export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, TERMINAL, operationKind, type DispatchBody, type DispatchRevisions, type DispatchState, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
+export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TERMINAL, operationKind, type DispatchBody, type DispatchRevisions, type DispatchState, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
 export { DispatcherService, type DispatchCheck, type DispatcherDeps, type DispatcherLoop, type AttemptDispatcherOptions, type DispatcherLimitFigures, type RecipeChange, type RouteChoice, type RouteResolver, type TickReport } from "./dispatcher.js";
 export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./network.js";
-export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork } from "./ports.js";
+export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork, WorkProgress } from "./ports.js";
 export { TURN_END_KINDS, turnEndKindOf, type TurnEndKind } from "./ports.js";
 export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { type RouteProbes } from "./loops.js";
-export { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, coverageLoops, type CoverageNoticeLike, archiveLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, reviewLoops, standupLoops, workspaceLoops } from "./loops.js";
+export { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, coverageLoops, type CoverageNoticeLike, archiveLoops, probeLoops, grantLapseLoops, lapseNotice, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, reviewLoops, standupLoops, workspaceLoops } from "./loops.js";
 export { LocalWorker, catalogFacts, checkpointStoredTokens, judgeResume, type AttemptLease, type AttemptRuntime, type DeliverableMessage, type MessageBoundaryName, type RuntimeGuards, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";
 export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";

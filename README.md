@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **249 of 359 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **251 of 359 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -110,8 +110,8 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 38% | 8 of 21 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 77% | 17 of 22 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 31 of 33 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 81% | 18 of 22 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 32 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 65% | 13 of 20 |
@@ -255,7 +255,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 17 of 22</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 18 of 22</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -277,7 +277,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A07d** · P27 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c)_
 - [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
 - [x] **A07e** · P28 · Suggest at least seven days for a standing grant _(needs A07d)_
-- [ ] **A07h** · P28 · Expire a standing grant only after it goes unused, and renew it each time a worker uses it _(needs A07d, A02)_
+- [x] **A07h** · P28 · Expire a standing grant only after it goes unused, and renew it each time a worker uses it _(needs A07d, A02)_
 - [x] **A07f** · P30 · Derive protected branches in the controller and scope approval grants to branches _(needs A07, P01)_
 - [x] **A07g** · P31 · Let only an integrator's contract cover protected branches _(needs A07f)_
 - [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
@@ -285,7 +285,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 31 of 33</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 32 of 33</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -309,7 +309,7 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C09c** · P32 · Record activity at every step and explain through chat _(needs C09b)_
 - [x] **C07h** · P33 · Prove handoff input stays bounded without losing what the next agent needs to fix the task _(needs C07f, L03)_
 - [x] **C09d** · P33 · Record activity at every step: dispatcher, tools, messages, meetings, chat _(needs C09c)_
-- [ ] **C07i** · P34 · Watch each attempt's starting size in production and alert before it becomes a slowdown _(needs C07h)_
+- [x] **C07i** · P34 · Watch each attempt's starting size in production and alert before it becomes a slowdown _(needs C07h)_
 - [x] **C07j** · P34 · Mark every hand-off cut and keep the original so the newest decisions are not silently lost _(needs C07h)_
 - [x] **C07l** · P34 · Extend the 50-hand-off test to the first call, the stored conversation and the resume note _(needs C07h)_
 - [x] **C09e** · P34 · Record activity: approvals, messages, meetings, chat _(needs C09d)_

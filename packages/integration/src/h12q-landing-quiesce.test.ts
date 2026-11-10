@@ -60,7 +60,7 @@ test("landing waits for the running attempt's call in flight to settle, is done 
                   // A call in flight when the landing is asked for: it ends only when the quiesce tells it to stop.
                   void call({ callId: "w1", tool: { name: "read-file", version: "1" }, args: {} }, { kind: "local", run: async (signal) => { callStarted(); await new Promise<void>((r) => signal.addEventListener("abort", () => r(), { once: true })); callEnded = true; return { text: "stopped" }; } }).then((r) => { log.push(`call:${JSON.stringify(r).slice(0, 200)}`); }, (e) => { log.push(`callerr:${(e as Error).message}`); });
                 }
-                started(); await over; return { status: "completed", text: "done" };
+                started(); await over; return { status: "completed", text: "done", endKind: "normal" };
               }, checkpoint: async () => ({}), tell: async (text: string) => { log.push(`told:${text}`); }, close: async () => undefined };
             } },
           });

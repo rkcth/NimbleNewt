@@ -34,7 +34,7 @@ import { checkValue, schemaProblems } from "./schema.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "maintenance.request", "maintenance.status"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -133,7 +133,7 @@ export interface ToolExecutionDeps {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request"]);
 /**
  * Control characters other than a line break or a tab (terminal escapes among them, C1 controls, the line and paragraph separators) and invisible format characters (bidirectional overrides, zero-width characters: `\p{Cf}`)
  * are dropped from a job's output before the agent reads it.
@@ -301,6 +301,8 @@ export class ToolExecutionService {
             case "job.status": case "job.output": response = await this.#jobRead(context, request.op as BridgeOperation, args); break;
             case "job.cancel": response = await this.#jobCancel(context, args); break;
             case "work.end": response = await this.#workEnd(token, context, args); break;
+            case "maintenance.request": response = await this.#maintenanceRequest(token, context, args); break;
+            case "maintenance.status": response = await this.#maintenanceStatus(token, context, args); break;
           }
         }
       } finally {
@@ -432,6 +434,7 @@ export class ToolExecutionService {
       : op === "task.transition" ? { summary: `${c.agent.id} moved the task through the bridge.`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "tool.register" ? { summary: `${c.agent.id} registered tool ${id("name")} through the bridge.`, refs: [{ kind: "catalog-version", id: id("versionId") }] }
       : op === "job.start" && typeof result["jobId"] === "string" ? { summary: `${c.agent.id} started job ${id("jobId")} (${id("tool")} ${id("version")}) through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
+      : op === "maintenance.request" && typeof result["maintenanceId"] === "string" ? { summary: `${c.agent.id} asked for an environment change, maintenance request ${id("maintenanceId")} (${id("status")}), through the bridge.`, refs: [{ kind: "maintenance", id: id("maintenanceId") }] }
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
     if (step === undefined) return;
@@ -459,6 +462,42 @@ export class ToolExecutionService {
     onlyKnown(args, ["submit", "result", "note", "message"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * The agent asks for a change to its own environment (card A09: a skill draft, a package or extension, a mount, a network site, or a protected change for the owner), through the same door every client uses (`maintenance.request`
+   * with the worker's task credential, so the request is the credential's agent's own and never another's). The answer is the maintenance ID at once: nothing waits for the decision or the application, so a call whose own worker
+   * is replaced by the application has already returned. Asking again with the call ID is the same request. The agent names no agent: an `agentId` is refused.
+   */
+  async #maintenanceRequest(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, ["kind", "spec", "reason", "rollbackPlan"]);
+    const response = await this.#deps.state.handle(token, { v: 1, op: "maintenance.request", commandId: `bridge:${c.attemptId}:${c.callId}`, args });
+    if (!response.ok) return refusal(response.error.code, response.error.message);
+    const r = response.result;
+    return ok({ maintenanceId: r["maintenanceId"] ?? null, status: r["status"] ?? null, replayed: r["replayed"] === true, note: "Keep the maintenanceId: maintenance-status reads it, also in a later attempt. The controller decides and applies the change; applying it may restart your worker, and this call does not wait for that." });
+  }
+
+  /** Where one of the agent's maintenance requests stands (`maintenance.get` with the worker's task credential: only the agent's own requests are found). Text the controller or an applier wrote is cleaned of control characters. */
+  async #maintenanceStatus(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, ["maintenanceId"]);
+    const id = typeof args["maintenanceId"] === "string" && /^mnt-[a-z2-7]{20}$/.test(args["maintenanceId"]) ? args["maintenanceId"] : invalid("maintenanceId", "must be a maintenance ID (mnt-...)");
+    const response = await this.#deps.state.handle(token, { v: 1, op: "maintenance.get", args: { maintenanceId: id } });
+    if (!response.ok) return refusal(response.error.code, response.error.message);
+    const item = (isObject(response.result["item"]) ? response.result["item"] : {}) as JsonObject;
+    // The state API also shows a supervisor its reports' requests; through the bridge an agent reads its own only, and another's reads like one that does not exist.
+    if (item["agentId"] !== c.agent.id) return refusal("not_found", "no such maintenance request");
+    const textOf = (v: unknown): string | undefined => (typeof v === "string" ? plainText(v).slice(0, 300) : undefined);
+    const decision = isObject(item["decision"]) ? item["decision"] : undefined;
+    const failure = isObject(item["failure"]) ? item["failure"] : undefined;
+    return ok({
+      maintenanceId: id, kind: item["kind"] ?? null, class: item["class"] ?? null, status: item["status"] ?? null, specDigest: item["specDigest"] ?? null,
+      ...(decision === undefined ? {} : { decision: { verdict: decision["verdict"] ?? null, via: decision["via"] ?? null, ...(typeof decision["rule"] === "string" ? { rule: decision["rule"] } : {}) } }),
+      ...(textOf(item["pendingReason"]) === undefined ? {} : { pendingReason: textOf(item["pendingReason"])! }),
+      ...(typeof item["appliedAt"] === "string" ? { appliedAt: item["appliedAt"] } : {}),
+      ...(failure === undefined || textOf(failure["reason"]) === undefined ? {} : { failure: textOf(failure["reason"])! }),
+    });
   }
 
   async #message(c: Context, args: JsonObject): Promise<BridgeResponse> {
@@ -605,7 +644,8 @@ export class ToolExecutionService {
    * A version revoked between the record and the launch is refused whatever was chosen (a choice of `finish` is about calls already running).
    */
   async #authorizeStart(c: Context, v: VersionBody, facts: HostFacts, own: AbortController): Promise<void> {
-    const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false });
+    // The access the tool asks for is used now (card A07h: a grant with an idle window that only tools use is renewed by their runs).
+    const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false, uses: v.manifest.requestedAccess });
     const lost = v.manifest.requestedAccess.filter((action) => !allows(now, action, c.projectId, { resource: { kind: "task", id: c.taskId } }));
     if (lost.length > 0) throw new Error(`the task's credential no longer holds ${lost.slice(0, BRIDGE_LIMITS.access).join(", ")}`);
     const ready = await this.#deps.catalog.authorizeRun(c.agent, { commandId: `bridge-run:${c.attemptId}:${c.callId}`, name: v.name, version: v.version, taskId: c.taskId, projectId: c.projectId, host: facts });

@@ -99,7 +99,7 @@ async function rig(dir: string, options: RigOptions): Promise<Rig> {
                     record.content = content;
                     ran.push(order.attemptId);
                     if (options.hang === true) { await closed; return { status: "cancelled" } as never; }
-                    return { status: "completed", text: "done", checkpoint: options.checkpoint(order.attemptId) };
+                    return { status: "completed", endKind: "normal", text: "done", checkpoint: options.checkpoint(order.attemptId) };
                   },
                   checkpoint: async () => options.checkpoint(order.attemptId),
                   close: async () => { release(); },

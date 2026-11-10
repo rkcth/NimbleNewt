@@ -101,6 +101,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "swarm.limits.change": { verb: "Change the limits on child tasks: how many levels deep (depth), how many unfinished children one task may have at once (liveChildren), how many children in all report back to one task (totalChildren, the fan-in)", mode: "propose" },
   // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
   // Whether a task moving to another model route has its context checked first, and what is counted for a route nobody has measured (card C07f): both on unless the owner turns them off.
+  "context.start-size.change": { verb: "Change when the owner is alerted that a task's starting size keeps rising over its hand-offs, or is close to its route's limit", mode: "apply" },
   "context.route.change": { verb: "Turn the check of a task's context when it moves to another model route (and the rebuilt context put in its first prompt) on or off, or set the size counted for an unmeasured route", mode: "propose" },
   "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
   // Whether the controller may remove an ended attempt's scratch workspace is a data-keeping decision: shown first in every profile (owner decision 2026-10-30; default after-handoff).
@@ -664,7 +665,8 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
  * (`grantDateInWords`, checked in the chat) or none, and with none the line says the right never runs out. A date is the owner's own text and goes through `short`, once, like every other value here.
  */
 function grantMeaning(args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
-  const end = typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : "no end: it never runs out and stays until you revoke it";
+  const idle = typeof args["idleDays"] === "number" ? `; lapses once unused for ${args["idleDays"]} day${args["idleDays"] === 1 ? "" : "s"}, each use renews it` : "";
+  const end = (typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : typeof args["idleDays"] === "number" ? "no end date" : "no end: it never runs out and stays until you revoke it") + idle;
   const start = typeof args["notBefore"] === "string" ? `; starts ${short(args["notBefore"])}` : "";
   const scope = args["project"];
   const reach = scope === "*" ? "; everywhere: it covers every project, including ones made later" : typeof scope === "string" ? `; only in ${labels[scope] === undefined ? short(scope) : quotedText(labels[scope], 60)}` : "";

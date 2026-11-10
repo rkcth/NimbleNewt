@@ -539,7 +539,7 @@ export class WorkEndService {
    * The dispatcher is about to end the attempt for its own reason (the turn completed, a stop, a lost worker). An ending the agent asked for is not lost: a stop drops it with its true reason; the turn completing after `work.end` completes it (settle, submit, tell,
    * and the attempt ends with the agent's result, which is what `handled` says); any other end drops it as `attempt_ended`, after the tell, with the agent's request written into the end's summary.
    */
-  async resolveOnEnd(attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }): Promise<{ readonly handled?: true; readonly summary?: string; readonly outcome?: "succeeded" | "failed" | "abandoned"; readonly partial?: true } | undefined> {
+  async resolveOnEnd(attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }): Promise<{ readonly handled?: true; readonly summary?: string; readonly outcome?: "succeeded" | "failed" | "abandoned"; readonly partial?: true; readonly pending?: true } | undefined> {
     const found = await this.#get(idOf(attemptId));
     if (found === undefined || !OPEN_STATES.includes(found.body.state)) return undefined;
     if (how.stopped !== undefined) { await this.#drop(attemptId, how.stopped.by === "emergency" ? "emergency_stop" : "owner_stop", how.stopped.reason); return undefined; }
@@ -551,7 +551,8 @@ export class WorkEndService {
         incomplete = true;
       }
       // The ending could not be completed now (the task is paused, another instance is busy): a plain `done` leaves it for later and the turn's own end stands; any other result is not lost, the end carries it.
-      if (incomplete && found.body.result === "done") return undefined;
+      // `pending` tells the dispatcher the agent did say its work was done (card W03), so the turn is not taken for one that stopped early.
+      if (incomplete && found.body.result === "done") return { pending: true };
       override = found.body.result === "partial" ? "succeeded" : "abandoned";
     }
     const b = found.body;

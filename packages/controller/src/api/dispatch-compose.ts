@@ -10,14 +10,14 @@ import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate }
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, compactionKeep, startupItems, type DecisionDeps } from "../decisions/index.js";
-import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
+import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, startSizeRecorder, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
 import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -384,6 +384,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     ...wakeLoops(watches, attemptWaker(() => live.dispatcher, principal)), ...(i.records === undefined ? [] : recordLoops(i.records, projects)), ...(i.responsibilities === undefined ? [] : [...responsibilityLoops(i.responsibilities.checks, i.responsibilities.incidents, projects, i.responsibilities.notify), ...(i.responsibilities.coverage === undefined ? [] : coverageLoops(i.responsibilities.coverage.service, i.responsibilities.coverage.notify))]), ...(i.eventSources === undefined ? [] : sourceLoops(SourceService.withEpoch(storage, epoch, events, ro), i.eventSources, i.eventSourcesOff, { tell: (n) => notifications.emitFromController({ commandId: n.id, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: n.text }), log: (m) => i.onError?.(new Error(m)) })), ...(i.probes === undefined ? [] : probeLoops(i.probes.cutover, i.probes.probes)), ...(i.routes === undefined ? [] : [{ name: "routes.tick", run: async (by: Principal) => { await i.routes!.cutover.tick(by); } }]), ...(i.retention === undefined ? [] : [{ name: "retention.sweep", run: async (by: Principal) => { await i.retention!.restoreReserve?.(); await i.retention!.sweep(by); } }]), ...(i.backups === undefined ? [] : [{ name: "backups.nightly", run: async () => { void i.backups!.runScheduled().catch(() => undefined); /* started, not awaited: a long copy never holds up the other loops; a failure is kept in the backup status */ } }]), ...improvementOutcomeLoops(improvements, projects), ...untoldImprovementLoops(improvements, projects, (n) => notifications.emitFromController({ commandId: n.key, kind: "maintenance", level: "notice", ref: { kind: "improvement-item", id: n.itemId }, detail: n.text, projectId: n.projectId })), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     // A pause the owner gave a time to is lifted when the time comes, and only that scope (card L06b).
     { name: "lifecycle.resume-conditions", run: async (by) => { await pauses.liftDue(by); } },
+    // A standing grant that lapsed from non-use is told to the owner once, in plain words (card A07h).
+    ...grantLapseLoops(i.grants, (n) => notifications.emitFromController({ commandId: n.key, kind: "maintenance", level: "notice", label: "A standing grant lapsed from non-use", ref: { kind: "grant-record", id: n.grantId }, detail: n.text, ...(n.projectId === undefined ? {} : { projectId: n.projectId }) })),
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token), async (c) => {
       // Each climb of the supervisor ladder is told once (owner decision 2026-10-30, supervisor ladder): the id carries the concern, the level and the time it climbed, which are stored, so a retried notice is the same one. A supervisor is told by a notice on the task; the owner, at the top, by a needs-you item.
       const key = createHash("sha256").update(`${c.id}|${c.escalatedAt ?? ""}|${c.escalationLevel ?? 0}`).digest("hex").slice(0, 32);
@@ -462,6 +464,13 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     if (moved.rebuilt && moved.warning !== undefined) await notifications.emitFromController({ commandId: `ctx-unmeasured:${unmeasuredId}`, kind: "maintenance", level: "notice", ref: { kind: "route-move", id: unmeasuredId }, detail: `Route ${c.route.slice(0, 80)} has not been measured yet: the move was built on an assumed prompt size, and its first call will be checked with its real size.`.slice(0, 200), projectId: c.projectId }).catch((error: unknown) => i.onError?.(error));
     return moved;
   };
+  /**
+   * Card C07i: the starting-size watch, given every first call the guards judge on the local host and on each remote host. An alert it opens reaches the owner once (the notification's command ID is the alert's; one whose telling failed is told at the task's next first call), and the task's
+   * status shows it while it is open. A rising run is a Notice (nothing waits on the owner yet); a call past the owner's share of its limit is Needs you, since the next growth is refused. A failure is reported, never raised.
+   */
+  const startSizes = StartSizeService.withEpoch(storage, epoch, ro);
+  const recordStartSize = startSizeRecorder(startSizes, principal, notifications, i.onError);
+  const startSize = (worker: "local" | "remote") => ({ worker, record: recordStartSize });
   const remedies = "choose a route with a larger window, reduce the task contract, supersede decisions or reassign the task";
   // Remote MCP servers (cards T03, H12g, H12k): built before the local host so the host is given the same connector and client the handle carries.
   const mcpParts = (() => {
@@ -484,6 +493,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       routeWindow: async (order) => (await i.routing.get())?.routes[order.route]?.contextTokens,
       // And a stored conversation is judged whatever the embedder passed: a checkpoint of the worker package's shape says its size, and one that says nothing is not resumed.
       storedTokens: i.options.local.storedTokens ?? checkpointStoredTokens,
+      startSize: startSize("local"),
       // Card C07g: the worker's process is up and says what it sends besides the prompt; the route is measured with that, and the view built again on the measured figure before the first call.
       rebuildView: async (order, fixed, launch, promptChars) => {
         await context.measureRoute(principal, { taskId: order.taskId, attemptId: order.attemptId, launch, route: order.route, ...(order.harness === undefined ? {} : { harness: order.harness }), systemPromptChars: fixed.systemPromptChars, toolSchemaChars: fixed.toolSchemaChars });
@@ -634,6 +644,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           window: hostWindow, routeWindow, storedTokens: checkpointStoredTokens,
           // No remote operation reports the provider's input count, so no admitted round is kept waiting for one.
           confirms: false,
+          startSize: startSize("remote"),
         }).context!;
         // The first call as the controller can know it before the host's process is up, measured against the same window the guards judge it by.
         const firstCall = estimatedFirstCall(context, async (order) => usableWindow(hostWindow(order)) ?? usableWindow(await routeWindow(order)));

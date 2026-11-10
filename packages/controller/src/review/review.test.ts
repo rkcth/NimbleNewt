@@ -54,6 +54,14 @@ for (const backend of backends) {
     await review.decide(who, { commandId: cid("dc"), requestId: id, expectedRevision: v.revision, verdict: "allow", reason: "reviewed the script", ...extra });
   };
 
+  suite("card A07h: deciding a review uses the reviewer's review right, so a standing grant for it with an idle window starts its window again", async ({ review, grants, owner, ann, rev, task, a }) => {
+    const g = await grants.grant(owner, { commandId: cid("g"), grantee: "agent:rev", action: "review.decide", project: a, source: "standing", basis: "reviews in A", idleDays: 30 });
+    now += 20 * 86_400_000;
+    const r = await ask(review, ann, task);
+    await approve(review, rev, r.id);
+    assert.equal((await grants.getGrant(g.id))!.lastUsedAt, stamp(), "the decision was a use");
+  });
+
   suite("the exact reviewed operation is admitted once; a repeat of the same call replays and a second use is refused", async ({ review, ann, rev, task }) => {
     const r = await ask(review, ann, task);
     await approve(review, rev, r.id);

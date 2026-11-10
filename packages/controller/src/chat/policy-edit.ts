@@ -80,7 +80,7 @@ export interface PolicyEditBody {
   readonly refusal?: { readonly code: string; readonly message: string };
   readonly createdAt: string;
   /** Fixed when the edit starts to apply, so a retry after a crash does the same thing. */
-  readonly decided?: { readonly at: string; readonly expiresAt?: string; readonly lengthDays?: number; readonly permanent?: true };
+  readonly decided?: { readonly at: string; readonly expiresAt?: string; readonly lengthDays?: number; readonly permanent?: true; /** Card A07h: the grant lapses after this many days unused instead of on a date (edits decided before A07h carry `expiresAt`). */ readonly idleDays?: number };
   readonly appliedAt?: string;
   /** The revisions the edit produced. */
   readonly applied?: readonly AppliedRef[];
@@ -235,14 +235,26 @@ export function ownerOrders(evidence: string, wording: string, move: string, tar
   return sentences.some((x) => norm(x).includes(wanted) && verb.test(x) && targets.every((t) => t.test(x)) && !NEGATION.test(x) && !MUSING.test(x));
 }
 
-const NUMBER_WORDS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, twenty: 20, thirty: 30 };
-/** Whether the owner's own words state this number of days ("90", "a week", "two weeks", "a fortnight", "a month" as 28 to 31 days, "a year" as 365 or 366, "3 months" as 84 to 93). */
+const UNIT_WORDS: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const TEEN_WORDS: Readonly<Record<string, number>> = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TEN_WORDS: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const NUMBER_WORDS: Readonly<Record<string, number>> = { ...UNIT_WORDS, ...TEEN_WORDS, ...TEN_WORDS, a: 1, an: 1, "a couple of": 2, "couple of": 2, "a hundred": 100, "one hundred": 100, hundred: 100 };
+const alt = (o: Readonly<Record<string, number>>) => Object.keys(o).sort((x, y) => y.length - x.length).join("|");
+/** A number in the owner's words: digits, or words such as "a", "two", "fifteen", "forty-five", "twenty one", "a hundred" (longest form first, so "twenty one" is not read as "one"). */
+const NUMBER_PHRASE = `\\d+|(?:${alt(TEN_WORDS)})[ -](?:${alt(UNIT_WORDS)})|${alt(NUMBER_WORDS)}`;
+function numberOf(phrase: string): number {
+  if (/^\d+$/.test(phrase)) return Number(phrase);
+  const [tens, unit] = phrase.split(/[ -]/);
+  if (unit !== undefined && TEN_WORDS[tens!] !== undefined && UNIT_WORDS[unit] !== undefined) return TEN_WORDS[tens!]! + UNIT_WORDS[unit]!;
+  return NUMBER_WORDS[phrase]!;
+}
+/** Whether the owner's own words state this number of days ("90", "a week", "two weeks", "fifteen days", "forty-five days", "a fortnight", "a month" as 28 to 31 days, "a year" as 365 or 366, "3 months" as 84 to 93). */
 export function lengthInWords(days: number, text: string): boolean {
   // Record IDs and anything shaped like one are not the owner's numbers.
   const t = text.replace(CURLY, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ").replace(/\b(pedit|prop|turn|thr|agt|proj|task|grt)-\S+/g, " ");
-  const re = new RegExp(`(?:^|[^0-9a-z])(\\d+|${Object.keys(NUMBER_WORDS).join("|")})[ -]?(day|week|fortnight|month|year)s?\\b`, "g");
+  const re = new RegExp(`(?:^|[^0-9a-z])(${NUMBER_PHRASE})[ -]?(day|week|fortnight|month|year)s?\\b`, "g");
   for (const m of t.matchAll(re)) {
-    const n = /^\d+$/.test(m[1]!) ? Number(m[1]) : NUMBER_WORDS[m[1]!]!;
+    const n = numberOf(m[1]!);
     const [lo, hi] = m[2] === "day" ? [n, n] : m[2] === "week" ? [7 * n, 7 * n] : m[2] === "fortnight" ? [14 * n, 14 * n] : m[2] === "month" ? [28 * n, 31 * n] : [365 * n, 366 * n];
     if (days >= lo && days <= hi) return true;
   }
@@ -387,7 +399,7 @@ export class PolicyEditService {
     // A retry of an edit already applying keeps what was fixed and stored the first time (a maximum set since must not strand it half done).
     const chosen = op?.kind === "grant" && found.status !== "applying" ? this.#length(op, at, request.lengthDays, await this.#lengthRules(owner)) : undefined;
     if (chosen !== undefined && "message" in chosen) throw new DomainError("invalid_command", chosen.message, { field: "lengthDays" });
-    const begun = await this.#move(owner.id, id, `${id}-begin`, ["proposed", "applying"], (b) => (b.status === "applying" ? b : { ...b, status: "applying", decided: { at, ...(chosen === undefined || "message" in chosen ? {} : chosen.permanent === true ? { permanent: true as const } : { expiresAt: chosen.expiresAt as string, lengthDays: chosen.days as number }) } }));
+    const begun = await this.#move(owner.id, id, `${id}-begin`, ["proposed", "applying"], (b) => (b.status === "applying" ? b : { ...b, status: "applying", decided: { at, ...(chosen === undefined || "message" in chosen ? {} : chosen.permanent === true ? { permanent: true as const } : chosen.idleDays !== undefined ? { idleDays: chosen.idleDays, lengthDays: chosen.days as number } : { expiresAt: chosen.expiresAt as string, lengthDays: chosen.days as number }) } }));
     if (begun.body.status !== "applying") {
       if (begun.body.status === "applied") return { editId: id, status: "applied", replayed: true, applied: begun.body.applied ?? [] };
       invalid("editId", `that edit is ${begun.body.status}`);
@@ -638,7 +650,8 @@ export class PolicyEditService {
     const noLimit = change.spendLimit === null;
     const now = this.#runner.now();
     let ends: string;
-    try { ends = noEnd ? "no end date is recorded on it, so nothing retires it" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`; } catch (error) {
+    // A length in days is an idle window (card A07h): the grant lapses only after it has gone unused that long, and each use by the agent starts it again. A day the owner named is an end date.
+    try { ends = noEnd ? "no end date is recorded on it, so nothing retires it" : chosen.until !== undefined ? `if applied now it ends ${chosen.until}` : `it lapses only once ${grantee.name} has not used it for ${chosen.days} day${chosen.days === 1 ? "" : "s"}, and each use starts that count again (if it were never used it would lapse ${new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()})`; } catch (error) {
       if (error instanceof RangeError) throw new Refusal("invalid_length", "that length puts the end of the grant beyond any date a record can hold");
       throw error;
     }
@@ -654,7 +667,7 @@ export class PolicyEditService {
     const explanation = [
       `It covers ${environments.join(" and ")} only${change.environments === undefined ? " (you did not name an environment, so only the free ones)" : ""}.`,
       `Length: ${noEnd ? "no end" : `${chosen.days} day${chosen.days === 1 ? "" : "s"}`} (${chosen.why}); ${ends}. You can pick another when you apply it: ${options.map((d) => `${d} day${d === 1 ? "" : "s"}`).join(", ")}.`,
-      noEnd ? "It does not expire by itself: it stays in force until you revoke it." : "It expires by itself and you can revoke it at any time.",
+      noEnd ? "It does not expire by itself: it stays in force until you revoke it." : chosen.until !== undefined ? "It expires by itself and you can revoke it at any time." : "It closes by itself when it goes unused, you are told once when it does, and you can revoke it at any time.",
       "A standing grant never covers what stays your decision: changing access, a customer-live deployment, a protected branch, spending beyond the estimate, an irreversible action, or an audience nobody named.",
       ...(change.audiences === undefined ? [] : [`Audiences: ${change.audiences.join(", ")}.`]), ...(change.spendLimit === undefined ? [] : [noLimit ? "Spend limit: none. There is no ceiling on this grant: it may spend any amount without asking you." : `Spend limit: ${change.spendLimit}.`]),
     ];
@@ -756,8 +769,11 @@ export class PolicyEditService {
     return { ...(maxDays === undefined ? {} : { maxDays }), ...(defaultDays === undefined ? {} : { defaultDays }) };
   }
 
-  /** The length fixed when the owner applies: the maximum is looked at again then, so a maximum set after the proposal still binds. */
-  #length(op: Extract<EditOp, { kind: "grant" }>, at: string, override: number | undefined, rules: GrantLengthRules): { days?: number; expiresAt?: string; permanent?: true } | { message: string } {
+  /**
+   * The length fixed when the owner applies: the maximum is looked at again then, so a maximum set after the proposal still binds. A length in days is the grant's idle window (card A07h): it lapses
+   * only after going unused that long, and each use renews it. A day the owner named (`until`) stays an end date.
+   */
+  #length(op: Extract<EditOp, { kind: "grant" }>, at: string, override: number | undefined, rules: GrantLengthRules): { days?: number; expiresAt?: string; idleDays?: number; permanent?: true } | { message: string } {
     const max = rules.maxDays;
     if (override === undefined && op.permanent === true) {
       if (max !== undefined) return { message: noMore(max, "this grant has no end, so it can no longer be made as proposed; ask again") };
@@ -773,7 +789,7 @@ export class PolicyEditService {
     const days = override ?? op.lengthDays ?? rules.defaultDays ?? DEFAULT_GRANT_DAYS;
     if (days > GRANT_DAYS_CEILING) return { message: `${days} days is more than a grant can last (${GRANT_DAYS_CEILING} days)` };
     if (max !== undefined && days > max) return { message: noMore(max, `not ${days}`) };
-    return { days, expiresAt: new Date(Date.parse(at) + days * DAY_MS).toISOString() };
+    return { days, idleDays: days };
   }
 
   async #run(owner: Principal, id: string, body: PolicyEditBody, op: EditOp, note: (ref: AppliedRef) => Promise<void>): Promise<{ applied: AppliedRef[]; takesEffect?: string }> {
@@ -790,10 +806,10 @@ export class PolicyEditService {
       }
       case "grant": {
         // A grant with no end is made only when the decision says so; a decision that fixed neither an end nor permanence is damaged, and nothing is granted from it.
-        if (body.decided?.permanent !== true && body.decided?.expiresAt === undefined) throw new DomainError("invalid_transition", `edit ${id} fixed no end time for this grant and did not say it is permanent, so no grant was made`);
+        if (body.decided?.permanent !== true && body.decided?.expiresAt === undefined && body.decided?.idleDays === undefined) throw new DomainError("invalid_transition", `edit ${id} fixed no end time or idle window for this grant and did not say it is permanent, so no grant was made`);
         const g = await d.grants.grant(owner, {
-          commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", ...(body.decided?.expiresAt === undefined ? {} : { expiresAt: body.decided.expiresAt }),
-          basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.permanent === true ? "no end" : `${body.decided?.lengthDays ?? "?"} days`} (${op.lengthWhy}).`.slice(0, 900),
+          commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", ...(body.decided?.expiresAt === undefined ? {} : { expiresAt: body.decided.expiresAt }), ...(body.decided?.idleDays === undefined ? {} : { idleDays: body.decided.idleDays }),
+          basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.permanent === true ? "no end" : body.decided?.idleDays !== undefined ? `${body.decided.idleDays} days, lapsing only after that long unused` : `${body.decided?.lengthDays ?? "?"} days`} (${op.lengthWhy}).`.slice(0, 900),
           terms: { environments: [...op.environments], ...(op.spendLimit === undefined ? {} : { spendLimit: op.spendLimit }), ...(op.spendUnlimited === true ? { spendUnlimited: true } : {}), ...(op.audiences === undefined ? {} : { audiences: [...op.audiences] }) },
         });
         return { applied: [{ kind: "grant-record", id: g.id, revision: g.revision }], takesEffect: "from the grantee's next snapshot" };
@@ -801,9 +817,10 @@ export class PolicyEditService {
       case "revoke": {
         const out: AppliedRef[] = [];
         for (const [k, g] of op.grants.entries()) {
-          await d.grants.revoke(owner, { commandId: `${id}-rk${k}`, grantId: g.id, expectedRevision: g.revision, reason: `revoked by the owner in chat, edit ${id}` });
-          out.push({ kind: "grant-record", id: g.id, revision: g.revision + 1 });
-          await note({ kind: "grant-record", id: g.id, revision: g.revision + 1 });
+          // A recorded use (card A07h) may have moved the grant on since the proposal; the revocation still goes through and the revision it left is the one reported.
+          const r = await d.grants.revoke(owner, { commandId: `${id}-rk${k}`, grantId: g.id, expectedRevision: g.revision, reason: `revoked by the owner in chat, edit ${id}` });
+          out.push({ kind: "grant-record", id: g.id, revision: r.revision });
+          await note({ kind: "grant-record", id: g.id, revision: r.revision });
         }
         return { applied: out, takesEffect: "from the grantee's next snapshot" };
       }

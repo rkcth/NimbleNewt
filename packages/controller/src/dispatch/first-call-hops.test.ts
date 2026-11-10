@@ -89,7 +89,7 @@ for (const backend of backends) {
                 sent.push({ hop, kind: kindOf(hop), agent: order.agentId, attemptId: order.attemptId, route: order.route, tokens: FIXED_TOKENS + Math.ceil(content.length / 3) + ctx, stored: ctx, resumed: from !== undefined, ...(order.resumeNote === undefined ? {} : { resumeNote: order.resumeNote }), content });
                 ctx += grow;
                 if (mode === "hang") { await closed; return { status: "cancelled" } as never; }
-                return { status: "completed", text: "ok", checkpoint: { nn: { contextTokens: ctx } } };
+                return { status: "completed", text: "ok", endKind: "normal", checkpoint: { nn: { contextTokens: ctx } } };
               },
               checkpoint: async () => ({ nn: { contextTokens: ctx } }),
               close: async () => { release(); },

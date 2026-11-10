@@ -48,3 +48,8 @@ test("a right's days are escaped once on the line, so a value can never start a 
   assert.match(line, /starts 2026-12-01\\u\{7\}T00:00:00\.000Z/, line);
   assert.doesNotMatch(line, /\\\\u\{|\\u\{\\u/, "nothing is escaped twice");
 });
+
+test("a grant.create preview with an idle window says it lapses once unused and that each use renews it (card A07h)", () => {
+  assert.match(describe("grant.create", { grantee: "agent:ann", action: "attempt.work", project: "proj-x", idleDays: 30 }, {}), /\(no end date; lapses once unused for 30 days, each use renews it; only in proj-x\)/);
+  assert.match(describe("grant.create", { grantee: "agent:ann", action: "attempt.work", project: "proj-x", idleDays: 1, expiresAt: "2026-12-01T00:00:00.000Z" }, {}), /\(ends 2026-12-01T00:00:00\.000Z; lapses once unused for 1 day, each use renews it; only in proj-x\)/);
+});
