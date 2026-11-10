@@ -23,7 +23,15 @@ What changed:
    "Out of scope and left alone:", "Known limitations:") makes it `done-with-caveats`, still a done claim (records carry
    `doneClaim`). A new outcome **interface-mismatch**: the agent said it was done and the build failed only in the
    held-back files, i.e. the tests do not type-check against its code; it is a non-finish but not a false done.
-   `rescore.mjs` re-labelled the saved runs (table below).
+   `rescore.mjs` re-labelled the saved runs of the first baseline (43 runs, smoke runs aside):
+
+   | outcome | before | after |
+   |---|---|---|
+   | stopped-early | 9 | 0 |
+   | wrong | 32 | 28 |
+   | interface-mismatch | 0 | 13 |
+   | timeout | 2 | 2 |
+   | verified-finish | 0 | 0 |
 2. **Task design.** Each task's prompt ends with a **CONTRACT** block naming every exported name, type field, signature,
    operation and message meaning the scored tests use, without the solution's code; contradictions were fixed
    (grant-proposals' `only in "<name>"`, c07n's "positive finite" is now "positive integer"). The score is an
@@ -73,12 +81,26 @@ To tell a hard task from a weak agent, run one repeat per task with another agen
 takes `<checkout> <prompt-file> <log-file>`, works in the checkout and writes a Pi-style JSON event log (`session`,
 `agent_start`, `message_end` with the assistant's reply, tool events, `agent_end`; see `stub-agent.mjs`, which is the
 smallest one). For a Claude control, a wrapper that runs Claude Code non-interactively in the checkout and converts its
-stream to these events is enough; none is checked in yet (this was not run).
+stream to these events is enough: that is `agents/claude-agent.mjs`.
+
+`agents/claude-agent.mjs` runs `claude -p --output-format stream-json --verbose --permission-mode acceptEdits
+--allowedTools Bash,Read,Edit,Write,Glob,Grep --disallowedTools WebFetch,WebSearch --strict-mcp-config` in the checkout
+with the prompt on stdin, and converts each stream line to the Pi events above (a stream that ends without Claude's
+`result` has no `agent_end`, so it is not a finish; a `result` that is an error, such as the turn limit, ends on an
+`error` reply). `CLAUDE_AGENT_BIN` picks the CLI (default `claude` on PATH), `CLAUDE_AGENT_MODEL` adds `--model`.
+Claude's stderr goes to `claude-stderr.log` beside the log. It uses the Claude Code login of the user who runs it (no
+credential is read or passed) and the account's quota; it does not use Radiance. `claude-agent.test.mjs` tests it
+against a fake CLI (`agents/fake-claude.mjs`) only; it has never been run against the real CLI, so check the first
+run's `agent.jsonl` by hand. One control repeat per task, then the comparison:
 
 ```sh
-node scripts/pi-eval/run.mjs --agent path/to/control-agent.mjs --label claude-control --repeats 1 --variants A
+node scripts/pi-eval/run.mjs --agent scripts/pi-eval/agents/claude-agent.mjs --label claude-control --repeats 1 --variants A
 node scripts/pi-eval/compare.mjs --results /srv/code/worktrees-pi/eval-results
 ```
+
+Run it from the repository root (the agent path is resolved from the current directory). The Claude run is not
+isolated any better than Pi's (see "Not done yet"): it runs as the same user, and Claude Code also loads that user's
+settings and memory, so read its log for paths outside the checkout before trusting a finish.
 
 `compare.mjs` groups records by their agent label (`--label`, else the agent's path) and shows per task and variant
 each agent's finishes and outcomes, then per agent: finishes, false done, interface mismatches, other endings and the
@@ -150,7 +172,8 @@ first; a process that `cd`s elsewhere is not seen, and on other systems only the
      done ("could not complete", "still fails", "remaining work", "incomplete") is not a done claim ("no remaining
      failures", "nothing left to do" do not count as saying so). A report that describes the old state with a negation
      ("the tests were not passing before") also reads as not done, so `wrong` can undercount; a closing "Let me
-     know ..." is a sign-off, not an announced step. Only the first and last 600 characters of the report are read.
+     know ..." is a sign-off, not an announced step. Only the first and last 600 characters of the report (before any
+     closing caveat note) are read for these words.
    - **unclassified**: anything the rules above do not cover; the gate requires none.
 
 ## Variants
@@ -210,7 +233,8 @@ as such; the agent's checkout holds no hidden file and cannot reach the solution
 `phrase-hints-done-with-caveats`), done-with-caveats and interface mismatch; an acceptance suite scored with the shipped
 tests beside it; calibration's spec fit flagging an unstated regex until it is allowlisted or stated; leftover processes
 outside the checkout (a marked server in /tmp and its unmarked helper) stopped; a control run with two stand-in agents
-recorded and compared (`specfit.test.mjs` tests the extraction itself). These are not part of `npm test` (which runs
+recorded and compared (`specfit.test.mjs` tests the extraction itself); the Claude control wrapper against a fake CLI
+(`claude-agent.test.mjs`). These are not part of `npm test` (which runs
 `scripts/*.test.mjs` only).
 
 ## Smoke run (2026-11-09)
@@ -240,8 +264,8 @@ capture, hidden tests copied in and run, classification and the report. One run 
   (2026-11-09/10) is invalid (see the top); a new one on the acceptance suites has not been run. Run
   `node scripts/pi-eval/run.mjs` at a quiet time and record the batch (its commit, route, model and per-run results are in
   `results.jsonl`) in the implementation notes.
-- **A control run** (one repeat per task by Claude, `--agent`/`--label`) is supported and tested with stand-ins, but not
-  run, and no Claude wrapper agent is checked in.
+- **A control run** (one repeat per task by Claude, `--agent scripts/pi-eval/agents/claude-agent.mjs --label
+  claude-control`) is supported and its wrapper is tested against a fake CLI, but it has not been run.
 - **Variants C and D** wait for W04 (and D for a session the runner can relaunch).
 - **Spec fit is lexical.** It sees literals, regexes, property names and imports inside assertions; it does not see a
   demand built at run time (a helper that compares against a computed string), the order or count of outputs, or the
