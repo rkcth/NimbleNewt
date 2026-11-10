@@ -157,7 +157,7 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
           rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
           while (rounds.size > KEPT_ROUNDS) rounds.delete(rounds.keys().next().value!);
         }
-        await watch({ window, tokens: decision.startupTokens, limit: decision.limits.startup, admitted: decision.admit });
+        if (binding.startSize !== undefined) await watch({ window, tokens: decision.startupTokens, ...(decision.limits?.startup === undefined ? {} : { limit: decision.limits.startup }), admitted: decision.admit });
         return { admit: decision.admit, reasons: decision.reasons };
       },
       async confirm(order, usage) {

@@ -20,6 +20,7 @@ import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { CallBody } from "../mcp/mcp.js";
 import type { CutoverService } from "../routing/cutover.js";
+import { startSizeAlertText, type StartSizeService } from "../context/start-size.js";
 import type { JobService } from "../jobs/jobs.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
@@ -223,6 +224,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
+  start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
   handoff_archive: { keys: ["taskId|taskTitle", "section", "archiveId", "from"], about: "the whole text of a hand-off package section that was cut to fit, as the source gave it (credentials removed): name the task (its latest hand-off, going on or finished) and the section (brief, completedWork, drafts, ...), or the archive ID a cut marker names; from is the line to read on from, as the previous answer says" },
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
@@ -283,6 +285,7 @@ export type StatusRequest =
   | { readonly kind: "owner_questions"; readonly limit?: number }
   | { readonly kind: "needs_you"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
+  | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
   | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
@@ -365,6 +368,8 @@ export interface StatusDeps {
     /** The cuts of a task's latest hand-off the caller may read, and the archived originals (card C07j review, round 4): the `handoff_archive` view. Absent: that view is not offered. */
     cutsForTask?(by: Principal, taskId: string): Promise<{ readonly handoffId: string; readonly phase: string; readonly cuts: readonly { readonly section: string; readonly archiveId: string; readonly left: number; readonly total: number }[] } | undefined>;
     archive?(by: Principal, query: { archiveId: string; part?: number }): Promise<{ readonly handoffId: string; readonly taskId: string; readonly section: string; readonly chars: number; readonly parts: number; readonly text: string; readonly truncated?: boolean } | undefined> };
+  /** Each attempt's starting size across a task's hand-offs and the alerts open on it (card C07i): the `start_size` view and the warning in the task's status. Absent: neither is shown. */
+  readonly startSizes?: Pick<StartSizeService, "read" | "openAlerts">;
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer, and the stand-ups themselves (card M03h): the `standups` view. Absent: they are not listed. */
@@ -584,6 +589,7 @@ export class StatusService {
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "stop_cleanup": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.stopCleanupLines(by, request); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
+      case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
@@ -1089,6 +1095,35 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
+  /**
+   * A task's starting sizes across its hand-offs (card C07i), from the watch's own record: the newest points, what older ones were rolled up into, the alerts open with where the originals are kept, and the thresholds in force.
+   * A route whose window is not known has no share: it is said to be unknown, never shown as zero.
+   */
+  async startSizeLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.startSizes === undefined) return undefined;
+    const taskId = checkTaskId(taskIdValue);
+    const r = await this.#deps.startSizes.read(by, { taskId });
+    if (r === undefined) return undefined;
+    const c = cite("ctx-start-size", derivedId("css", taskId), r.revision);
+    const lines: Line[] = [];
+    const s = r.settings;
+    const thresholds = `The watch alerts once when the starting size rises over ${s.risingHandoffs} hand-offs in a row (each at least ${s.minRisePercent} percent larger) and warns once at ${s.warnPercent} percent of the route's startup limit; it never cuts or compacts anything.`;
+    if (r.points.length === 0) return { observedAt: this.#runner.now(), lines: [line(`No first call of this task has been recorded yet. ${thresholds}`, cite("task", taskId))] };
+    const first = r.rolled?.fromHandoff ?? r.points[0]!.handoff;
+    lines.push(line(`${r.attempts} attempt${r.attempts === 1 ? "" : "s"} recorded, hand-offs ${first} to ${r.points[r.points.length - 1]!.handoff}.${r.rolled === undefined ? "" : ` The ${r.rolled.count} oldest (hand-offs ${r.rolled.fromHandoff} to ${r.rolled.toHandoff}) are rolled up: smallest ${r.rolled.minTokens}, largest ${r.rolled.maxTokens}, mean ${Math.round(r.rolled.sumTokens / r.rolled.count)} tokens.`}`, c, cite("task", taskId)));
+    for (const p of r.points.slice(-10)) {
+      const limit = p.limitTokens === undefined ? "its route's window is not known, so its share of a limit is unknown" : `${p.share} percent of the route's startup limit of ${p.limitTokens} tokens`;
+      lines.push(line(`Hand-off ${p.handoff} (attempt ${shown(p.attemptId, 40)}, ${p.worker} worker, route ${shown(p.route, 80)}): ${p.tokens} tokens, ${limit}${p.admitted ? "" : "; the call was refused"}.`, c));
+    }
+    const how = (ref: string): string => (ref.startsWith("hnd-") ? `${ref} (handoff.get)` : ref.startsWith("hof-") ? `${ref} (context.handoff.read)` : ref.startsWith("sha256:") ? `${ref.slice(0, 19)}... (context.note-archive.read)` : ref);
+    for (const a of [r.alerts.trend, r.alerts.share]) {
+      if (a === undefined || a.state !== "open") continue;
+      lines.push(line(`Alert open since ${a.openedAt}: ${startSizeAlertText(a)}. The originals are kept whole: ${[...a.refs.map(how), "cut hand-off sections in the handoff_archive status of the task"].join("; ")}.`, cite("ctx-start-size", a.id), cite("task", taskId)));
+    }
+    lines.push(line(thresholds, c));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async handoffLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.handoffs === undefined) return undefined;
     const taskId = checkTaskId(taskIdValue);
@@ -1566,6 +1601,11 @@ export class StatusService {
       lines.push(line("It is blocked, but no record says why. That is itself a problem to look at.", cite("task", id, found.revision)));
     for (const c of concerns.suspected) lines.push(line(`Suspected, not confirmed: ${c.detail}`, cite("stall-concern", c.id), cite("task", id)));
     for (const c of concerns.confirmed) lines.push(line(`Confirmed problem: ${c.detail}`, cite("stall-concern", c.id), cite("task", id)));
+    // Card C07i: a starting size that keeps rising, or is close to its limit, is a visible warning on the task while it lasts (the watch cut nothing for it).
+    if (this.#deps.startSizes !== undefined && (viewerIsOwner || allows(by, "attempt.work", body.projectId, { resource: { kind: "task", id } }))) {
+      const open = await this.#deps.startSizes.openAlerts(id).catch(() => []);
+      for (const a of open) lines.push(line(`Warning: ${startSizeAlertText(a)}. Ask for the start_size status of the task for the figures and where the originals are kept.`, cite("ctx-start-size", a.id), cite("task", id)));
+    }
 
     // Completion, from the task record alone, with the doubts that are still open.
     const doubts = await this.#doubts(id, all, toolsOk);
