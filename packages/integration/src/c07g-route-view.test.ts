@@ -25,7 +25,8 @@ test("a task that moves to a route nobody has measured: the real process is meas
   const backend = process.platform === "darwin" ? "seatbelt" : "bubblewrap";
   const usable = real.capacity.available && real.capacity.backend === backend && !["/usr", "/bin", "/lib"].includes(nodeRoot);
   if (!usable) { if (required) assert.fail(`the sandbox is required but unusable: ${real.capacity.reason}`); return t.skip("the sandbox of this OS or a node install it can mount is unusable"); }
-  const model = await endpoint([{ text: "watered" }]);
+  // The agent ends with work.end (card W03: a plain stop is not success).
+  const model = await endpoint([{ call: { name: "nimblenewt__work-end", args: { result: "done", note: "watered" } } }, { text: "watered" }]);
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn c07g ")));
   const dirs = { checkout: join(directory, "checkout"), gitDir: join(directory, "git"), home: join(directory, "home"), scratch: join(directory, "scratch") };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
@@ -122,7 +123,8 @@ test("a task that moves to a route nobody has measured: the real process is meas
     assert.deepEqual(moves.map((m) => [m.basis, m.admit]).sort(), [["estimated", true], ["unmeasured", true]], "decided on the assumed figure, then again on the measured one");
 
     // What the model got is the view built on the measured figure: the process's tools are much smaller than the assumed 14,000 characters, so more of the owner's questions fit whole than in the dispatcher's view.
-    assert.equal(model.seen.length, 1);
+    // The first call, and the reply after work.end when the turn is not ended first (the sweep may end it before that call).
+    assert.ok(model.seen.length === 1 || model.seen.length === 2, String(model.seen.length));
     const sent = JSON.stringify(model.seen[0]!.body.messages);
     const text = JSON.parse(sent) as { content: unknown }[];
     const prompt = text.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n");
