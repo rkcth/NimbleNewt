@@ -124,17 +124,26 @@ for (const backend of backends) {
 }
 
 for (const backend of backends) {
-  test(`${backend.name}: failed, cancelled and outcome-unknown jobs wake the task the same way with the state named (failed and unknown as Needs you); a reconciled unknown job wakes a new attempt of the same assignment`, async () => {
+  test(`${backend.name}: failed, cancelled and outcome-unknown jobs wake the task the same way with the state named (failed and unknown as Needs you); the agent woken for the unknown one that waits again is woken by its reconciliation`, async () => {
     const store = await backend.open();
     try {
       const r = await rig(store.storage);
       const { w } = r;
       const ann = await w.agent("ann", workGrants(w.project, []));
       const seen = new Map<string, string>();
-      w.worker.script = async (c) => { if (c.order.resumeNote !== undefined) { seen.set(c.order.taskId, c.order.resumeNote); return finishes(); } return startsJob(r, `job of ${c.order.taskId.slice(-4)}`)(c); };
+      let unknownTask = "";
+      const proseOnce = new Set<string>();
+      w.worker.script = async (c) => {
+        if (c.order.resumeNote === undefined) return startsJob(r, `job of ${c.order.taskId.slice(-4)}`)(c);
+        seen.set(c.order.taskId, c.order.resumeNote);
+        // The agent woken for the outcome-unknown job ends its first woken turn in prose (it waits for the owner to settle it).
+        if (c.order.taskId === unknownTask && !proseOnce.has(c.order.taskId)) { proseOnce.add(c.order.taskId); return { status: "completed", text: "waiting for the owner to settle it", endKind: "no-work-end", visibleChars: 30, checkpoint: { run: 2 } }; }
+        return finishes();
+      };
       const failed = await w.task("fails", ann);
       const cancelled = await w.task("cancelled", ann);
       const unknown = await w.task("unknown", ann);
+      unknownTask = unknown.taskId;
       await r.tick();
       for (const t of [failed, cancelled, unknown]) assert.equal((await w.dispatcher.get(w.owner, t.attemptId!))!.state, "parked");
       const jobOf = (attemptId: string) => r.started.find((s) => s.attemptId === attemptId)!.jobId;
@@ -151,26 +160,26 @@ for (const backend of backends) {
       assert.equal(levels.get(jobOf(unknown.attemptId!)), "needs-you");
       assert.equal(levels.get(jobOf(cancelled.attemptId!)), "notice");
 
-      // The owner settles the unknown job; the task's attempt has finished meanwhile, so the wake admits a new attempt of the same assignment (and only one), whose first run is told.
-      assert.equal((await w.dispatcher.get(w.owner, unknown.attemptId!))!.state, "finished");
+      // The woken agent of the unknown job ends its turn in prose: the job is still outcome-unknown, so the attempt parks for it again; the owner settles it, and the settled end readmits the same attempt (no new one).
+      const d = (await w.dispatcher.get(w.owner, unknown.attemptId!))!;
+      assert.equal(d.state, "parked", JSON.stringify(d.outcome));
+      assert.deepEqual(d.waitsOnJobs, [jobOf(unknown.attemptId!)]);
       const before = (await w.assignments.getAssignment(unknown.taskId))!;
-      // Later (an attempt that ran when a job's state changed could read it there; this one had ended before the owner settled it).
       w.clock.advance(60_000);
       await r.jobs.reconcile(w.owner, { commandId: "rc", jobId: jobOf(unknown.attemptId!), to: "completed", evidence: "the report file is complete" });
       const report = await r.tick();
-      const after_ = (await w.assignments.getAssignment(unknown.taskId))!;
-      assert.equal(after_.generation, before.generation, "the same assignment");
-      assert.equal(after_.attempts, before.attempts + 1, "one new attempt");
-      assert.equal(report.woken?.length, 1);
+      assert.deepEqual(report.woken, [unknown.attemptId]);
+      assert.equal((await w.assignments.getAssignment(unknown.taskId))!.attempts, before.attempts, "the same attempt, not a new one");
       const fresh = w.worker.starts.at(-1)!;
-      assert.notEqual(fresh.attemptId, unknown.attemptId);
-      assert.equal(fresh.taskId, unknown.taskId);
+      assert.equal(fresh.attemptId, unknown.attemptId);
+      assert.equal(fresh.requestId, `cmd:adm:${unknown.attemptId}:wk2`);
       assert.match(fresh.resumeNote ?? "", /had an unknown outcome, which was settled: it completed/);
       const wakes = await r.wake(unknown.taskId);
       assert.deepEqual(wakes.map((x) => [x.phase, x.status]).sort(), [["end", "woken"], ["reconciled", "woken"]]);
       assert.equal(wakes.find((x) => x.phase === "reconciled")!.notice, undefined, "the owner settled it: no notification for that");
+      assert.equal((await w.dispatcher.get(w.owner, unknown.attemptId!))!.outcome?.status, "succeeded");
       await r.tick();
-      assert.equal((await w.assignments.getAssignment(unknown.taskId))!.attempts, before.attempts + 1, "never a second one");
+      assert.equal((await w.assignments.getAssignment(unknown.taskId))!.attempts, before.attempts, "never a new one");
     } finally { await store.close(); }
   });
 }
@@ -432,6 +441,74 @@ for (const backend of backends) {
       for (let i = 0; i < 3 && !woken.includes(behind.attemptId!); i++) woken.push(...((await r.tick()).woken ?? []));
       assert.ok(woken.includes(behind.attemptId!), "the wake behind the waiting ones is reached");
       assert.equal((await w.dispatcher.get(w.owner, paused.attemptId!))!.state, "parked", "the paused task still waits");
+    } finally { await store.close(); }
+  });
+}
+
+
+// Second review (clean-context Opus): an attempt ended on purpose before its job ended (its agent's work.end, whatever the result, or the owner's stop) is not followed by a new attempt when the job ends; the owner is still
+// told. A wake whose admitted attempt ran and ended before the wake was recorded admits no second one.
+for (const backend of backends) {
+  test(`${backend.name}: a job that ends after its attempt was ended by its agent's work.end (done, partial, blocked, abandoned) or stopped by the owner starts no new attempt; the owner is told; an admitted wake is not admitted twice`, async () => {
+    const store = await backend.open();
+    try {
+      const r = await rig(store.storage);
+      const { w } = r;
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const quiet = { status: "completed", text: "waiting", endKind: "no-work-end", visibleChars: 7, checkpoint: { run: 1 } } as const;
+      for (const how of ["done", "partial", "blocked", "abandoned", "owner-stop"] as const) {
+        w.worker.script = async (c) => {
+          await startsJob(r, `job ${how}`)(c);
+          if (how === "owner-stop") return quiet;
+          await w.dispatcher.finishWith(w.owner, c.order.attemptId, { result: how, note: "ended" });
+          return finishes();
+        };
+        const t = await w.task(`task ${how}`, ann);
+        await r.tick();
+        if (how === "owner-stop") {
+          assert.equal((await w.dispatcher.get(w.owner, t.attemptId!))!.state, "parked");
+          await w.dispatcher.stop(w.owner, t.attemptId!, { reason: "not now" });
+        }
+        assert.equal((await w.dispatcher.get(w.owner, t.attemptId!))!.state, "finished", how);
+        const before = (await w.assignments.getAssignment(t.taskId))!.attempts;
+        w.clock.advance(5000);
+        const job = r.started.at(-1)!.jobId;
+        await r.jobs.finish(host(r), { commandId: `f-${job}`, jobId: job, outcome: "completed" });
+        const starts = w.worker.starts.length;
+        await r.tick();
+        await r.tick();
+        assert.equal((await w.assignments.getAssignment(t.taskId))!.attempts, before, `${how}: no new attempt`);
+        assert.equal(w.worker.starts.length, starts, `${how}: nothing started`);
+        const [wake] = await r.wake(t.taskId);
+        assert.equal(wake!.status, "skipped", how);
+        assert.match(wake!.reason ?? "", how === "owner-stop" ? /was stopped \(your stop\)/ : /its agent ended its work/, how);
+        assert.deepEqual(wake!.notice, { sent: true }, `${how}: the owner is told of the end`);
+        const item = (await r.notifications.inbox(w.owner)).items.find((i) => i.ref.id === job);
+        assert.match(item?.detail ?? "", /The agent was not woken: /);
+      }
+
+      // A wake marked admitting whose admitted attempt has run and ended (a crash before the wake was recorded): no second attempt.
+      w.worker.script = async (c) => (c.order.resumeNote === undefined ? startsJob(r, "crash")(c) : finishes());
+      const t = await w.task("crash", ann);
+      await r.tick();
+      const job = r.started.at(-1)!.jobId;
+      await r.jobs.finish(host(r), { commandId: `f-${job}`, jobId: job, outcome: "completed" });
+      const wakeId = wakeIdOf(job, "end");
+      const found = (await store.storage.getAggregate({ kind: JOB_WAKE_KIND, id: wakeId }))!;
+      // The attempt that would have woken has ended, a later one was admitted for the wake and has ended too, and the wake still says admitting.
+      await w.dispatcher.stop(w.owner, t.attemptId!, { reason: "seed" });
+      const asg = (await w.assignments.getAssignment(t.taskId))!;
+      const next = (await w.assignments.admitAttempt({ commandId: "ad-crash", actor: "inbox", taskId: t.taskId, expectedRevision: asg.revision, generation: asg.generation, owner: { kind: "agent", id: ann.aid }, harness: "pi" })).id;
+      const asg2 = (await w.assignments.getAssignment(t.taskId))!;
+      await w.assignments.finishAttempt({ commandId: "fin-crash", actor: "inbox", taskId: t.taskId, expectedRevision: asg2.revision, fence: { generation: asg2.generation, attemptId: next }, outcome: "succeeded" });
+      await store.storage.applyOperation({ operationId: "seed-admitting", epoch: w.epoch, actor: "test", correlationId: "seed-admitting", at: w.clock.now(), changes: [{ type: "update", ref: { kind: JOB_WAKE_KIND, id: wakeId }, expectedRevision: found.revision, body: { ...(found.body as object), status: "admitting", admitting: { generation: asg.generation, attempts: asg.attempts } } }] as never, audit: [{ type: "test.seed", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+      const attempts = (await w.assignments.getAssignment(t.taskId))!.attempts;
+      await r.tick();
+      await r.tick();
+      assert.equal((await w.assignments.getAssignment(t.taskId))!.attempts, attempts, "no second attempt for one wake");
+      const after_ = (await r.wake(t.taskId))[0]!;
+      assert.equal(after_.status, "skipped");
+      assert.match(after_.reason ?? "", /the attempt admitted for it has run and ended/);
     } finally { await store.close(); }
   });
 }

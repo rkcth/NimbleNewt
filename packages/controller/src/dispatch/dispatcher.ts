@@ -2605,11 +2605,21 @@ export class DispatcherService {
     }
     // No live attempt. An attempt that ran after the job ended could read its result there (the agent polled it, or the job was short) and has ended since, by its own work.end or otherwise: its end is not a reason to
     // start another attempt (review fix: otherwise every job that ends while its attempt runs starts a new attempt once the agent ends its work).
+    // A new attempt admitted for this wake has run and ended before the wake was recorded (a crash in between): the wake was made (second review: the admitting mark was only read while that attempt was live).
+    if (w.status === "admitting" && w.admitting !== undefined && assignment.attempts > w.admitting.attempts) return skip("the attempt admitted for it has run and ended");
     for (const id of [w.seenBy, w.attemptId]) {
       if (id === undefined) continue;
       const ran = (await this.#load(id))?.body;
-      if (ran?.state === "finished" && ran.generation === assignment.generation && (id === w.seenBy || (ran.outcome !== undefined && Date.parse(ran.outcome.at) >= Date.parse(w.at)))) return skip(`its attempt ${id} ran when the job ended and has ended since (it could read the job's result there)`);
+      if (ran?.state !== "finished" || ran.generation !== assignment.generation) continue;
+      if (id === w.seenBy || (ran.outcome !== undefined && Date.parse(ran.outcome.at) >= Date.parse(w.at))) return skip(`its attempt ${id} ran when the job ended and has ended since (it could read the job's result there)`);
+      // An attempt ended on purpose before the job ended: stopped by the owner (or an emergency stop), or ended by its agent's own work.end (done, partial, blocked or abandoned). The job's end does not start the task again
+      // after that (second review: it did, so a stop or the agent's "done" was undone by a job that ended later); the owner is told of the end and can assign the task again.
+      if (ran.stopped !== undefined) return skip(`its attempt ${id} was stopped (${ran.stopped.by === "emergency" ? "an emergency stop" : "your stop"}) before the job ended, and a job's end does not start a stopped attempt's task again`);
+      if (ran.turnEnd?.endKind === "normal" && ran.outcome?.status !== "stopped-early") return skip(`its agent ended its work (attempt ${id}, with work.end) before the job ended, so no new attempt was started for it`);
     }
+    // An attempt of the task later than the one that started the job ran after it (and has ended): it could read the job, and how it ended is its own (second review).
+    const startedBy = w.attemptId === undefined ? undefined : await this.#deps.assignments.getAttempt(w.attemptId).catch(() => undefined);
+    if (startedBy !== undefined && startedBy.number < assignment.attempts) return skip("a later attempt of the task ran after the one that started the job, and has ended");
     // Otherwise a new one of the same assignment, unless the owner has to decide first.
     for (const type of ["dispatch_blocked", "agent_stopped_early"] as const) {
       const open = await this.#deps.blockers.openFor(type, { kind: "task", id: w.taskId }).catch(() => undefined);
