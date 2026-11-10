@@ -8,10 +8,15 @@
 //   --work-root DIR      where throwaway checkouts go (default eval-work beside the results, or PI_EVAL_WORK_ROOT)
 //   --repo DIR           the repository that holds the base and solution commits (default: this checkout)
 //   --deps-from DIR      where node_modules are copied from (default: --repo)
-//   --agent CMD          the agent: a .mjs/.js file run with this Node, or an executable (default pi-agent.mjs)
+//   --agent CMD          the agent: a .mjs/.js file run with this Node, or an executable (default pi-agent.mjs); it is
+//                        called as `<agent> <checkout> <prompt-file> <log-file>` and writes Pi's JSON event log (README:
+//                        "A control run")
+//   --label NAME         the name results.jsonl records for the agent (default its path); compare.mjs groups by it
 //   --timeout-minutes N  override every task's wall-clock limit
 //   --taskset FILE       default taskset.json beside this file
-//   --calibrate          no agent: check each task's hidden tests fail at its base and pass at its solution
+//   --calibrate          no agent: check each task's acceptance tests fail at its base and pass at its solution, that
+//                        they demand nothing the prompt or the base source does not show (spec fit, see README), and
+//                        run the shipped suites at the solution (--no-shipped skips that informational part)
 //   --keep               keep the throwaway checkouts      --dry-run  print what would run
 import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
@@ -31,7 +36,7 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument ${a}`);
     const [k, inline] = a.slice(2).split(/=(.*)/s);
-    if (["calibrate", "keep", "dry-run", "no-report", "help"].includes(k)) { o.flags.add(k); continue; }
+    if (["calibrate", "keep", "dry-run", "no-report", "help", "no-shipped"].includes(k)) { o.flags.add(k); continue; }
     const v = inline ?? argv[++i];
     if (v === undefined) throw new Error(`--${k} needs a value`);
     o[k] = v;
@@ -74,8 +79,8 @@ async function main() {
   const children = new Set();
   const activeDirs = new Set();
   const ctx = {
-    set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: agentPath, batchId, benchCommit, children, activeDirs,
-    keep: o.flags.has("keep"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
+    set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: o.label ?? agentPath, agentPath, batchId, benchCommit, children, activeDirs,
+    keep: o.flags.has("keep"), skipShipped: o.flags.has("no-shipped"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
     log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`),
   };
   for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => {
@@ -95,7 +100,13 @@ async function main() {
       const r = await calibrateOne(ctx, t);
       await appendJsonl(join(resultsDir, "calibration.jsonl"), r);
       ok &&= r.ok;
-      process.stdout.write(`${t.id}: ${r.ok ? "ok" : "NOT OK"} (base ${r.base ? `${r.base.pass}/${r.base.tests} pass` : "-"}, solution ${r.solution ? `${r.solution.pass}/${r.solution.tests} pass` : "-"})${r.error ? ` ${r.error}` : ""}\n`);
+      const side = (x) => (x ? `${x.pass ?? 0}/${x.tests ?? 0} pass${x.built === false ? `, build failed${x.interfaceMismatch ? " in the suite's files" : ""}` : ""}` : "-");
+      process.stdout.write(`${t.id}: ${r.ok ? "ok" : "NOT OK"} [${r.suite}] (base ${side(r.base)}, solution ${side(r.solution)}${r.shipped ? `; shipped suites at the solution ${r.shipped.pass}/${r.shipped.tests} pass` : ""})${r.error ? ` ${r.error}` : ""}\n`);
+      if (r.specFit) {
+        process.stdout.write(`  spec fit: ${r.specFit.demands} demand(s) read, ${r.specFit.flagged} not in the prompt or the base source, ${r.specFit.unjustified.length} without a reason in the allowlist${r.specFit.ok ? "" : ": NOT OK"}\n`);
+        for (const u of r.specFit.unjustified) process.stdout.write(`    ${u.kind} ${u.key}  (${u.file}:${u.line})\n`);
+        if (r.specFit.stale.length > 0) process.stdout.write(`  stale allowlist entries (no longer flagged): ${r.specFit.stale.map((k) => JSON.stringify(k)).join(", ")}\n`);
+      }
     }
     return ok ? 0 : 1;
   }

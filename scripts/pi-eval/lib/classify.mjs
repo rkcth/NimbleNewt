@@ -5,7 +5,7 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 
 /** Every ending a run can have. `unclassified` exists only so a gap in this file is counted instead of hidden; the gates require none. */
-export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "timeout", "error", "unclassified"]);
+export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "error", "unclassified"]);
 
 /** Words a final report uses when it says the work is done. Read only to tell a false done (`wrong`) from a stop mid-work; it never makes a run a finish. */
 const DONE_CLAIM = /\b(?:done|complete(?:d|s)?|finished|all (?:\d+ )?(?:of the )?(?:tests?|checks?|steps?) (?:now )?pass(?:ed|es)?|implemented|summary of (?:the )?(?:work|changes)|work is complete)\b/i;
@@ -16,6 +16,18 @@ const DONE_CLAIM = /\b(?:done|complete(?:d|s)?|finished|all (?:\d+ )?(?:of the )
 const NOT_DONE = /\b(?:not|never)\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|n't\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete[ds]?|finish(?:ed)?|implemented|pass(?:ing|ed)?)\b|\b(?:unable to|could ?not|couldn't|cannot|can't|did not|didn't|failed to)\s+(?:yet\s+)?(?:complete|finish|get|make|implement|fix)\b|(?<!\b(?:no|nothing|zero)\s+(?:\w+\s+)?)\bremaining (?:work|steps?|tasks?|items?|failures?)\b|(?<!\b(?:no|none|nothing|zero)\s+(?:\w+\s+)?)\bstill (?:fail(?:s|ing)?|to do|open|unchecked)\b|\b(?:incomplete|partially (?:done|complete[d]?|implemented)|work in progress)\b|(?<!\bnothing\s+(?:is\s+)?)\bleft to do\b/i;
 // The lookbehinds keep a done report's "no remaining failures", "none still failing", "no tests still fail" and
 // "nothing left to do" from reading as a partial report.
+/**
+ * A report whose plan is all done, said without the word "done": "All boxes ticked; tree clean.", "All ten steps are
+ * committed and the working tree is clean.", "All PLAN.md boxes are ticked".
+ */
+const ALL_TICKED = /\ball\s+(?:(?:the|of the|my|[\w.]+)\s+){0,3}(?:boxes|steps|items|checkboxes|tasks)\s+(?:are\s+|were\s+)?(?:now\s+)?(?:ticked|checked|done|complete[d]?|committed|finished)\b|\b(?:working\s+)?tree\s+(?:is\s+)?clean\b/i;
+/**
+ * The start of a scoped caveat note at the end of a report ("Remaining risk / not done: ...", "**Not done:** ...",
+ * "Out of scope and left alone: ...", or such a label alone on its line as a heading). What follows it names what the agent chose to leave, not a refusal of the task.
+ */
+const CAVEAT_LABEL = /(?:^|\n)[ \t]*[#>*_\- \t]*(?:remaining risks?|risks?|not done|left (?:out|undone|alone)|out of scope|follow[- ]?ups?|known (?:limitations?|gaps?|issues?)|caveats?|limitations?|open (?:points|questions)|not (?:changed|touched|covered|in this change))\b[^\n:]{0,40}(?::|(?=\n))/i;
+/** A tool call that runs tests: its result is read for the agent's own last test counts. */
+const TEST_COMMAND = /(?:--test\b|\bnpm\s+(?:run\s+)?test\b|\bnode\s+--test\b)/;
 /** A last line that announces a next step ("Now let me run the tests:") instead of reporting. "Let me know ..." is a sign-off, not a step. */
 const ANNOUNCES_STEP = /(?:^|[\n.!]\s*)(?:(?:now|next|then|first|ok(?:ay)?|good)[,:]?\s+)?(?:I'll|I will|I'm going to|let me(?!\s+know)|let's|I need to)\b[^\n]*$|:\s*$/i;
 /** What a model writes when it answers nothing (seen as the whole thinking of a thinking-only reply). */
@@ -30,6 +42,8 @@ export function newSummary() {
     turns: 0, assistantMessages: 0, toolCalls: 0, toolErrors: 0, toolCommands: [],
     tokens: { input: 0, output: 0, cacheRead: 0, reasoning: 0 },
     last: null, parseErrors: 0, events: 0,
+    // The agent's own test runs: the counts of the last one that printed any, and how many ran.
+    selfTestRuns: 0, lastSelfTest: null, pendingTests: new Set(),
   };
 }
 
@@ -47,8 +61,17 @@ export function addEvent(s, e) {
       s.toolCalls++;
       // Kept bounded: only used to look for a run that read the hidden solution from elsewhere.
       if (s.toolCommands.length < 5000) s.toolCommands.push(JSON.stringify(e.args ?? {}).slice(0, 2000));
+      if (typeof e.args?.command === "string" && TEST_COMMAND.test(e.args.command)) s.pendingTests.add(e.toolCallId);
       break;
-    case "tool_execution_end": if (e.isError === true) s.toolErrors++; break;
+    case "tool_execution_end": {
+      if (e.isError === true) s.toolErrors++;
+      if (!s.pendingTests.delete(e.toolCallId)) break;
+      s.selfTestRuns++;
+      const out = textOf(e.result?.content, "text", "text") || String(e.result?.structuredContent?.output ?? "");
+      const c = testCounts(out);
+      if (c.pass !== null || c.fail !== null) s.lastSelfTest = { tests: c.tests, pass: c.pass, fail: c.fail };
+      break;
+    }
     case "message_end": {
       const m = e.message;
       if (!m || m.role !== "assistant") break;
@@ -67,6 +90,8 @@ export function addEvent(s, e) {
         // A report often says "Done." first and lists tests last, so both ends are kept and read for a done claim.
         visibleHead: visible.trim().slice(0, 600),
         visibleTail: visible.trim().slice(-600),
+        // The whole report (bounded), to tell a scoped caveat note at its end from a refusal.
+        visibleText: visible.trim().slice(0, 20_000),
         thinkingTail: thinking.trim().slice(-300),
         errorMessage: typeof m.errorMessage === "string" ? m.errorMessage.slice(0, 300) : null,
       };
@@ -118,15 +143,38 @@ export function endKindOf(summary) {
   return "report";
 }
 
-/** Whether the last visible text claims the work is done. */
-export const claimsDone = (summary) => {
+/** Whether the agent's last own test run that printed counts was green (some passed, none failed). */
+export const selfTestsGreen = (summary) => summary.lastSelfTest !== null && summary.lastSelfTest !== undefined && (summary.lastSelfTest.pass ?? 0) > 0 && summary.lastSelfTest.fail === 0;
+
+/**
+ * What the last reply says about the work:
+ *   "done"              it says the work is done: done words ("Done.", "complete", "all tests pass"), a plan said to be
+ *                       all done ("All boxes ticked; tree clean."), or, whatever its words, a report given with every
+ *                       PLAN.md box ticked, a clean tree and the agent's own last test run green;
+ *   "done-with-caveats" the same, with a scoped note of what was left ("Remaining risk / not done: ..."): still a done claim;
+ *   "not-done"          it says the work is not done (outside such a note): an honest partial report, not a false done;
+ *   "none"              no visible report, a report that announces a next step, or one that claims nothing.
+ * Only the first and last 600 characters of the report's body (before any caveat note) are read for the words, since
+ * the middle of a long report quotes old states ("the tests were not passing before").
+ *   ctx: { plan, dirty } as the runner measured them (both optional).
+ */
+export function doneClaim(summary, { plan = null, dirty = null } = {}) {
   const last = summary.last;
-  if (last === null || last.visibleChars === 0) return false;
-  const head = last.visibleHead ?? "";
-  if (!(DONE_CLAIM.test(head) || DONE_CLAIM.test(last.visibleTail))) return false;
-  if (NOT_DONE.test(head) || NOT_DONE.test(last.visibleTail)) return false;
-  return !ANNOUNCES_STEP.test(last.visibleTail);
-};
+  if (last === null || last.visibleChars === 0) return "none";
+  if (ANNOUNCES_STEP.test(last.visibleTail)) return "none";
+  const text = last.visibleText ?? `${last.visibleHead ?? ""}\n${last.visibleTail ?? ""}`;
+  const cut = CAVEAT_LABEL.exec(text);
+  const body = cut === null ? text : text.slice(0, cut.index);
+  const head = body.slice(0, 600), tail = body.slice(-600);
+  if (NOT_DONE.test(head) || NOT_DONE.test(tail)) return "not-done";
+  const structural = plan !== null && plan.unchecked === 0 && plan.checked > 0 && dirty === false && selfTestsGreen(summary);
+  const said = DONE_CLAIM.test(head) || DONE_CLAIM.test(tail) || ALL_TICKED.test(head) || ALL_TICKED.test(tail);
+  if (!said && !structural) return "none";
+  return cut !== null ? "done-with-caveats" : "done";
+}
+
+/** Whether the last visible text claims the work is done (with or without a caveat note). */
+export const claimsDone = (summary, ctx) => { const d = doneClaim(summary, ctx); return d === "done" || d === "done-with-caveats"; };
 
 /**
  * Names a run's ending. Input:
@@ -139,9 +187,11 @@ export const claimsDone = (summary) => {
  * The order matters: a timeout or a broken run is never a finish, a finish needs the hidden tests to pass on a changed
  * worktree, and every other ending is named from the log. `unclassified` is returned only for a case not foreseen here.
  */
-export function classify({ summary, hidden, plan = null, changed, timedOut = false, exitCode = 0 }) {
+export function classify({ summary, hidden, plan = null, changed, dirty = null, timedOut = false, exitCode = 0 }) {
   const endKind = endKindOf(summary);
-  const out = (outcome, reason) => ({ outcome, reason, endKind, claimsDone: claimsDone(summary) });
+  const claim = doneClaim(summary, { plan, dirty });
+  const done = claim === "done" || claim === "done-with-caveats";
+  const out = (outcome, reason) => ({ outcome, reason, endKind, claimsDone: done, doneClaim: claim });
   if (timedOut) return out("timeout", "the agent was stopped at its wall-clock limit");
   if (!summary.sawSession && summary.assistantMessages === 0) return out("error", `the agent wrote no Pi session (exit ${exitCode})`);
   if (summary.last !== null && (summary.last.stopReason === "error" || summary.last.stopReason === "aborted")) return out("error", `the last reply ended with ${summary.last.stopReason}${summary.last.errorMessage ? `: ${summary.last.errorMessage}` : ""}`);
@@ -159,7 +209,8 @@ export function classify({ summary, hidden, plan = null, changed, timedOut = fal
   if (summary.last.stopReason === "stop" || summary.last.stopReason === "toolUse") {
     if (unfinishedPlan) return out("stopped-early", `the agent stopped with ${plan.unchecked} unchecked PLAN.md step(s) and the held-back tests fail`);
     if (summary.last.visibleChars === 0) return out("stopped-early", "the agent stopped on a thinking-only reply mid-work");
-    if (claimsDone(summary)) return out("wrong", "the agent said it was done and the held-back tests fail");
+    if (done && hidden?.interfaceMismatch === true) return out("interface-mismatch", `the agent said it was done and the held-back tests do not type-check against its code (${(hidden.typeErrorFiles ?? []).slice(0, 3).join(", ") || "a name, field or signature differs"}): not scored as a false done`);
+    if (done) return out("wrong", `the agent said it was done${claim === "done-with-caveats" ? " (with a note of what it left)" : ""} and the held-back tests fail`);
     return out("stopped-early", endKind === "announced-step" ? "the agent announced a next step and stopped" : "the agent stopped without saying the work was done");
   }
   return out("unclassified", `no rule for stopReason ${JSON.stringify(summary.last.stopReason)}`);

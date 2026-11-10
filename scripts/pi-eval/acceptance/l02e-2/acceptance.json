@@ -1,0 +1,14 @@
+{
+  "files": {
+    "packages/controller/src/lifecycle/w01-acceptance-l02e-2-ports.test.ts": "w01-acceptance-l02e-2-ports.test.ts",
+    "packages/controller/src/lifecycle/w01-acceptance-l02e-2-stop.test.ts": "w01-acceptance-l02e-2-stop.test.ts",
+    "packages/controller/src/status/w01-acceptance-l02e-2-status.test.ts": "w01-acceptance-l02e-2-status.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/lifecycle/w01-acceptance-l02e-2-ports.test.js",
+    "dist/lifecycle/w01-acceptance-l02e-2-stop.test.js",
+    "dist/status/w01-acceptance-l02e-2-status.test.js"
+  ],
+  "allow": {}
+}

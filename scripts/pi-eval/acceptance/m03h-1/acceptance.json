@@ -1,0 +1,14 @@
+{
+  "files": {
+    "packages/controller/src/standups/w01-acceptance-m03h-1-standups.test.ts": "w01-acceptance-m03h-1-standups.test.ts",
+    "packages/controller/src/status/w01-acceptance-m03h-1-status.test.ts": "w01-acceptance-m03h-1-status.test.ts",
+    "packages/controller/src/chat/w01-acceptance-m03h-1-chat.test.ts": "w01-acceptance-m03h-1-chat.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/standups/w01-acceptance-m03h-1-standups.test.js",
+    "dist/status/w01-acceptance-m03h-1-status.test.js",
+    "dist/chat/w01-acceptance-m03h-1-chat.test.js"
+  ],
+  "allow": {}
+}

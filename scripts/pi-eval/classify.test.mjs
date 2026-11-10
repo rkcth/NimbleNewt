@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { classify, endKindOf, planProgress, summarizeLogFile, summarizeLogText, testCounts } from "./lib/classify.mjs";
+import { classify, doneClaim, endKindOf, planProgress, summarizeLogFile, summarizeLogText, testCounts } from "./lib/classify.mjs";
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const load = (name) => summarizeLogFile(join(fixtures, name));
@@ -157,4 +157,78 @@ test("a log line split by a stray line, a huge line and a half-written last line
   assert.equal(s.toolCalls, 2);
   assert.equal(s.agentEnd, true);
   assert.equal(classify({ summary: s, hidden: failed, changed: true }).outcome, "wrong");
+});
+
+// The baseline's misread endings (2026-11-10 audit): reports that say the plan is done without a done word, and done
+// reports with a scoped note of what was left, were scored stopped-early.
+const testRun = (pass, fail, id = "t1") => [
+  { type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "cd packages/controller && node --test dist/chat/*.test.js" } },
+  { type: "tool_execution_end", toolCallId: id, toolName: "bash", result: { content: [{ type: "text", text: `# tests ${pass + fail}\n# pass ${pass}\n# fail ${fail}\n` }] }, isError: fail > 0 },
+];
+const reportWith = (text, ...extra) => summarizeLogText(ev(...head, tool, ...extra, msg([{ type: "text", text }], "stop"), ...tail));
+
+test("c07n-B-r3: 'All ten steps are committed and the working tree is clean.' is a done claim (a false done when the tests fail)", async () => {
+  const s = await load("c07n-all-steps-committed.jsonl");
+  assert.equal(s.lastSelfTest.fail, 0);
+  const r = classify({ summary: s, hidden: failed, changed: true, plan: { checked: 11, unchecked: 0 }, dirty: false });
+  assert.equal(r.outcome, "wrong", r.reason);
+  assert.equal(r.doneClaim, "done");
+});
+
+test("a report with every PLAN.md box ticked, a clean tree and a green last self-test is a done claim whatever its first word", async () => {
+  const s = await load("flaky-report-no-done-word.jsonl"); // opens "## Report", no done word anywhere in its ends
+  const plan = { checked: 11, unchecked: 0 };
+  assert.equal(classify({ summary: s, hidden: failed, changed: true, plan, dirty: false }).outcome, "wrong");
+  assert.equal(classify({ summary: s, hidden: passed, changed: true, plan, dirty: false }).outcome, "verified-finish");
+  // Any of the three missing, the words alone decide: this report has none, so it is not a done claim.
+  assert.equal(classify({ summary: s, hidden: failed, changed: true, plan, dirty: true }).outcome, "stopped-early");
+  assert.equal(classify({ summary: s, hidden: failed, changed: true, plan: { checked: 10, unchecked: 1 }, dirty: false }).outcome, "stopped-early");
+  const red = reportWith("## Report\nChanged the parser and its preview.", ...testRun(10, 2));
+  assert.equal(doneClaim(red, { plan, dirty: false }), "none", "the last self-test failed");
+  const green = reportWith("## Report\nChanged the parser and its preview.", ...testRun(3, 1, "a"), ...testRun(12, 0, "b"));
+  assert.equal(doneClaim(green, { plan, dirty: false }), "done", "the last self-test is the one that counts");
+  assert.equal(doneClaim(green, { plan: null, dirty: false }), "none", "variant A has no plan: words only");
+});
+
+test("plan-done phrasings are done claims: all boxes ticked, all N steps committed, tree clean", () => {
+  for (const text of [
+    "All boxes ticked; tree clean. Report:\n\n## What changed\n- the parser",
+    "All nine PLAN boxes are ticked; tree is clean at d7974be8 (9 commits, nothing pushed).",
+    "All six PLAN steps are ticked and committed; the tree is clean.",
+    "All PLAN.md boxes are ticked and every step is committed on `eval`.",
+    "All nine steps are ticked and committed. Final state:\n\n| File | Change |\n|---|---|\n| policy-edit.ts | the word lists are gone |",
+  ]) assert.equal(doneClaim(reportWith(text)), "done", text);
+});
+
+test("phrase-hints-A-r1: 'Done.' with a closing 'Remaining risk / not done:' note is done with caveats, not a refusal", async () => {
+  const s = await load("phrase-hints-done-with-caveats.jsonl");
+  const r = classify({ summary: s, hidden: failed, changed: true });
+  assert.equal(r.doneClaim, "done-with-caveats");
+  assert.equal(r.outcome, "wrong", r.reason);
+  assert.equal(classify({ summary: s, hidden: passed, changed: true }).outcome, "verified-finish");
+});
+
+test("a scoped caveat note does not turn a done report into a stop; a not-done statement in the body still does", () => {
+  for (const text of [
+    "Done. The preview quotes every name.\n\n**Out of scope and left alone:** the status view, which still prints raw text; not done here.",
+    "Done. All tests pass.\n\nKnown limitations: the API hint is not changed and is not done in this card.",
+    "Implemented the grant dates.\n\n### Remaining risk / not done\n- meetings/record.ts still says \"say what you decide\"; left for its own card.",
+  ]) assert.equal(doneClaim(reportWith(text)), "done-with-caveats", text);
+  for (const text of [
+    "I could not complete step 4.\n\nRemaining risk: the coordinator test still fails.",
+    "The change is not yet complete; two tests are still failing.\n\nFollow-up: finish the preview.",
+  ]) assert.equal(doneClaim(reportWith(text)), "not-done", text);
+});
+
+test("hidden tests that do not type-check against the agent's code are an interface mismatch, not a false done", () => {
+  const s = reportWith("Done. All tests pass.");
+  const mismatch = { ran: true, passed: false, built: false, interfaceMismatch: true, typeErrorFiles: ["packages/controller/src/x/w01-acceptance-x.test.ts"] };
+  const r = classify({ summary: s, hidden: mismatch, changed: true });
+  assert.equal(r.outcome, "interface-mismatch", r.reason);
+  assert.match(r.reason, /w01-acceptance-x\.test\.ts/);
+  // The agent's own code not building is no mismatch: still a false done.
+  assert.equal(classify({ summary: s, hidden: { ...mismatch, interfaceMismatch: false }, changed: true }).outcome, "wrong");
+  // An agent that did not claim to be done stopped early, whatever the build says.
+  const stop = reportWith("I found the file. Next I'll add the tests:");
+  assert.equal(classify({ summary: stop, hidden: mismatch, changed: true }).outcome, "stopped-early");
 });

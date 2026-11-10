@@ -90,7 +90,13 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
   for (const v of variants) {
     const r = gatesFor(v, groups);
     allPass &&= r.pass;
-    out.push(`## Variant ${v}`, ...r.lines.map((l) => `- ${l}`), `- ${r.pass ? "PASS" : `FAIL: ${r.failures.join("; ")}`}`, "");
+    // The card's shipped test files, also run on each agent's work: they carry wording later review rounds settled on that
+    // no prompt states, so they are shown for information and never gate.
+    const shipped = records.filter((x) => String(x.variant ?? "?") === v && x.shipped);
+    const info = shipped.length > 0 ? [`- matches shipped wording (informational, not a gate): ${shipped.filter((x) => x.shipped.passed).length}/${shipped.length} run(s) pass the card's shipped test files`] : [];
+    const mism = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
+    if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes, not as false done`);
+    out.push(`## Variant ${v}`, ...r.lines.map((l) => `- ${l}`), ...info, `- ${r.pass ? "PASS" : `FAIL: ${r.failures.join("; ")}`}`, "");
   }
   out.push(variants.length === 0 ? "RESULT: no runs" : `RESULT: ${allPass ? "PASS" : "FAIL"} (${variants.map((v) => `${v} ${gatesFor(v, groups).pass ? "pass" : "fail"}`).join(", ")})`);
   return { text: out.join("\n"), pass: allPass, groups };
