@@ -34,7 +34,7 @@ import { checkValue, schemaProblems } from "./schema.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "maintenance.request", "maintenance.status"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "maintenance.request", "maintenance.status", "turn.continue"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -133,7 +133,11 @@ export interface ToolExecutionDeps {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue"]);
+/** The most continuations of one turn the controller agrees to (card W04; the worker's own bound is 3). */
+const MAX_TURN_CONTINUATIONS = 10;
+/** The end kinds a continuation may name (card W02's, restated: the controller does not depend on the worker's contracts). */
+const CONTINUED_KINDS = new Set(["length", "empty-visible-text", "no-work-end", "announced-step-without-tool-call"]);
 /**
  * Control characters other than a line break or a tab (terminal escapes among them, C1 controls, the line and paragraph separators) and invisible format characters (bidirectional overrides, zero-width characters: `\p{Cf}`)
  * are dropped from a job's output before the agent reads it.
@@ -152,7 +156,7 @@ const isObject = (v: unknown): v is JsonObject => typeof v === "object" && v !==
 export const toolPathName = (canonical: string): string => runAction(canonical).slice("tool.".length);
 const canonicalOf = (pathName: string): string => (pathName.startsWith("a-") ? `a_${pathName.slice(2)}` : pathName);
 
-interface Context { /** The task credential's own principal, cut to the task and project (desk, messages). */ readonly scoped: Principal; /** The agent with its own grants, for installation-wide records (the catalogue). */ readonly agent: Principal; /** The agent as the attempt presents it (cut to the task, without the contract's tool ceiling). */ readonly acting: Principal; readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly hostId: string; readonly callId: string }
+interface Context { /** The task credential's own principal, cut to the task and project (desk, messages). */ readonly scoped: Principal; /** The agent with its own grants, for installation-wide records (the catalogue). */ readonly agent: Principal; /** The agent as the attempt presents it (cut to the task, without the contract's tool ceiling). */ readonly acting: Principal; readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly hostId: string; readonly callId: string; /** How many calls of the attempt wait for an approval as the request is bound (card W04 review: such a turn parks, it is not continued). */ readonly parked: number }
 
 /**
  * A signal for the runner whose abort listeners cannot end the process: a listener that throws is an uncaught exception in Node, and the runner is not ours. Listeners added with `addEventListener` or `onabort` run
@@ -303,6 +307,7 @@ export class ToolExecutionService {
             case "work.end": response = await this.#workEnd(token, context, args); break;
             case "maintenance.request": response = await this.#maintenanceRequest(token, context, args); break;
             case "maintenance.status": response = await this.#maintenanceStatus(token, context, args); break;
+            case "turn.continue": response = this.#turnContinue(context, args); break;
           }
         }
       } finally {
@@ -330,7 +335,8 @@ export class ToolExecutionService {
     }
     // A held task runs nothing, recorded or not. The extension's own declaration reads (`tool.discover`, whose call IDs the extension makes up and may rewrite) are not a model's tool call: they need no generation under `requireRecorded`.
     if (!verdict.recorded && verdict.held !== undefined && mode.check) return refusal("generation_refused", `${verdict.held}; the call was not run`);
-    if (!verdict.recorded) return mode.require && request.op !== "tool.discover" ? refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) : undefined;
+    // A turn continuation (card W04) is the worker's own question, not a model's tool call, and has no generation of its own either; a held task still refuses it above.
+    if (!verdict.recorded) return mode.require && request.op !== "tool.discover" && request.op !== "turn.continue" ? refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) : undefined;
     if (!verdict.ok && mode.check) return refusal("generation_refused", `${verdict.reason ?? `call ${request.callId.slice(0, 60)} does not belong to a current generation`}; it was not run`);
     return undefined;
   }
@@ -395,7 +401,7 @@ export class ToolExecutionService {
     // The agent as the attempt presents it right now (grants re-read), without the contract's tool ceiling: the tool path judges a call beyond the ceiling by asking, not by refusing.
     const acting = await this.#deps.credentials.principalOf(this.#deps.principal, gateway.attemptId, { limit: false });
     const agent = await this.#deps.credentials.agentOf(this.#deps.principal, gateway.attemptId);
-    return { scoped: presented, agent, acting, attemptId: attempt.attemptId, taskId: attempt.taskId, projectId: attempt.projectId, hostId: attempt.hostId, callId };
+    return { scoped: presented, agent, acting, attemptId: attempt.attemptId, taskId: attempt.taskId, projectId: attempt.projectId, hostId: attempt.hostId, callId, parked: attempt.parked.length };
   }
 
   // ---- the desk, the task, messages -----------------------------------------------------------------------------------------
@@ -435,6 +441,7 @@ export class ToolExecutionService {
       : op === "tool.register" ? { summary: `${c.agent.id} registered tool ${id("name")} through the bridge.`, refs: [{ kind: "catalog-version", id: id("versionId") }] }
       : op === "job.start" && typeof result["jobId"] === "string" ? { summary: `${c.agent.id} started job ${id("jobId")} (${id("tool")} ${id("version")}) through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : op === "maintenance.request" && typeof result["maintenanceId"] === "string" ? { summary: `${c.agent.id} asked for an environment change, maintenance request ${id("maintenanceId")} (${id("status")}), through the bridge.`, refs: [{ kind: "maintenance", id: id("maintenanceId") }] }
+      : op === "turn.continue" ? { summary: `The turn of ${c.agent.id} was continued (nudge ${typeof result["n"] === "number" ? result["n"] : "?"} of ${typeof result["max"] === "number" ? result["max"] : "?"}): it had ended ${typeof result["endKind"] === "string" ? `as ${result["endKind"]}` : "early"}, without a tool call or work.end.`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
     if (step === undefined) return;
@@ -462,6 +469,23 @@ export class ToolExecutionService {
     onlyKnown(args, ["submit", "result", "note", "message"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * The worker asks whether it may continue a turn that yielded without a tool call and without work.end (card W04). Everything that refuses a write refuses it before it gets here: a pause (it is in `WRITES`), an attempt that is no longer running,
+   * replaced or frozen (the binding), a held or stale generation. What is left is the bound: `n` of `max`, both at most 10. Nothing is written but the activity step, so the owner can see each nudge; the worker counts them durably itself and
+   * reports them with the turn's result.
+   */
+  #turnContinue(c: Context, args: JsonObject): BridgeResponse {
+    onlyKnown(args, ["n", "max", "endKind"]);
+    const n = args["n"]; const max = args["max"]; const kind = args["endKind"];
+    if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_TURN_CONTINUATIONS) return refusal("invalid_command", `max: must be a whole number from 1 to ${MAX_TURN_CONTINUATIONS}`);
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n > max) return refusal("invalid_command", "n: must be a whole number from 1 to max");
+    if (kind !== undefined && (typeof kind !== "string" || !CONTINUED_KINDS.has(kind))) return refusal("invalid_command", "endKind: must be how a turn ended without work.end (length, empty-visible-text, no-work-end or announced-step-without-tool-call)");
+    // A turn that yields while calls of the attempt wait for an approval is waiting, not stopping early: it ends, and the attempt parks and gives its place back until the decision (W04 review). A nudge would spend model calls on a turn
+    // that cannot go on and push the agent to end its work instead of waiting.
+    if (c.parked > 0) return refusal("awaiting_approval", `${c.parked} call(s) of this attempt wait for an approval; the turn ends and the attempt parks until the decision`);
+    return ok({ go: true, n, max, ...(kind === undefined ? {} : { endKind: kind }) });
   }
 
   /**

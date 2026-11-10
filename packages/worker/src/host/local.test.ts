@@ -373,6 +373,11 @@ test("every turn result from the host carries an end kind: the process's own, un
   const failed = await run({ t: "result", status: "failed", error: "the model did not answer" });
   assert.equal(failed.status, "failed");
   assert.equal(failed.endKind, "unknown");
+  // Card W04: the nudges the process gave the turn are passed on, for a failed turn too; an older process says none and none is claimed.
+  const nudged = await run({ t: "result", status: "completed", text: "", endKind: "empty-visible-text", visibleChars: 0, nudges: 3 });
+  assert.equal(nudged.nudges, 3);
+  assert.equal((await run({ t: "result", status: "failed", error: "x", nudges: 1 })).nudges, 1);
+  assert.equal(older.nudges, undefined);
 });
 
 test("the process's read-back check of a checkpoint goes on the checkpoint the host hands the controller; a process that ran none hands none (card L04d)", async () => {

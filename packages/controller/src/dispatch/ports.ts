@@ -93,6 +93,8 @@ export interface WorkerTurnResult {
   readonly endKind?: TurnEndKind;
   /** The length of the last reply's visible text (trimmed), when the worker said. */
   readonly visibleChars?: number;
+  /** Card W04: how many times the worker continued the turn after it yielded without a tool call or work.end (its own bound is 3), when it said. The model calls of those continuations are in `usage` like any other: nothing is charged twice. */
+  readonly nudges?: number;
   readonly text?: string;
   readonly error?: string;
   /** The conversation checkpoint at the end of the turn (opaque to the controller). */

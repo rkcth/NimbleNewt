@@ -8,6 +8,7 @@ export { PI_DECLARATION, SUPPORTED_CAPABILITIES, UNSUPPORTED_CAPABILITIES, type 
 export { CHECKPOINT_FORMAT, HISTORY_FORMAT, SUPPORTED_HISTORY_FORMATS, upgradeCheckpoint, type CheckpointUpgrade } from "./checkpoints.js";
 export { STORAGE_MARKER_FORMAT, STORAGE_MIGRATIONS, scanStorage } from "./storage-compat.js";
 export { CompactionHookTimeout, applyContextPolicy, type AdapterContextPolicy, type CompactionDecision, type CompactionRequest } from "./context-policy.js";
+export { CONTINUATION_MARK, DEFAULT_MAX_CONTINUATIONS, MAX_CONTINUATIONS_LIMIT, isContinuation, type ContinuationPolicy, type ContinuationState, type YieldedAnswer } from "./continuation.js";
 export { LayoutHolder, UnstablePromptError, assertStableText, checkLayout, layoutFingerprint, layoutSections, sharedSystemText, sortedTools, volatileContext, type PromptLayout } from "./prompt-layout.js";
 export { PrefixTracker, shapeModels, splitSharedSystem, thinkingFor, type CacheShaping, type ModelCachePolicy, type ModelInfo, type PrefixReport, type Retention, type ThinkingDropReport } from "./cache-shaping.js";
 export { storedThinking } from "./thinking.js";

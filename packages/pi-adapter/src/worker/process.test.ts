@@ -7,6 +7,12 @@ import { LeaseWatchdog, LineDecoder, encodeMessage, parseFromChild, parseToChild
 import { createOfflineModels } from "../testing/offline.js";
 import { WORK_END_TOOL } from "../bridge.js";
 import { durabilityOf, runWorker, type WorkerHooks } from "./process.js";
+import { LENGTH_NUDGE_LEAD, NUDGE_TEXT } from "./nudge.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 
 const start: ChannelStart = {
   attemptId: "att-1", agentId: "agent:ann", namespaceId: "abcdef0123456789", credential: "task-credential", storeDir: "/home/agent/pi", relayBase: "http://relay.invalid",
@@ -14,8 +20,13 @@ const start: ChannelStart = {
 };
 
 /** The host's side of the channel, in the test's hands. */
-function host(hooks: WorkerHooks) {
+/**
+ * How the test's controller answers a turn continuation (card W04). Default: refused as a controller from before W04 refuses an operation it does not know, so the turn ends as it did before; `go` answers yes. A function decides per request.
+ */
+type Continue = "refuse" | "go" | "hold" | ((m: Extract<FromChild, { t: "bridge" }>) => "refuse" | "go" | "hold");
+function host(hooks: WorkerHooks, continueTurn: Continue = "refuse") {
   const toChild = new PassThrough();
+  const continues: Extract<FromChild, { t: "bridge" }>[] = [];
   const seen: FromChild[] = [];
   const discovers: string[] = [];
   const waiters: (() => void)[] = [];
@@ -23,11 +34,19 @@ function host(hooks: WorkerHooks) {
   const done = runWorker({ input: toChild, write: (text) => { for (const raw of decoder.push(text)) {
     const m = parseFromChild(raw);
     // The declarations at the start of a request are answered here and kept apart from what the tests look at.
+    if (m.t === "bridge" && m.request.op === "turn.continue") {
+      continues.push(m);
+      const how = typeof continueTurn === "function" ? continueTurn(m) : continueTurn;
+      if (how === "go") toChild.write(encodeMessage({ t: "bridge.reply", id: m.id, reply: { ok: true, result: { go: true } } }));
+      else if (how === "refuse") toChild.write(encodeMessage({ t: "bridge.reply", id: m.id, reply: { ok: false, code: "invalid_command", message: "op: turn.continue is not an operation of the bridge" } }));
+      else { seen.push(m); for (const w of waiters.splice(0)) w(); }
+      continue;
+    }
     if (m.t === "bridge" && m.request.op === "tool.discover") { discovers.push(m.request.callId); toChild.write(encodeMessage({ t: "bridge.reply", id: m.id, reply: { ok: true, result: { revision: "r1", tools: [{ name: "a_abc.shout", kind: "tool", version: "1.2.0" }] } } })); continue; }
     seen.push(m); for (const w of waiters.splice(0)) w();
   } } }, hooks);
   return {
-    seen, done, discovers,
+    seen, done, discovers, continues,
     send: (m: ToChild): void => { toChild.write(encodeMessage(m)); },
     end: (): void => { toChild.end(); },
     /** The first message of that kind from `from` on; a process that never sends it fails the test after `ms` instead of hanging it. */
@@ -71,7 +90,7 @@ test("the process starts on the host's word, runs the turn, reaches the bridge o
   assert.match(bridge.request.callId, /^h:[0-9a-f]{40}$/, "a provider call ID the controller would refuse is replaced by a digest of itself");
   h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa" } } } });
   const result = await h.next("result");
-  assert.deepEqual(result, { t: "result", status: "completed", text: "hello from the agent", endKind: "no-work-end", visibleChars: 20 });
+  assert.deepEqual(result, { t: "result", status: "completed", text: "hello from the agent", endKind: "no-work-end", visibleChars: 20, nudges: 0 });
   h.send({ t: "checkpoint", id: 7 });
   const cp = await h.next("checkpoint.ok");
   assert.equal(cp.id, 7);
@@ -167,7 +186,7 @@ test("a refused bridge call is the model's tool result, not a crash; garbage on 
   h.send({ t: "run", requestId: "req-1", content: "say hello" });
   const bridge = await h.next("bridge");
   h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: false, code: "paused", message: "the task is paused" } });
-  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "saw: catalogue refusal", endKind: "no-work-end", visibleChars: 22 });
+  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "saw: catalogue refusal", endKind: "no-work-end", visibleChars: 22, nudges: 0 });
   assert.equal(h.discovers.length, 1, "one snapshot of the declarations per request");
   h.send({ t: "tell", id: 1 } as never);
   const fault = await h.next("fault");
@@ -214,7 +233,7 @@ test("model calls go over the channel to the host's relay and nowhere else; the 
   h.send({ t: "fetch.head", id: call.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
   for (const c of chunks) h.send({ t: "fetch.chunk", id: call.id, data: Buffer.from(c).toString("base64") });
   h.send({ t: "fetch.end", id: call.id });
-  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "relayed answer", endKind: "no-work-end", visibleChars: 14 });
+  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "relayed answer", endKind: "no-work-end", visibleChars: 14, nudges: 0 });
   // Anything but the relay's address fails inside the process, without a message to the host.
   const before = h.seen.length;
   await assert.rejects(fetch("https://example.com/"), /there is no network here/);
@@ -469,7 +488,7 @@ test("H08b: a fenced bridge answer makes the process ask whether the lease still
       h.send({ t: "lease.ok", id: ask.id, leaseMs: 20_000 });
       const second = await h.next("bridge", h.seen.indexOf(bridge) + 1);
       h.send({ t: "bridge.reply", id: second.id, reply: { ok: true, result: {} } });
-      assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "finished", endKind: "no-work-end", visibleChars: 8 });
+      assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "finished", endKind: "no-work-end", visibleChars: 8, nudges: 0 });
       assert.equal(got.dog!.productive, true);
     } else {
       h.send({ t: "lease.fenced", id: ask.id, reason: "the attempt has been replaced" });
@@ -568,4 +587,190 @@ test("L04d: a checkpoint that does not read back, or whose check fails, is not v
   assert.equal(thrown.verified, false);
   assert.match(thrown.error!, /^the checkpoint could not be read back: disk gone/);
   assert.ok(thrown.error!.length <= 300, "the reason fits the channel's bound");
+});
+
+// ---- card W04: a turn that yields without a tool call and without work.end is continued, a bounded number of times ----
+
+test("W04: an agent that yields thinking-only twice and then calls work.end is continued twice in the same turn, asks the controller before each nudge, and finishes normal with 2 nudges", async () => {
+  const { offline, hooks } = scripted();
+  const seenByModel: string[] = [];
+  offline.faux.setResponses([
+    fauxAssistantMessage([fauxThinking("first I should think")]),
+    fauxAssistantMessage([fauxThinking("still thinking")]),
+    (context) => { seenByModel.push(JSON.stringify(context.messages)); return fauxAssistantMessage(fauxToolCall(WORK_END_TOOL, { result: "done" }, { id: "we-1" }), { stopReason: "toolUse" }); },
+    fauxAssistantMessage("Ended: all steps done."),
+  ]);
+  const h = host(hooks, "go");
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "do the plan" });
+  const end = await h.next("bridge");
+  assert.equal(end.request.op, "work.end");
+  h.send({ t: "bridge.reply", id: end.id, reply: { ok: true, result: { item: { state: "requested" } } } });
+  const result = await h.next("result");
+  assert.deepEqual(result, { t: "result", status: "completed", text: "Ended: all steps done.", endKind: "normal", visibleChars: 22, nudges: 2 });
+  assert.deepEqual(h.continues.map((m) => m.request.args), [{ n: 1, max: 3, endKind: "empty-visible-text" }, { n: 2, max: 3, endKind: "empty-visible-text" }]);
+  assert.equal(new Set(h.continues.map((m) => m.request.callId)).size, 2, "each nudge is its own request to the controller");
+  assert.equal(h.continues.every((m) => m.token === "task-credential"), true, "asked with the task's own credential");
+  assert.ok(seenByModel[0]!.includes(NUDGE_TEXT), "the model is given the nudge");
+  assert.equal(h.seen.filter((m) => m.t === "result").length, 1, "one turn, one result");
+  assert.equal(offline.faux.getPendingResponseCount(), 0);
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("W04: an agent that never calls a tool gets exactly 3 nudges, then the turn ends with its own end kind for W03; no fourth nudge is asked", async () => {
+  const { offline, hooks } = scripted();
+  let calls = 0;
+  offline.faux.setResponses(Array.from({ length: 8 }, () => () => { calls++; return fauxAssistantMessage([fauxThinking("thinking, no action")]); }));
+  const h = host(hooks, "go");
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "do the plan" });
+  const result = await h.next("result");
+  assert.deepEqual(result, { t: "result", status: "completed", text: "", endKind: "empty-visible-text", visibleChars: 0, nudges: 3 });
+  assert.equal(calls, 4, "the first reply and three nudged ones");
+  assert.deepEqual(h.continues.map((m) => (m.request.args as { n: number }).n), [1, 2, 3]);
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("W04: a length stop is continued with the nudge that says so and is not reported as the answer", async () => {
+  const { offline, hooks } = scripted();
+  const seenByModel: string[] = [];
+  offline.faux.setResponses([
+    fauxAssistantMessage("The report so far: step one is", { stopReason: "length" }),
+    (context) => { seenByModel.push(JSON.stringify(context.messages)); return fauxAssistantMessage(fauxToolCall(WORK_END_TOOL, { result: "done" }, { id: "we-1" }), { stopReason: "toolUse" }); },
+    fauxAssistantMessage("Report: step one is done."),
+  ]);
+  const h = host(hooks, "go");
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "report" });
+  const end = await h.next("bridge");
+  h.send({ t: "bridge.reply", id: end.id, reply: { ok: true, result: { item: { state: "requested" } } } });
+  const result = await h.next("result");
+  assert.equal(result.text, "Report: step one is done.");
+  assert.equal(result.endKind, "normal");
+  assert.equal(result.nudges, 1);
+  assert.deepEqual(h.continues.map((m) => m.request.args), [{ n: 1, max: 3, endKind: "length" }]);
+  assert.ok(seenByModel[0]!.includes(LENGTH_NUDGE_LEAD));
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("W04: a nudge the controller refuses (a paused task, a stopped attempt, an older controller) is not given: the answer ends the turn as before", async () => {
+  for (const code of ["paused", "fenced", "invalid_command"]) {
+    const { offline, hooks } = scripted();
+    offline.faux.setResponses([fauxAssistantMessage([fauxThinking("thinking")]), fauxAssistantMessage("never asked")]);
+    const h = host(hooks, (m) => { h.send({ t: "bridge.reply", id: m.id, reply: { ok: false, code, message: `refused: ${code}` } }); return "hold"; });
+    h.send({ t: "start", v: 1, start: offlineStart });
+    await h.next("ready");
+    h.send({ t: "run", requestId: "req-1", content: "work" });
+    const result = await h.next("result");
+    assert.deepEqual(result, { t: "result", status: "completed", text: "", endKind: "empty-visible-text", visibleChars: 0, nudges: 0 }, code);
+    assert.equal(offline.faux.getPendingResponseCount(), 1, `${code}: no further model call`);
+    h.send({ t: "close" });
+    await h.done;
+  }
+});
+
+test("W04: after work.end is accepted nothing is nudged, even when the agent then stops with prose; a refused work.end is no ending and is nudged", async () => {
+  const accepted = scripted();
+  accepted.offline.faux.setResponses([fauxAssistantMessage(fauxToolCall(WORK_END_TOOL, { result: "done" }, { id: "we-1" }), { stopReason: "toolUse" }), fauxAssistantMessage("I am done."), fauxAssistantMessage("unused")]);
+  const a = host(accepted.hooks, "go");
+  a.send({ t: "start", v: 1, start: offlineStart });
+  await a.next("ready");
+  a.send({ t: "run", requestId: "req-1", content: "finish" });
+  const end = await a.next("bridge");
+  a.send({ t: "bridge.reply", id: end.id, reply: { ok: true, result: { item: { state: "requested" } } } });
+  assert.equal((await a.next("result")).nudges, 0);
+  assert.equal(a.continues.length, 0, "the controller is not even asked");
+  assert.equal(accepted.offline.faux.getPendingResponseCount(), 1);
+  a.send({ t: "close" });
+  await a.done;
+
+  const refused = scripted();
+  refused.offline.faux.setResponses([fauxAssistantMessage(fauxToolCall(WORK_END_TOOL, { result: "done" }, { id: "we-1" }), { stopReason: "toolUse" }), fauxAssistantMessage("I am done."), fauxAssistantMessage("still done")]);
+  const r = host(refused.hooks, (m) => ((m.request.args as { n: number }).n === 1 ? "go" : "refuse"));
+  r.send({ t: "start", v: 1, start: offlineStart });
+  await r.next("ready");
+  r.send({ t: "run", requestId: "req-1", content: "finish" });
+  const endR = await r.next("bridge");
+  r.send({ t: "bridge.reply", id: endR.id, reply: { ok: false, code: "paused", message: "the task is paused" } });
+  const result = await r.next("result");
+  assert.equal(result.nudges, 1);
+  assert.equal(result.text, "still done");
+  r.send({ t: "close" });
+  await r.done;
+});
+
+test("W04: a lease lost while the nudge is being asked gives no nudge and no further model call", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage([fauxThinking("thinking")]), fauxAssistantMessage("never asked")]);
+  let dog: LeaseWatchdog | undefined;
+  const h = host({ ...hooks, lease: { tickMs: 0, renewMs: 0, onWatchdog: (d) => { dog = d; }, terminate: () => undefined } }, "hold");
+  h.send({ t: "start", v: 1, start: { ...offlineStart, lease: { leaseMs: 60_000, graceMs: 10_000 } } });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  const ask = await h.next("bridge");
+  assert.equal(ask.request.op, "turn.continue");
+  await dog!.lost();
+  const result = await h.next("result");
+  assert.equal(result.status, "failed");
+  assert.equal(offline.faux.getPendingResponseCount(), 1, "no model call after the loss");
+  h.send({ t: "close" });
+  await h.done;
+});
+
+/** A reply of the relayed model, as the scripted endpoint streams it: thinking only (`reasoning_content`), or a call of work.end. */
+function sseReply(kind: "thinking" | "work-end"): string[] {
+  const sse = (obj: unknown): string => `data: ${JSON.stringify(obj)}\n\n`;
+  const base = { id: "c1", object: "chat.completion.chunk", created: 1, model: "local" };
+  if (kind === "thinking") return [sse({ ...base, choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "thinking it over" }, finish_reason: null }] }), sse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }), "data: [DONE]\n\n"];
+  return [sse({ ...base, choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "we-1", type: "function", function: { name: WORK_END_TOOL, arguments: "{\"result\":\"done\"}" } }] }, finish_reason: null }] }), sse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }), "data: [DONE]\n\n"];
+}
+
+test("W04: a restart between nudges resumes the count from the conversation's document: the new process asks for nudge 2, not 1, and stops after 3", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-w04-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const answer = (h: ReturnType<typeof host>, id: number, kind: "thinking" | "work-end"): void => {
+      h.send({ t: "fetch.head", id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+      for (const c of sseReply(kind)) h.send({ t: "fetch.chunk", id, data: Buffer.from(c).toString("base64") });
+      h.send({ t: "fetch.end", id });
+    };
+    // The first process: one thinking-only reply, nudge 1 is given, and the process goes away while the nudged call is in flight.
+    const first = host({ storage }, "go");
+    first.send({ t: "start", v: 1, start });
+    await first.next("ready");
+    first.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const call1 = await first.next("fetch");
+    answer(first, call1.id, "thinking");
+    const call2 = await first.next("fetch", first.seen.indexOf(call1) + 1);
+    assert.notEqual(call2.id, call1.id);
+    assert.deepEqual(first.continues.map((m) => (m.request.args as { n: number }).n), [1]);
+    first.end();
+    await first.done;
+
+    // The second process resumes the same turn from the store: its nudges are 2 and 3, then the answer stands.
+    const second = host({ storage }, "go");
+    second.send({ t: "start", v: 1, start: { ...start, recover: { reason: "test restart" } } });
+    await second.next("ready");
+    second.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    let from = 0;
+    for (let i = 0; i < 3; i++) {
+      const call = await second.next("fetch", from);
+      from = second.seen.indexOf(call) + 1;
+      answer(second, call.id, "thinking");
+    }
+    const result = await second.next("result");
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(result.nudges, 3);
+    assert.equal(result.endKind, "empty-visible-text");
+    assert.deepEqual(second.continues.map((m) => (m.request.args as { n: number }).n), [2, 3]);
+    assert.equal(second.seen.filter((m) => m.t === "fetch").length, 3, "the resumed call and two nudged ones; no fourth nudge");
+    second.send({ t: "close" });
+    await second.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

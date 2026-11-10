@@ -5,10 +5,12 @@ import type { Storage } from "@earendil-works/pi-durable";
 import { CHECKPOINT_DURABILITY_ERROR, ChannelError, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
-import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
+import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
+import { DEFAULT_MAX_CONTINUATIONS, type ContinuationPolicy } from "../continuation.js";
 import { volatileContext } from "../prompt-layout.js";
 import { processClock } from "./clock.js";
 import { classifyTurnEnd } from "./end-kind.js";
+import { nudgeCallId, nudgeText } from "./nudge.js";
 import { relayFetch } from "./relay-fetch.js";
 
 /**
@@ -161,6 +163,8 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   let stopTicking: (() => void) | undefined;
   let stopRenewing: (() => void) | undefined;
   let turnOpen = false;
+  /** The agent's work.end was accepted in this process (card W04): no turn of it is continued again. Also written to the conversation's continuation document, so a restarted process knows. */
+  let workEnded = false;
   /** Renewals in flight: their ID and the monotonic time each was sent at, which is what an answer counts from. */
   const renewing = new Map<number, number>();
   let nextRenewal = 0;
@@ -224,7 +228,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     globalThis.fetch = relay.fetch;
     const models = await (hooks.models ?? ((s) => relayModels(s)))(start, relay.fetch);
     const storage = await (hooks.storage ?? ((dir) => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT)))(start.storeDir);
-    const transport = boundTransport(start.credential, async (token, request) => {
+    const wire = boundTransport(start.credential, async (token, request) => {
       // After a fenced answer no further call leaves until the controller has said whether the lease still holds (or the lease has ended).
       while (checking !== undefined && dog?.productive === true) await checking.done;
       return await new Promise<BridgeReply>((resolve) => {
@@ -235,12 +239,36 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       send({ t: "bridge", id, token, request: { op: request.op, callId: request.callId, ...(request.args === undefined ? {} : { args: request.args as never }) } });
       });
     });
+    // An accepted work.end ends the agent's work (card W04): nothing is continued after it.
+    const transport: BridgeTransport = Object.freeze({
+      send: async (request: Parameters<BridgeTransport["send"]>[0]): Promise<BridgeReply> => {
+        const reply = await wire.send(request);
+        if (request.op === "work.end" && reply.ok) { workEnded = true; await adapter?.markWorkEnded().catch(() => undefined); }
+        return reply;
+      },
+    });
     const cache = start.cache === undefined ? undefined : { policy: () => ({ ...(start.cache!.key === undefined ? {} : { key: start.cache!.key }), ...(start.cache!.retention === undefined ? {} : { retention: start.cache!.retention }) }) };
     bridge = createBridge(transport);
     const tools = composeTools(bridge, [], start.namespaceId);
     toolSchemaChars = JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
     const contextPolicy = contextPolicyOf(start.context);
+    // Card W04: a turn that yields without a tool call and without work.end is continued, at most three times, with a fixed nudge. Each continuation is asked of the controller first (bridge `turn.continue`): a pause, a stop, a replaced or
+    // frozen attempt, or a controller that does not know the operation refuses it, and the answer then ends the turn as it ended (W03 takes it from there). Nothing is continued once the lease is gone, the host has closed the process or work.end
+    // was accepted.
+    const stopped = (): boolean => closed || workEnded || (dog !== undefined && !dog.productive);
+    const continuation: ContinuationPolicy = {
+      max: DEFAULT_MAX_CONTINUATIONS,
+      decide: async (answer, ask) => {
+        if (stopped()) return undefined;
+        const endKind = classifyTurnEnd({ stopReason: answer.stopReason, visibleText: answer.visibleText, toolCalls: [] }).endKind;
+        const reply = await transport.send({ op: "turn.continue", callId: nudgeCallId(ask.turn, ask.n), args: { n: ask.n, max: ask.max, endKind } });
+        if (!reply.ok || reply.result["go"] !== true || stopped()) return undefined;
+        return nudgeText(answer.stopReason);
+      },
+      onError: (error) => { console.error(`continuation hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
+    };
     adapter = await PiAdapter.open({
+      continuation,
       storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
       tools, ...(cache === undefined ? {} : { cache }), ...(contextPolicy === undefined ? {} : { contextPolicy }),
       // Pi keeps the newest part of a conversation verbatim when it compacts; its default would be larger than a small model's whole startup share, so nothing would ever be cut. A tenth of the window is kept (provisional, card H12f).
@@ -264,18 +292,23 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     try {
       if (dog !== undefined) await dog.assertProductive();
       // The request opens with a snapshot of the catalogue's declarations, which go to the model in the volatile context after the stable prompt. A tool registered while the request is in flight appears in the next request's snapshot.
+      // The turn's continuation count (card W04) starts here; the same request run again by a restarted process keeps its count.
+      await adapter.beginTurn(requestIdText);
       let shown = "";
       try { await bridge!.declarations.openRequest(requestIdText); shown = bridge!.declarations.textOf(requestIdText); } catch { /* the model works without the list; it can still ask tool-discover */ }
       const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: shown === "" ? content : `${content}\n\n${volatileContext(shown)}` });
       const result = await handle.result();
-      if (dog !== undefined && !dog.productive) send({ t: "result", status: "failed", error: `lease lost (${dog.reason}): the turn was stopped` });
+      // How many times the turn was continued (card W04), from the conversation's document; told with every result so the attempt records it.
+      let nudges = 0;
+      try { const c = await adapter.continuations(); if (c.turn === requestIdText) nudges = c.used; } catch { /* not known: 0 is not claimed as more */ }
+      if (dog !== undefined && !dog.productive) send({ t: "result", status: "failed", error: `lease lost (${dog.reason}): the turn was stopped`, nudges });
       else if (result.status === "completed") {
-        // How the turn ended (card W02): told with the result, so the controller can tell a full report from a reply cut off at the output limit, one with nothing visible, or a stop without work.end.
+        // How the turn ended (card W02): told with the result, so the controller can tell a full report from a reply cut off at the output limit, one with nothing visible, or a stop without work.end. After continuations (W04) it is the last answer's.
         const ending = classifyTurnEnd({ stopReason: await lastStopReason(adapter), visibleText: result.text, toolCalls: result.toolCalls });
-        send({ t: "result", status: "completed", text: result.text, endKind: ending.endKind, visibleChars: ending.visibleChars });
+        send({ t: "result", status: "completed", text: result.text, endKind: ending.endKind, visibleChars: ending.visibleChars, nudges });
       }
-      else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled" });
-      else send({ t: "result", status: "failed", error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
+      else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled", nudges });
+      else send({ t: "result", status: "failed", nudges, error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {
       send({ t: "result", status: "failed", error: dog !== undefined && !dog.productive ? `lease lost (${dog.reason}): the turn was stopped` : String((error as Error)?.message ?? error).slice(0, 2000) });
     } finally { turnOpen = false; bridge?.declarations.closeRequest(requestIdText); if (dog !== undefined && !dog.productive) dog.quiet(); }

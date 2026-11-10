@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
+import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, MAX_TURN_NUDGES, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
 
 const start: ChannelStart = {
   attemptId: "att-1", agentId: "agent:ann", namespaceId: "abcdef0123456789", credential: "tok", storeDir: "/home/agent/pi", relayBase: "http://relay.invalid",
@@ -96,4 +96,11 @@ test("a turn's end kind (card W02): each known kind passes, one this side does n
   assert.equal(endKindOf(undefined), "unknown");
   assert.equal(endKindOf("Normal"), "unknown");
   assert.equal(endKindOf("normal"), "normal");
+});
+
+test("a turn's nudges (card W04): a whole number up to the bound on any result; anything else is refused", () => {
+  assert.deepEqual(parseFromChild({ t: "result", status: "completed", text: "x", endKind: "normal", nudges: 2 }), { t: "result", status: "completed", text: "x", endKind: "normal", nudges: 2 });
+  assert.deepEqual(parseFromChild({ t: "result", status: "failed", error: "e", nudges: 0 }), { t: "result", status: "failed", error: "e", nudges: 0 });
+  assert.deepEqual(parseFromChild({ t: "result", status: "cancelled" }), { t: "result", status: "cancelled" });
+  for (const nudges of [-1, 1.5, "2", MAX_TURN_NUDGES + 1]) assert.throws(() => parseFromChild({ t: "result", status: "completed", nudges }), ChannelError, JSON.stringify(nudges));
 });

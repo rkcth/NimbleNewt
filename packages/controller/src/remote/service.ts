@@ -1777,7 +1777,7 @@ function checkEnforcement(value: unknown): ContractEnforcement[] {
 function checkResult(value: unknown): StoredResult {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("result", "must be an object");
   const r = value as Record<string, unknown>;
-  onlyKnown(r, ["status", "text", "error", "checkpoint", "usage", "endKind", "visibleChars"]);
+  onlyKnown(r, ["status", "text", "error", "checkpoint", "usage", "endKind", "visibleChars", "nudges"]);
   if (r["status"] !== "completed" && r["status"] !== "failed" && r["status"] !== "cancelled") invalid("result.status", "must be completed, failed or cancelled");
   const clip = (v: unknown, field: string): string | undefined => (v === undefined ? undefined : redactText(text(v, field, { min: 0, max: 100_000, multiline: true })).slice(0, REMOTE_LIMITS.text));
   const t = clip(r["text"], "result.text");
@@ -1787,7 +1787,10 @@ function checkResult(value: unknown): StoredResult {
   const visible = r["visibleChars"];
   if (visible !== undefined && !(Number.isSafeInteger(visible) && (visible as number) >= 0)) invalid("result.visibleChars", "must be a whole number of at least 0");
   const ending = r["status"] !== "completed" ? {} : { ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visible === undefined ? {} : { visibleChars: visible as number }) };
-  return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }), ...ending };
+  // Card W04: the nudges a remote worker gave the turn, carried for any status (a turn can be nudged and then fail).
+  const nudges = r["nudges"];
+  if (nudges !== undefined && !(Number.isSafeInteger(nudges) && (nudges as number) >= 0 && (nudges as number) <= 100)) invalid("result.nudges", "must be a whole number from 0 to 100");
+  return { status: r["status"] as StoredResult["status"], ...(t === undefined ? {} : { text: t }), ...(e === undefined ? {} : { error: e }), ...(r["usage"] === undefined ? {} : { usage: r["usage"] as never }), ...ending, ...(nudges === undefined ? {} : { nudges: nudges as number }) };
 }
 
 /** The events a worker sends for a piece of a reply: a short list of known shapes, nothing else. */

@@ -285,6 +285,9 @@ for (const backend of backends) {
       mode = { check: true, require: true };
       out["noneRequired"] = await send("call_none");
       out["declare"] = await svc.handle(order.credential, gateway, { op: "tool.discover", callId: "h:0123456789abcdef0123456789abcdef01234567", args: {} });
+      // Card W04: the worker's own continuation question is no model call either; a held task refuses it.
+      out["continue"] = await svc.handle(order.credential, gateway, { op: "turn.continue", callId: "nudge:0123:1", args: { n: 1, max: 3 } });
+      out["continueHeld"] = await svc.handle(order.credential, gateway, { op: "turn.continue", callId: "call_heldnone", args: { n: 1, max: 3 } });
       mode = { check: false, require: false };
       out["oldUnchecked"] = await send("call_old");
       mode = { check: true, require: false };
@@ -301,6 +304,8 @@ for (const backend of backends) {
     assert.match(bad(out["heldNone"]!).message, /is held.*not run/, "a held task runs no call, recorded or not");
     assert.match(bad(out["noneRequired"]!).message, /belongs to no recorded generation/);
     assert.notEqual((out["declare"] as { code?: string }).code, "generation_refused", "the extension's own declaration reads are not a model call");
+    good(out["continue"]!);
+    assert.match(bad(out["continueHeld"]!).message, /is held.*not run/, "a held task's turn is not continued");
     good(out["oldUnchecked"]!);
     assert.equal(bad(out["broken"]!).code, "unavailable");
     // Only the calls that passed reached the state API: ok, none, oldUnchecked.
@@ -595,6 +600,53 @@ for (const backend of backends) {
     assert.equal((error as { code?: string } | undefined)?.code, "command_conflict");
   });
 
+  suite("W04: the worker may continue a turn only within the bound, only for its own running attempt, and each nudge is a step of the task's activity", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const steps: { summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
+    const svc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async (step) => { steps.push(step); } });
+    const out: Record<string, BridgeResponse> = {};
+    let held: { token: string; gateway: Parameters<ToolExecutionService["handle"]>[1] } | undefined;
+    c.worker.script = c.session(async (s) => {
+      held = { token: s.token, gateway: s.gateway };
+      const send = (args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op: "turn.continue", callId, args });
+      out["one"] = await send({ n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:a:1");
+      out["three"] = await send({ n: 3, max: 3, endKind: "length" }, "nudge:a:3");
+      out["over"] = await send({ n: 4, max: 3 }, "nudge:a:4");
+      out["bigMax"] = await send({ n: 1, max: 11 }, "nudge:b:1");
+      out["zero"] = await send({ n: 0, max: 3 }, "nudge:b:0");
+      out["normal"] = await send({ n: 1, max: 3, endKind: "normal" }, "nudge:c:1");
+      out["extra"] = await send({ n: 1, max: 3, attemptId: "att-other" }, "nudge:d:1");
+    });
+    await c.tick();
+    assert.deepEqual(good(out["one"]!), { go: true, n: 1, max: 3, endKind: "empty-visible-text" });
+    good(out["three"]!);
+    for (const k of ["over", "bigMax", "zero", "normal", "extra"]) assert.equal(bad(out[k]!).code, "invalid_command", k);
+    assert.equal(steps.length, 2, "one step per nudge given, none for a refused one");
+    assert.match(steps[0]!.summary, /^The turn of agent:ann.* was continued \(nudge 1 of 3\): it had ended as empty-visible-text, without a tool call or work\.end\.$/);
+    assert.deepEqual(steps[0]!.refs, [{ kind: "task", id: taskId }]);
+    // Once the attempt has ended, its worker cannot continue a turn.
+    const after = await svc.handle(held!.token, held!.gateway, { op: "turn.continue", callId: "nudge:e:1", args: { n: 1, max: 3 } });
+    assert.ok(["fenced", "unauthenticated"].includes(bad(after).code), JSON.stringify(after));
+  });
+
+  suite("W04 review: a turn that yields while a call of its attempt waits for an approval is not continued (it parks); once the call is decided and made, it may be", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const name = await c.install(s, "check", "1.0.0");
+      const input = { tool: name, input: { url: "https://example.org", depth: 2 } };
+      assert.equal(good(await s.send("tool.invoke", input, "first-use"))["state"], "awaiting-approval");
+      out["parked"] = await s.send("turn.continue", { n: 1, max: 3, endKind: "no-work-end" }, "nudge:p:1");
+      await c.invoke(s, input, "first-use");
+      out["after"] = await s.send("turn.continue", { n: 1, max: 3, endKind: "no-work-end" }, "nudge:p:1");
+    });
+    await c.tick();
+    assert.equal(bad(out["parked"]!).code, "awaiting_approval");
+    assert.deepEqual(good(out["after"]!), { go: true, n: 1, max: 3, endKind: "no-work-end" }, "the refused call ID may be asked again");
+  });
+
   suite("a pause stops every write an agent makes through the bridge (desk, task, message, registration) and reads go on", async (c) => {
     const ann = await c.agentFor("ann");
     const { taskId } = await c.task("t", ann);
@@ -617,6 +669,8 @@ for (const backend of backends) {
       out["tool.register"] = await send("tool.register", { name: "x", kind: "skill", version: "1.0.0", manifest: JSON.parse(JSON.stringify(manifest({ entryPoint: undefined, interpreter: undefined }))), instructionsRecordId: doc["id"] as string }, "w5");
       out["job.start"] = await send("job.start", { tool: "toolbox.build", input: {} }, "w8");
       out["maintenance.request"] = await send("maintenance.request", { kind: "skill", spec: { name: "notes", digest: `sha256:${"a".repeat(64)}` }, reason: "keep notes" }, "w10");
+      // Card W04: a paused task's turn is not continued.
+      out["turn.continue"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -624,10 +678,11 @@ for (const backend of backends) {
       out["discover"] = await send("tool.discover", {}, "r3");
       await c.pauses.resume(c.owner, { commandId: uid("rs"), scope: { kind: "task", id: taskId }, reason: "go" });
       out["after"] = await send("desk.write", { kind: "note", title: "n", body: "b3", visibility: "shared", status: "accepted" }, "w6");
+      out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request"]) assert.equal(bad(out[op]!).code, "paused", op);
-    for (const op of ["desk.read", "task.get", "discover", "after"]) good(out[op]!);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
   });

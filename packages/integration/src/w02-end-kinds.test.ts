@@ -49,6 +49,8 @@ describe("each turn's ending is classified by the worker process and carried to 
           namespaceId: () => "abcdef0123456789",
           bridge: async (_order, _call, _token, request) => {
             if (request.op === "tool.discover") return { ok: true, result: { revision: "r1", tools: [] } };
+            // A controller from before W04 refuses a turn continuation: each ending here is the turn's first answer (w04-continuation.test covers the nudges).
+            if (request.op === "turn.continue") return { ok: false, code: "invalid_command", message: "op: turn.continue is not an operation of the bridge" };
             bridged.push({ op: request.op, args: request.args });
             return { ok: true, result: { item: { state: "requested" } } };
           },

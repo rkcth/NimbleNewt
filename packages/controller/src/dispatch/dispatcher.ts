@@ -328,7 +328,14 @@ interface Live { readonly handle: WorkerHandle; readonly host: WorkerHost; reado
 interface PendingResumeCommit { readonly checkId: string; readonly commandId: string }
 
 /** A completed turn that did not end normally (card W03): how it ended, what it last said and the checkpoint it left. */
-interface EarlyStop { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly text?: string; readonly checkpoint?: JsonObject }
+interface EarlyStop { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number; readonly text?: string; readonly checkpoint?: JsonObject }
+/** The most continuations of one turn the dispatcher records (card W04): a figure above it from a worker is not a count and is left out. */
+const MAX_RECORDED_NUDGES = 100;
+/** The attempt's running total of nudges with one turn's added (card W04), as fields to spread into the write that records the turn. */
+const nudgeTotal = (x: DispatchBody, turnEnd: { readonly turnEnd?: NonNullable<DispatchBody["turnEnd"]> }): { nudgesUsed?: number } => {
+  const n = turnEnd.turnEnd?.nudges ?? 0;
+  return n > 0 ? { nudgesUsed: (x.nudgesUsed ?? 0) + n } : {};
+};
 /** The end of an attempt whose readmits were used up (card W03): the run it records and the blocker's summary. */
 interface StoppedEarlyEnd { readonly run: NonNullable<DispatchBody["stoppedEarly"]>[number]; readonly summary: string }
 interface EndOptions { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean; agentEnded?: boolean; early?: EarlyStop }
@@ -2121,7 +2128,9 @@ export class DispatcherService {
         // How the turn ended (card W02) goes on the attempt with the write that ends or parks it (no write of its own: two writes from one revision would share a command ID). It decides nothing yet (W03).
         // A result that says no kind (an older or remote worker) is recorded as unknown, never as normal.
         const visibleChars = Number.isSafeInteger(result.visibleChars) && result.visibleChars! >= 0 ? result.visibleChars : undefined;
-        this.#turnEnds.set(attemptId, { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now() });
+        // Card W04: the nudges the worker gave the turn go on the same record (a figure that is not a small whole number is left out).
+        const nudges = Number.isSafeInteger(result.nudges) && result.nudges! >= 0 && result.nudges! <= MAX_RECORDED_NUDGES ? result.nudges : undefined;
+        this.#turnEnds.set(attemptId, { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }) });
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
@@ -2131,7 +2140,7 @@ export class DispatcherService {
         // Card W03: a completed turn is success only when it ended normally (the agent's work.end was accepted). Any other kind, an unknown one included, is a stop before the work was said to be done: unless the agent's own
         // ending is found when the attempt ends (the end hook), the run ends stopped-early and is readmitted from its checkpoint, or the task gets a blocker once the readmits are used up.
         const kind = this.#turnEnds.get(attemptId)?.endKind ?? "unknown";
-        const early: EarlyStop | undefined = result.status === "completed" && kind !== "normal" ? { endKind: kind, ...(visibleChars === undefined ? {} : { visibleChars }), ...(result.text === undefined ? {} : { text: result.text }), ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }) } : undefined;
+        const early: EarlyStop | undefined = result.status === "completed" && kind !== "normal" ? { endKind: kind, ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }), ...(result.text === undefined ? {} : { text: result.text }), ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }) } : undefined;
         await this.#end(attemptId, result.status === "completed" ? "succeeded" : result.status === "cancelled" ? "abandoned" : "failed", result.status === "completed" ? "the turn completed" : (result.error ?? `the turn ${result.status}`), { readmit: false, ...(early === undefined ? {} : { early }) });
       } catch (error) {
         // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
@@ -2155,7 +2164,7 @@ export class DispatcherService {
     await this.#update(attemptId, (x) => {
       const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
       // The attempt goes on where it was: the native store of its conversation is owned by that host.
-      return { ...rest, ...turnEnd, state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
+      return { ...rest, ...turnEnd, ...nudgeTotal(x, turnEnd), state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
     });
   }
 
@@ -2291,7 +2300,7 @@ export class DispatcherService {
     // The agent's own ending (`work.end`, completed by the sweep while the turn still ran) stops the turn before it can say how it ended: the attempt ended as the agent meant it to, so it is recorded `normal` (W02 review).
     const held = this.#takeTurnEnd(attemptId);
     const turnEnd = held.turnEnd === undefined && options.agentEnded === true ? { turnEnd: { endKind: "normal" as const, at: this.#runner.now() } } : held;
-    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), ...turnEnd, state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: options.stoppedEarly === undefined ? outcome : "stopped-early", summary: summary.slice(0, 500), at: this.#runner.now() }, ...(options.stoppedEarly === undefined ? {} : { stoppedEarly: [...(x.stoppedEarly ?? []).slice(-(STOPPED_EARLY_READMITS + 1)), options.stoppedEarly.run] }), ...(late === undefined ? {} : { lateHeld: late }) }; },
+    const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), ...turnEnd, ...nudgeTotal(x, turnEnd), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: options.stoppedEarly === undefined ? outcome : "stopped-early", summary: summary.slice(0, 500), at: this.#runner.now() }, ...(options.stoppedEarly === undefined ? {} : { stoppedEarly: [...(x.stoppedEarly ?? []).slice(-(STOPPED_EARLY_READMITS + 1)), options.stoppedEarly.run] }), ...(late === undefined ? {} : { lateHeld: late }) }; },
       async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
     if (settleLate !== undefined && finished.reservationId === settleLate) { const { releasingId: _r, ...rest } = finished; void _r; await this.#settleReservation(rest, options.lost === true, `:${settleLate}`); }
     // A worker registered while this end was running (its start answered after the end began) is let go too.
@@ -2326,7 +2335,7 @@ export class DispatcherService {
     const at = this.#runner.now();
     const counted = await this.#stoppedEarlyCount(b.taskId);
     const used = counted !== undefined && counted.body.generation === b.generation ? counted.body.readmits : 0;
-    const how = `${early.endKind}${early.visibleChars === undefined ? "" : `, ${early.visibleChars} visible characters`}`;
+    const how = `${early.endKind}${early.visibleChars === undefined ? "" : `, ${early.visibleChars} visible characters`}${early.nudges === undefined || early.nudges === 0 ? "" : `, after ${early.nudges} nudge(s) to go on`}`;
     let checkpoint = early.checkpoint;
     if (checkpoint === undefined && used < STOPPED_EARLY_READMITS) checkpoint = await this.#checkpoint(attemptId, "the turn stopped early", "turn-complete").catch(() => undefined);
     if (used < STOPPED_EARLY_READMITS && checkpoint !== undefined) {
@@ -2342,7 +2351,7 @@ export class DispatcherService {
         if (x.state !== "running" || x.turnRound === round) { readmitted = x.turnRound === round; return x; }
         readmitted = true;
         const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
-        return { ...rest, ...turnEnd, state: "waiting", pinnedHost: x.hostId, resumeFrom: checkpoint!, resumeNote: note, turnRound: round, stoppedEarly: [...(x.stoppedEarly ?? []).slice(-STOPPED_EARLY_READMITS), { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: true }] };
+        return { ...rest, ...turnEnd, ...nudgeTotal(x, turnEnd), state: "waiting", pinnedHost: x.hostId, resumeFrom: checkpoint!, resumeNote: note, turnRound: round, stoppedEarly: [...(x.stoppedEarly ?? []).slice(-STOPPED_EARLY_READMITS), { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: true, ...(early.nudges === undefined ? {} : { nudges: early.nudges }) }] };
       }, async (x) => (x.state !== "running" || x.turnRound === round ? [] : this.#stoppedEarlyChange(b)));
       // A stop asked while the readmit was being written still wins: the stop's own end finds the attempt waiting and finishes it.
       if (readmitted) return {};
@@ -2361,7 +2370,7 @@ export class DispatcherService {
       `Plan: ${progress.plan}.`,
       `Changes: ${progress.diff}.`,
     ];
-    const run = { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: false };
+    const run = { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: false, ...(early.nudges === undefined ? {} : { nudges: early.nudges }) };
     return this.#endInner(attemptId, "abandoned", this.#cleanSummary("abandoned", `${summary}; it stopped early (${how}) and its readmits are used up`), { readmit: false, stoppedEarly: { run, summary: lines.join("\n").slice(0, 1000) } });
   }
 

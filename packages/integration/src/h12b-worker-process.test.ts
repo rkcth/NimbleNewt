@@ -55,7 +55,9 @@ describe("the worker process runs the Pi conversation inside the sandbox", () =>
       assert.equal(typeof result.checkpoint, "object");
       // The request opens with a look at the catalogue; the tool call is the other one.
       assert.equal(bridged.filter((b) => b.op === "tool.discover").length, 1);
-      bridged.splice(0, bridged.length, ...bridged.filter((b) => b.op !== "tool.discover"));
+      // Card W04: the worker asks before nudging a turn that ended without work.end; this stub answers no go, so the turn ended on its reply.
+      assert.equal(bridged.filter((b) => b.op === "turn.continue").length, 1);
+      bridged.splice(0, bridged.length, ...bridged.filter((b) => b.op !== "tool.discover" && b.op !== "turn.continue"));
       assert.equal(bridged.length, 1);
       assert.equal(bridged[0]!.token, "task-credential-1");
       assert.equal(bridged[0]!.op, "desk.read");

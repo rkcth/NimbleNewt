@@ -116,13 +116,15 @@ export interface DispatchBody {
    * How the attempt's last turn ended (card W02): the worker's classification of its last reply (`unknown` when the worker did not say), the length of that reply's visible text when it said, and when the dispatcher recorded it.
    * A completed turn whose kind is not `normal` (and whose agent did not end the attempt with work.end) is a stop before the work was said to be done (card W03, `stoppedEarly`).
    */
-  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string };
+  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; /** Card W04: how many times the worker continued that turn after it yielded without a tool call or work.end (absent: none said). */ readonly nudges?: number };
+  /** Card W04: the continuations (nudges) of all this attempt's turns, summed; absent while there were none. Each turn's own count is on `turnEnd` and on its `stoppedEarly` run. */
+  readonly nudgesUsed?: number;
   /**
    * The runs of this attempt that stopped early (card W03): a turn that completed without the agent's work.end, or whose end kind is not `normal`. Each run ended `stopped-early`; the first `STOPPED_EARLY_READMITS` of a task were
    * readmitted from the checkpoint on the same conversation and host (`readmitted: true`), and the one after them ended the attempt (its outcome is `stopped-early`). `round` numbers the readmits, and names the turn's request
    * (`cmd:adm:<attempt>:se<round>`), so the conversation takes a new input instead of answering with the one it already holds.
    */
-  readonly stoppedEarly?: readonly { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; readonly readmitted: boolean }[];
+  readonly stoppedEarly?: readonly { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; readonly readmitted: boolean; /** Card W04: the nudges that run's turn was given before it stopped. */ readonly nudges?: number }[];
   readonly turnRound?: number;
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;

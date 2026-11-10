@@ -119,7 +119,8 @@ describe("the composed worker: Pi in a sandboxed process, the bridge across the 
       const report2 = await dispatcher.tick();
       await dispatcher.idle();
       assert.deepEqual(report2.started, [next.attemptId]);
-      assert.equal(model.seen.length, firstTurn + 1);
+      // The next task's agent answers in prose only, so its turn is nudged three times (card W04): four calls, each opening with the same declarations.
+      assert.equal(model.seen.length, firstTurn + 4);
       assert.match(contextOf(model.seen[firstTurn]!), /\\n- a_[a-z0-9]{16}\.double 1\.0\.0 \(tool\)/, "the next request declares the tool");
 
       // The process cannot load the controller or the worker package (they are not in its filesystem) or reach the database: a script with the same mounts as the process proves it.
