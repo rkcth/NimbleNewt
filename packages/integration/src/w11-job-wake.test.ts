@@ -67,7 +67,7 @@ test("an agent that starts a job and ends its turn is woken once in the same con
   let local: LocalWorker | undefined;
   const ws = new LocalWorkspaces({ root: join(directory, "work"), git, shared: () => shared, busy: () => local?.busyAttempts() ?? [], landing: () => ({ branch: "main", requirePermit: false }) });
   // The job: reads its input, waits a moment (the agent's turn ends meanwhile), writes one line and exits 0.
-  const source = `let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);setTimeout(()=>{process.stdout.write("built "+i.target+" in 3 pages\\n");process.exit(0);},1500);});`;
+  const source = `let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);setTimeout(()=>{process.stdout.write("built "+i.target+" in 3 pages\\n");process.exit(0);},5000);});`;
   let tool = "";
   let jobOne = "";
   const steps: (Step | (() => Step))[] = [

@@ -154,6 +154,8 @@ for (const backend of backends) {
       // The owner settles the unknown job; the task's attempt has finished meanwhile, so the wake admits a new attempt of the same assignment (and only one), whose first run is told.
       assert.equal((await w.dispatcher.get(w.owner, unknown.attemptId!))!.state, "finished");
       const before = (await w.assignments.getAssignment(unknown.taskId))!;
+      // Later (an attempt that ran when a job's state changed could read it there; this one had ended before the owner settled it).
+      w.clock.advance(60_000);
       await r.jobs.reconcile(w.owner, { commandId: "rc", jobId: jobOf(unknown.attemptId!), to: "completed", evidence: "the report file is complete" });
       const report = await r.tick();
       const after_ = (await w.assignments.getAssignment(unknown.taskId))!;
@@ -300,6 +302,136 @@ for (const backend of backends) {
       const n = w.worker.starts.length;
       await r.tick();
       assert.equal(w.worker.starts.length, n, "nothing starts by itself");
+    } finally { await store.close(); }
+  });
+}
+
+// Review (clean-context Opus): the wake is judged by the attempt that waits for the job, and a job whose end the running attempt could read is not a reason to start another attempt once that one has ended.
+for (const backend of backends) {
+  test(`${backend.name}: a job that ends while its attempt runs, which then ends with work.end, starts no new attempt; the owner's per-hour notices are spent once per ended job, not once per look`, async () => {
+    const store = await backend.open();
+    try {
+      const r = await rig(store.storage);
+      const { w } = r;
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      // The turn starts a job, the job ends while the turn still runs (the agent polled job-status), and the agent ends its work with work.end.
+      w.worker.script = async (c) => {
+        await startsJob(r, "quick check")(c);
+        const last = r.started.at(-1)!;
+        await r.jobs.finish(host(r), { commandId: `f-${last.jobId}`, jobId: last.jobId, outcome: "completed" });
+        return finishes();
+      };
+      const { taskId, attemptId } = await w.task("polls", ann);
+      await r.tick();
+      assert.equal((await w.dispatcher.get(w.owner, attemptId!))!.state, "finished");
+      const before = (await w.assignments.getAssignment(taskId))!.attempts;
+      w.clock.advance(1000);
+      await r.tick();
+      await r.tick();
+      assert.equal((await w.assignments.getAssignment(taskId))!.attempts, before, "no new attempt for a job the ended attempt could read");
+      assert.equal(w.worker.starts.length, 1);
+      const [wake] = await r.wake(taskId);
+      assert.equal(wake!.status, "skipped");
+      assert.match(wake!.reason ?? "", /ran when the job ended and has ended since/);
+
+      // A paused task looked at many times is told of once: the hour's notice bound is not spent by the looks.
+      const t2 = await w.task("paused", ann);
+      w.worker.script = async (c) => (c.order.resumeNote === undefined ? startsJob(r, "long build", { background: true })(c) : finishes());
+      await r.tick();
+      await w.pauses.pause(w.owner, { commandId: "pz2", scope: { kind: "task", id: t2.taskId }, reason: "look" });
+      const first = r.started.at(-1)!.jobId;
+      await r.jobs.finish(host(r), { commandId: "f-a", jobId: first, outcome: "completed" });
+      for (let i = 0; i < JOB_WAKE_LIMITS.noticesPerHour + 2; i++) await r.tick();
+      const count = (await store.storage.getAggregate({ kind: STOPPED_EARLY_KIND, id: t2.taskId }))?.body as { noticeTimes?: string[] } | undefined;
+      assert.equal(count?.noticeTimes?.length, 1, "one notice counted for one ended job");
+      await w.pauses.resume(w.owner, { commandId: "pr2", scope: { kind: "task", id: t2.taskId }, reason: "go on" });
+      await r.tick();
+      const woke = (await r.wake(t2.taskId)).find((x) => x.jobId === first)!;
+      assert.equal(woke.status, "woken");
+      assert.deepEqual(woke.notice, { sent: true }, "the notice stays as it was first recorded");
+    } finally { await store.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: an attempt parked for a job it did not start (an earlier owner's, or one its agent asked to stop) is woken when it ends, not ended silently`, async () => {
+    const store = await backend.open();
+    try {
+      const r = await rig(store.storage);
+      const { w } = r;
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const bob = await w.agent("bob", workGrants(w.project, []));
+      // Ann starts a job and parks; the task goes to Bob, whose turn ends in prose while Ann's job still runs.
+      const quiet = async (): Promise<WorkerTurnResult> => ({ status: "completed", text: "waiting for the build", endKind: "no-work-end", visibleChars: 20, checkpoint: { run: 9 } });
+      w.worker.script = async (c) => (c.order.agentId.endsWith("ann") ? startsJob(r, "anns build")(c) : c.order.resumeNote === undefined ? quiet() : finishes());
+      const { taskId } = await w.task("moves", ann);
+      await r.tick();
+      const annJob = r.started.at(-1)!.jobId;
+      const asg = (await w.assignments.getAssignment(taskId))!;
+      await w.assignments.transferTask({ commandId: "tr2", actor: w.owner.id, taskId, expectedRevision: asg.revision, to: { kind: "agent", id: bob.aid } });
+      const a2 = (await w.assignments.getAssignment(taskId))!;
+      const bobAttempt = (await w.assignments.admitAttempt({ commandId: "ad-bob", actor: "inbox", taskId, expectedRevision: a2.revision, generation: a2.generation, owner: { kind: "agent", id: bob.aid }, harness: "pi" })).id;
+      await r.tick();
+      assert.equal((await w.dispatcher.get(w.owner, bobAttempt))!.state, "parked", "Bob's attempt waits for the job that runs");
+      await r.jobs.finish(host(r), { commandId: "f-ann", jobId: annJob, outcome: "completed" });
+      const report = await r.tick();
+      assert.deepEqual(report.woken, [bobAttempt], "the attempt that waits for the job is woken");
+      assert.notEqual((await w.dispatcher.get(w.owner, bobAttempt))!.outcome?.status, "abandoned");
+      const counted = (await store.storage.getAggregate({ kind: STOPPED_EARLY_KIND, id: taskId }))!.body as { generation: number; wakes: number; readmits: number };
+      assert.deepEqual([counted.generation, counted.wakes, counted.readmits], [a2.generation, 1, 0], "counted in Bob's generation, not reset to Ann's");
+
+      // An agent that asks to stop its own job and ends its turn before the stop is confirmed parks for it; the stop's end wakes it (it is not left without an attempt).
+      const cal = await w.agent("cal", [...workGrants(w.project, []), { action: "job.control", project: w.project }]);
+      const t3 = await w.task("cancels", cal);
+      w.worker.script = async (c) => {
+        if (c.order.resumeNote !== undefined) return finishes();
+        if (!c.order.agentId.endsWith("cal")) return quiet();
+        await startsJob(r, "unwanted")(c);
+        const j = r.started.at(-1)!.jobId;
+        const calP = await w.principals.authenticate((await w.principals.issueCredential(w.owner, "agent:cal")).token);
+        await r.jobs.requestCancel(calP, { commandId: `c-${j}`, jobId: j, reason: "not needed" });
+        return quiet();
+      };
+      await r.tick();
+      assert.equal((await w.dispatcher.get(w.owner, t3.attemptId!))!.state, "parked", JSON.stringify((await w.dispatcher.get(w.owner, t3.attemptId!))!.outcome));
+      const j3 = r.started.at(-1)!.jobId;
+      await r.jobs.confirmCancel(host(r), { commandId: "cc3", jobId: j3, result: "stopped" });
+      assert.equal((await r.wake(t3.taskId))[0]!.cancelledBy, "agent:cal", "the task's own agent asked for the stop");
+      const rep3 = await r.tick();
+      const d3 = (await w.dispatcher.get(w.owner, t3.attemptId!))!;
+      assert.ok(rep3.woken?.includes(t3.attemptId!) || d3.outcome?.status === "succeeded", `the parked attempt goes on: ${JSON.stringify(d3.outcome)}`);
+    } finally { await store.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: wakes that must wait at the head of a long due list do not keep the ones behind them from being looked at`, async () => {
+    const store = await backend.open();
+    try {
+      const r = await rig(store.storage);
+      const { w } = r;
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      w.worker.script = async (c) => (c.order.resumeNote === undefined ? startsJob(r, "build", { background: true })(c) : finishes());
+      const paused = await w.task("paused", ann);
+      const behind = await w.task("behind", ann);
+      await r.tick();
+      await w.pauses.pause(w.owner, { commandId: "pz-head", scope: { kind: "task", id: paused.taskId }, reason: "hold" });
+      // More waiting wakes of the paused task than one tick looks at, ahead of the parked attempt's wake.
+      const pausedJob = r.started.find((s) => s.attemptId === paused.attemptId)!.jobId;
+      const head: string[] = [];
+      const changes: unknown[] = [];
+      for (let i = 0; i < JOB_WAKE_LIMITS.perTick + 5; i++) {
+        const id = wakeIdOf(`${pausedJob}-${i}`, "end");
+        head.push(id);
+        changes.push({ type: "create", ref: { kind: JOB_WAKE_KIND, id }, body: { jobId: pausedJob, taskId: paused.taskId, projectId: w.project, kind: "tool", label: "build", state: "completed", phase: "end", attemptId: paused.attemptId, at: w.clock.now(), status: "due", notice: { sent: false, why: "seeded" } } });
+      }
+      changes.push({ type: "create", ref: JOB_WAKES_INDEX, body: { due: head, recent: [] } });
+      await store.storage.applyOperation({ operationId: "seed-head", epoch: w.epoch, actor: "test", correlationId: "seed-head", at: w.clock.now(), changes: changes as never, audit: [{ type: "test.seed", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+      await r.jobs.finish(host(r), { commandId: "f-behind", jobId: r.started.find((s) => s.attemptId === behind.attemptId)!.jobId, outcome: "completed" });
+      const woken: string[] = [];
+      for (let i = 0; i < 3 && !woken.includes(behind.attemptId!); i++) woken.push(...((await r.tick()).woken ?? []));
+      assert.ok(woken.includes(behind.attemptId!), "the wake behind the waiting ones is reached");
+      assert.equal((await w.dispatcher.get(w.owner, paused.attemptId!))!.state, "parked", "the paused task still waits");
     } finally { await store.close(); }
   });
 }

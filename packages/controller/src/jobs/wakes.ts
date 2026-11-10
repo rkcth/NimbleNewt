@@ -58,6 +58,8 @@ export interface JobWakeBody {
   /** How the wake was decided, in plain words (why it was not woken, or which attempt was). */
   readonly reason?: string;
   readonly woke?: string;
+  /** An attempt that was running after the job ended (it could read the result itself); when it has ended and no attempt is live, no new attempt is started for the wake. */
+  readonly seenBy?: string;
   /** Written before a new attempt is admitted for the wake, so a restart in between finds the attempt it admitted instead of admitting another. */
   readonly admitting?: { readonly generation: number; readonly attempts: number };
   /** Whether the owner was told (`sent`), and if not why. */

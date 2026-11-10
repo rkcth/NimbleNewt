@@ -809,6 +809,9 @@ export class DispatcherService {
     try { await this.#stopNow(by, d, stopped, options); } finally { if (this.#stopsAsked.get(d.body.attemptId) === stopped) this.#stopsAsked.delete(d.body.attemptId); }
   }
 
+  /** Where the next tick's look at the due job wakes begins (card W11), when there are more than one tick looks at. */
+  #wakeCursor = 0;
+
   readonly #stopsAsked = new Map<string, { readonly by: "owner" | "emergency"; readonly reason: string }>();
 
   async #stopNow(by: Principal, d: { readonly body: DispatchBody }, stopped: { readonly by: "owner" | "emergency"; readonly reason: string }, options: { emergency?: boolean; reason: string }): Promise<void> {
@@ -2454,7 +2457,10 @@ export class DispatcherService {
     const index = await this.#runner.get(JOB_WAKES_INDEX.kind, JOB_WAKES_INDEX.id);
     const due = (index?.body as unknown as JobWakesIndex | undefined)?.due ?? [];
     const woken: string[] = [];
-    for (const wakeId of due.slice(0, JOB_WAKE_LIMITS.perTick)) {
+    // The look goes round the list: wakes that must wait (a paused task, a running attempt) stay at the head of the list, and a fixed first slice would never reach the ones behind them (review fix).
+    const start = due.length <= JOB_WAKE_LIMITS.perTick ? 0 : this.#wakeCursor % due.length;
+    this.#wakeCursor = due.length <= JOB_WAKE_LIMITS.perTick ? 0 : start + JOB_WAKE_LIMITS.perTick;
+    for (const wakeId of [...due.slice(start), ...due.slice(0, start)].slice(0, JOB_WAKE_LIMITS.perTick)) {
       let taskId = "";
       try {
         const found = await this.#runner.get(JOB_WAKE_KIND, wakeId);
@@ -2486,7 +2492,8 @@ export class DispatcherService {
     const assignment = await this.#deps.assignments.getAssignment(w.taskId);
     const origin = w.attemptId === undefined ? undefined : (await this.#load(w.attemptId))?.body;
     const generation = origin?.generation ?? (w.attemptId === undefined ? undefined : (await this.#deps.assignments.getAttempt(w.attemptId).catch(() => undefined))?.generation);
-    const countGen = generation ?? assignment?.generation ?? 0;
+    // Counted in the assignment's current generation (W03's record is per generation): a job of an earlier owner that ends must not reset the current owner's counts by writing its own generation (review fix).
+    const countGen = assignment?.generation ?? generation ?? 0;
     const decision = await this.#wakeDecision(w, task, assignment, generation);
     const notice = w.phase === "end" && w.notice === undefined ? await this.#tellOwner(w, task, countGen, decision.tell) : undefined;
     const marked = (status: JobWakeBody["status"], extra: Partial<JobWakeBody>): JobWakeBody => {
@@ -2496,7 +2503,8 @@ export class DispatcherService {
     const counts = (wake: boolean) => async (): Promise<Change[]> => this.#wakeCountChanges(w.taskId, countGen, { wake, notice: notice?.sent === true });
     switch (decision.kind) {
       case "wait": {
-        if (notice !== undefined) await this.#wakeCommit(wakeId, found.revision, marked(w.status, {}), counts(false), false);
+        const seen = decision.seen !== undefined && w.seenBy !== decision.seen ? { seenBy: decision.seen } : undefined;
+        if (notice !== undefined || seen !== undefined) await this.#wakeCommit(wakeId, found.revision, marked(w.status, seen ?? {}), counts(false), false);
         return undefined;
       }
       case "skip": {
@@ -2536,7 +2544,12 @@ export class DispatcherService {
       }
       case "admit": {
         const base = w.status === "admitting" ? found : { revision: found.revision + 1, body: marked("admitting", { admitting: { generation: decision.generation, attempts: decision.attempts } }) };
-        if (w.status !== "admitting") await this.#wakeCommit(wakeId, found.revision, base.body, counts(false), false);
+        if (w.status !== "admitting") {
+          await this.#wakeCommit(wakeId, found.revision, base.body, counts(false), false);
+          // A commit that lost a race is not an error (#wakeCommit leaves it), but nothing is admitted unless the mark that lets a restart find the admitted attempt is on record at the revision counted on (review fix).
+          const marked_ = await this.#runner.get(JOB_WAKE_KIND, wakeId);
+          if (marked_ === undefined || marked_.revision !== base.revision || (marked_.body as unknown as JobWakeBody).status !== "admitting") return undefined;
+        }
         let id: string;
         try {
           id = (await this.#deps.assignments.admitAttempt({ commandId: `dpa-wake:${wakeId}:${decision.attempts}`, actor: DISPATCHER_ACTOR, taskId: w.taskId, expectedRevision: decision.revision, generation: decision.generation, owner: decision.owner, ...(decision.harness === undefined ? {} : { harness: decision.harness }) })).id;
@@ -2560,22 +2573,27 @@ export class DispatcherService {
     const skip = (why: string, usedUp = false): WakeDecision => ({ kind: "skip", why, tell: `The agent was not woken: ${why}.`, ...(usedUp ? { usedUp: true } : {}) });
     if (task === undefined) return skip("the task no longer exists");
     if (task.state === "done" || task.state === "cancelled") return skip(`the task is ${task.state === "done" ? "done" : "cancelled"}`);
-    if (w.attemptId === undefined || generation === undefined) return skip("no attempt of an agent started the job");
     if (await this.#deps.jobWakes?.stopped?.(w.taskId)) return skip("the task is stopped");
     const held = await this.#deps.heldBy?.(w.taskId);
     if (held !== undefined) return skip(clip(held, 200));
     if (assignment === undefined || assignment.state !== "assigned" || assignment.owner?.kind !== "agent") return skip("the task is no longer assigned to an agent");
-    if (assignment.generation !== generation) return skip("the task was reassigned after the job started");
-    // A job the task's own agent stopped: it asked for the stop, so it knows; nothing to wake it for.
-    if (w.state === "cancelled" && w.cancelledBy !== undefined && w.cancelledBy === `agent:${assignment.owner.id}`) return skip("the task's own agent stopped the job");
-    if ((await this.#deps.pauses.guard(w.taskId)).blockedBy.length > 0) return { kind: "wait", tell: "The agent will be woken to read it when the task's pause is lifted." };
-    const room = await this.#wakeRoom(w.taskId, generation);
     const active = assignment.activeAttemptId;
+    // The attempt that parked for this job is woken by its end, whoever started the job (an earlier owner's attempt, the owner) and however it ended (its own agent's stop included): it ended its turn to wait for it (review fix).
+    const waiter = active === undefined ? undefined : (await this.#load(active))?.body;
+    const waits = waiter !== undefined && waiter.state === "parked" && waiter.parked.length === 0 && waiter.generation === assignment.generation && (waiter.waitsOnJobs ?? []).includes(w.jobId);
+    if (!waits) {
+      if (w.attemptId === undefined || generation === undefined) return skip("no attempt of an agent started the job");
+      if (assignment.generation !== generation) return skip("the task was reassigned after the job started");
+      // A job the task's own agent stopped: it asked for the stop, so it knows; nothing to wake it for.
+      if (w.state === "cancelled" && w.cancelledBy !== undefined && w.cancelledBy === `agent:${assignment.owner.id}`) return skip("the task's own agent stopped the job");
+    }
+    if ((await this.#deps.pauses.guard(w.taskId)).blockedBy.length > 0) return { kind: "wait", tell: "The agent will be woken to read it when the task's pause is lifted." };
+    const room = await this.#wakeRoom(w.taskId, assignment.generation);
     const admitted = w.status === "admitting" && w.admitting !== undefined && active !== undefined && assignment.attempts > w.admitting.attempts;
     if (active !== undefined) {
       const d = (await this.#load(active))?.body;
       if (d === undefined) return { kind: "note", attemptId: active, ...(admitted ? { counted: true } : {}), tell: admitted ? "The agent was woken to read it." : "The agent will read it when its next run starts." };
-      if (d.state === "running") return admitted ? { kind: "skip", why: "the attempt admitted for it is already running", tell: "The agent was woken to read it." } : { kind: "wait", tell: "The agent is at work on the task and can read it now." };
+      if (d.state === "running") return admitted ? { kind: "skip", why: "the attempt admitted for it is already running", tell: "The agent was woken to read it." } : { kind: "wait", seen: active, tell: "The agent is at work on the task and can read it now." };
       if (d.state === "waiting") return { kind: "join", attemptId: active, ...(admitted ? { counted: true } : {}), tell: admitted ? "The agent was woken to read it." : "The agent will read it when its next run starts." };
       if (d.state === "parked" && (d.waitsOnJobs === undefined || d.parked.length > 0)) return { kind: "wait", tell: "The agent waits for an approval and will be told when it goes on." };
       if (d.state === "parked") {
@@ -2585,7 +2603,14 @@ export class DispatcherService {
       }
       return { kind: "wait", tell: "The agent will be told when it next runs." };
     }
-    // No live attempt: a new one of the same assignment, unless the owner has to decide first.
+    // No live attempt. An attempt that ran after the job ended could read its result there (the agent polled it, or the job was short) and has ended since, by its own work.end or otherwise: its end is not a reason to
+    // start another attempt (review fix: otherwise every job that ends while its attempt runs starts a new attempt once the agent ends its work).
+    for (const id of [w.seenBy, w.attemptId]) {
+      if (id === undefined) continue;
+      const ran = (await this.#load(id))?.body;
+      if (ran?.state === "finished" && ran.generation === assignment.generation && (id === w.seenBy || (ran.outcome !== undefined && Date.parse(ran.outcome.at) >= Date.parse(w.at)))) return skip(`its attempt ${id} ran when the job ended and has ended since (it could read the job's result there)`);
+    }
+    // Otherwise a new one of the same assignment, unless the owner has to decide first.
     for (const type of ["dispatch_blocked", "agent_stopped_early"] as const) {
       const open = await this.#deps.blockers.openFor(type, { kind: "task", id: w.taskId }).catch(() => undefined);
       if (open !== undefined) return skip(`the task has an open ${type.replaceAll("_", " ")} blocker (${open.id}) that waits for you, and no attempt starts by itself until it is dealt with`);
@@ -2597,8 +2622,8 @@ export class DispatcherService {
     const caps = [contract.maxAttempts, figures.maxAttempts].filter((x): x is number => x !== undefined);
     const allowed = caps.length === 0 ? undefined : Math.min(...caps);
     if (allowed !== undefined && assignment.attempts >= allowed) return skip(`${assignment.attempts} attempts were made and the task allows ${allowed}`);
-    const origin = (await this.#load(w.attemptId))?.body;
-    return { kind: "admit", generation, attempts: assignment.attempts, revision: assignment.revision, owner: assignment.owner as { kind: "agent"; id: string }, ...(origin?.harness === undefined ? {} : { harness: origin.harness }), tell: "The agent was woken to read it." };
+    const origin = w.attemptId === undefined ? undefined : (await this.#load(w.attemptId))?.body;
+    return { kind: "admit", generation: assignment.generation, attempts: assignment.attempts, revision: assignment.revision, owner: assignment.owner as { kind: "agent"; id: string }, ...(origin?.harness === undefined ? {} : { harness: origin.harness }), tell: "The agent was woken to read it." };
   }
 
   /** Why the task may not be woken now: `skip` when its go-ons are used up (W03's readmits and the wakes together), `wait` when this hour's wakes are. */
@@ -2664,7 +2689,9 @@ export class DispatcherService {
     if (c !== undefined && c.body.generation === generation && (c.body.noticeTimes ?? []).filter((t) => Date.parse(t) > since).length >= JOB_WAKE_LIMITS.noticesPerHour) return { sent: false, why: `the owner was already told of ${JOB_WAKE_LIMITS.noticesPerHour} ended jobs of this task in the last hour` };
     const short = w.state === "completed" ? "completed" : w.state === "failed" ? "failed" : w.state === "cancelled" ? "was cancelled" : "ended, outcome unknown";
     const label = `Job ${quoted(w.label, 60)} ${short}`.slice(0, 200);
-    const detail = `Task ${quoted(task?.title ?? w.taskId, 50)}: the job ${stateWords(w.state)}. ${how} Ask about the job in chat to see its status and output.`;
+    // The fixed sentences are kept whole; what became of the wake is shortened to fit the notice (review fix: a long reason cut the end off).
+    const head = `Task ${quoted(task?.title ?? w.taskId, 50)}: the job ${short}.`, tail = " Ask about the job in chat to see its status and output.";
+    const detail = `${head} ${clip(how, Math.max(20, 200 - head.length - tail.length - 1))}${tail}`;
     try {
       await notify.emitFromController({ commandId: `jwk-ntf:${w.jobId}`, kind: "maintenance", level: w.state === "failed" || w.state === "outcome_unknown" ? "needs-you" : "notice", ref: { kind: "job", id: w.jobId }, projectId: w.projectId, label, detail: clip(detail, 200) });
       return { sent: true };
@@ -2917,7 +2944,7 @@ const errorText = (error: unknown): string => redactText(error instanceof Error 
 type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 /** What becomes of one due job wake (card W11); `tell` is the owner's sentence about it. */
 type WakeDecision =
-  | { readonly kind: "wait"; readonly tell: string }
+  | { readonly kind: "wait"; readonly tell: string; /** The attempt that runs now and can read the job's end itself. */ readonly seen?: string }
   | { readonly kind: "skip"; readonly why: string; readonly tell: string; readonly usedUp?: true }
   | { readonly kind: "join" | "readmit"; readonly attemptId: string; readonly counted?: true; readonly tell: string }
   | { readonly kind: "note"; readonly attemptId: string; readonly counted?: true; readonly tell: string }
