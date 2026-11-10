@@ -71,7 +71,7 @@ export interface EndingAttempt {
   readonly generation?: number;
 }
 
-/** An evidence item the agent names (card W05): the item as the task contract says it, and the committed file of its checkout that holds it. */
+/** An evidence item the agent names (card W05): the item as the task contract says it, and the file of its checkout that holds it. */
 export interface WorkEndEvidence { readonly item: string; readonly path: string }
 
 /**

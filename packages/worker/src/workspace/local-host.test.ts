@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -222,25 +222,28 @@ test("the diff stat runs no filter, diff driver or hook the agent's checkout nam
   } finally { await w.done(); }
 });
 
-test("doneState says what is not committed, the commits and changes ahead of the base, and whether each evidence path is a plain, non-empty file of the last commit (card W05)", { skip }, async () => {
+test("doneState says what is not committed, the commits and changes ahead of the base, and whether each evidence path is a plain, non-empty file of the checkout as it stands (card W05)", { skip }, async () => {
   const w = await world();
   try {
     const scope = { taskId: "tsk-one", projectId: "prj-one" };
     assert.equal(await w.ws.doneState(scope, []), undefined, "no checkout: nothing to say");
     const made = await w.ws.ensure(scope);
     const g = (...args: string[]): string => execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/nonexistent-hooks", "-c", "commit.gpgsign=false", ...args], { encoding: "utf8" });
-    assert.deepEqual(await w.ws.doneState(scope, []), { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0, evidence: [] }, "a fresh checkout: clean, nothing ahead");
+    assert.deepEqual(await w.ws.doneState(scope, []), { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0, evidence: [], agentCommits: false }, "a fresh checkout: clean, nothing ahead; the agent cannot commit in this layout");
     await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
     await mkdir(join(made.checkout, "logs"));
     await writeFile(join(made.checkout, "logs", "test.txt"), "12 passed\n");
     await writeFile(join(made.checkout, ".gitignore"), "build/\n");
     await mkdir(join(made.checkout, "build"));
     await writeFile(join(made.checkout, "build", "out.js"), "ignored\n");
+    await symlink("/etc/hostname", join(made.checkout, "logs", "link.txt"));
     const before = g("status", "--porcelain");
-    const dirty = await w.ws.doneState(scope, ["logs/test.txt"]);
-    assert.deepEqual(dirty?.uncommitted.slice().sort(), [".gitignore", "logs/test.txt", "src/a.ts"], "changed and new files count; an ignored one does not");
-    assert.deepEqual([dirty?.uncommittedCount, dirty?.ahead, dirty?.changed], [3, 0, 3]);
-    assert.deepEqual(dirty?.evidence, [{ path: "logs/test.txt", present: false, why: "not in the last commit" }], "a file that is only in the checkout is not evidence yet");
+    const dirty = await w.ws.doneState(scope, ["logs/test.txt", "build/out.js", "logs/link.txt"]);
+    assert.deepEqual(dirty?.uncommitted.slice().sort(), [".gitignore", "logs/link.txt", "logs/test.txt", "src/a.ts"], "changed and new files count; an ignored one does not");
+    assert.deepEqual([dirty?.uncommittedCount, dirty?.ahead, dirty?.changed], [4, 0, 4]);
+    // The agent cannot commit here: what its checkout holds (not ignored) is its work, and its evidence. A link (even to a file outside the checkout) is not a file.
+    assert.deepEqual(dirty?.evidence, [{ path: "logs/test.txt", present: true }, { path: "build/out.js", present: false, why: "not in the checkout (or ignored)" }, { path: "logs/link.txt", present: false, why: "not a plain file" }]);
+    await rm(join(made.checkout, "logs", "link.txt"));
     assert.equal(g("status", "--porcelain"), before, "reading changes nothing in the checkout's index");
     await writeFile(join(made.checkout, "empty.txt"), "");
     await writeFile(join(made.checkout, "*"), "a star\n");
@@ -251,9 +254,9 @@ test("doneState says what is not committed, the commits and changes ahead of the
       { path: "logs/test.txt", present: true },
       { path: "empty.txt", present: false, why: "empty" },
       { path: "logs", present: false, why: "a folder, not a file" },
-      { path: "missing.txt", present: false, why: "not in the last commit" },
+      { path: "missing.txt", present: false, why: "not in the checkout (or ignored)" },
       { path: "*", present: true },
-      { path: "src/*.ts", present: false, why: "not in the last commit" },
+      { path: "src/*.ts", present: false, why: "not in the checkout (or ignored)" },
     ], "paths are taken literally: a pattern matches no other file");
   } finally { await w.done(); }
 });

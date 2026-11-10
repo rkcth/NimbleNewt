@@ -79,13 +79,13 @@ test("how a check ended: a failure keeps the end of its output, a time-out is a 
 test("doneVerifier reports the checkout and runs each check in turn; a check that throws is not-run, never passed; no checkout is said so (W05)", async () => {
   const order_: string[] = [];
   const verify = doneVerifier({
-    workspaces: { doneState: async (scope, paths) => (scope.taskId === "none" ? undefined : { uncommitted: ["a"], uncommittedCount: 1, ahead: 2, changed: 3, evidence: paths.map((p) => ({ path: p, present: p !== "x" })) }) },
+    workspaces: { doneState: async (scope, paths) => (scope.taskId === "none" ? undefined : { uncommitted: ["a"], uncommittedCount: 1, ahead: 2, changed: 3, agentCommits: false, evidence: paths.map((p) => ({ path: p, present: p !== "x" })) }) },
     checks: { run: async (_id, c) => { order_.push(c.run[0]!); if (c.run[0] === "boom") throw new Error("host broke"); return { state: c.run[0] === "ok" ? "passed" : "failed", exitCode: c.run[0] === "ok" ? 0 : 2 }; } },
   });
   const request = { checks: [{ name: "one", run: ["ok"], timeoutMs: 10 }, { name: "two", run: ["boom"], timeoutMs: 10 }, { name: "three", run: ["bad"], timeoutMs: 10 }], evidence: ["x", "y"], maxOutputBytes: 100 };
   const got = await verify("att-1", { taskId: "t", projectId: "p" }, request);
   assert.deepEqual(order_, ["ok", "boom", "bad"], "one after another, in the contract's order");
-  assert.deepEqual(got, { checkout: true, tree: { uncommitted: ["a"], uncommittedCount: 1, ahead: 2, changed: 3 }, evidence: [{ path: "x", present: false }, { path: "y", present: true }], checks: [{ name: "one", state: "passed", exitCode: 0 }, { name: "two", state: "not-run", reason: "host broke" }, { name: "three", state: "failed", exitCode: 2 }] });
+  assert.deepEqual(got, { checkout: true, tree: { uncommitted: ["a"], uncommittedCount: 1, ahead: 2, changed: 3, agentCommits: false }, evidence: [{ path: "x", present: false }, { path: "y", present: true }], checks: [{ name: "one", state: "passed", exitCode: 0 }, { name: "two", state: "not-run", reason: "host broke" }, { name: "three", state: "failed", exitCode: 2 }] });
   assert.deepEqual((await verify("att-1", { taskId: "none", projectId: "p" }, { ...request, checks: [] })), { checkout: false, checks: [] });
 });
 

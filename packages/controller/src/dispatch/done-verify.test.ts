@@ -20,6 +20,8 @@ const DIRTY: DoneCheckReport = {
   checks: [{ name: "unit tests", state: "failed", exitCode: 1, ms: 900, output: `${"x".repeat(5000)}\nFAIL parser.test.ts: expected 2, got 1 (key ${SECRET}) ‮ end\n` }, { name: "lint", state: "passed", exitCode: 0 }],
 };
 
+const LINT = { name: "lint", run: ["npm", "run", "lint"] };
+
 async function withContract(w: DispatchWorld, taskId: string, fields: Record<string, unknown> = {}): Promise<void> {
   await w.contracts.setContract(w.owner, { commandId: `c-${taskId}`, taskId, expectedVersion: 0, requiredEvidence: ["test log", "screenshot"], checks: [{ name: "unit tests", run: ["npm", "test"] }, { name: "lint", run: ["npm", "run", "lint"], timeoutSeconds: 30 }], ...fields } as never);
 }
@@ -62,9 +64,9 @@ for (const backend of backends) {
       assert.match(lines[1]!, /^1\. Required evidence "screenshot" is not named: give it in work\.end evidence as \{ item, path \}/);
       assert.match(lines[2]!, /^2\. The checkout has 7 file\(s\) that are not committed: "src\/a\.ts", "notes\\u202e\.md", "c", "d", "e" and 2 more\. Commit them/);
       assert.match(lines[3]!, /^3\. There is no commit ahead of the task's base\./);
-      assert.match(lines[4]!, /^4\. Required evidence "test log": "logs\/test\.txt" is not a file of your last commit \("not in the last commit"\)/);
+      assert.match(lines[4]!, /^4\. Required evidence "test log": "logs\/test\.txt" is not a plain, non-empty file of your checkout \("not in the last commit"\)/);
       assert.match(lines[5]!, /^5\. Check "unit tests" failed: it exited with code 1\. The end of its output \(quoted\): ".*FAIL parser\.test\.ts: expected 2, got 1 \(key \[redacted\]\) \\u202e end"\./);
-      assert.match(lines[6]!, /^Fix these, commit, and call work\.end again/);
+      assert.match(lines[6]!, /^Fix these and call work\.end again/);
       assert.ok(!first!.message.includes(SECRET), "a secret in a check's output is never shown");
       assert.ok(!first!.message.includes("‮"), "controls in what came from elsewhere are escaped");
       assert.ok(lines[5]!.length < 800, "a check's output is bounded");
@@ -151,9 +153,8 @@ for (const backend of backends) {
       const w = await buildWorld(store.storage);
       const ann = await w.agent("ann", workGrants(w.project, []));
       const { taskId } = await w.task("counted", ann);
-      // A contract stored only for its priority still asks for committed work (no evidence or checks).
-      await withContract(w, taskId, { requiredEvidence: [], checks: [], priority: 7 });
-      w.worker.verify = async () => ({ checkout: true, tree: { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0 }, evidence: [], checks: [] });
+      await withContract(w, taskId, { requiredEvidence: [], checks: [LINT], priority: 7 });
+      w.worker.verify = async () => ({ checkout: true, tree: { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0 }, evidence: [], checks: [{ name: "lint", state: "passed" }] });
       let n = 0;
       await turn(w, async (attemptId) => { const v = await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "d1" }); assert.equal(v.state, "failed"); }, { endKind: "no-work-end", checkpoint: { turn: ++n } });
       let d = (await w.dispatcher.get(w.owner, verdictAttempt(w)))!;
@@ -175,10 +176,9 @@ for (const backend of backends) {
       const w = await buildWorld(store.storage);
       const ann = await w.agent("ann", workGrants(w.project, []));
       const { taskId } = await w.task("submit", ann);
-      // A contract stored only for its priority still asks for committed work (no evidence or checks).
-      await withContract(w, taskId, { requiredEvidence: [], checks: [], priority: 7 });
+      await withContract(w, taskId, { requiredEvidence: [], checks: [LINT], priority: 7 });
       let tree = { uncommitted: ["src/a.ts", "src/b.ts", "test/c.ts"], uncommittedCount: 3, ahead: 0, changed: 3 };
-      w.worker.verify = async () => ({ checkout: true, tree, evidence: [], checks: [] });
+      w.worker.verify = async () => ({ checkout: true, tree, evidence: [], checks: [{ name: "lint", state: "passed" }] });
       const v: DoneVerdict[] = [];
       await turn(w, async (attemptId) => {
         v.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "s1", submit: true }));
@@ -258,3 +258,51 @@ test("the refusal text is bounded as a whole: past its size the rest are counted
   assert.ok(text.length < 6600, String(text.length));
   assert.match(text, /\n\(6 more item\(s\) not shown\.\)\nFix these/);
 });
+
+for (const backend of backends) {
+  test(`${backend.name}: a contract that names no evidence and no checks (stored for its priority, difficulty or criteria alone) is not checked and the host is not asked (W05)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { taskId } = await w.task("priority only", ann);
+      await withContract(w, taskId, { requiredEvidence: [], checks: [], priority: 7, acceptanceCriteria: ["it works"] });
+      let asked = 0;
+      w.worker.verify = async () => { asked++; return { checkout: true, tree: { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0 }, evidence: [], checks: [] }; };
+      let v: DoneVerdict | undefined;
+      await turn(w, async (attemptId) => { v = await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "p1" }); });
+      assert.deepEqual(v, { state: "skipped" });
+      assert.equal(asked, 0);
+      assert.equal(await countOf(w, taskId), 0);
+      assert.equal((await w.dispatcher.get(w.owner, verdictAttempt(w)))!.verifications, undefined);
+    } finally { await store.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: where the agent cannot commit (the real local worker), its uncommitted change is its work: a done passes without a commit or submit, and one with no change against the base is refused (W05)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { taskId } = await w.task("no git", ann);
+      await withContract(w, taskId, { requiredEvidence: ["test log"], checks: [LINT] });
+      let tree: NonNullable<DoneCheckReport["tree"]> = { uncommitted: [], uncommittedCount: 0, ahead: 0, changed: 0, agentCommits: false };
+      let present = false;
+      w.worker.verify = async () => ({ checkout: true, tree, evidence: [{ path: "logs/test.txt", present, ...(present ? {} : { why: "not in the checkout (or ignored)" }) }], checks: [{ name: "lint", state: "passed" }] });
+      const v: DoneVerdict[] = [];
+      await turn(w, async (attemptId) => {
+        v.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "g1", evidence: [{ item: "test log", path: "logs/test.txt" }] }));
+        tree = { uncommitted: ["src/a.ts", "logs/test.txt"], uncommittedCount: 2, ahead: 0, changed: 2, agentCommits: false };
+        present = true;
+        v.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "g2", evidence: [{ item: "test log", path: "logs/test.txt" }] }));
+      });
+      assert.equal(v[0]!.state, "failed");
+      const message = (v[0] as { message: string }).message;
+      assert.match(message, /1\. Your checkout holds no change against the task's base/);
+      assert.match(message, /2\. Required evidence "test log": "logs\/test\.txt" is not a plain, non-empty file of your checkout \("not in the checkout \(or ignored\)"\)\. Write it there and name it again\./);
+      assert.doesNotMatch(message, /[Cc]ommit/, "an agent that cannot commit is never told to commit");
+      assert.equal(v[1]!.state, "passed", "uncommitted work, no commit ahead and no submit: the checkout as it stands is the work");
+    } finally { await store.close(); }
+  });
+}

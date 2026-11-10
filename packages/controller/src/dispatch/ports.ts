@@ -168,7 +168,15 @@ export interface DoneCheckRun {
  */
 export interface DoneCheckReport {
   readonly checkout: boolean;
-  readonly tree?: { readonly uncommitted: readonly string[]; readonly uncommittedCount: number; readonly ahead: number; /** Files that differ from the task's base, counting what is not committed (what a submit carries). */ readonly changed?: number };
+  readonly tree?: {
+    readonly uncommitted: readonly string[]; readonly uncommittedCount: number; readonly ahead: number; /** Files that differ from the task's base, counting what is not committed (what a submit carries). */ readonly changed?: number;
+    /**
+     * False when the agent cannot commit in this checkout (the worker package's layout keeps the git directory outside the sandbox; the change is committed after review, H12o): its work is then what the checkout holds against the
+     * base, and the rules "committed and clean" and "a commit ahead" do not apply. Absent: the agent commits its own work.
+     */
+    readonly agentCommits?: boolean;
+  };
+  /** Whether each evidence path is a plain, non-empty file of the checkout as it stands (not ignored; what a submission would carry). */
   readonly evidence?: readonly { readonly path: string; readonly present: boolean; readonly why?: string }[];
   readonly checks: readonly DoneCheckRun[];
 }

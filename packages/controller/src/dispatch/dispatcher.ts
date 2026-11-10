@@ -355,7 +355,7 @@ export type DoneVerdict =
   | { readonly state: "passed"; readonly contract: number }
   | { readonly state: "failed"; readonly failures: readonly string[]; readonly exhausted: boolean; readonly message: string; readonly summary: string }
   | { readonly state: "unknown"; readonly failures: readonly string[]; readonly exhausted: boolean; readonly message: string; readonly summary: string };
-/** An evidence item the agent names in work.end (card W05): the item as the contract says it, and the committed file of the checkout that holds it. */
+/** An evidence item the agent names in work.end (card W05): the item as the contract says it, and the file of the checkout that holds it. */
 export interface DoneEvidence { readonly item: string; readonly path: string }
 
 export class DispatcherService {
@@ -865,9 +865,9 @@ export class DispatcherService {
   readonly #verifying = new Map<string, Promise<unknown>>();
 
   /**
-   * Checks an agent's work.end done against the task contract before it is taken (card W05). A task with no stored contract is not checked (`skipped`: today's behaviour). Otherwise the host of the attempt reports, and the controller judges:
-   * the checkout has nothing uncommitted (new files an ignore rule does not match count), its head is at least one commit ahead of the task's base, every evidence item the contract requires is named by the agent with a file of its last
-   * commit, and every check command of the contract exits 0 when the host runs it in the attempt's sandbox (each within its time, its output cut). The agent cannot mark any of this passed: the verdict is the controller's, from the host's
+   * Checks an agent's work.end done against the task contract before it is taken (card W05). A task whose stored contract names no evidence and no checks (or that has none) is not checked (`skipped`: today's behaviour). Otherwise the
+   * host of the attempt reports, and the controller judges: the checkout holds a change against the task's base (where the agent cannot commit, as on the worker package's local host, that is all the tree must show; where it can, the
+   * checkout must also have nothing uncommitted and be a commit ahead, unless a submit carries the change), every evidence item the contract requires is named by the agent with a plain, non-empty file of the checkout, and every check command of the contract exits 0 when the host runs it in the attempt's sandbox (each within its time, its output cut). The agent cannot mark any of this passed: the verdict is the controller's, from the host's
    * report. A host that cannot check, a check it could not run, or a host that does not answer makes the verdict `unknown`, never `passed`.
    *
    * The verdict is recorded on the attempt (`verifications`) under `key`, the work.end call it answers: the same call asked again (a retry, a restart in the middle) gets the recorded verdict and is counted once; checks of one attempt
@@ -889,7 +889,8 @@ export class DispatcherService {
     const recorded = d.body.verifications?.find((v) => v.key === request.key);
     if (recorded !== undefined) return verdictOf(recorded);
     const contract = await this.#doneContract(d.body);
-    if (contract === undefined) return { state: "skipped" };
+    // Only a contract that states what a done must show (evidence or checks) is checked: one stored for its priority, difficulty or criteria alone (a swarm child's, a non-coding task's) is taken as before.
+    if (contract === undefined || (contract.requiredEvidence.length === 0 && contract.checks.length === 0)) return { state: "skipped" };
     const b = d.body;
     const failures: string[] = [];
     // What could not be looked at (the verdict is then `unknown` unless something definitely failed too).
@@ -902,7 +903,7 @@ export class DispatcherService {
     const wanted: { item: string; path: string }[] = [];
     for (const item of contract.requiredEvidence) {
       const path = named.get(item);
-      if (path === undefined) fail(`Required evidence ${quoted(item, 200)} is not named: give it in work.end evidence as { item, path } with the committed file of your checkout that holds it.`);
+      if (path === undefined) fail(`Required evidence ${quoted(item, 200)} is not named: give it in work.end evidence as { item, path } with the file of your checkout that holds it.`);
       else wanted.push({ item, path });
     }
     const checks = contract.checks.map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? CHECK_SECONDS) * 1000 }));
@@ -929,7 +930,13 @@ export class DispatcherService {
       } else {
         const tree = report.tree;
         if (tree === undefined || !Number.isSafeInteger(tree.uncommittedCount) || !Number.isSafeInteger(tree.ahead)) { cannot("The host did not say whether the checkout is committed and ahead of its base."); }
-        else {
+        else if (tree.agentCommits === false) {
+          // The agent cannot commit in this checkout (the real local worker: its git directory is outside the sandbox, and the change is committed after review through the commit permit, H12o). Its work is what the checkout holds
+          // against the base, committed or not: there must be a change.
+          const changed = typeof tree.changed === "number" && Number.isSafeInteger(tree.changed) ? tree.changed : undefined;
+          if (changed === undefined) cannot("The host did not say whether the checkout holds a change against the task's base.");
+          else if (changed < 1) fail("Your checkout holds no change against the task's base (a file that an ignore rule matches does not count), so there is no work to take.");
+        } else {
           // Work the agent offers with `submit` is carried as it stands (staged from the checkout, committed after review), so with a submit nothing has to be committed first: it is enough that there is a change against the base.
           const submit = request.submit === true;
           if (tree.uncommittedCount > 0 && !submit) {
@@ -942,7 +949,7 @@ export class DispatcherService {
         for (const w of wanted) {
           const seen = (report.evidence ?? []).find((e) => e.path === w.path);
           if (seen === undefined) { cannot(`Required evidence ${quoted(w.item, 200)}: the host did not say whether ${quoted(w.path, 200)} is there.`); }
-          else if (seen.present !== true) fail(`Required evidence ${quoted(w.item, 200)}: ${quoted(w.path, 200)} is not a file of your last commit${seen.why === undefined ? "" : ` (${quoted(seen.why, 120)})`}. Commit it and name it again.`);
+          else if (seen.present !== true) fail(`Required evidence ${quoted(w.item, 200)}: ${quoted(w.path, 200)} is not a plain, non-empty file of your checkout${seen.why === undefined ? "" : ` (${quoted(seen.why, 120)})`}. Write it there and name it again.`);
         }
       }
       for (const c of checks) {
@@ -2203,9 +2210,9 @@ export class DispatcherService {
     try {
       const c = await this.#doneContract(b);
       if (c === undefined || (c.requiredEvidence.length === 0 && c.checks.length === 0)) return "";
-      const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with a committed file that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
+      const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with the file of your checkout that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
       const checks = c.checks.length === 0 ? "" : ` The host then runs these checks in your sandbox, and each must pass: ${c.checks.map((x) => quoted(x.name, 80)).join(", ")}.`;
-      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must be committed and clean, at least one commit ahead of the task's base (or, with submit true, hold your change against the base).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
+      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
     } catch { return ""; }
   }
 
@@ -2500,7 +2507,7 @@ export class DispatcherService {
       await this.#endCall(attemptId, "succeeded", `the turn stopped early (${how}); the attempt goes on`);
       if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-early:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "the turn stopped early; the attempt waits to go on from its checkpoint" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
       const turnEnd = this.#takeTurnEnd(attemptId);
-      const note = `Your last turn ended before you said the work was done (it ended: ${early.endKind}; no work.end was accepted${b.verifications?.at(-1)?.state === "failed" || b.verifications?.at(-1)?.state === "unknown" ? ", and your last work.end done was refused with the list of what did not pass" : ""}). This attempt goes on from where it stopped, in the same conversation (go-on ${round} of ${STOPPED_EARLY_READMITS}). Look at what is left in PLAN.md, do it, commit it, and end with work.end; a turn that ends in prose alone is not taken as done.`;
+      const note = `Your last turn ended before you said the work was done (it ended: ${early.endKind}; no work.end was accepted${b.verifications?.at(-1)?.state === "failed" || b.verifications?.at(-1)?.state === "unknown" ? ", and your last work.end done was refused with the list of what did not pass" : ""}). This attempt goes on from where it stopped, in the same conversation (go-on ${round} of ${STOPPED_EARLY_READMITS}). Look at what is left in PLAN.md, do it, and end with work.end; a turn that ends in prose alone is not taken as done.`;
       let readmitted = false;
       await this.#update(attemptId, (x) => {
         if (x.state !== "running" || x.turnRound === round) { readmitted = x.turnRound === round; return x; }
@@ -2790,7 +2797,7 @@ export function doneRefusal(v: Pick<DoneVerification, "state" | "failures" | "ex
     : `work.end done was not accepted: the controller checked your work against the task contract and ${v.failures.length} item(s) did not pass.`;
   const tail = v.exhausted
     ? "The go-ons of this task are used up, so the attempt ends now, blocked, with this list for the owner."
-    : "Fix these, commit, and call work.end again; the controller checks again. A done that is not accepted counts toward this task's go-ons, and once they are used up the attempt ends blocked. If you cannot finish, end with work.end result blocked or partial and say why in the note.";
+    : "Fix these and call work.end again; the controller checks again. A done that is not accepted counts toward this task's go-ons, and once they are used up the attempt ends blocked. If you cannot finish, end with work.end result blocked or partial and say why in the note.";
   return [head, ...lines, tail].join("\n");
 }
 

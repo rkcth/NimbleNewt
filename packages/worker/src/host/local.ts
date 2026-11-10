@@ -552,9 +552,9 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
  * sandbox (`localWorkerParts(...).checks`). A check that throws is reported `not-run` with the reason; the controller never takes it as passed.
  */
 export function doneVerifier(parts: {
-  readonly workspaces: { doneState(scope: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<{ uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; evidence: readonly { path: string; present: boolean; why?: string }[] } | undefined> };
+  readonly workspaces: { doneState(scope: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<{ uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean; evidence: readonly { path: string; present: boolean; why?: string }[] } | undefined> };
   readonly checks: { run(attemptId: string, check: HostCheck): Promise<HostCheckResult> };
-}): (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: { readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number }) => Promise<{ checkout: boolean; tree?: { uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number }; evidence?: readonly { path: string; present: boolean; why?: string }[]; checks: ({ name: string } & HostCheckResult)[] }> {
+}): (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: { readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number }) => Promise<{ checkout: boolean; tree?: { uncommitted: readonly string[]; uncommittedCount: number; ahead: number; changed: number; agentCommits?: boolean }; evidence?: readonly { path: string; present: boolean; why?: string }[]; checks: ({ name: string } & HostCheckResult)[] }> {
   return async (attemptId, scope, request) => {
     const state = await parts.workspaces.doneState(scope, request.evidence);
     const ran: ({ name: string } & HostCheckResult)[] = [];
@@ -563,6 +563,6 @@ export function doneVerifier(parts: {
       catch (error) { ran.push({ name: c.name, state: "not-run", reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
     }
     if (state === undefined) return { checkout: false, checks: ran };
-    return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed }, evidence: state.evidence, checks: ran };
+    return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence, checks: ran };
   };
 }
