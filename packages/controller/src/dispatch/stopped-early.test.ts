@@ -212,3 +212,46 @@ for (const backend of backends) {
     }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: the agent's accepted done that completes later, and its ending that comes after the end hook gave up, are not lost to a readmit (W03 review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      // A done the end hook could not complete now (the task is paused): the turn did not stop before the work was said to be done, so the attempt is not readmitted while that ending waits to be completed.
+      w.dispatcher.onEnd(async () => ({ pending: true }));
+      w.worker.script = stopper("length");
+      const pending = await w.task("pending done", ann);
+      await runOnce(w);
+      const p = (await w.dispatcher.get(w.owner, pending.attemptId!))!;
+      assert.equal(p.state, "finished");
+      assert.equal(p.outcome?.status, "succeeded");
+      assert.equal(p.turnRound, undefined, "never readmitted");
+      assert.equal(p.stoppedEarly, undefined);
+
+      // The end hook gives up waiting (its limit) while the agent's ending is still being completed; that ending then joins the end, which readmitted the attempt. It ends the attempt itself.
+      const errors: unknown[] = [];
+      w.dispatcher = w.restart({}, { endHookMs: 30, onError: (e) => errors.push(e) });
+      const dispatcher = w.dispatcher;
+      let ended: Promise<boolean> | undefined;
+      dispatcher.onEnd(async (id) => { await new Promise((ok) => setTimeout(ok, 60)); ended = dispatcher.finishWith(w.owner, id, { result: "done", note: "finished late" }); await ended; return { handled: true }; });
+      // The worker is slow to stop, so the readmit is still being written when the agent's ending arrives (at 60 ms, the hook gave up at 30 ms).
+      const plain = stopper("no-work-end");
+      w.worker.script = async ({ worker }) => { const slow = worker.stop.bind(worker); worker.stop = async () => { await new Promise((ok) => setTimeout(ok, 150)); await slow(); }; return plain(); };
+      const late = await w.task("late done", ann);
+      await runOnce(w);
+      await new Promise((ok) => setTimeout(ok, 400));
+      assert.equal(await ended, true);
+      await w.dispatcher.idle();
+      const l = (await w.dispatcher.get(w.owner, late.attemptId!))!;
+      assert.equal(l.state, "finished", "the agent's ending finished the attempt the readmit had sent back to waiting");
+      assert.equal(l.outcome?.status, "succeeded");
+      assert.match(l.outcome?.summary ?? "", /ended by the agent: done/);
+      await runOnce(w);
+      assert.equal(w.worker.starts.filter((o) => o.attemptId === late.attemptId).length, 1, "it does not run again");
+      assert.equal(await blockerOf(w, late.taskId), undefined);
+      assert.ok(errors.length >= 1, "the hook's timeout is reported");
+    } finally { await store.close(); }
+  });
+}

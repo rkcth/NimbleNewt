@@ -190,3 +190,34 @@ test("a plan that is a link is not followed (card W03)", { skip: skip !== false 
     assert.equal((await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }))?.plan, undefined);
   } finally { await w.done(); }
 });
+
+test("a plan swapped for a pipe or a device is not read and does not hang the read (card W03 review)", { skip: skip !== false ? skip : process.platform === "win32" ? "no named pipes in the file system on Windows" : false }, async () => {
+  const { readPlan } = await import("./index.js");
+  const dir = await mkdtemp(join(tmpdir(), "nn-plan-"));
+  try {
+    execFileSync("mkfifo", [join(dir, "PLAN.md")]);
+    const started = Date.now();
+    assert.equal(await readPlan(join(dir, "PLAN.md")), undefined);
+    assert.ok(Date.now() - started < 5000, "the pipe was not waited on");
+    assert.equal(await readPlan("/dev/null"), undefined, "not a plain file");
+    await writeFile(join(dir, "ok.md"), "- [ ] one\n- [x] two\n");
+    assert.deepEqual(await readPlan(join(dir, "ok.md")), { done: ["two"], open: ["one"] });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("the diff stat runs no filter, diff driver or hook the agent's checkout names (card W03 review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const made = await w.ws.ensure({ taskId: "tsk-one", projectId: "prj-one" });
+    const marker = join(w.dir, "ran");
+    // The checkout is the agent's: it can name drivers in .gitattributes and plant a .git of its own with their commands, which is never read (the repository is outside the checkout and named explicitly).
+    await writeFile(join(made.checkout, ".gitattributes"), "* filter=evil diff=evil\n");
+    await mkdir(join(made.checkout, ".git", "hooks"), { recursive: true });
+    const touch = `touch ${JSON.stringify(marker)}; cat`;
+    await writeFile(join(made.checkout, ".git", "config"), `[core]\n\tfsmonitor = ${touch}\n\thooksPath = .git/hooks\n[filter "evil"]\n\tclean = ${touch}\n[diff "evil"]\n\ttextconv = ${touch}\n\tcommand = ${touch}\n`);
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    const got = await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" });
+    assert.match(got?.diffStat ?? "", /files? changed/);
+    assert.equal(existsSync(marker), false);
+  } finally { await w.done(); }
+});

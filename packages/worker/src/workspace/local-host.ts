@@ -164,11 +164,21 @@ export async function readPlan(path: string): Promise<{ done: string[]; open: st
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.size > PROGRESS_LIMITS.planBytes) return undefined;
-    const handle = await open(path, constants.O_RDONLY | NOFOLLOW);
+    // Not blocking: a file swapped for a pipe after the look above would otherwise hang the open. What was opened is looked at again (a plain file, within the bound) and read only up to the bound, so a file swapped or
+    // grown meanwhile is never read whole.
+    const handle = await open(path, constants.O_RDONLY | NOFOLLOW | (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0));
     try {
-      const bytes = await handle.readFile();
-      if (bytes.length > PROGRESS_LIMITS.planBytes) return undefined;
-      text = bytes.toString("utf8");
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size > PROGRESS_LIMITS.planBytes) return undefined;
+      const buffer = Buffer.alloc(PROGRESS_LIMITS.planBytes + 1);
+      let length = 0;
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+        if (length > PROGRESS_LIMITS.planBytes) return undefined;
+      }
+      text = buffer.subarray(0, length).toString("utf8");
     } finally { await handle.close(); }
   } catch { return undefined; }
   const done: string[] = [], open_: string[] = [];

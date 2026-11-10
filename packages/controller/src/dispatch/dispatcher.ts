@@ -71,7 +71,7 @@ function withoutFreeze(b: DispatchBody, includeEnding: boolean): DispatchBody {
 }
 
 /** What the dispatcher tells the agent's ending (`work.end`, card H12n) when it is about to end an attempt for another reason: `handled` means the ending completed the attempt itself; a `summary` replaces the end's own. */
-export type EndHook = (attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }) => Promise<{ readonly handled?: true; readonly summary?: string; readonly outcome?: "succeeded" | "failed" | "abandoned"; readonly partial?: true } | undefined>;
+export type EndHook = (attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }) => Promise<{ readonly handled?: true; readonly summary?: string; readonly outcome?: "succeeded" | "failed" | "abandoned"; readonly partial?: true; /** The agent's own `done` ending was accepted and is completed later (card W03): the turn did not stop early. */ readonly pending?: true } | undefined>;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /** What a route resolver says: the route and harness for a task, or why there is none. The resolver is the owner's configuration read at the moment of dispatch (R03). */
@@ -831,7 +831,12 @@ export class DispatcherService {
     await this.#controlled(by, attemptId);
     if (end.confirm !== undefined && !(await end.confirm())) return false;
     const summary = `ended by the agent: ${end.result}${end.note === undefined ? "" : `: ${end.note}`}${end.submissionId === undefined ? "" : ` (submission ${end.submissionId})`}`;
-    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false, skipHook: true, agentEnded: true, ...(end.result === "partial" ? { partial: true } : {}) });
+    const options = { readmit: false, skipHook: true, agentEnded: true, ...(end.result === "partial" ? { partial: true } : {}) };
+    const outcome = end.result === "done" || end.result === "partial" ? "succeeded" as const : "abandoned" as const;
+    await this.#end(attemptId, outcome, summary, options);
+    // Card W03: this ending may have joined an end already under way that readmitted the attempt after an early stop instead of finishing it (the end hook gave up waiting for this ending). The agent's own ending is not
+    // lost to that: it ends the attempt now, so its submission and the attempt never disagree.
+    if ((await this.#load(attemptId))?.body.state !== "finished") await this.#end(attemptId, outcome, summary, options);
     return true;
   }
 
@@ -2174,7 +2179,8 @@ export class DispatcherService {
           if (told?.outcome !== undefined) outcome = told.outcome;
           if (told?.partial === true) options = { ...options, partial: true };
           // The agent had asked to end the attempt (blocked, abandoned, partial) and its ending is carried by this end: it said how its work ended, so the turn did not stop early.
-          if (told?.outcome !== undefined && options.early !== undefined) { const { early: _e, ...rest } = options; void _e; options = rest; }
+          // So did an accepted `done` ending that could not be completed just now (the task is paused, another instance holds it): it completes later, and the attempt must not go on meanwhile.
+          if ((told?.outcome !== undefined || told?.pending === true) && options.early !== undefined) { const { early: _e, ...rest } = options; void _e; options = rest; }
         }
       } catch (error) { this.#options.onError?.(error); } finally { if (timer !== undefined) clearTimeout(timer); this.#inHook.delete(attemptId); }
     }
@@ -2289,7 +2295,13 @@ export class DispatcherService {
       }, async (x) => (x.state !== "running" || x.turnRound === round ? [] : this.#stoppedEarlyChange(b)));
       // A stop asked while the readmit was being written still wins: the stop's own end finds the attempt waiting and finishes it.
       if (readmitted) return {};
-      if ((await this.#load(attemptId))?.body.state === "finished") return {};
+      const now = await this.#load(attemptId);
+      if (now === undefined || now.body.state === "finished") return {};
+      // Not readmitted because something else moved the attempt meanwhile. A stop asked in between ends it as stopped (it wins, and it is not a stop before the work was done); an attempt that another path sent back to
+      // waiting (a controller shutdown) is left as that path left it: its readmits are not used up, so no blocker says they are.
+      const stop = this.#stopsAsked.get(attemptId) ?? now.body.stopped;
+      if (stop !== undefined) return this.#endInner(attemptId, "abandoned", this.#cleanSummary("abandoned", stop.reason), { readmit: false });
+      if (now.body.state !== "running") return {};
     }
     const progress = await this.#progressOf(b);
     const lines = [
