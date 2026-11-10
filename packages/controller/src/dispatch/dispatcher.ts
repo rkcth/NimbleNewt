@@ -954,7 +954,7 @@ export class DispatcherService {
           // against the base, committed or not: there must be a change.
           const changed = typeof tree.changed === "number" && Number.isSafeInteger(tree.changed) ? tree.changed : undefined;
           if (changed === undefined) cannot("The host did not say whether the checkout holds a change against the task's base.");
-          else if (changed < 1) fail("Your checkout holds no change against the task's base (a file that an ignore rule matches does not count), so there is no work to take.");
+          else if (changed < 1) fail("Your checkout holds no change against the task's base (your PLAN.md and a file that an ignore rule matches do not count), so there is no work to take.");
         } else {
           // Work the agent offers with `submit` is carried as it stands (staged from the checkout, committed after review), so with a submit nothing has to be committed first: it is enough that there is a change against the base.
           const submit = request.submit === true;
@@ -2234,7 +2234,7 @@ export class DispatcherService {
       if (c === undefined || (c.requiredEvidence.length === 0 && c.checks.length === 0)) return "";
       const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with the file of your checkout that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
       const checks = c.checks.length === 0 ? "" : ` The host then runs these checks in your sandbox, and each must pass: ${c.checks.map((x) => quoted(x.name, 80)).join(", ")}.`;
-      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
+      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks} A done that does not pass is refused with the list of what failed.`;
     } catch { return ""; }
   }
 

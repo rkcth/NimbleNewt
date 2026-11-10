@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { constants, existsSync, readdirSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve } from "node:path";
+import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceError } from "./errors.js";
 import type { GitBridge } from "./git.js";
 import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy } from "./host.js";
@@ -94,14 +95,14 @@ export class LocalWorkspaces {
   async progress(call: { readonly taskId: string; readonly projectId: string }): Promise<{ plan?: { done: string[]; open: string[] }; diffStat?: string } | undefined> {
     const where = this.locate(call);
     if (where === undefined) return undefined;
-    const plan = await readPlan(join(where.checkout, "PLAN.md"));
+    const plan = await readPlan(join(where.checkout, PLAN_FILE));
     const diffStat = await this.#options.git.diffStat({ gitDir: where.gitDir, checkout: where.checkout }).catch(() => undefined);
     return { ...(plan === undefined ? {} : { plan }), ...(diffStat === undefined ? {} : { diffStat }) };
   }
 
   /**
    * What a task's checkout holds when its agent says the work is done (card W05, `GitBridge.doneState`): uncommitted files, commits ahead of the base, files changed against the base, and whether each evidence path is a file of the
-   * checkout. `agentCommits` is false: in this layout the agent's git directory is outside its sandbox, so the agent cannot commit (its changes are committed after review, H12o) and its work is what the checkout holds against the base.
+   * checkout. The agent's plan file (`PLAN_FILE`) is not counted as a change. `agentCommits` is false: in this layout the agent's git directory is outside its sandbox, so the agent cannot commit (its changes are committed after review, H12o) and its work is what the checkout holds against the base.
    * `undefined`: this host holds no checkout for the task.
    */
   async doneState(call: { readonly taskId: string; readonly projectId: string }, paths: readonly string[]): Promise<(Awaited<ReturnType<GitBridge["doneState"]>> & { readonly agentCommits: false }) | undefined> {

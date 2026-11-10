@@ -17,11 +17,17 @@ const NOT_DONE = /\b(?:not|never)\s+(?:yet\s+|been\s+|fully\s+)*(?:done|complete
 // The lookbehinds keep a done report's "no remaining failures", "none still failing", "no tests still fail" and
 // "nothing left to do" from reading as a partial report.
 /**
- * A report that opens with, or states, the honest result partial or blocked (card W06: variant B asks for a final report
- * that starts with the result, done, partial or blocked): "Partial. Implemented the parser; ...", "**Result: blocked**",
- * "Result - partial". It is a stop, whatever done words ("implemented") follow it.
+ * The result a report states (card W06: variant B asks for a final report that starts with the result, done, partial or
+ * blocked), read from the first place it is stated: the report's opening word used as a result ("Partial. Implemented
+ * the parser; ...", "**Blocked** by ...", "## Blocked\n"), or a result label at the start of a line ("**Result: blocked**",
+ * "Result - partial", "Status: partial", "## Result\n\nBlocked"). Only the first statement counts, so a report that opens
+ * "Done." keeps its done claim whatever a later line says ("Result: blocked requests now get 403"), and an opening word
+ * that is not used as a result ("Blocked users are refused", "Partial matches rank first") states nothing.
+ * A stated partial or blocked is a stop, whatever done words ("implemented") follow it.
  */
-const RESULT_NOT_DONE = /^[\s#>*_`-]*(?:partial|blocked)\b|\bresult[*_`]*\s*(?:is\s+|[:=\u2013\u2014-]\s*)[*_`"']*\s*(?:partial|blocked)\b/i;
+const RESULT_STATED = /^[\s#>*_`-]*(done|partial|blocked)(?=[*_`]*\s*(?:[.:;!,(\u2013\u2014-]|\n|$)|\s+(?:by|on|because|result|work|implementation|progress|completion|finish|solution)\b)|(?:^|\n)[ \t#>*_`-]*(?:final\s+)?(?:result|status|outcome)[*_`]*[ \t]*(?:is\s+|[:=\u2013\u2014-]\s*|\n[\s#>*_`-]*)[*_`"']*\s*(done|partial|blocked)\b/i;
+/** Whether the first result the report states is partial or blocked. */
+const statesNotDone = (head) => { const m = RESULT_STATED.exec(head); return m !== null && /^(?:partial|blocked)$/i.test(m[1] ?? m[2] ?? ""); };
 /**
  * A report whose plan is all done, said without the word "done": "All boxes ticked; tree clean.", "All ten steps are
  * committed and the working tree is clean.", "All PLAN.md boxes are ticked".
@@ -172,7 +178,7 @@ export function doneClaim(summary, { plan = null, dirty = null } = {}) {
   const cut = CAVEAT_LABEL.exec(text);
   const body = cut === null ? text : text.slice(0, cut.index);
   const head = body.slice(0, 600), tail = body.slice(-600);
-  if (RESULT_NOT_DONE.test(head) || NOT_DONE.test(head) || NOT_DONE.test(tail)) return "not-done";
+  if (statesNotDone(head) || NOT_DONE.test(head) || NOT_DONE.test(tail)) return "not-done";
   const structural = plan !== null && plan.unchecked === 0 && plan.checked > 0 && dirty === false && selfTestsGreen(summary);
   const said = DONE_CLAIM.test(head) || DONE_CLAIM.test(tail) || ALL_TICKED.test(head) || ALL_TICKED.test(tail);
   if (!said && !structural) return "none";

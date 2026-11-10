@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { requestId } from "@nimblenewt/contracts";
+import { PLAN_FILE, requestId } from "@nimblenewt/contracts";
 import { COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_JOB_RULE, COMPLETION_RULES, COMPLETION_RULE_GROUPS, JOB_WAKE_RULE_TEXT, PI_AGENT_LAYOUT, PiAdapter, assertStableText, checkLayout, layoutFingerprint, sharedSystemText } from "./index.js";
 import { BRIDGE_TOOL_NAMES, WORK_END_TOOL, createBridge } from "./bridge.js";
 import { NUDGE_TEXT, nudgeText } from "./worker/nudge.js";
@@ -18,6 +18,9 @@ test("W06: the completion rules are fixed text that passes the layout's stabilit
   // W05 checks a done only for a task whose contract names evidence or checks (and tells that task so at the start); a done of any other task is taken unchecked, so the rule must not say every done is checked.
   assert.ok(COMPLETION_CHECK_RULE.includes("When the task names required evidence or checks (you are told so at the start), a done is checked"), COMPLETION_CHECK_RULE);
   assert.ok(!/When you end with result done, the controller checks/.test(COMPLETION_RULES));
+  // W06 second review: the plan file is a working note; W05's change against the base does not count it (GitBridge.doneState), and the rules say so with the shared name.
+  assert.ok(COMPLETION_CHECK_RULE.includes(`a change against the task's base other than ${PLAN_FILE} (your plan is a working note, not the work)`), COMPLETION_CHECK_RULE);
+  assert.equal(COMPLETION_RULES.match(/PLAN\.md/g)?.length, 3, "the plan, check and end rules each name the plan file");
   assert.ok(COMPLETION_END_RULE.includes(WORK_END_TOOL) && BRIDGE_TOOL_NAMES.includes(WORK_END_TOOL), "names the real work.end tool");
   assert.ok(COMPLETION_JOB_RULE.endsWith(JOB_WAKE_RULE_TEXT), "the job rule is W11's sentence, word for word");
   assert.ok(BRIDGE_TOOL_NAMES.includes("nimblenewt__job-start") && COMPLETION_JOB_RULE.includes("nimblenewt__job-start"));

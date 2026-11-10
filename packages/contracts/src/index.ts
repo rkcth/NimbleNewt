@@ -341,6 +341,12 @@ export interface StorageInfo {
   readonly adoptedUnmarked: boolean;
 }
 
+/**
+ * The agent's plan file at the top of its checkout (cards W03, W05, W06): its working note, one checkbox per step. The completion rules tell every Pi agent to keep it, the host reads it for the owner when the work stops early,
+ * and it does not count as the change a done must show (an agent that only wrote its plan has done no work).
+ */
+export const PLAN_FILE = "PLAN.md";
+
 export * from "./harness.js";
 export * from "./worker-channel.js";
 export * from "./lease-watchdog.js";

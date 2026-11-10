@@ -37,7 +37,9 @@ describe("the worker process runs the Pi conversation inside the sandbox", () =>
       const parts = localWorkerParts<unknown>({
         launcher, app: appFromRepository(repository, { root: nodeRoot, executable: "bin/node" }), protectedPaths: [],
         workspace: () => dirs,
-        model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+        // 65,536 tokens (card W06 second review): on a window under 49,152 Pi's background compaction threshold is below zero, so once the system prompt (the completion rules) and the tools leave a cut past the kept tenth, Pi asks for
+        // a summary the test does not script (as in t06b).
+        model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 65536, maxTokens: 1024, reasoning: false, input: ["text"] }),
         namespaceId: () => "abcdef0123456789",
         bridge: async (_order, _call, token, request) => { bridged.push({ token, op: request.op, callId: request.callId, args: request.args }); return { ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa", body: "x" } } }; },
         relay: (order, request) => relay.forAttempt({ route: order.route, model: "local" }).relay(request),
