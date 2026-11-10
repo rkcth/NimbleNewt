@@ -2119,6 +2119,7 @@ Arguments:
 - `basis`: the reason, in the owner's words
 - `notBefore` (optional): ISO time the grant starts
 - `expiresAt` (optional): ISO time the grant ends
+- `idleDays` (optional): whole days the grant may go unused before it lapses; each use renews it (card A07h)
 
 Result: `{ id, revision, replayed }`.
 
