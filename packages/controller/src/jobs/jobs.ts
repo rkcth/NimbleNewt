@@ -8,6 +8,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { REDACTED, redactText } from "../security/redact.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
+import { JOB_WAKE_KIND, JOB_WAKES_INDEX, WAKING_KINDS, wakeChanges, type JobWakeBody, type JobWakesIndex } from "./wakes.js";
 
 /** What a job is. Cancelling a model request, stopping a tool and stopping a remote job are three different operations, so the kind says which one applies. An MCP operation is a remote job on a server the owner approved. */
 export type JobKind = "model_request" | "tool" | "remote" | "mcp";
@@ -123,6 +124,11 @@ export interface JobOptions extends RunnerOptions {
    * must not throw into the request: it confirms the stop (or that it was not obeyed) itself, through `confirmCancel`.
    */
   readonly onCancel?: (jobId: string, force: boolean) => void;
+  /**
+   * Card W11: a job of a task that reaches a final state (completed, failed, cancelled, outcome unknown; and again when an outcome-unknown job is reconciled) gets a wake record in the same commit, put on the due list the dispatcher
+   * works, so the task is woken once for it and the owner is told. Absent or false: no wake record is written.
+   */
+  readonly wakes?: boolean;
 }
 
 export interface AdmitJob extends NoActor {
@@ -196,6 +202,7 @@ export class JobService {
   readonly #longRunningGate: JobOptions["longRunningGate"];
   readonly #host: string | undefined;
   readonly #onCancel: JobOptions["onCancel"];
+  readonly #wakes: boolean;
 
   private constructor(runner: CommandRunner, pauses: PauseService | undefined, options: JobOptions) {
     this.#runner = runner;
@@ -206,6 +213,7 @@ export class JobService {
     this.#longRunningGate = options.longRunningGate;
     this.#host = options.host;
     this.#onCancel = options.onCancel;
+    this.#wakes = options.wakes === true;
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { pauses?: PauseService } = {}, options: JobOptions = {}): JobService {
@@ -314,7 +322,7 @@ export class JobService {
       if (!NEXT[job.state].includes(outcome)) invalid("outcome", `a ${job.state} job cannot become ${outcome}`);
       const at = this.#runner.now();
       return { ...this.#move(job, outcome, principal.id, at), finishedAt: at, ...(exit === undefined ? {} : { exit }), output: output === undefined ? job.output : this.#append(job.output, output), logs: this.#merge(job.logs, logs, JOB_LIMITS.refs, "logs"), artifacts: this.#merge(job.artifacts, artifacts, JOB_LIMITS.artifacts, "artifacts"), orphans: orphans ?? job.orphans };
-    }, undefined, async (job) => { await this.#checkRefs(job, logs ?? [], "logs"); await this.#checkRefs(job, artifacts ?? [], "artifacts"); });
+    }, this.#wake(jobId, outcome, "end"), async (job) => { await this.#checkRefs(job, logs ?? [], "logs"); await this.#checkRefs(job, artifacts ?? [], "artifacts"); });
     await this.#recordBackground(principal, jobId, command.commandId);
     return { id: jobId, state: done.after?.state ?? outcome, replayed: done.replayed };
   }
@@ -355,7 +363,7 @@ export class JobService {
       const at = this.#runner.now();
       const base = stopped ? { ...this.#move(job, "cancelled", principal.id, at), finishedAt: at } : { ...job, history: this.#history(job, { state: job.state, at, by: principal.id, note: "the stop was not obeyed" }) };
       return { ...base, cancel: { ...job.cancel!, ...(stopped ? {} : { uncooperative: true }) }, orphans: orphans ?? job.orphans };
-    });
+    }, stopped ? this.#wake(jobId, "cancelled", "end") : undefined);
     if (stopped) await this.#recordBackground(principal, jobId, command.commandId);
     return { id: jobId, state: done.after?.state ?? (stopped ? "cancelled" : "cancellation_requested"), replayed: done.replayed };
   }
@@ -369,7 +377,7 @@ export class JobService {
       if (!NEXT[job.state].includes("outcome_unknown")) invalid("jobId", `a ${job.state} job cannot become outcome-unknown`);
       const at = this.#runner.now();
       return { ...this.#move(job, "outcome_unknown", principal.id, at, reason), unknown: { reason, since: at } };
-    });
+    }, this.#wake(jobId, "outcome_unknown", "end"));
     return { id: jobId, replayed: result.replayed };
   }
 
@@ -386,7 +394,7 @@ export class JobService {
       if (job.state !== "outcome_unknown") invalid("jobId", `job ${jobId} is ${job.state}, not outcome-unknown`);
       const at = this.#runner.now();
       return { ...this.#move(job, to, principal.id, at, "reconciled"), finishedAt: at, reconciliations: [...job.reconciliations, reconciliationId].slice(-JOB_LIMITS.history), ...(exit === undefined ? {} : { exit }) };
-    }, (job, at) => [{ type: "create", ref: { kind: "job-reconciliation", id: reconciliationId }, body: clean({ jobId, from: job.state, to, evidence, by: principal.id, at } satisfies ReconciliationBody) }]);
+    }, async (job, at) => [{ type: "create", ref: { kind: "job-reconciliation", id: reconciliationId }, body: clean({ jobId, from: job.state, to, evidence, by: principal.id, at } satisfies ReconciliationBody) }, ...await this.#wake(jobId, to, "reconciled")!(job, at)]);
     await this.#recordBackground(principal, jobId, command.commandId);
     return { id: jobId, reconciliationId, replayed: done.replayed };
   }
@@ -423,7 +431,7 @@ export class JobService {
         case "exception":
           return { ...job, exception: { tracker: tracker!, reason, at }, history: this.#history(job, { state: job.state, at, by: principal.id, note: `tracked exception: ${reason}` }) };
       }
-    });
+    }, decision === "complete" ? this.#wake(jobId, "completed", "end") : undefined);
     if (decision === "complete") await this.#recordBackground(principal, jobId, command.commandId);
     if (decision === "cancel" && done.after?.state === "cancellation_requested") this.#told(jobId, false);
     return { id: jobId, state: done.after?.state ?? "admitted", replayed: done.replayed };
@@ -503,7 +511,44 @@ export class JobService {
     return out;
   }
 
+  /**
+   * Card W11: the jobs of a task an attempt that ends its turn can wait for: those that have not ended, and those that ended with their wake still due (so a job that ended a moment before the turn did is waited for too, and its wake
+   * comes at the next tick). Only kinds that wake a task. The controller reading its own records: no viewer.
+   */
+  async waitable(taskId: string): Promise<string[]> {
+    const id = checkTaskId(taskId);
+    const out = (await this.unfinishedOf(id)).filter((j) => WAKING_KINDS.includes(j.kind)).map((j) => j.id);
+    if (!this.#wakes) return out;
+    const index = (await this.#runner.get(JOB_WAKES_INDEX.kind, JOB_WAKES_INDEX.id))?.body as unknown as JobWakesIndex | undefined;
+    for (const wakeId of index?.due ?? []) {
+      const w = (await this.#runner.get(JOB_WAKE_KIND, wakeId))?.body as unknown as JobWakeBody | undefined;
+      if (w !== undefined && w.taskId === id && w.status === "due" && !out.includes(w.jobId)) out.push(w.jobId);
+    }
+    return out;
+  }
+
+  /**
+   * Card W11: the jobs that ended most recently (newest first, at most `limit`), each with whether its task was woken for it and whether the owner was told. Only what the viewer may read. For the owner's jobs view.
+   */
+  async recentlyEnded(viewer: Principal, limit = 10): Promise<{ readonly job: View<JobBody>; readonly wake: JobWakeBody }[]> {
+    const index = (await this.#runner.get(JOB_WAKES_INDEX.kind, JOB_WAKES_INDEX.id))?.body as unknown as JobWakesIndex | undefined;
+    const out: { job: View<JobBody>; wake: JobWakeBody }[] = [];
+    for (const r of [...(index?.recent ?? [])].reverse()) {
+      if (out.length >= limit) break;
+      const wake = (await this.#runner.get(JOB_WAKE_KIND, r.wakeId))?.body as unknown as JobWakeBody | undefined;
+      const job = await this.get(viewer, r.jobId).catch(() => undefined);
+      if (wake !== undefined && job !== undefined) out.push({ job, wake });
+    }
+    return out;
+  }
+
   // ---- parts ------------------------------------------------------------------------------------------------------------------
+
+  /** The wake record of a final state (card W11), as extra changes of the command that records it; nothing when wakes are off. */
+  #wake(jobId: string, state: JobState, phase: "end" | "reconciled"): ((job: JobBody, at: string) => Promise<readonly Change[]>) | undefined {
+    if (!this.#wakes) return async () => [];
+    return async (job, at) => wakeChanges((kind, id) => this.#runner.get(kind, id), { id: jobId, body: job }, state, phase, at);
+  }
 
   /** Tells the host that a stop was asked for. Never throws into the request: the stop request is recorded whatever becomes of the process. */
   #told(jobId: string, force: boolean): void {
@@ -639,7 +684,7 @@ export class JobService {
   }
 
   /** Reads the job, authorizes the caller, applies `change` to its body and commits it (with any extra changes) in one command; a concurrent writer meets a revision check and the command is read and decided again. */
-  async #change(name: string, principal: Principal, commandId: unknown, jobId: string, level: "write" | "control" | "cancel", payload: JsonObject, change: (job: JobBody) => JobBody, extra?: (job: JobBody, at: string) => readonly Change[], pre?: (job: JobBody) => Promise<void>) {
+  async #change(name: string, principal: Principal, commandId: unknown, jobId: string, level: "write" | "control" | "cancel", payload: JsonObject, change: (job: JobBody) => JobBody, extra?: (job: JobBody, at: string) => readonly Change[] | Promise<readonly Change[]>, pre?: (job: JobBody) => Promise<void>) {
     let after: JobBody | undefined;
     const result = await this.#command(name, principal, commandId, { jobId, ...payload }, async () => {
       const ref: AggregateRef = { kind: "job", id: jobId };
@@ -655,7 +700,7 @@ export class JobService {
       await pre?.(job);
       const next = change(job);
       after = next;
-      return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) } as Change, ...(extra?.(job, this.#runner.now()) ?? [])], detail: { jobId, taskId: job.taskId, from: job.state, to: next.state } };
+      return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) } as Change, ...(extra === undefined ? [] : await extra(job, this.#runner.now()))], detail: { jobId, taskId: job.taskId, from: job.state, to: next.state } };
     });
     if (after === undefined) after = (await this.#runner.get("job", jobId))?.body as unknown as JobBody | undefined;
     return { replayed: result.replayed, after };

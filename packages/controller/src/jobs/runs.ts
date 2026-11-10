@@ -152,6 +152,9 @@ export class LocalJobRuns {
   /** The jobs running in this process now. */
   running(): string[] { return [...this.#live.keys()]; }
 
+  /** How many jobs of the task run in this process now (card W11: the agent's turn is not nudged on while one runs, it ends and the task is woken when the job does). */
+  runningFor(taskId: string): number { return [...this.#live.values()].filter((r) => r.taskId === taskId).length; }
+
   /** Resolves once the job's end is recorded here (at once when it does not run here). */
   ended(jobId: string): Promise<void> { return this.#live.get(jobId)?.done ?? Promise.resolve(); }
 

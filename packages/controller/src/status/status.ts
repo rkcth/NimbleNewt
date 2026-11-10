@@ -237,7 +237,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
   retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
-  jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end (owner only)" },
+  jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
@@ -324,7 +324,7 @@ export interface StatusDeps {
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
   readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates">;
   /** The live jobs (card T07b). Absent: the view is not offered. */
-  readonly jobs?: Pick<JobService, "live">;
+  readonly jobs?: Pick<JobService, "live"> & Partial<Pick<JobService, "recentlyEnded">>;
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
   readonly assignments: AssignmentService;
@@ -725,13 +725,29 @@ export class StatusService {
     if (this.#deps.jobs === undefined || by.kind !== "owner") return undefined;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid("limit", "must be a whole number from 1 to 100");
     const got = await this.#deps.jobs.live(by, { limit });
-    if (got.jobs.length === 0) return { observedAt: this.#runner.now(), lines: [line("No job is running or waiting: every job has ended or is a tracked exception.", cite("jobs", "live"))] };
+    const ended = await this.#endedLines(by, Math.min(limit, 10));
+    if (got.jobs.length === 0) return { observedAt: this.#runner.now(), lines: [line("No job is running or waiting: every job has ended or is a tracked exception.", cite("jobs", "live")), ...ended] };
     const unknown = got.jobs.filter((j) => j.state === "outcome_unknown").length;
     return { observedAt: this.#runner.now(), lines: [
       line(`${got.jobs.length}${got.next === undefined ? "" : " or more"} job(s) have not ended${unknown === 0 ? "" : `; ${unknown} of them are outcome-unknown and wait for you to reconcile them (job.reconcile, with the evidence)`}:`, cite("jobs", "live")),
       ...got.jobs.map((j) => line(`${j.id} ${JSON.stringify(shown(j.label, 80))} (${j.kind}) of task ${j.taskId}: ${j.state.replaceAll("_", " ")} since ${shown(j.history.at(-1)?.at ?? j.admittedAt, 30)}${j.state === "outcome_unknown" && j.unknown !== undefined ? ` (${shown(j.unknown.reason, 160)})` : ""}${j.cancel?.uncooperative === true ? "; the stop was not obeyed, Force Stop is offered" : ""}${j.orphans.length > 0 ? `; the stop could not end ${j.orphans.length} process(es): ${j.orphans.slice(0, 3).map((o) => shown(o, 60)).join(", ")}` : ""}.`, cite("job", j.id), cite("task", j.taskId))),
       ...(got.next === undefined ? [] : [line("More jobs have not ended than are shown (ask with a larger limit).", cite("jobs", "live"))]),
+      ...ended,
     ] };
+  }
+
+  /** Card W11: the jobs that ended most recently, newest first: how each ended, whether its task was woken for it (or why not, or what it waits for) and whether you were told. The output is not shown (`job.get` reads it). */
+  async #endedLines(by: Principal, limit: number): Promise<Line[]> {
+    const recent = await this.#deps.jobs?.recentlyEnded?.(by, limit).catch(() => undefined);
+    if (recent === undefined || recent.length === 0) return [];
+    const woke = (w: (typeof recent)[number]["wake"]): string => w.status === "woken" ? `its task was woken for it${w.woke === undefined ? "" : ` (attempt ${w.woke})`}`
+      : w.status === "joined" ? `the task's next run was told of it${w.woke === undefined ? "" : ` (attempt ${w.woke})`}`
+      : w.status === "skipped" ? `its task was not woken: ${shown(w.reason ?? "no reason recorded", 200)}`
+      : "its task's wake is still to come (paused, busy, or its wake-ups for the hour used up)";
+    return [
+      line(`${recent.length} job(s) ended most recently:`, cite("jobs", "ended")),
+      ...recent.map(({ job, wake }) => line(`${job.id} ${JSON.stringify(shown(job.label, 80))} (${job.kind}) of task ${job.taskId}: ${wake.state.replaceAll("_", " ")} at ${shown(wake.at, 30)}${job.exit?.reason === undefined ? "" : ` (${shown(job.exit.reason, 120)})`}; ${woke(wake)}${wake.notice === undefined ? "" : wake.notice.sent ? "; you were told" : `; you were not told (${shown(wake.notice.why ?? "", 120)})`}.`, cite("job", job.id), cite("task", job.taskId))),
+    ];
   }
 
   /** The retention values in force and which of them the owner set. Owner only. */
