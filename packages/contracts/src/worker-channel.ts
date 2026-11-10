@@ -121,7 +121,8 @@ export type FromChild =
   | { readonly t: "fetch"; readonly id: number; readonly url: string; readonly method: string; readonly headers: HeaderList; readonly body?: string }
   | { readonly t: "fetch.abort"; readonly id: number }
   /** `endKind` and `visibleChars` (card W02): how a completed turn ended and the length of its last reply's visible text (trimmed). A worker from before W02 sends neither: the host reads that as `unknown`. */
-  | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number }
+  /** `nudges` (card W04): how many times the process continued the turn after it yielded without a tool call or work.end; absent from a worker before W04. */
+  | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number }
   /** `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). */
   | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number }
   | { readonly t: "tell.ok"; readonly id: number }
@@ -203,6 +204,9 @@ function reply(o: Obj): BridgeReplyMessage {
   return fail("reply.ok: must be true or false");
 }
 
+/** The most continuations one turn can report (card W04): the worker's own bound is far lower; a figure above this is a broken process, not a count. */
+export const MAX_TURN_NUDGES = 100;
+
 /** Checks a line the host read from the process. */
 export function parseFromChild(value: unknown): FromChild {
   if (!isObj(value)) return fail("a message is an object");
@@ -229,7 +233,8 @@ export function parseFromChild(value: unknown): FromChild {
       // An end kind this side does not know (a newer worker) is left out, so it reads as unknown, never as normal.
       const kind = value["endKind"] === undefined ? undefined : endKindOf(optStr(value, "endKind", 60));
       const visibleChars = value["visibleChars"] === undefined ? undefined : int(value, "visibleChars");
-      return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }), ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visibleChars === undefined ? {} : { visibleChars }) };
+      const nudges = value["nudges"] === undefined ? undefined : bounded(value, "nudges", 0, MAX_TURN_NUDGES);
+      return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }), ...(kind === undefined || kind === "unknown" ? {} : { endKind: kind }), ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }) };
     }
     case "checkpoint.ok": {
       const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");

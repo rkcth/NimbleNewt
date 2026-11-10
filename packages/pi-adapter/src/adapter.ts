@@ -17,6 +17,7 @@ import {
   IncompatibleStorageError, InterruptedWorkError, InvalidReadmissionError, InvalidRecoveryError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
 } from "./errors.js";
 import { applyContextPolicy, type AdapterContextPolicy } from "./context-policy.js";
+import { beginTurn, continuationHooks, isContinuation, markEnded, readContinuations, type ContinuationPolicy, type ContinuationState } from "./continuation.js";
 import { shapeModels, type CacheShaping } from "./cache-shaping.js";
 import { LayoutHolder, layoutFingerprint, layoutSections, sharedSystemText, sortedTools, type PromptLayout } from "./prompt-layout.js";
 import { storedThinking } from "./thinking.js";
@@ -113,6 +114,11 @@ export interface PiAdapterOptions {
   readonly promptLayout?: PromptLayout;
   /** Cache key and retention per model, and observers for prefix reuse and dropped thinking (card C06b). See `shapeModels`. */
   readonly cache?: CacheShaping;
+  /**
+   * Continue a turn of the root conversation that yields early (card W04): the policy is asked about each final answer of the current turn (`beginTurn`) while continuations remain, and its text continues the same turn. The count is kept in a
+   * document of the conversation. Absent: every final answer ends its turn, as before.
+   */
+  readonly continuation?: ContinuationPolicy;
 }
 
 export interface SubmissionHandle {
@@ -834,7 +840,8 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
     const ownCalls = async (): Promise<ToolCallOutcome[]> => {
       if (settled.entry === undefined) return [];
       const last = settled.status === "done" ? (settled.answer as number) - 1 : undefined;
-      const entries = await this.scan((settled.entry as number) + 1, last, (e) => startsRequestSegment(e));
+      // A continuation (card W04) is part of the turn it continues: the calls after it are still this request's.
+      const entries = await this.scan((settled.entry as number) + 1, last, (e) => startsRequestSegment(e) && !isContinuation(e));
       return entries.filter((e) => e.kind === "pi.tool-result").map(toolOutcome);
     };
     const toolCalls = await ownCalls();
@@ -895,10 +902,13 @@ export class PiAdapter implements RuntimePort {
     const registry = createRegistry();
     const policy = applyContextPolicy(options.contextPolicy, options.settings);
     const limited = policy.toolLimits.maxBytes !== undefined || policy.toolLimits.maxLines !== undefined;
+    // The root conversation is known once the harness is open; the hook continues nothing before then.
+    let rootRef: Conversation | undefined;
+    const hooks = [...policy.hooks, ...continuationHooks(options.continuation, () => rootRef)];
     registry.install(defineExtension({
       name: "nimblenewt",
       ...(layout === undefined ? {} : { sections: layoutSections(layout) }),
-      ...(policy.hooks.length === 0 ? {} : { hooks: policy.hooks }),
+      ...(hooks.length === 0 ? {} : { hooks }),
       tools: tools.map((tool) => defineTool({
         name: tool.name,
         description: tool.description,
@@ -936,6 +946,7 @@ export class PiAdapter implements RuntimePort {
       throw error;
     }
     const root = await harness.root(context, { agent: { model: options.model } });
+    rootRef = root;
     // Read-only: finds work a previous process left unfinished without starting the scheduler.
     const inspection = await harness.inspect(context);
     const interrupted = inspection.tasks.length > 0 || inspection.submissions.length > 0;
@@ -974,6 +985,21 @@ export class PiAdapter implements RuntimePort {
   }
 
   /** The root conversation, created on first use and the same on every reopen of the same storage. */
+  /** Makes `turn` (the request ID of the input about to be submitted) the root conversation's current turn for continuations (card W04); the same turn again keeps its count. */
+  async beginTurn(turn: string): Promise<ContinuationState> {
+    return await beginTurn(this.rootConversation, turn);
+  }
+
+  /** The root conversation's continuation count (card W04). */
+  async continuations(): Promise<ContinuationState> {
+    return await readContinuations(this.harness, this.rootConversation);
+  }
+
+  /** The agent ended its work in the current turn: no further continuation of it (card W04). */
+  async markWorkEnded(): Promise<void> {
+    await markEnded(this.rootConversation);
+  }
+
   root(): AdapterConversation {
     return new AdapterConversation(this.harness, this.rootConversation, this.shared);
   }
