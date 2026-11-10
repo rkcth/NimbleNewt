@@ -58,7 +58,7 @@ test("an agent that keeps stopping without work.end goes on twice in the same co
 test("an agent that ends with work.end done succeeds in one run, as before (card W03)", async (t) => {
   const launcher = await sandbox(t);
   if (launcher === undefined) return;
-  const x = await rig(launcher, [{ call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed" } } }, { text: "Ended: the parser is fixed." }]);
+  const x = await rig(launcher, [{ call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed" } } }, { text: "Ended: the parser is fixed." }]);
   try {
     await x.run();
     const d = await x.get();

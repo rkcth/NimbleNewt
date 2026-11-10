@@ -70,7 +70,7 @@ test("a real local worker publishes its output through the tool bridge, and ever
     { call: { name: "nimblenewt__artifact-publish", args: { name: "Seed plan", files } } },
     { call: { name: "nimblenewt__message-send", args: { to: `agent:${BEN}`, class: "informational", purpose: "handover", text: "The seed plan is published." } } },
     { call: { name: "nimblenewt__desk-write", args: { kind: "note", title: "next", body: "Water on Fridays.", visibility: "shared", status: "accepted" } } },
-    { call: { name: "nimblenewt__work-end", args: { result: "done", note: "seed plan published" } } },
+    { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "seed plan published" } } },
     { text: "all done" },
   ]);
   let c: Awaited<ReturnType<typeof startController>> | undefined;

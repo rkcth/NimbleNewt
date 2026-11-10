@@ -178,7 +178,7 @@ export interface StateApiDeps {
   readonly catalogRevocation?: CatalogRevocationPort;
   readonly catalogPolicy?: Pick<CatalogPolicyService, "get" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
-  readonly workEnd?: Pick<WorkEndService, "request" | "get">;
+  readonly workEnd?: Pick<WorkEndService, "request" | "get"> & Partial<Pick<WorkEndService, "note" | "answer">>;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 

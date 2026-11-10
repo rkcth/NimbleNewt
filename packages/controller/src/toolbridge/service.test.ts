@@ -470,7 +470,7 @@ for (const backend of backends) {
     const seen: { state: unknown[]; messages: unknown[] } = { state: [], messages: [] };
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
-      state: { handle: async (token: unknown, raw: unknown) => { if ((raw as { args: { title?: string } }).args.title === "refused") return { v: 1, op: "x", ok: false, error: { code: "stale_revision", message: "x" } } as never; if ((raw as { args: { note?: string } }).args.note === "long") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `work.end done was not accepted: the controller checked your work against the task contract and 1 item(s) did not pass.\n1. ${"y".repeat(1500)} END` } } as never; if ((raw as { args: { note?: string } }).args.note === "other") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `${"z".repeat(1500)} END` } } as never; seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      state: { handle: async (token: unknown, raw: unknown) => { if ((raw as { args: { title?: string } }).args.title === "refused") return { v: 1, op: "x", ok: false, error: { code: "stale_revision", message: "x" } } as never; if ((raw as { args: { note?: string } }).args.note === "long") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `work.end done was not accepted: the controller checked your work against the task contract and 1 item(s) did not pass.\n1. ${"y".repeat(1500)} END` } } as never; if ((raw as { args: { note?: string } }).args.note === "noreport") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `work.end needs a report: every ending carries a report.\nYour notes so far:\n${"n".repeat(1500)} END` } } as never; if ((raw as { args: { note?: string } }).args.note === "other") return { v: 1, op: "x", ok: false, error: { code: "invalid_command", message: `${"z".repeat(1500)} END` } } as never; seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
       messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true,
       activity: async (step) => { steps.push(step); } });
     const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
@@ -496,6 +496,11 @@ for (const backend of backends) {
       // Card W05: a refused done carries the whole list of what failed; any other refusal is cut as before.
       out["workend-long"] = await send("work.end", { result: "done", note: "long", evidence: [{ item: "test log", path: "logs/t.txt" }] }, "we2");
       out["workend-other"] = await send("work.end", { result: "done", note: "other" }, "we3");
+      // Card W10: an ending without a report is refused whole (it carries the agent's notes); notes and answers go through the API for the attempt the request came through.
+      out["workend-noreport"] = await send("work.end", { result: "done", note: "noreport" }, "we4");
+      out["note-named"] = await send("work.note", { kind: "did", text: "x", attemptId: "att-other" }, "wn0");
+      out["note"] = await send("work.note", { kind: "did", text: "watered" }, "wn1");
+      out["answer"] = await send("work.answer", { answers: ["north and south"] }, "wa1");
       // The step is best effort: an activity record that fails never changes the answer of the write.
       const failing = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async () => { throw new Error("activity down"); } });
       out["failing"] = await failing.handle(order.credential, gateway, { op: "desk.write", callId: "w9", args: { kind: "note", title: "still", body: "written", visibility: "shared", status: "accepted" } });
@@ -517,6 +522,11 @@ for (const backend of backends) {
     good(out["workend"]!);
     assert.match(bad(out["workend-long"]!).message, / END$/, "a refused done is given whole");
     assert.equal(bad(out["workend-other"]!).message.length, 600, "another refusal is cut as before");
+    assert.match(bad(out["workend-noreport"]!).message, / END$/, "an ending without a report is refused whole, with the notes");
+    assert.equal(bad(out["note-named"]!).code, "invalid_command", "a note names no attempt");
+    good(out["note"]!); good(out["answer"]!);
+    const w10 = calls.filter((x) => x.raw.op === "work.note" || x.raw.op === "work.answer").map((x) => [x.raw.op, x.raw.commandId?.replace(/^bridge:[^:]+:/, "bridge:A:"), JSON.stringify({ ...x.raw.args, attemptId: "A" }), x.token === calls[0]!.token]);
+    assert.deepEqual(w10, [["work.note", "bridge:A:wn1", JSON.stringify({ kind: "did", text: "watered", attemptId: "A" }), true], ["work.answer", "bridge:A:wa1", JSON.stringify({ answers: ["north and south"], attemptId: "A" }), true]]);
     const ending = calls.filter((x) => x.raw.op === "work.end");
     assert.equal(ending.length, 1);
     assert.deepEqual(ending[0]!.raw, { v: 1, op: "work.end", commandId: ending[0]!.raw.commandId, args: { result: "partial", note: "two beds left", attemptId: (ending[0]!.raw.args as unknown as { attemptId: string }).attemptId } });
@@ -697,6 +707,9 @@ for (const backend of backends) {
       out["maintenance.request"] = await send("maintenance.request", { kind: "skill", spec: { name: "notes", digest: `sha256:${"a".repeat(64)}` }, reason: "keep notes" }, "w10");
       // Card W04: a paused task's turn is not continued.
       out["turn.continue"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
+      // Card W10: nor are its notes and answers written.
+      out["work.note"] = await send("work.note", { kind: "did", text: "x" }, "w11");
+      out["work.answer"] = await send("work.answer", { answers: ["x"] }, "w12");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -707,7 +720,7 @@ for (const backend of backends) {
       out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");

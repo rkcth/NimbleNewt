@@ -152,7 +152,88 @@ export interface DispatchBody {
    */
   readonly slotSpans?: readonly { readonly from: string; readonly to?: string }[];
   readonly slotSpansCut?: string;
+  /**
+   * Card W10: the agent's running notes for this attempt (what it did, found, left and could not do), oldest first, written through the bridge (`work.note`), each once by its call. Bounded by `WORK_REPORT_LIMITS`. Kept with the
+   * attempt, so a controller restart, a readmit (W03) and a wake (W11) keep them, and the next attempt of the task is told them.
+   */
+  readonly notes?: readonly WorkNote[];
+  /** Card W10: the second agent's questioning of the agent's done (the open one, or the last one closed). See `Interrogation`. */
+  readonly interrogation?: Interrogation;
+  /** Card W10: the questionings closed before the current one (newest last, at most `WORK_REPORT_LIMITS.history`), each with its verdict and the work.end call that got it. */
+  readonly interrogated?: readonly InterrogationSummary[];
+  /** Card W10: the report the attempt ended with (the agent's own text and, for a done, the questions and answers and how the questioning went). Its rendering also carries the notes. */
+  readonly report?: AttemptReport;
 }
+
+/** Card W10: what a running note is about. */
+export const WORK_NOTE_KINDS = ["did", "found", "left", "could-not"] as const;
+export type WorkNoteKind = (typeof WORK_NOTE_KINDS)[number];
+/** One running note (card W10): its call (the agent-scoped command ID, so the same call again writes nothing), its kind, the agent's text (redacted; quoted whenever shown) and when it was written. */
+export interface WorkNote { readonly key: string; readonly kind: WorkNoteKind; readonly text: string; readonly at: string }
+
+/** One round of the questioning (card W10): the work.end call that got the questions, the questions (the second agent's words), and the agent's answers (one per question) with the call that gave them. */
+export interface InterrogationRound {
+  readonly key: string;
+  readonly questions: readonly string[];
+  readonly at: string;
+  readonly route?: string;
+  readonly answers?: readonly string[];
+  readonly answerKey?: string;
+  readonly answeredAt?: string;
+}
+
+/**
+ * The second agent's questioning of a done (card W10). `asking`: it put questions and waits for the answers and the next work.end. `supported`: it found the report supported by the work and the contract (it does not approve the work:
+ * acceptance stays with the review). `unsupported`: it found the report unsupported or the work incomplete; the done was refused with its questions and counted toward the task's go-ons (`counted`; `exhausted` once they were used up).
+ * `not-run`: no second agent could be asked (none is set up, or no route answered within the budget), so the done was taken on the controller's own checks; `why` says so.
+ */
+export interface Interrogation {
+  readonly state: "asking" | "supported" | "unsupported" | "not-run";
+  readonly rounds: readonly InterrogationRound[];
+  readonly at: string;
+  /** The work.end call that got the verdict (a repeat of it gets the same answer). */
+  readonly verdictKey?: string;
+  /** The second agent's reason for `unsupported` (its words), or why it did not run. */
+  readonly reason?: string;
+  readonly why?: string;
+  readonly route?: string;
+  readonly counted?: boolean;
+  readonly exhausted?: boolean;
+  /** Which of the task's go-ons the refusal was (1-based). */
+  readonly goOn?: number;
+}
+export interface InterrogationSummary { readonly state: Interrogation["state"]; readonly verdictKey?: string; readonly reason?: string; readonly questions: readonly string[]; readonly rounds: number; readonly at: string; readonly counted?: boolean; /** Which of the task's go-ons the refusal was (card W10). */ readonly goOn?: number }
+
+/**
+ * The report an attempt ended with (card W10): the work.end call, its result, the agent's report (redacted; quoted whenever shown), the questions and answers of the second agent folded in, and how the questioning went
+ * (`not-asked` for an ending that is not a done: partial, blocked and abandoned are not questioned).
+ */
+export interface AttemptReport {
+  readonly key: string;
+  readonly result: string;
+  readonly text: string;
+  readonly at: string;
+  readonly questioning: "supported" | "unsupported" | "not-run" | "not-asked";
+  readonly qa?: readonly { readonly question: string; readonly answer?: string }[];
+  readonly reason?: string;
+  readonly why?: string;
+}
+
+/** Card W10: the bounds of the notes, the report and the questioning. */
+export const WORK_REPORT_LIMITS = {
+  /** One note, the notes of an attempt, and all their text together. */
+  note: 600, notes: 30, notesChars: 12_000,
+  /** The agent's report. */
+  report: 4000,
+  /** The questions of one round, one question, one answer, and the rounds of questions before the second agent must give its verdict. */
+  questions: 3, question: 300, answer: 800, rounds: 2,
+  reason: 300,
+  /** Closed questionings kept on the attempt, and the attempts of a task the task's report record names. */
+  history: 3, attempts: 5,
+} as const;
+/** Card W10: one record per task naming its attempts that wrote notes or a report (newest last), so the next attempt and the owner's view find them. */
+export const WORK_REPORT_KIND = "work-report-task";
+export interface WorkReportTaskBody { readonly taskId: string; readonly attempts: readonly string[] }
 
 export type OperationState = "awaiting-approval" | "in-progress" | "confirmed" | "failed" | "cancelled" | "uncertain" | "refused";
 export const TERMINAL: ReadonlySet<OperationState> = new Set(["confirmed", "failed", "cancelled", "uncertain", "refused"]);

@@ -52,7 +52,7 @@ test("the composed controller with the real worker process: a project reuses its
     const events = (await response.text()).split("\n\n").filter((e) => e.startsWith("data: {")).map((e) => JSON.parse(e.slice(6)) as Record<string, unknown>);
     if (crash.armed) crash.asked = true;
     const call = crash.armed ? { index: 0, id: "call_1", type: "function", function: { name: "nimblenewt__desk-read", arguments: JSON.stringify({ recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }) } }
-      : { index: 0, id: "call_end", type: "function", function: { name: "nimblenewt__work-end", arguments: JSON.stringify({ result: "done", note: "seeds ordered" }) } };
+      : { index: 0, id: "call_end", type: "function", function: { name: "nimblenewt__work-end", arguments: JSON.stringify({ report: "Done as the task asked.", result: "done", note: "seeds ordered" }) } };
     const out = [{ choices: [{ index: 0, delta: { role: "assistant", tool_calls: [call] } }] }, { ...events.at(-1), choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }];
     return new Response(`${out.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("")}data: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
   };

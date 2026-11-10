@@ -5,7 +5,7 @@ import type { Principal } from "../security/principals.js";
 import type { SubmissionService } from "../submissions/index.js";
 import type { EndingAttempt, WorkEndDeps } from "./work-end.js";
 
-type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "verifyDone">>;
+type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "verifyDone" | "addNote" | "notesOf" | "answerQuestions" | "interrogateDone" | "recordReport">>;
 
 /**
  * The attempt port of the ending (card H12n) bound to the real dispatcher: the attempt's state, its freeze, the settling of calls in flight (with the calls that had to be cut, and whether each could have changed the checkout), and its end
@@ -43,6 +43,12 @@ export function dispatcherEndingPorts(dispatch: () => { readonly dispatcher: Dis
       const v = await h.dispatcher.verifyDone(h.principal, attemptId, request);
       return v.state === "skipped" || v.state === "passed" ? { state: v.state } : v;
     },
+    // Card W10: the running notes, the answers to the second agent's questions, the questioning of a done, and the report of another ending live on the attempt's dispatch record. A dispatcher without them (a test double) keeps none.
+    notes: async (attemptId) => { const h = need(); return h.dispatcher.notesOf === undefined ? [] : h.dispatcher.notesOf(h.principal, attemptId); },
+    note: async (attemptId, note) => { const h = need(); if (h.dispatcher.addNote === undefined) throw new DomainError("unavailable", "running notes are not kept by this controller"); return h.dispatcher.addNote(h.principal, attemptId, note); },
+    answer: async (attemptId, request) => { const h = need(); if (h.dispatcher.answerQuestions === undefined) throw new DomainError("unavailable", "this controller does not question reports"); return h.dispatcher.answerQuestions(h.principal, attemptId, request); },
+    interrogate: async (attemptId, request) => { const h = need(); return h.dispatcher.interrogateDone === undefined ? { state: "not-run" } : h.dispatcher.interrogateDone(h.principal, attemptId, request); },
+    recordReport: async (attemptId, request) => { const h = need(); await h.dispatcher.recordReport?.(h.principal, attemptId, request); },
   };
 }
 

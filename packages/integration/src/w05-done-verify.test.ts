@@ -13,8 +13,8 @@ test("a done before the work is written is refused with what failed, in the same
   if (launcher === undefined) return;
   const holder: { write?: () => void } = {};
   const x = await rig(launcher, [
-    { call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed" } } },
-    { before: async () => holder.write!(), call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed, b added", evidence: [{ item: "the new module", path: "src/b.ts" }] } } },
+    { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed" } } },
+    { before: async () => holder.write!(), call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed, b added", evidence: [{ item: "the new module", path: "src/b.ts" }] } } },
     { text: "Ended: the parser is fixed." },
   ]);
   try {
@@ -34,10 +34,10 @@ test("a done before the work is written is refused with what failed, in the same
     assert.match(x.answer.seen[0]!, /When you end with work\.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base \(your PLAN.md does not count; you do not commit it[^"]*\\"the new module\\"[^"]*\\"has b\\"/);
     assert.match(x.answer.seen[1]!, /refused \(invalid_command\): work\.end done was not accepted: the controller checked your work against the task contract and 3 item\(s\) did not pass\./);
     assert.match(x.answer.seen[1]!, /Your checkout holds no change against the task's base/);
-    const refusal = /work\.end done was not accepted:[\s\S]*?say why in the note\./.exec(x.answer.seen[1]!)?.[0] ?? "";
+    const refusal = /work\.end done was not accepted:[\s\S]*?say why in the report\./.exec(x.answer.seen[1]!)?.[0] ?? "";
     assert.notEqual(refusal, "");
     assert.doesNotMatch(refusal, /[Cc]ommit/, "the agent cannot commit (its checkout has no .git), so the refusal never tells it to");
-    assert.match(x.answer.seen[1]!, /If you cannot finish, end with work\.end result blocked or partial and say why in the note\./, "the whole list and what to do reach the model");
+    assert.match(x.answer.seen[1]!, /If you cannot finish, end with work\.end result blocked or partial and say why in the report\./, "the whole list and what to do reach the model");
     assert.match(x.answer.seen[1]!, /Check \\"has b\\" failed: it exited with code 3\. The end of its output \(quoted\): \\"\/work missing src\/b\.ts\\"/, "the check ran in the sandbox (its working directory is the checkout at /work) and its output is quoted");
   } finally { await x.close(); }
 });

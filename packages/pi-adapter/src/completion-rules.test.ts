@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { PLAN_FILE, requestId } from "@nimblenewt/contracts";
-import { COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_JOB_RULE, COMPLETION_RULES, COMPLETION_RULE_GROUPS, JOB_WAKE_RULE_TEXT, PI_AGENT_LAYOUT, PiAdapter, assertStableText, checkLayout, layoutFingerprint, sharedSystemText } from "./index.js";
-import { BRIDGE_TOOL_NAMES, WORK_END_TOOL, createBridge } from "./bridge.js";
+import { COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_JOB_RULE, COMPLETION_REPORT_RULE, COMPLETION_RULES, COMPLETION_RULE_GROUPS, JOB_WAKE_RULE_TEXT, PI_AGENT_LAYOUT, PiAdapter, assertStableText, checkLayout, layoutFingerprint, sharedSystemText } from "./index.js";
+import { BRIDGE_TOOL_NAMES, WORK_ANSWER_TOOL, WORK_END_TOOL, WORK_NOTE_TOOL, createBridge } from "./bridge.js";
 import { NUDGE_TEXT, nudgeText } from "./worker/nudge.js";
 import { rig, wireBody } from "./testing/wire.js";
 
@@ -24,6 +24,23 @@ test("W06: the completion rules are fixed text that passes the layout's stabilit
   assert.ok(COMPLETION_END_RULE.includes(WORK_END_TOOL) && BRIDGE_TOOL_NAMES.includes(WORK_END_TOOL), "names the real work.end tool");
   assert.ok(COMPLETION_JOB_RULE.endsWith(JOB_WAKE_RULE_TEXT), "the job rule is W11's sentence, word for word");
   assert.ok(BRIDGE_TOOL_NAMES.includes("nimblenewt__job-start") && COMPLETION_JOB_RULE.includes("nimblenewt__job-start"));
+});
+
+test("W06 with W10: the report group names the real note, end and answer tools, says every ending carries a report and that the second agent cannot approve; the stuck agent's way out names the report", () => {
+  assert.ok(COMPLETION_RULE_GROUPS.includes(COMPLETION_REPORT_RULE));
+  assert.ok(COMPLETION_RULE_GROUPS.indexOf(COMPLETION_REPORT_RULE) === COMPLETION_RULE_GROUPS.indexOf(COMPLETION_END_RULE) + 1, "right after how the work ends");
+  for (const tool of [WORK_NOTE_TOOL, WORK_END_TOOL, WORK_ANSWER_TOOL]) {
+    assert.ok(BRIDGE_TOOL_NAMES.includes(tool), `${tool} is a bridge tool`);
+    assert.ok(COMPLETION_REPORT_RULE.includes(tool), `the report rule names ${tool}`);
+  }
+  assert.ok(COMPLETION_REPORT_RULE.includes("done or not, carries a report"));
+  assert.ok(COMPLETION_REPORT_RULE.includes("did, found, left or could-not"), "the note kinds work.note takes");
+  assert.ok(COMPLETION_REPORT_RULE.includes("cannot approve your work"));
+  assert.ok(/refused like a done that does not pass/.test(COMPLETION_REPORT_RULE));
+  // A stuck agent may always end blocked or partial (not questioned); the place it says why is the report work.end requires.
+  assert.ok(COMPLETION_END_RULE.includes("blocked or partial and say why in the report"), COMPLETION_END_RULE);
+  assert.ok(NUDGE_TEXT.includes("blocked or partial and say why in the report"), NUDGE_TEXT);
+  assert.ok(!/say why in the note/.test(COMPLETION_RULES + NUDGE_TEXT));
 });
 
 test("W06: no agent-facing text tells a Pi agent to commit (the checkout has no git directory); the nudge and the work.end tool agree with the rules", () => {

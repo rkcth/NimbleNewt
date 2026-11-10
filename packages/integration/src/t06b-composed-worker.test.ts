@@ -82,7 +82,7 @@ describe("the composed worker: Pi in a sandboxed process, the bridge across the 
       (text) => { code = recordIdIn(text); return { call: { name: "nimblenewt__tool-register", args: { name: "double", kind: "tool", version: "1.0.0", manifest: MANIFEST, instructionsRecordId: notes, executableRecordId: code }, id: "call_0" } }; },
       (text) => ({ call: { name: "nimblenewt__tool-invoke", args: { tool: /(a_[a-z0-9]+\.double)/.exec(text)![1]!, input: { n: 21 } }, id: "call_0" } }),
       // Card W03: the agent ends its turn with work.end, then reports.
-      (text) => ({ call: { name: "nimblenewt__work-end", args: { result: "done", note: `Done: ${/result[^0-9]{0,6}42/.test(text.slice(-600)) ? "42" : "no result"}` }, id: "call_0" } }),
+      (text) => ({ call: { name: "nimblenewt__work-end", args: { report: "Doubled 21.", result: "done", note: `Done: ${/result[^0-9]{0,6}42/.test(text.slice(-600)) ? "42" : "no result"}` }, id: "call_0" } }),
       () => ({ text: "Ended." }),
     ]);
     try {
@@ -152,7 +152,7 @@ describe("the composed worker: Pi in a sandboxed process, the bridge across the 
     const service = createTcpServer((socket) => { connections.push("connected"); socket.destroy(); });
     await new Promise<void>((ok) => service.listen(0, "127.0.0.1", ok));
     const port = (service.address() as { port: number }).port;
-    const model = await endpoint([() => ({ call: { name: "nimblenewt__work-end", args: { result: "done", note: "nothing to do" } } }), () => ({ text: "nothing to do" })]);
+    const model = await endpoint([() => ({ call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "nothing to do" } } }), () => ({ text: "nothing to do" })]);
     // The tampered program: the real worker process, with code of its own that reads the channel beside it, takes the credential from the start message and probes before the turn runs.
     const tampered = join(directory, "tampered");
     mkdirSync(tampered);
@@ -296,8 +296,8 @@ async function compose(x: { launcher: SandboxLauncher; directory: string; runs: 
       for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
       return dirs;
     },
-    // 65,536 tokens: on a window under 49,152 Pi's background compaction threshold (window - reserve - background) is below zero, so once the system prompt (card W06) and the tools leave a cut past the kept tenth, Pi asks for a summary
-    // between the scripted calls. This test scripts every model call.
+    // 65,536 tokens: on a window under 49,152 Pi's background compaction threshold (window - reserve - background) is below zero, so once the system prompt (card W06), the tools (card W10 added work.note, work.answer and the
+    // report) leave a cut past the kept tenth, Pi asks for a summary between the scripted calls. This test scripts every model call.
     model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 65536, maxTokens: 1024, reasoning: false, input: ["text"] }),
     namespaceId: (order) => personalId(order.agentId),
     // A reviewer who answers at once: an ask that is parked is approved and the same request is made again with the same call ID.

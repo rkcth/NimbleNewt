@@ -21,10 +21,12 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
  * - `done_unverified`: the agent kept saying its work was done (work.end done) and the controller's checks against the task contract kept failing, or could not be made, until the task's go-ons were used up (card W05); the summary lists what
  *   did not pass. A person reads the list, then has the work fixed, changes the contract or assigns the task again.
  * - `agent_stopped_early`: the agent's turns kept ending before it said its work was done (no work.end, or a reply cut off or with nothing visible), and the readmits from its checkpoint were used up (card W03); a person reads what it last said, its plan and its diff, then assigns the task again or changes it.
+ * - `report_unsupported`: the agent kept saying its work was done, and a second agent that questioned its report against the task contract and the work kept finding the report not supported, until the task's go-ons were used up
+ *   (card W10). Addressed to the director (the CTO role), not asked of the owner: the director reads the report, the questions and the answers, then has the work finished, the task replanned or its criteria clarified.
  * - `context_overflow`: the context kept running out (a first call that does not fit, a summary that could not be made, repeated overflow); a person changes the route, the task or the budget (card C07b).
  */
-export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked" | "missing_context" | "resume_churn" | "agent_stopped_early" | "done_unverified";
-export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked", "missing_context", "resume_churn", "agent_stopped_early", "done_unverified"];
+export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked" | "missing_context" | "resume_churn" | "agent_stopped_early" | "done_unverified" | "report_unsupported";
+export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked", "missing_context", "resume_churn", "agent_stopped_early", "done_unverified", "report_unsupported"];
 
 /**
  * What kind of obstacle a blocker is (card U05), so a status answer can say what stands in the way and the route out:

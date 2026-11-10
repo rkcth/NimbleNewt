@@ -6,7 +6,7 @@ import { rig, sandbox } from "./w03-rig-support.js";
 // reply limit and reasoning cap reach the provider in the field names of the endpoint's kind; a route without them is sent what Pi built; a reply cut off at the limit is continued in the same turn with the nudge to stop deliberating and
 // act, counted as a nudge; and a changed budget applies from the next call. Skipped without bubblewrap unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI).
 const LENGTH_NUDGE = /\[NimbleNewt: the turn goes on\] Your last reply was cut off at the output limit: stop deliberating, act\./;
-const WORK_END = { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed" } };
+const WORK_END = { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed" } };
 
 test("a route's reply limit and reasoning cap reach the provider through the relay; a length stop is continued with the stop deliberating, act nudge; a changed budget applies from the next call (card W07)", async (t) => {
   const launcher = await sandbox(t);

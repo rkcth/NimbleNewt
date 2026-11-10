@@ -78,7 +78,7 @@ test("an agent that starts a job and ends its turn is woken once in the same con
     { text: "The site build runs; I noted my place and will read it when this task is woken." },
     // Run two, after the wake: read the output, end the work.
     () => ({ call: { name: "nimblenewt__job-output", args: { jobId: jobOne } } }),
-    { call: { name: "nimblenewt__work-end", args: { result: "done", note: "the site is built" } } },
+    { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "the site is built" } } },
     { text: "Done: the site is built." },
   ];
   const answer = await model(steps);
