@@ -1180,7 +1180,7 @@ export class StatusService {
       const c = cite("dispatch", attemptId, found.revision);
       if (i === 0) { for (const text of reportLines(d)) lines.push(line(text, c, cite("task", taskId))); continue; }
       const r = d.report;
-      lines.push(line(`Earlier: attempt ${shown(attemptId, 60)} ${r === undefined ? `left ${d.notes?.length ?? 0} note(s) and no report` : `ended ${shown(r.result, 20)} at ${r.at} with a report (${r.questioning === "not-asked" ? "not questioned" : r.questioning === "not-run" ? "no second agent questioned it" : `questioned: ${r.questioning}`}): ${quoted(r.text, 200)}`}.`, c));
+      lines.push(line(`Earlier: attempt ${shown(attemptId, 60)} ${r === undefined ? `left ${d.notes?.length ?? 0} note(s) and no report` : `ended ${shown(r.result, 20)} at ${r.at}${r.result === "done" && d.outcome !== undefined && d.outcome.status !== "succeeded" ? ` (the attempt itself finished ${d.outcome.status})` : ""} with a report (${r.questioning === "not-asked" ? "not questioned" : r.questioning === "not-run" ? "no second agent questioned it" : `questioned: ${r.questioning}`}): ${quoted(r.text, 200)}`}.`, c));
     }
     return { observedAt: at, lines };
   }

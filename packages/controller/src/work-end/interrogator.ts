@@ -27,6 +27,11 @@ export interface ReportInterrogatorOptions {
    * A second pass costs nothing for a skipped route or the cap (no call is made), so it only asks again what failed for a passing reason.
    */
   readonly retryDelayMs?: number;
+  /**
+   * How long one call to a route may take before it is given up as a failure that may pass (default 120,000 ms, at most 600,000). The agent's work.end waits on the questioning and nothing else bounds the host's model client,
+   * so without it a route that never answers would hold the ending (and every later questioning of the attempt) forever. A reply that comes after it is not read (the routed client still counts its tokens).
+   */
+  readonly callTimeoutMs?: number;
 }
 
 export const INTERROGATOR_LIMITS = { answer: 20_000, notes: 4000, report: WORK_REPORT_LIMITS.report + 200, prompt: 24_000 } as const;
@@ -44,10 +49,12 @@ export class ReportInterrogator implements ReportInterrogatorPort {
   readonly #routes: () => Promise<readonly string[]>;
   readonly #onFailure: ReportInterrogatorOptions["onFailure"];
   readonly #retryDelayMs: number;
+  readonly #callTimeoutMs: number;
 
   constructor(model: ResumeReviewModel, options: ReportInterrogatorOptions) {
     this.#model = model;
     this.#retryDelayMs = options.retryDelayMs !== undefined && Number.isFinite(options.retryDelayMs) && options.retryDelayMs >= 0 ? Math.min(options.retryDelayMs, 30_000) : 2000;
+    this.#callTimeoutMs = options.callTimeoutMs !== undefined && Number.isFinite(options.callTimeoutMs) && options.callTimeoutMs > 0 ? Math.min(options.callTimeoutMs, 600_000) : 120_000;
     const given = options.routes;
     this.#routes = typeof given === "function" ? async () => await given() : async () => given;
     this.#onFailure = options.onFailure;
@@ -65,9 +72,10 @@ export class ReportInterrogator implements ReportInterrogatorPort {
       let passing = false;
       for (const route of routes) {
         let reply: string;
-        try { reply = await this.#model.complete(route, { system: SYSTEM, user }); } catch (error) {
+        try { reply = await this.#complete(route, user); } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (!/^(?:blocked|budget|credit|auth|rate-limit|outage): /.test(message)) passing = true;
+          // Not asked again: what the routed client skips or cools the route for, the cap, and a request the route refused as it stands (too large, not valid), which fails the same way twice.
+          if (!/^(?:blocked|budget|credit|auth|rate-limit|outage|context-overflow|invalid-request): /.test(message)) passing = true;
           last = clipText(redactText(message), 200);
           try { this.#onFailure?.(route, last); } catch { /* a failing log tells nothing */ }
           continue;
@@ -83,6 +91,13 @@ export class ReportInterrogator implements ReportInterrogatorPort {
       await new Promise((ok) => setTimeout(ok, this.#retryDelayMs));
     }
     throw new DomainError("unavailable", `no route answered the second agent's questions (${last})`);
+  }
+
+  /** One call, given up after `callTimeoutMs` (a timeout may pass, so it is asked once more like a dropped connection). */
+  async #complete(route: string, user: string): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, fail) => { timer = setTimeout(() => fail(new Error(`timeout: route ${route} did not answer within ${this.#callTimeoutMs} ms`)), this.#callTimeoutMs); });
+    try { return await Promise.race([this.#model.complete(route, { system: SYSTEM, user }), timeout]); } finally { clearTimeout(timer); }
   }
 }
 

@@ -4,7 +4,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { DomainError } from "../domain/errors.js";
 import { buildWorld, workGrants, type DispatchWorld } from "./testing/world.js";
 import { STOPPED_EARLY_KIND, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type DispatchBody } from "./model.js";
-import { reportLines, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
+import { earlierReportNote, reportLines, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import type { DoneCheckReport, WorkerTurnResult } from "./ports.js";
 
 after(stopServer);
@@ -320,3 +320,12 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+test("a report taken as done on an attempt that then finished otherwise (an owner's stop after the done was taken) says how the attempt itself finished; a done that finished succeeded says nothing more (W10 second review)", () => {
+  const report = { key: "k", result: "done", text: "Done.", at: "2026-11-10T00:00:00.000Z", questioning: "not-run" as const, why: "no second agent is set up on this controller", qa: [] };
+  const base = { attemptId: "att-1", agentId: "agent:ann", notes: [], report };
+  const stopped = reportLines({ ...base, outcome: { status: "abandoned", summary: "the owner stopped the task", at: "t" } })[0]!;
+  assert.match(stopped, /ended done at 2026-11-10T00:00:00\.000Z \(as its agent ended it; the attempt itself finished abandoned: "the owner stopped the task"\); no second agent questioned it: no second agent is set up on this controller\./);
+  for (const outcome of [undefined, { status: "succeeded" as const, summary: "done", at: "t" }]) assert.doesNotMatch(reportLines({ ...base, ...(outcome === undefined ? {} : { outcome }) })[0]!, /as its agent ended it/);
+  assert.match(earlierReportNote({ ...base, outcome: { status: "failed", summary: "lost", at: "t" } }), /the attempt itself finished failed/);
+});
