@@ -14,6 +14,8 @@ import type { StandupService } from "../standups/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { CutoverService } from "../routing/cutover.js";
 import type { DispatcherLoop } from "./dispatcher.js";
+import type { GrantService, LapsedGrant } from "../security/grants.js";
+import { quoted } from "../status/explain.js";
 
 /**
  * The loops the dispatcher's tick runs (card H12). Several services were built with the note "the controller's loop must call this"; each builder below turns one such call into a `DispatcherLoop`, so
@@ -388,4 +390,28 @@ export function wakeLoops(watches: Pick<WatchService, "consumeWakes">, waker: Wa
 /** The waker of the running controller (card H13c): an attempt that is running reads its inbox at its next boundary, and one waiting for a place reads it when it starts; anything else (no record yet, parked on an approval, finished) is tried again next tick. */
 export function attemptWaker(dispatcher: () => { get(by: Principal, attemptId: string): Promise<{ state: string } | undefined> } | undefined, by: Principal): Waker {
   return { wake: async (r) => { const state = (await dispatcher()?.get(by, r.attemptId))?.state; return state === "running" || state === "waiting" ? "woken" : "deferred"; } };
+}
+
+/**
+ * The owner's one plain notice that a standing grant lapsed from non-use (card A07h): it names the right, who held it and where (each name quoted once, as recorded) and the last time it was used,
+ * and says what to do. At most 200 characters (the notice limit), the names cut to fit.
+ */
+export function lapseNotice(l: LapsedGrant): string {
+  const who = l.granteeName === undefined ? l.grantee : quoted(l.granteeName, 40);
+  const where = l.project === "*" ? "every project" : l.projectName === undefined ? l.project : quoted(l.projectName, 40);
+  const last = l.lastUsedAt === undefined ? "it was never used" : `last used ${l.lastUsedAt.slice(0, 10)}`;
+  return `${who} no longer holds ${l.action} in ${where}: unused for ${l.idleDays} day${l.idleDays === 1 ? "" : "s"} (${last}). Grant it again if the work needs it.`.slice(0, 200);
+}
+
+/**
+ * Tells the owner once about each standing grant that lapsed from non-use (card A07h). Looked at no more often than every `intervalMs` (default ten minutes), whatever the tick rate; the notice is named by the
+ * grant, so one that is repeated after a failure part-way is the same notice.
+ */
+export function grantLapseLoops(grants: Pick<GrantService, "noticeLapsed">, tell: (notice: { readonly key: string; readonly grantId: string; readonly projectId?: string; readonly text: string }) => Promise<unknown>, intervalMs = 600_000, now: () => number = Date.now): DispatcherLoop[] {
+  let last: number | undefined;
+  return [{ name: "grants.lapsed", run: async (by) => {
+    if (last !== undefined && now() - last < intervalMs) return;
+    last = now();
+    await grants.noticeLapsed(by.id, (l) => tell({ key: `grant-lapsed:${l.grantId}`, grantId: l.grantId, ...(l.project === "*" ? {} : { projectId: l.project }), text: lapseNotice(l) }));
+  } }];
 }

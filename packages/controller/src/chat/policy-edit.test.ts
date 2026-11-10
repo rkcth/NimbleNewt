@@ -6,7 +6,7 @@ import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { CELL_KEYS, PROFILE_TABLES, PolicyService } from "../policy/index.js";
 import { ReviewService } from "../review/index.js";
-import { GrantService } from "../security/index.js";
+import { GrantService, idleEnd } from "../security/index.js";
 import { GRANT_LENGTH_OPTIONS, PolicyEditService, chooseGrantLength, lengthInWords, ownerOrders, targetsOf, POLICY_EDIT_LIMITS, checkIntents, type Outcome } from "./index.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
@@ -360,7 +360,8 @@ for (const backend of backends) {
     const held = await c.grants.held(ann, NOW);
     assert.equal(held.length, 1);
     const g = held[0]!.body;
-    assert.deepEqual([g.action, g.project, g.source, g.expiresAt, g.terms?.environments], ["approve.class.commit", c.a, "standing", "2027-01-20T10:00:00.000Z", ["development", "testing"]]);
+    // Card A07h: the length is the idle window; unused from now on, it lapses when the old end date would have been.
+    assert.deepEqual([g.action, g.project, g.source, g.expiresAt, g.idleDays, idleEnd(g), g.terms?.environments], ["approve.class.commit", c.a, "standing", undefined, 90, "2027-01-20T10:00:00.000Z", ["development", "testing"]]);
     assert.match(g.basis, /you did not say how long/);
     assert.match(g.basis, /Length: 90 days/);
     assert.equal((await c.edits.get(c.w.owner, o.editId!))!.applied![0]!.kind, "grant-record");
@@ -377,7 +378,7 @@ for (const backend of backends) {
     const w1 = only((await c.say(week)).outcomes);
     assert.match((await c.edits.get(c.w.owner, w1.editId!))!.explanation.join(" "), /Length: 7 days \(you asked for 7 days\)/);
     await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: w1.editId! });
-    assert.equal((await c.grants.held(ann, NOW))[0]!.body.expiresAt, "2026-10-29T10:00:00.000Z");
+    assert.equal(idleEnd((await c.grants.held(ann, NOW))[0]!.body), "2026-10-29T10:00:00.000Z");
     const until = `Let ${ann} merge in development until 2026-10-30.`;
     script[until] = [pe({ type: "grant", grantee: ann, approve: { class: "merge" }, until: "2026-10-30" }, "merge in development")];
     const u = only((await c.say(until)).outcomes);
@@ -420,7 +421,7 @@ for (const backend of backends) {
     assert.match(edit.explanation.join(" "), /Length: 14 days \(you asked for 14 days\)/);
     const done = await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId!, lengthDays: 14 });
     assert.equal(done.status, "applied");
-    assert.equal((await c.grants.held((edit.op as unknown as { grantee: string }).grantee, NOW))[0]!.body.expiresAt, "2026-11-05T10:00:00.000Z");
+    assert.equal(idleEnd((await c.grants.held((edit.op as unknown as { grantee: string }).grantee, NOW))[0]!.body), "2026-11-05T10:00:00.000Z");
     await c.w.agents.create(c.w.owner, { commandId: cid("ag"), friendlyName: "Twin" });
     await c.w.agents.create(c.w.owner, { commandId: cid("ag"), friendlyName: "Twin" });
     script["Let Twin push in development."] = [pe({ type: "grant", grantee: "Twin", approve: { class: "push" } }, "push in development")];
@@ -443,7 +444,9 @@ for (const backend of backends) {
     assert.equal(done.status, "applied", JSON.stringify(done));
     const held = await c.grants.held("agent:ann", new Date(at).toISOString());
     assert.equal(held.length, 1, "one grant, not two");
-    assert.equal(held[0]!.body.expiresAt, "2026-10-29T10:00:00.000Z", "seven days from the first try, not from the retry");
+    // The length fixed at the first try is kept; the idle window starts when the grant exists (card A07h).
+    assert.deepEqual([held[0]!.body.idleDays, held[0]!.body.expiresAt], [7, undefined], "seven days as fixed at the first try");
+    assert.equal((await c.edits.get(c.w.owner, made.id))!.decided?.at, NOW, "the time fixed at the first try");
   });
 
   suite("a tool reserved for the owner is never granted, and a mandatory human gate is never released from chat", async (c, script) => {
@@ -778,7 +781,7 @@ for (const backend of backends) {
       const o = only((await (async () => { script["Let agent:ann commit in development without asking."] = [pe({ type: "grant", grantee: "agent:ann", approve: { class: "commit" } }, "commit in development")]; return c.say("Let agent:ann commit in development without asking."); })()).outcomes);
       script["Yes, apply that edit."] = [{ kind: "apply_proposal", proposalId: o.editId, lengthDays: 90, evidence: "apply that edit", basis: "owner" }];
       assert.equal(only((await c.say("Yes, apply that edit.")).outcomes).status, "applied");
-      assert.equal((await c.grants.held("agent:ann", NOW))[0]!.body.expiresAt, "2026-11-21T10:00:00.000Z", "30 days as shown, not the 90 the interpreter added");
+      assert.equal(idleEnd((await c.grants.held("agent:ann", NOW))[0]!.body), "2026-11-21T10:00:00.000Z", "30 days as shown, not the 90 the interpreter added");
     });
   }
 
@@ -951,7 +954,40 @@ for (const backend of backends) {
     const r = await c.say(`Let ${ann} commit in development.`);
     assert.match(r.reply[0]!, /Length: 14 days \(you did not say how long.*default you set of 14 days/);
     await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: only(r.outcomes).editId! });
-    assert.equal((await c.grants.held(ann, NOW))[0]!.body.expiresAt, new Date(Date.parse(NOW) + 14 * DAY).toISOString());
+    assert.equal(idleEnd((await c.grants.held(ann, NOW))[0]!.body), new Date(Date.parse(NOW) + 14 * DAY).toISOString());
+  });
+
+  suite("a chat grant's length is how long it may go unused (card A07h): any length is applied unless grants.maxDays is set, use renews it, and a named end day stays an end date", async (c, script) => {
+    const ann = "agent:ann";
+    const said = `Let ${ann} commit in development for 1000 days.`;
+    script[said] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 1000 }, "commit in development for 1000 days")];
+    const r = await c.say(said);
+    const o = only(r.outcomes);
+    assert.equal(o.status, "proposed", "no cap unless the owner set one");
+    assert.match(r.reply[0]!, /it lapses only once \S+ has not used it for 1000 days, and each use starts that count again/);
+    assert.match(r.reply[0]!, /It closes by itself when it goes unused, you are told once when it does/);
+    await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId! });
+    const [g] = await c.grants.held(ann, NOW);
+    assert.deepEqual([g!.body.idleDays, g!.body.expiresAt, g!.body.lastUsedAt], [1000, undefined, NOW]);
+    assert.match(g!.body.basis, /Length: 1000 days, lapsing only after that long unused/);
+    // A short window, used now and then, outlives it many times over.
+    const week = `Let ${ann} push in development for a week.`;
+    script[week] = [pe({ type: "grant", grantee: ann, approve: { class: "push" }, lengthDays: 7 }, "push in development for a week")];
+    await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: only((await c.say(week)).outcomes).editId! });
+    const push = (await c.grants.held(ann, NOW)).find((x) => x.body.action === "approve.class.push")!;
+    for (let d = 5; d <= 100; d += 5) await c.grants.recordUse("service:dispatcher", [push.id], new Date(Date.parse(NOW) + d * DAY).toISOString());
+    assert.ok((await c.grants.held(ann, new Date(Date.parse(NOW) + 104 * DAY).toISOString())).some((x) => x.id === push.id), "still live after 100 days of use");
+    // A day the owner names is an end date, as before.
+    const until = `Let ${ann} merge in development until 2026-10-30.`;
+    script[until] = [pe({ type: "grant", grantee: ann, approve: { class: "merge" }, until: "2026-10-30" }, "merge in development")];
+    const u = await c.say(until);
+    assert.match(u.reply[0]!, /if applied now it ends 2026-10-30T23:59:59\.000Z/);
+    await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: only(u.outcomes).editId! });
+    const merge = (await c.grants.held(ann, NOW)).find((x) => x.body.action === "approve.class.merge")!;
+    assert.deepEqual([merge.body.expiresAt, merge.body.idleDays], ["2026-10-30T23:59:59.000Z", undefined]);
+    // With a maximum set, a longer window is refused as before.
+    await setSetting(c, "grants.maxDays", 90);
+    assert.equal(only((await c.say(said)).outcomes).code, "invalid_length");
   });
 
   suite("a spending grant with no ceiling is still a proposal, and it spends without a ceiling; without a stated ceiling the chat asks how much", async (c, script) => {

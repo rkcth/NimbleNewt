@@ -80,7 +80,7 @@ export interface PolicyEditBody {
   readonly refusal?: { readonly code: string; readonly message: string };
   readonly createdAt: string;
   /** Fixed when the edit starts to apply, so a retry after a crash does the same thing. */
-  readonly decided?: { readonly at: string; readonly expiresAt?: string; readonly lengthDays?: number; readonly permanent?: true };
+  readonly decided?: { readonly at: string; readonly expiresAt?: string; readonly lengthDays?: number; readonly permanent?: true; /** Card A07h: the grant lapses after this many days unused instead of on a date (edits decided before A07h carry `expiresAt`). */ readonly idleDays?: number };
   readonly appliedAt?: string;
   /** The revisions the edit produced. */
   readonly applied?: readonly AppliedRef[];
@@ -387,7 +387,7 @@ export class PolicyEditService {
     // A retry of an edit already applying keeps what was fixed and stored the first time (a maximum set since must not strand it half done).
     const chosen = op?.kind === "grant" && found.status !== "applying" ? this.#length(op, at, request.lengthDays, await this.#lengthRules(owner)) : undefined;
     if (chosen !== undefined && "message" in chosen) throw new DomainError("invalid_command", chosen.message, { field: "lengthDays" });
-    const begun = await this.#move(owner.id, id, `${id}-begin`, ["proposed", "applying"], (b) => (b.status === "applying" ? b : { ...b, status: "applying", decided: { at, ...(chosen === undefined || "message" in chosen ? {} : chosen.permanent === true ? { permanent: true as const } : { expiresAt: chosen.expiresAt as string, lengthDays: chosen.days as number }) } }));
+    const begun = await this.#move(owner.id, id, `${id}-begin`, ["proposed", "applying"], (b) => (b.status === "applying" ? b : { ...b, status: "applying", decided: { at, ...(chosen === undefined || "message" in chosen ? {} : chosen.permanent === true ? { permanent: true as const } : chosen.idleDays !== undefined ? { idleDays: chosen.idleDays, lengthDays: chosen.days as number } : { expiresAt: chosen.expiresAt as string, lengthDays: chosen.days as number }) } }));
     if (begun.body.status !== "applying") {
       if (begun.body.status === "applied") return { editId: id, status: "applied", replayed: true, applied: begun.body.applied ?? [] };
       invalid("editId", `that edit is ${begun.body.status}`);
@@ -638,7 +638,8 @@ export class PolicyEditService {
     const noLimit = change.spendLimit === null;
     const now = this.#runner.now();
     let ends: string;
-    try { ends = noEnd ? "no end date is recorded on it, so nothing retires it" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`; } catch (error) {
+    // A length in days is an idle window (card A07h): the grant lapses only after it has gone unused that long, and each use by the agent starts it again. A day the owner named is an end date.
+    try { ends = noEnd ? "no end date is recorded on it, so nothing retires it" : chosen.until !== undefined ? `if applied now it ends ${chosen.until}` : `it lapses only once ${grantee.name} has not used it for ${chosen.days} day${chosen.days === 1 ? "" : "s"}, and each use starts that count again (if it were never used it would lapse ${new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()})`; } catch (error) {
       if (error instanceof RangeError) throw new Refusal("invalid_length", "that length puts the end of the grant beyond any date a record can hold");
       throw error;
     }
@@ -654,7 +655,7 @@ export class PolicyEditService {
     const explanation = [
       `It covers ${environments.join(" and ")} only${change.environments === undefined ? " (you did not name an environment, so only the free ones)" : ""}.`,
       `Length: ${noEnd ? "no end" : `${chosen.days} day${chosen.days === 1 ? "" : "s"}`} (${chosen.why}); ${ends}. You can pick another when you apply it: ${options.map((d) => `${d} day${d === 1 ? "" : "s"}`).join(", ")}.`,
-      noEnd ? "It does not expire by itself: it stays in force until you revoke it." : "It expires by itself and you can revoke it at any time.",
+      noEnd ? "It does not expire by itself: it stays in force until you revoke it." : chosen.until !== undefined ? "It expires by itself and you can revoke it at any time." : "It closes by itself when it goes unused, you are told once when it does, and you can revoke it at any time.",
       "A standing grant never covers what stays your decision: changing access, a customer-live deployment, a protected branch, spending beyond the estimate, an irreversible action, or an audience nobody named.",
       ...(change.audiences === undefined ? [] : [`Audiences: ${change.audiences.join(", ")}.`]), ...(change.spendLimit === undefined ? [] : [noLimit ? "Spend limit: none. There is no ceiling on this grant: it may spend any amount without asking you." : `Spend limit: ${change.spendLimit}.`]),
     ];
@@ -756,8 +757,11 @@ export class PolicyEditService {
     return { ...(maxDays === undefined ? {} : { maxDays }), ...(defaultDays === undefined ? {} : { defaultDays }) };
   }
 
-  /** The length fixed when the owner applies: the maximum is looked at again then, so a maximum set after the proposal still binds. */
-  #length(op: Extract<EditOp, { kind: "grant" }>, at: string, override: number | undefined, rules: GrantLengthRules): { days?: number; expiresAt?: string; permanent?: true } | { message: string } {
+  /**
+   * The length fixed when the owner applies: the maximum is looked at again then, so a maximum set after the proposal still binds. A length in days is the grant's idle window (card A07h): it lapses
+   * only after going unused that long, and each use renews it. A day the owner named (`until`) stays an end date.
+   */
+  #length(op: Extract<EditOp, { kind: "grant" }>, at: string, override: number | undefined, rules: GrantLengthRules): { days?: number; expiresAt?: string; idleDays?: number; permanent?: true } | { message: string } {
     const max = rules.maxDays;
     if (override === undefined && op.permanent === true) {
       if (max !== undefined) return { message: noMore(max, "this grant has no end, so it can no longer be made as proposed; ask again") };
@@ -773,7 +777,7 @@ export class PolicyEditService {
     const days = override ?? op.lengthDays ?? rules.defaultDays ?? DEFAULT_GRANT_DAYS;
     if (days > GRANT_DAYS_CEILING) return { message: `${days} days is more than a grant can last (${GRANT_DAYS_CEILING} days)` };
     if (max !== undefined && days > max) return { message: noMore(max, `not ${days}`) };
-    return { days, expiresAt: new Date(Date.parse(at) + days * DAY_MS).toISOString() };
+    return { days, idleDays: days };
   }
 
   async #run(owner: Principal, id: string, body: PolicyEditBody, op: EditOp, note: (ref: AppliedRef) => Promise<void>): Promise<{ applied: AppliedRef[]; takesEffect?: string }> {
@@ -790,10 +794,10 @@ export class PolicyEditService {
       }
       case "grant": {
         // A grant with no end is made only when the decision says so; a decision that fixed neither an end nor permanence is damaged, and nothing is granted from it.
-        if (body.decided?.permanent !== true && body.decided?.expiresAt === undefined) throw new DomainError("invalid_transition", `edit ${id} fixed no end time for this grant and did not say it is permanent, so no grant was made`);
+        if (body.decided?.permanent !== true && body.decided?.expiresAt === undefined && body.decided?.idleDays === undefined) throw new DomainError("invalid_transition", `edit ${id} fixed no end time or idle window for this grant and did not say it is permanent, so no grant was made`);
         const g = await d.grants.grant(owner, {
-          commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", ...(body.decided?.expiresAt === undefined ? {} : { expiresAt: body.decided.expiresAt }),
-          basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.permanent === true ? "no end" : `${body.decided?.lengthDays ?? "?"} days`} (${op.lengthWhy}).`.slice(0, 900),
+          commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", ...(body.decided?.expiresAt === undefined ? {} : { expiresAt: body.decided.expiresAt }), ...(body.decided?.idleDays === undefined ? {} : { idleDays: body.decided.idleDays }),
+          basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.permanent === true ? "no end" : body.decided?.idleDays !== undefined ? `${body.decided.idleDays} days, lapsing only after that long unused` : `${body.decided?.lengthDays ?? "?"} days`} (${op.lengthWhy}).`.slice(0, 900),
           terms: { environments: [...op.environments], ...(op.spendLimit === undefined ? {} : { spendLimit: op.spendLimit }), ...(op.spendUnlimited === true ? { spendUnlimited: true } : {}), ...(op.audiences === undefined ? {} : { audiences: [...op.audiences] }) },
         });
         return { applied: [{ kind: "grant-record", id: g.id, revision: g.revision }], takesEffect: "from the grantee's next snapshot" };
