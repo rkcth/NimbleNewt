@@ -10,3 +10,4 @@ export { ENFORCEMENT_LIMITS, ContextEnforcementService, contextRouteKey, startup
 export { LINEAGE_KEEP, LINEAGE_DIGEST, foldLineage, lineageDigest, type LineageEarlier } from "./lineage.js";
 export { THINKING_LIMITS, THINKING_RETENTION_DAYS, ThinkingService, deleteAfter, type ReadBlock, type ThinkingBlock, type ThinkingDropBody, type ThinkingExportPolicyBody, type ThinkingLookBody, type ThinkingSource } from "./thinking.js";
 export { ContextRouteSettingsService, DEFAULT_ROUTE_FLOOR_CHARS, ROUTE_FLOOR_DEFAULTS, type RouteSettingsEffective } from "./route-settings.js";
+export { START_PARTS, START_PART_WORDS, START_SIZE_BOUNDS, START_SIZE_DEFAULTS, START_SIZE_LIMITS, StartSizeService, risingRun, startSizeAlertText, type StartPart, type StartSizeAlert, type StartSizeBody, type StartSizePoint, type StartSizeSample, type StartSizeSettingsEffective } from "./start-size.js";
