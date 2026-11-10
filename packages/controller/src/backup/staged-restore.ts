@@ -9,6 +9,8 @@ import type { LedgerEntry } from "../retention/ledger.js";
 import { canonicalJson } from "../storage/json.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
+import { PostgresStorage, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
+import { postgresFingerprint } from "../transfer/transfer.js";
 import { UnlockFailed, type BackupKey } from "./crypto.js";
 import type { MaintenanceBarrier } from "./barrier.js";
 import type { BackupService } from "./service.js";
@@ -28,7 +30,10 @@ export { canon, canonSync };
  * maintenance barrier stays up (every command refused) until the controller is started again. The next start (`applyPendingRestore`, before the database is opened, holding the data directory's lock) moves the old
  * database aside (`<db>.before-restore-<stamp>`) and puts the restored one in its place, move by move in a journal: a move that fails (a file in use on Windows, a device boundary) rolls the moves already made back, so
  * the live data is whole again, and the failure is recorded in the marker for the owner to cancel or retry. Nothing is deleted.
- * Provisional: the controller does not end its own process (the host decides how it is restarted, `onStaged` tells it); SQLite only (a PostgreSQL schema restore is not staged yet).
+ * On PostgreSQL (card K01i) the restore is written into a NEW schema of the same database (`nnrs_<digest>_<stamp>`), and the start swaps it in with one transaction that renames the live schema aside
+ * (`<schema>_br_<stamp>`) and the staged one into its name; that transaction is the last move of the same journal (the conversation folders move first), and it is undone the same way. The swap is refused while another
+ * controller is connected to the database (by its application name), so a running controller never has its schema renamed under it.
+ * Provisional: the controller does not end its own process (the host decides how it is restarted, `onStaged` tells it).
  */
 export const PENDING_FILE = "pending-restore.json";
 export const JOURNAL_FILE = "restore-journal.json";
@@ -72,6 +77,8 @@ export interface PendingRestore {
   readonly name: string;
   readonly stamp: string;
   readonly preparedAt: string;
+  /** `postgres`: `liveDb` is the database's place (server, port, database and schema; never the password) and `stagedDb` the staged schema's name. Absent: SQLite files. */
+  readonly database?: "postgres";
   readonly stagedDb: string;
   readonly liveDb: string;
   readonly pi: readonly { readonly id: string; readonly staged: string; readonly target: string }[];
@@ -85,8 +92,10 @@ export interface StagedRestoreOptions {
   readonly backups: BackupService;
   readonly root: string;
   readonly barrier: MaintenanceBarrier;
-  /** The live database file (SQLite). */
-  readonly sqlitePath: string;
+  /** The live database file (SQLite). Exactly one of this and `postgres` is given. */
+  readonly sqlitePath?: string;
+  /** The live PostgreSQL schema (card K01i): the address (a secret: it is never shown or written anywhere), the schema, and how a staged schema is opened (default: `PostgresStorage.open` with that schema; the host passes the same server options as the live open). */
+  readonly postgres?: PostgresLive["postgres"];
   /** The folder the markers and the key live in (the data directory). */
   readonly dataDirectory: string;
   readonly storage: Pick<ControllerStorage, "currentEpoch" | "snapshot"> & Partial<Pick<ControllerStorage, "listAudit">>;
@@ -110,6 +119,15 @@ export interface StagedRestoreOptions {
   readonly link?: (existing: string, path: string) => Promise<void>;
   /** The device of a path (tests). */
   readonly deviceOf?: (path: string) => Promise<number>;
+}
+
+/** The live database of a restore: the SQLite file's path, or a PostgreSQL schema. */
+export type RestoreDatabase = string | PostgresLive;
+export interface PostgresLive { readonly postgres: { readonly url: string; readonly schema: string; readonly port?: PostgresRestorePort; readonly openStaged?: (schema: string) => Promise<ControllerStorage> } }
+interface Live { readonly id: string; readonly dbDir?: string; readonly pg?: { readonly url: string; readonly schema: string; readonly port: PostgresRestorePort; readonly openStaged?: (schema: string) => Promise<ControllerStorage> } }
+async function liveOf(db: RestoreDatabase): Promise<Live> {
+  if (typeof db === "string") { const id = await canon(db); return { id, dbDir: dirname(id) }; }
+  return { id: postgresFingerprint(db.postgres.url, db.postgres.schema), pg: { url: db.postgres.url, schema: db.postgres.schema, port: db.postgres.port ?? postgresRestorePort(db.postgres.url), ...(db.postgres.openStaged === undefined ? {} : { openStaged: db.postgres.openStaged }) } };
 }
 
 const stampOf = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -184,31 +202,32 @@ async function readMarkerRaw(data: string): Promise<PendingRestore | undefined> 
 }
 
 /** Reads and authenticates the marker and checks it is for THIS installation's places; undefined when there is none. Throws (a plain Error) for one that is unreadable, forged or for another place. */
-async function readMarker(dataDirectory: string, livePath: string, piFinal: ((id: string) => string | undefined) | undefined): Promise<{ pending: PendingRestore; data: string; live: string } | undefined> {
+async function readMarker(dataDirectory: string, db: RestoreDatabase, piFinal: ((id: string) => string | undefined) | undefined): Promise<{ pending: PendingRestore; data: string; live: Live } | undefined> {
   const data = await canon(dataDirectory);
-  const live = await canon(livePath);
+  const live = await liveOf(db);
   const parsed = await readMarkerRaw(data);
   if (parsed === undefined) return undefined;
   const bad = (why: string): never => { throw new Error(`the pending restore marker is not valid (${why}); the restore was not applied`); };
-  if (parsed.liveDb !== live) throw new Error("the pending restore marker is not for this database");
-  if (parsed.stagedDb !== stagedOf(live, parsed.stamp)) bad("the staged database is not beside the live one");
+  if (parsed.liveDb !== live.id || (parsed.database === "postgres") !== (live.pg !== undefined)) throw new Error("the pending restore marker is not for this database");
+  if (live.pg === undefined ? parsed.stagedDb !== stagedOf(live.id, parsed.stamp) : parsed.stagedDb !== stagedSchemaOf(live.pg.schema, parsed.stamp)) bad("the staged database is not beside the live one");
   for (const p of parsed.pi) {
     if (!validStoreId(p.id) || typeof p.target !== "string") return bad("a conversation store");
     const known = resolve(piFinal?.(p.id) ?? join(data, "restored-pi-state", p.id));
     if (p.target !== await canon(known)) bad(`a conversation folder is not where this installation keeps ${p.id}`);
     if (p.staged !== stagedOf(p.target, parsed.stamp)) bad("a staged conversation folder is not beside its target");
-    safeTarget(p.target, data, live);
+    safeTarget(p.target, data, live.dbDir);
   }
   return { pending: parsed, data, live };
 }
 
 /** A restore never replaces the data directory, the database's folder or anything above them (a corrupt id mapping must not make it move a whole tree). */
-function safeTarget(target: string, data: string, live: string): void {
-  const dirs = [data, dirname(live)];
+function safeTarget(target: string, data: string, dbDir: string | undefined): void {
+  const dirs = dbDir === undefined ? [data] : [data, dbDir];
   if (dirname(target) === target || dirs.some((d) => d === target || inside(target, d))) throw new DomainError("invalid_command", "a conversation store would replace the data directory or a folder above it");
 }
 
-interface Move { readonly from: string; readonly to: string }
+/** A file or folder rename; or, with `aside` (PostgreSQL), the schema swap: `from` is the staged schema, `to` the live one and `aside` where the live one goes, all in one transaction. */
+interface Move { readonly from: string; readonly to: string; readonly aside?: string }
 /** `done`: every move was made; what is left is to remove the marker and then the journal (so a crash between the two is not mistaken for a swap still to plan). */
 interface Journal { readonly stamp: string; readonly mode: "forward" | "back" | "done"; readonly moves: readonly Move[]; /** forward: the next move to make (= how many are made); back: how many moves are still to undo. */ readonly at: number; readonly mac?: string }
 
@@ -245,6 +264,19 @@ export interface ApplyOptions {
   readonly now?: () => Date;
   /** Removes a file of the swap's bookkeeping (tests end the process between two removals). */
   readonly remove?: (path: string) => Promise<void>;
+  /** PostgreSQL: how long the start waits for another controller's connections to the database to go before it refuses (default 5000 ms; a closed controller's sessions take a moment to leave the server's list). */
+  readonly controllersGoneMs?: number;
+}
+
+/** A schema is never swapped under a running controller: one connected to the database refuses the start (the restore stays recorded and is applied by a start when it has gone). */
+async function noOtherController(port: PostgresRestorePort, o: ApplyOptions): Promise<void> {
+  const until = Date.now() + (o.controllersGoneMs ?? 5000);
+  for (;;) {
+    const n = await port.controllersConnected();
+    if (n === 0) return;
+    if (Date.now() >= until) throw new Error(`a restore waits to be swapped in, but another controller is connected to this PostgreSQL database (${n} connection(s)); its schema is not renamed under it. Stop the other controller and start again; nothing was changed.`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
 }
 
 async function renameRetry(o: ApplyOptions, from: string, to: string): Promise<void> {
@@ -258,30 +290,51 @@ async function renameRetry(o: ApplyOptions, from: string, to: string): Promise<v
   }
 }
 
-/** The moves of a first run. A staged copy the marker names that is not there is not a swap to skip: it returns what is missing, and nothing is moved. */
-async function planMoves(p: PendingRestore): Promise<{ moves: Move[] } | { missing: string }> {
+/** The moves of a first run. A staged copy the marker names that is not there is not a swap to skip: it returns what is missing, and nothing is moved. The database goes last (on PostgreSQL, one schema swap). */
+async function planMoves(p: PendingRestore, live: Live): Promise<{ moves: Move[] } | { missing: string }> {
   for (const x of p.pi) if (!(await exists(x.staged))) return { missing: `the staged conversation folder ${basename(x.staged)}` };
-  if (!(await exists(p.stagedDb))) return { missing: `the staged database ${basename(p.stagedDb)}` };
+  if (live.pg !== undefined ? !(await live.pg.port.exists(p.stagedDb)) : !(await exists(p.stagedDb))) return { missing: `the staged database ${basename(p.stagedDb)}` };
   const moves: Move[] = [];
   for (const x of p.pi) {
     if (await exists(x.target)) moves.push({ from: x.target, to: asideOf(x.target, p.stamp) });
     moves.push({ from: x.staged, to: x.target });
   }
+  if (live.pg !== undefined) { moves.push({ from: p.stagedDb, to: live.pg.schema, aside: asideSchemaOf(live.pg.schema, p.stamp) }); return { moves }; }
   for (const s of SQLITE_SIDECARS) if (await exists(p.liveDb + s)) moves.push({ from: p.liveDb + s, to: asideOf(p.liveDb, p.stamp) + s });
   for (const s of SQLITE_SIDECARS) if (s !== "" && await exists(p.stagedDb + s)) moves.push({ from: p.stagedDb + s, to: p.liveDb + s });
   moves.push({ from: p.stagedDb, to: p.liveDb });
   return { moves };
 }
 
+/** The schema port a journal's schema swap needs: the live database must be the PostgreSQL schema the move names (a journal for another schema is refused, never applied to this one). */
+function portFor(m: Move, live: Live): PostgresRestorePort {
+  if (live.pg === undefined || m.to !== live.pg.schema) throw new Error("the restore journal swaps a PostgreSQL schema that is not this installation's database; nothing was changed");
+  return live.pg.port;
+}
+const swapOf = (m: Move): { live: string; staged: string; aside: string } => ({ live: m.to, staged: m.from, aside: m.aside! });
+/** Whether a forward move is already made (the process ended between the move and the journal). */
+async function made(m: Move, live: Live): Promise<boolean> {
+  if (m.aside === undefined) return !(await exists(m.from)) && (await exists(m.to));
+  const port = portFor(m, live);
+  return !(await port.exists(m.from)) && (await port.exists(m.aside));
+}
+async function makeMove(o: ApplyOptions, m: Move, live: Live): Promise<void> {
+  if (m.aside === undefined) { await mkdir(dirname(m.to), { recursive: true }); await renameRetry(o, m.from, m.to); return; }
+  await portFor(m, live).swap(swapOf(m));
+}
+/** Undoes one move if it is made; a move already undone is skipped. */
+async function undoMove(o: ApplyOptions, m: Move, live: Live): Promise<void> {
+  if (m.aside === undefined) { if ((await exists(m.to)) && !(await exists(m.from))) await renameRetry(o, m.to, m.from); return; }
+  if (await made(m, live)) await portFor(m, live).unswap(swapOf(m));
+}
+
 /** Undoes the moves of a journal, last first. Each undo is checked against what is on disk (a move already undone is skipped), so a rollback that is interrupted is simply run again; progress is recorded in the journal only when a move cannot be undone. Throws (with what is left) when one cannot be undone. */
-async function rollBack(data: string, key: Buffer, j: Journal, o: ApplyOptions): Promise<void> {
+async function rollBack(data: string, key: Buffer, j: Journal, o: ApplyOptions, live: Live): Promise<void> {
   for (let i = j.at; i > 0; i--) {
     const m = j.moves[i - 1]!;
-    if ((await exists(m.to)) && !(await exists(m.from))) {
-      try { await renameRetry(o, m.to, m.from); } catch (error) {
-        await writeJournal(data, key, { stamp: j.stamp, mode: "back", moves: j.moves, at: i });
-        throw new Error(`the restore could not be undone: ${basename(m.to)} could not be moved back to ${basename(m.from)} (${(error as NodeJS.ErrnoException).code ?? "error"}). The data directory is half-swapped; the journal ${JOURNAL_FILE} lists every move. Free the file and start again: the rollback continues from where it stopped.`);
-      }
+    try { await undoMove(o, m, live); } catch (error) {
+      await writeJournal(data, key, { stamp: j.stamp, mode: "back", moves: j.moves, at: i });
+      throw new Error(`the restore could not be undone: ${basename(m.to)} could not be moved back to ${basename(m.from)} (${(error as NodeJS.ErrnoException).code ?? "error"}). The data directory is half-swapped; the journal ${JOURNAL_FILE} lists every move. Free the file and start again: the rollback continues from where it stopped.`);
     }
   }
 }
@@ -292,10 +345,11 @@ async function rollBack(data: string, key: Buffer, j: Journal, o: ApplyOptions):
  * marker is refused, never ignored. Returns the restored backup's name, or undefined when there was nothing to do or the swap did not happen (then the marker records why, `backup.restore.status` shows it and
  * `backup.restore.cancel` clears it, and the controller starts on the data it had). Throws when the data directory is half-swapped and could not be put back, when the marker is not authentic, or when another controller holds the data directory.
  */
-export async function applyPendingRestore(dataDirectory: string, livePath: string, print: (line: string) => void = () => undefined, options: ApplyOptions = {}): Promise<string | undefined> {
+export async function applyPendingRestore(dataDirectory: string, db: RestoreDatabase, print: (line: string) => void = () => undefined, options: ApplyOptions = {}): Promise<string | undefined> {
   const data = await canon(dataDirectory);
   if (!(await exists(join(data, PENDING_FILE))) && !(await exists(join(data, JOURNAL_FILE)))) return undefined;
-  const lock = options.lock ?? await acquireDataLocks([data, dirname(await canon(livePath))], options.now === undefined ? undefined : { now: options.now });
+  const live = await liveOf(db);
+  const lock = options.lock ?? await acquireDataLocks(live.dbDir === undefined ? [data] : [data, live.dbDir], options.now === undefined ? undefined : { now: options.now });
   const now = (): Date => (options.now ?? (() => new Date()))();
   try {
     const key = await markerKey(data, false);
@@ -316,14 +370,15 @@ export async function applyPendingRestore(dataDirectory: string, livePath: strin
       pending = await readMarkerRaw(data);
       if (pending === undefined) throw new Error(`a restore journal (${JOURNAL_FILE}) is there but the restore marker is not: the data directory may be half-swapped. Nothing was changed; the journal lists every move, undo them by hand, then remove the journal.`);
     } else {
-      const found = await readMarker(dataDirectory, livePath, options.piFinal);
+      const found = await readMarker(dataDirectory, db, options.piFinal);
       if (found === undefined) return undefined;
       pending = found.pending;
       if (pending.failed !== undefined) {
         print(`A restore of ${pending.name} was tried and could not be applied (${pending.failed.reason}); the data is as it was. Cancel it (backup.restore.cancel) and prepare it again when the cause is fixed.`);
         return undefined;
       }
-      const plan = await planMoves(pending);
+      if (live.pg !== undefined) await noOtherController(live.pg.port, options);
+      const plan = await planMoves(pending, live);
       if ("missing" in plan) {
         const why = `${plan.missing} is missing, so nothing was moved`;
         await writeFailedMarker(data, (await requireKey(data)), pending, why, now());
@@ -340,11 +395,9 @@ export async function applyPendingRestore(dataDirectory: string, livePath: strin
         const m = journal.moves[i]!;
         try {
           // Already made (the process ended between the rename and the journal)?
-          if (!(await exists(m.from)) && (await exists(m.to))) { /* done */ } else {
-            await mkdir(dirname(m.to), { recursive: true });
-            await renameRetry(options, m.from, m.to);
-          }
-        } catch (error) { failure = error; journal = { ...journal, at: i }; break; }
+          if (!(await made(m, live))) await makeMove(options, m, live);
+        // The failed move is included in what is undone: a rename that failed did not happen (its undo is skipped), but a schema swap whose connection was lost after the commit did (its undo finds it made).
+        } catch (error) { failure = error; journal = { ...journal, at: i + 1 }; break; }
         journal = { ...journal, at: i + 1 };
         await writeJournal(data, k, journal);
       }
@@ -353,14 +406,14 @@ export async function applyPendingRestore(dataDirectory: string, livePath: strin
         await writeJournal(data, k, { stamp: journal.stamp, mode: "done", moves: journal.moves, at: journal.moves.length });
         await remove(join(data, PENDING_FILE));
         await remove(join(data, JOURNAL_FILE));
-        print(`The restore of ${pending.name} was applied: the previous database and conversation folders are kept beside, named .before-restore-${pending.stamp}.`);
+        print(`The restore of ${pending.name} was applied: the previous ${live.pg === undefined ? "database" : `database (schema ${asideSchemaOf(live.pg.schema, pending.stamp)})`} and conversation folders are kept beside, named .before-restore-${pending.stamp}.`);
         return pending.name;
       }
       journal = { stamp: journal.stamp, mode: "back", moves: journal.moves, at: journal.at };
       await writeJournal(data, k, journal);
     }
     const why = failure === undefined ? "an earlier attempt to put things back was interrupted" : `${(failure as NodeJS.ErrnoException).code ?? "error"} while moving files into place`;
-    await rollBack(data, k, journal, options);
+    await rollBack(data, k, journal, options, live);
     // The failure is recorded (atomically) before the journal goes: a crash in between leaves the journal, whose rollback has nothing left to do, and the next start records it again.
     await writeFailedMarker(data, k, pending, why, now());
     await rm(join(data, JOURNAL_FILE), { force: true });
@@ -379,7 +432,12 @@ export class StagedRestore {
   readonly #previewed = new Map<string, number | undefined>();
   readonly #sessionKey = randomBytes(32);
   readonly #used = new Set<string>();
-  constructor(options: StagedRestoreOptions) { this.#o = options; }
+  constructor(options: StagedRestoreOptions) {
+    if ((options.sqlitePath === undefined) === (options.postgres === undefined)) throw new Error("a staged restore needs exactly one live database: sqlitePath or postgres");
+    this.#o = options;
+  }
+  /** The live database, as the swap and the marker name it. */
+  get #db(): RestoreDatabase { return this.#o.postgres === undefined ? this.#o.sqlitePath! : { postgres: this.#o.postgres }; }
   #now(): Date { return (this.#o.now ?? (() => new Date()))(); }
 
   async #find(name: unknown): Promise<{ path: string; manifest: BackupManifest }> {
@@ -467,9 +525,11 @@ export class StagedRestore {
       ...(effects === undefined ? {} : { effectsToMarkUncertain: effects }), ...(deliveries === undefined ? {} : { deliveriesToResend: deliveries }),
       steps: [
         "1. The backup is checked against its manifest (and opened, if encrypted).",
-        "2. It is restored into a new database and new conversation folders beside the live ones; the live ones are not touched.",
+        this.#o.postgres === undefined ? "2. It is restored into a new database and new conversation folders beside the live ones; the live ones are not touched." : "2. It is restored into a new schema of the same PostgreSQL database and new conversation folders beside the live ones; the live ones are not touched.",
         "3. No agent work may be running. The installation stops accepting commands and a snapshot of the current state is taken (kind pre-restore, kept unless you set how many to keep).",
-        "4. The controller must be restarted by you; on that start the old database and conversation folders are moved aside (.before-restore-<time>) and the restored ones take their place. If a move fails, the ones already made are undone and you are told.",
+        this.#o.postgres === undefined
+          ? "4. The controller must be restarted by you; on that start the old database and conversation folders are moved aside (.before-restore-<time>) and the restored ones take their place. If a move fails, the ones already made are undone and you are told."
+          : `4. The controller must be restarted by you, with no other controller connected to the database; on that start the conversation folders are moved aside (.before-restore-<time>), the live schema is renamed to ${this.#o.postgres.schema}_br_<time> and the restored schema takes its name, in one transaction. If a step fails, the ones already made are undone and you are told.`,
         "5. Actions that were only intended when the backup was taken come back as uncertain and are never run again; undelivered messages are sent again.",
       ],
       warnings,
@@ -492,14 +552,18 @@ export class StagedRestore {
     const barrier = this.#o.barrier.state();
     if (this.#pending !== undefined) return { pending: this.#pending.pending, barrier };
     try {
-      const found = await readMarker(this.#o.dataDirectory, this.#o.sqlitePath, this.#o.piFinal);
+      const found = await readMarker(this.#o.dataDirectory, this.#db, this.#o.piFinal);
       return { ...(found === undefined ? {} : { pending: found.pending }), barrier };
     } catch (error) { return { barrier, markerProblem: error instanceof Error ? error.message.slice(0, 300) : "the marker cannot be read" }; }
   }
 
   async #rmStaged(p: { stagedDb: string; pi: readonly { staged: string }[] }): Promise<string[]> {
     const left: string[] = [];
-    for (const target of [...SQLITE_SIDECARS.map((s) => p.stagedDb + s), ...p.pi.map((x) => x.staged)]) {
+    const pg = this.#o.postgres;
+    if (pg !== undefined && p.stagedDb !== "") {
+      try { await (pg.port ?? postgresRestorePort(pg.url)).dropStaged(pg.schema, p.stagedDb); } catch { left.push(`schema ${p.stagedDb}`); }
+    }
+    for (const target of [...(pg === undefined ? SQLITE_SIDECARS.map((s) => p.stagedDb + s) : []), ...p.pi.map((x) => x.staged)]) {
       try { await rm(target, { recursive: true, force: true }); } catch { left.push(target); }
     }
     return left;
@@ -529,9 +593,10 @@ export class StagedRestore {
     const leftovers = (): { stagedDb: string; pi: { staged: string }[] } => ({ stagedDb, pi: [...targets.values()].map((t) => ({ staged: stagedOf(t, stamp) })) });
     try {
       const data = await canon(this.#o.dataDirectory);
-      const live = await canon(this.#o.sqlitePath);
+      const liveDb = await liveOf(this.#db);
+      const live = liveDb.id;
       stamp = stampOf(this.#now());
-      stagedDb = stagedOf(live, stamp);
+      stagedDb = liveDb.pg === undefined ? stagedOf(live, stamp) : stagedSchemaOf(liveDb.pg.schema, stamp);
       const staged: { stagedDb: string; pi: { id: string; staged: string; target: string }[] } = { stagedDb, pi: [] };
       if (await exists(join(data, PENDING_FILE))) throw new DomainError("unavailable", "a restore is already recorded for the next start (or one that failed is still recorded): cancel it first");
       const { path, manifest } = await this.#find(name);
@@ -555,10 +620,10 @@ export class StagedRestore {
       const piTarget = (id: string): string => {
         if (!validStoreId(id)) throw new DomainError("invalid_command", "a conversation store has an id that cannot be restored");
         let t = targets.get(id);
-        if (t === undefined) { t = canonSync(this.#o.piFinal?.(id) ?? join(data, "restored-pi-state", id)); safeTarget(t, data, live); targets.set(id, t); }
+        if (t === undefined) { t = canonSync(this.#o.piFinal?.(id) ?? join(data, "restored-pi-state", id)); safeTarget(t, data, liveDb.dbDir); targets.set(id, t); }
         return stagedOf(t, stamp);
       };
-      const fresh = await SqliteStorage.open({ path: stagedDb });
+      const fresh: ControllerStorage = liveDb.pg === undefined ? await SqliteStorage.open({ path: stagedDb }) : await (liveDb.pg.openStaged ?? ((schema: string) => PostgresStorage.open({ connectionString: liveDb.pg!.url, schema })))(stagedDb);
       try {
         // The one verification: the restore checks the backup, and the manifest it checked must be the one the approval named.
         result = await restoreBackup(path, fresh, { ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
@@ -573,7 +638,7 @@ export class StagedRestore {
       }
       // Staged beside what it replaces, so every rename stays on one device; checked anyway.
       const dev = this.#o.deviceOf ?? (async (p: string) => (await stat(p)).dev);
-      const pairs: (readonly [string, string])[] = [[stagedDb, dirname(live)], ...staged.pi.map((x) => [x.staged, dirname(x.target)] as const)];
+      const pairs: (readonly [string, string])[] = [...(liveDb.dbDir === undefined ? [] : [[stagedDb, liveDb.dbDir] as const]), ...staged.pi.map((x) => [x.staged, dirname(x.target)] as const)];
       for (const [from, to] of pairs) {
         if (await dev(from) !== await dev(to)) throw new DomainError("unavailable", `the restored data and the place it must go are on different devices (${basename(from)}); the swap would not be a single rename. Nothing was changed.`);
       }
@@ -583,7 +648,7 @@ export class StagedRestore {
         const lastSeq = await this.#lastAuditSeq();
         const backupSeq = manifest.files.find((f) => f.table === "audit")?.rows;
         const key = await requireKey(data, true, this.#o.link);
-        const body: Omit<PendingRestore, "mac"> = { format: 2, name: manifest.name, stamp, preparedAt: this.#now().toISOString(), stagedDb, liveDb: live, pi: staged.pi };
+        const body: Omit<PendingRestore, "mac"> = { format: 2, name: manifest.name, stamp, preparedAt: this.#now().toISOString(), ...(liveDb.pg === undefined ? {} : { database: "postgres" as const }), stagedDb, liveDb: live, pi: staged.pi };
         const pending: PendingRestore = { ...body, mac: macOf(key, body) };
         markerPath = join(data, PENDING_FILE);
         await writeFile(markerPath, `${JSON.stringify(pending, null, 2)}\n`, { flag: "wx", mode: 0o600 });
@@ -618,7 +683,7 @@ export class StagedRestore {
       }
     }
     let disk: PendingRestore | undefined;
-    try { disk = (await readMarker(data, this.#o.sqlitePath, this.#o.piFinal))?.pending; } catch { disk = await readMarkerRaw(data).catch(() => undefined); }
+    try { disk = (await readMarker(data, this.#db, this.#o.piFinal))?.pending; } catch { disk = await readMarkerRaw(data).catch(() => undefined); }
     const p = mem?.pending ?? disk;
     if (p === undefined && !(await exists(join(data, PENDING_FILE))) && !(await exists(join(data, JOURNAL_FILE)))) return { cancelled: false };
     const leftovers: string[] = [];
@@ -627,7 +692,7 @@ export class StagedRestore {
       const key = await markerKey(data, false);
       const journal = key === undefined ? undefined : await readJournal(data, key);
       // A swap that was finished (journal "done") is not undone by a cancel: only its leftovers are cleared.
-      if (journal !== undefined && key !== undefined) { if (journal.mode !== "done") await rollBack(data, key, journal, {}); await rm(join(data, JOURNAL_FILE), { force: true }).catch(() => leftovers.push(JOURNAL_FILE)); }
+      if (journal !== undefined && key !== undefined) { if (journal.mode !== "done") await rollBack(data, key, journal, {}, await liveOf(this.#db)); await rm(join(data, JOURNAL_FILE), { force: true }).catch(() => leftovers.push(JOURNAL_FILE)); }
       try { await rm(join(data, PENDING_FILE), { force: true }); markerGone = true; } catch { leftovers.push(PENDING_FILE); }
       if (p !== undefined) leftovers.push(...await this.#rmStaged(p));
     } finally {

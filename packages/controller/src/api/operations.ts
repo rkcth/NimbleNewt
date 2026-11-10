@@ -199,7 +199,7 @@ export interface Context {
   readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   /** The pinned backup key (card K01b); absent when backups are not encrypted. */
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
-  /** Restoring a backup from inside the running controller (card K01h). Absent: not available on this installation (no backups folder, or not SQLite). */
+  /** Restoring a backup from inside the running controller (card K01h). Absent: not available on this installation (no backups folder, or PostgreSQL without a data directory). */
   readonly backupRestore?: Pick<StagedRestore, "preview" | "apply" | "cancel" | "status">;
   /** Moving the controller database between SQLite and PostgreSQL (card F04e). Absent: no transfer target is configured on this installation. */
   readonly databaseTransfer?: Pick<DatabaseTransferService, "preview" | "apply" | "rollback" | "status">;
