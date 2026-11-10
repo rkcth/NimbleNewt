@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { GitBridge, LocalWorkspaces, type HostWorkspaceCall } from "./index.js";
+import { PLAN_FILE } from "@nimblenewt/contracts";
 
 // Card H12q: the production workspace port of a local host: one layout for the attempt's checkout and the operations on it.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
@@ -258,6 +259,29 @@ test("doneState says what is not committed, the commits and changes ahead of the
       { path: "*", present: true },
       { path: "src/*.ts", present: false, why: "not in the checkout (or ignored)" },
     ], "paths are taken literally: a pattern matches no other file");
+  } finally { await w.done(); }
+});
+
+test("doneState does not count the agent's plan file as a change: a checkout that holds only PLAN.md has no work, a nested PLAN.md or a plan beside real work counts as usual, and the plan can still be named as evidence (card W06 second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-plan", projectId: "prj-one" };
+    const made = await w.ws.ensure(scope);
+    assert.equal(PLAN_FILE, "PLAN.md");
+    await writeFile(join(made.checkout, PLAN_FILE), "- [x] write the plan\n- [ ] do the work\n");
+    const only = await w.ws.doneState(scope, [PLAN_FILE]);
+    assert.deepEqual([only?.uncommittedCount, only?.changed], [1, 0], "the plan alone is not committed, and it is no change");
+    assert.deepEqual(only?.evidence, [{ path: PLAN_FILE, present: true }], "it is still a file of the checkout");
+    await mkdir(join(made.checkout, "docs"));
+    await writeFile(join(made.checkout, "docs", PLAN_FILE), "a document that happens to have the name\n");
+    assert.equal((await w.ws.doneState(scope, []))?.changed, 1, "only the plan file at the top is left out");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    assert.equal((await w.ws.doneState(scope, []))?.changed, 2);
+    // Third review: the plan in another letter case is the same note (an agent's "plan.md", or a case-insensitive disk keeping that name).
+    const other = { taskId: "tsk-plan-case", projectId: "prj-one" };
+    const made2 = await w.ws.ensure(other);
+    await writeFile(join(made2.checkout, "plan.md"), "- [x] write the plan\n");
+    assert.equal((await w.ws.doneState(other, []))?.changed, 0, "a lower-case plan alone is no change");
   } finally { await w.done(); }
 });
 

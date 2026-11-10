@@ -31,7 +31,7 @@ test("a done before the work is written is refused with what failed, in the same
     assert.deepEqual(d.verifications?.map((v) => v.checks.map((c) => [c.name, c.state, c.exitCode])), [[["has b", "failed", 3]], [["has b", "passed", 0]]]);
     // The agent was told at the start what a done is checked against, and read the refusal as the answer of its first work.end, in the same conversation.
     assert.equal(x.answer.seen.length, 3);
-    assert.match(x.answer.seen[0]!, /When you end with work\.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base \(you do not commit it[^"]*\\"the new module\\"[^"]*\\"has b\\"/);
+    assert.match(x.answer.seen[0]!, /When you end with work\.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base \(your PLAN.md does not count; you do not commit it[^"]*\\"the new module\\"[^"]*\\"has b\\"/);
     assert.match(x.answer.seen[1]!, /refused \(invalid_command\): work\.end done was not accepted: the controller checked your work against the task contract and 3 item\(s\) did not pass\./);
     assert.match(x.answer.seen[1]!, /Your checkout holds no change against the task's base/);
     const refusal = /work\.end done was not accepted:[\s\S]*?say why in the note\./.exec(x.answer.seen[1]!)?.[0] ?? "";

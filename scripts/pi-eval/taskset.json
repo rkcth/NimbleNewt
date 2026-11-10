@@ -48,13 +48,15 @@
     },
     "B": {
       "prompt": "prompts/variant-b.md",
-      "about": "a stepwise PLAN.md with a checkbox per step and a commit per step"
+      "about": "the completion rules of the system prompt (card W06): a stepwise PLAN.md, small steps, no commit, an honest end"
     },
     "C": {
+      "prompt": "prompts/variant-b.md",
       "needs": "W04",
       "about": "B plus the bounded continuation hook of W04"
     },
     "D": {
+      "prompt": "prompts/variant-b.md",
       "needs": "W04",
       "about": "C plus a relaunch that reuses the stored session (pi --session-id)"
     }

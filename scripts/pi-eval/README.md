@@ -149,7 +149,7 @@ descend from one that is seen, is missed; on other systems only the agent's own 
    start if the solution is reachable or a hidden file already holds the solution's content. `node_modules` (root and
    per package) are copied from this checkout, and the repository is built (`tsc --build --force`).
 2. The prompt is the variant's template (`prompts/variant-a.md`, `prompts/variant-b.md`) with the task text
-   (`tasks/<id>.md`) put in; it is saved beside the log, outside the checkout.
+   (`tasks/<id>.md`) and, for B to D, the completion rules (see Variants) put in; it is saved beside the log, outside the checkout.
 3. The agent (`pi-agent.mjs`: `pi -p --no-session --no-approve --provider radiance --model qwen3.8-flash-next-iq4r
    --thinking medium --mode json`, the same flags as `~/.local/pi-cli/runcard.sh`) runs in the checkout under the task's
    wall-clock limit (S 60, M 120, L 180 minutes); at the limit its process group is stopped.
@@ -174,19 +174,33 @@ descend from one that is seen, is missed; on other systems only the agent's own 
    - **wrong** (false done): the last reply says it is done and the acceptance tests fail. A report given with every
      PLAN.md box ticked, a clean tree and a green last self-test is a done claim whatever its words; a closing caveat
      note ("Remaining risk / not done: ...") keeps it one (`doneClaim: done-with-caveats`). A report that says what is not
-     done ("could not complete", "still fails", "remaining work", "incomplete") is not a done claim ("no remaining
-     failures", "nothing left to do" do not count as saying so). A report that describes the old state with a negation
-     ("the tests were not passing before") also reads as not done, so `wrong` can undercount; a closing "Let me
-     know ..." is a sign-off, not an announced step. Only the first and last 600 characters of the report (before any
-     closing caveat note) are read for these words.
+     done ("could not complete", "still fails", "remaining work", "incomplete", "mostly done", "I'm blocked") is not a
+     done claim ("no remaining failures", "nothing left to do" do not count as saying so), and neither is one whose first
+     stated result is partial or blocked (card W06: variant B asks the report to start with its result): an opening
+     "Partial." / "Blocked by ..." / "## Blocked" / "⚠️ Partial:", or a result label at the start of a line ("Result:
+     partial", "**Result**: blocked", "Status: partial", "The result is partial", "Result (done, partial or blocked):
+     partial"); a long report that states none in its first 600 characters is read for such a label in its last 600.
+     Only the first stated result counts, and a word not used as a result ("Blocked users are refused", "Status: blocked
+     requests get 403") states none. A result stated as done ("Done.", "Result: done", "Done, but ...") is a done claim
+     whatever not-done words follow it (`done-with-caveats` when there are some), so a false done is never hidden as a
+     stop; an opening "Done:" that may only head a list of what was done does not override them. Without a stated
+     result, a report that describes the old state with a negation ("the tests were not passing before") also reads as
+     not done, so `wrong` can undercount; a closing "Let me know ..." is a sign-off, not an announced step. Only the
+     first and last 600 characters of the report (before any closing caveat note) are read for these words.
    - **unclassified**: anything the rules above do not cover; the gate requires none.
 
 ## Variants
 
 - **A** the plain prompt (task, rules, build and test commands, "end with a short report").
-- **B** A plus: write PLAN.md with a checkbox per small step, tick and commit after each step, do not stop with a box
-  unchecked.
-- **C** B plus the bounded continuation of W04, and **D** C plus a relaunch that reuses the stored session
+- **B** A plus the completion rules every NimbleNewt Pi agent has in its system prompt (card W06), word for word: a
+  PLAN.md with a checkbox per small step, no commit (the checkout is scored as it stands), done only when every step is
+  done and checked, blocked or partial with a reason otherwise, never an ending in prose alone. The template has the
+  placeholder `{{COMPLETION_RULES}}`; the runner fills it from this checkout's built pi-adapter
+  (`packages/pi-adapter/dist/prompt-layout.js`, `COMPLETION_RULES`; build first) and records the text's digest and size in
+  the result (`completionRules: { sha256, chars }`). A short note in front says what differs on the Pi command line: no
+  `nimblenewt__work-end` tool (end with a report that starts with the result instead) and nothing checks the checkout.
+  Until W06, B was "tick and commit after each step"; results of earlier batches carry no `completionRules`.
+- **C** B (the same prompt, with the completion rules) plus the bounded continuation of W04, and **D** C plus a relaunch that reuses the stored session
   (`PI_EVAL_SESSION_ID` makes `pi-agent.mjs` pass `--session-id`). Both are refused with "needs W04" until W04 lands.
 
 ## The release gates

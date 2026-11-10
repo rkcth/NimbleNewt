@@ -7,7 +7,7 @@ import { PiAdapter } from "../adapter.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
 import { DEFAULT_MAX_CONTINUATIONS, type ContinuationPolicy } from "../continuation.js";
-import { volatileContext } from "../prompt-layout.js";
+import { PI_AGENT_LAYOUT, sharedSystemText, volatileContext } from "../prompt-layout.js";
 import { processClock } from "./clock.js";
 import { classifyTurnEnd } from "./end-kind.js";
 import { nudgeCallId, nudgeText } from "./nudge.js";
@@ -270,6 +270,8 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     adapter = await PiAdapter.open({
       continuation,
       storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
+      // Card W06: every agent this process runs has the fixed completion rules as its system text, the same bytes for every task, role, readmit, wake and restart (so the cached prefix is kept).
+      promptLayout: PI_AGENT_LAYOUT,
       tools, ...(cache === undefined ? {} : { cache }), ...(contextPolicy === undefined ? {} : { contextPolicy }),
       // Pi keeps the newest part of a conversation verbatim when it compacts; its default would be larger than a small model's whole startup share, so nothing would ever be cut. A tenth of the window is kept (provisional, card H12f).
       settings: { compaction: { keepRecentTokens: Math.max(500, Math.floor(start.model.contextWindow * KEEP_RECENT_SHARE)) } },
@@ -282,8 +284,8 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     }
     // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
     try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
-    // Pi Durable renders no system text of its own and this process gives the adapter no prompt layout, so the conversation has no system prompt: what the model is told besides the tools is the turn's own text.
-    send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars, systemPromptChars: 0 });
+    // Pi Durable renders no system text of its own; the system prompt is the layout's sections (card W06: the completion rules), measured as Pi renders them.
+    send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars, systemPromptChars: sharedSystemText(PI_AGENT_LAYOUT).length });
   };
 
   const turn = async (requestIdText: string, content: string): Promise<void> => {

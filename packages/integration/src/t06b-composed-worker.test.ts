@@ -296,7 +296,9 @@ async function compose(x: { launcher: SandboxLauncher; directory: string; runs: 
       for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
       return dirs;
     },
-    model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+    // 65,536 tokens: on a window under 49,152 Pi's background compaction threshold (window - reserve - background) is below zero, so once the system prompt (card W06) and the tools leave a cut past the kept tenth, Pi asks for a summary
+    // between the scripted calls. This test scripts every model call.
+    model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 65536, maxTokens: 1024, reasoning: false, input: ["text"] }),
     namespaceId: (order) => personalId(order.agentId),
     // A reviewer who answers at once: an ask that is parked is approved and the same request is made again with the same call ID.
     bridge: async (order, call, token, request) => {

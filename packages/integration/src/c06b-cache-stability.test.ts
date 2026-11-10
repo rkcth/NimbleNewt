@@ -85,7 +85,7 @@ async function run(backend: Backend, layout: "nimblenewt" | "legacy"): Promise<R
     if (layout === "nimblenewt") {
       const adapter = await PiAdapter.open({
         storage: new MemoryStorage(), models: world.models, model: world.ref,
-        tools: TOOL_ORDER[agent].map(tool), promptLayout: { preamble: PREAMBLE, project: PROJECT, agent: ROLES[agent] }, cache: { policy: () => policy },
+        tools: TOOL_ORDER[agent].map(tool), promptLayout: { completionRules: true, preamble: PREAMBLE, project: PROJECT, agent: ROLES[agent] }, cache: { policy: () => policy },
       });
       adapters.push(adapter);
       agents.set(agent, { bodies: world.bodies, submit: async (text, n) => { world.reply(`answer ${n}`); await (await adapter.root().submit({ kind: "input", requestId: requestId(`${agent}-${n}`), content: `${volatileContext(`status: step ${n}`)}\n${text}` })).result(); } });

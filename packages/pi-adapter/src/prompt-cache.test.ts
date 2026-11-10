@@ -8,7 +8,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { requestId, type AuditEvent } from "@nimblenewt/contracts";
-import { PiAdapter, UnstablePromptError, assertStableText, sharedSystemText, sortedTools, volatileContext, type AdapterTool, type PrefixReport, type PromptLayout } from "./index.js";
+import { COMPLETION_RULES, PiAdapter, UnstablePromptError, assertStableText, sharedSystemText, sortedTools, volatileContext, type AdapterTool, type PrefixReport, type PromptLayout } from "./index.js";
 import { rig, wireBody, type Rig } from "./testing/wire.js";
 
 // Card C06b. These tests look at the bytes pi-ai would send to the provider (its own request builder is run on what the harness handed the provider), not only at Pi's log.
@@ -19,7 +19,8 @@ afterEach(async () => { for (const a of adapters.splice(0)) await a.close(); for
 
 const input = (id: string, content: string) => ({ kind: "input", requestId: requestId(id), content }) as const;
 const tool = (name: string, description = `the ${name} tool`): AdapterTool => ({ name, description, parameters: Type.Object({ q: Type.Optional(Type.String()) }), execute: async () => "done" });
-const LAYOUT: PromptLayout = { preamble: "You work for NimbleNewt. Be brief and exact.", project: "Project Aster: a ledger service in TypeScript.", agent: "You review pull requests." };
+// Card W06: every test here runs with the completion rules in the layout, as every Pi agent of the worker has them.
+const LAYOUT: PromptLayout = { completionRules: true, preamble: "You work for NimbleNewt. Be brief and exact.", project: "Project Aster: a ledger service in TypeScript.", agent: "You review pull requests." };
 
 /** What the provider's cache sees: cache markers are not part of the content, and a text given as a string equals the same text as one block. */
 const clean = (v: unknown): unknown => (v === undefined ? null : JSON.parse(JSON.stringify(v, (k, x: unknown) => (k === "cache_control" ? undefined : x))));
@@ -44,7 +45,8 @@ test("audit: Pi renders no system text of its own, replays the sections and tool
   const first = world.seen[0]!.context.messages as { role: string; content?: unknown; sections?: Record<string, string>; toolsAdded?: { name: string }[] }[];
   // The leading message is the one system message; it carries the sections in order and the tools sorted by name.
   assert.equal(first[0]!.role, "system");
-  assert.deepEqual(Object.keys(first[0]!.sections!), ["nn_preamble", "nn_project", "nn_agent"]);
+  assert.deepEqual(Object.keys(first[0]!.sections!), ["nn_completion", "nn_preamble", "nn_project", "nn_agent"]);
+  assert.equal(first[0]!.sections!["nn_completion"], `<nn_completion>\n${COMPLETION_RULES}\n</nn_completion>`, "the completion rules come first, before everything else of the system text (card W06)");
   assert.deepEqual(first[0]!.toolsAdded!.map((t) => t.name), ["alpha", "zeta"]);
   assert.equal(first.filter((m) => m.role === "system").length, 1);
   // Turn two: nothing in the head moved, so the request only extends the earlier one.
@@ -104,7 +106,8 @@ test("system text is stable-first: the preamble, then the project, then the agen
   await (await adapter.root().submit(input("r2", volatileContext("it is a busy day")))).result();
   const [a, b] = await Promise.all(world.seen.map(wireBody));
   const text = (a!["system"] as { text: string }[]).map((s) => s.text).join("\n\n");
-  assert.ok(text.indexOf("NimbleNewt") < text.indexOf("Aster") && text.indexOf("Aster") < text.indexOf("pull requests"));
+  assert.ok(text.indexOf(COMPLETION_RULES) === text.indexOf("<nn_completion>") + "<nn_completion>\n".length && text.indexOf("<nn_completion>") < text.indexOf("You work for NimbleNewt"), "the completion rules come first");
+  assert.ok(text.indexOf("You work for NimbleNewt") < text.indexOf("Aster") && text.indexOf("Aster") < text.indexOf("pull requests"));
   assert.ok(!text.includes("quiet day"));
   assert.equal(head(b!), head(a!), "a different volatile message left the head alone");
   assert.equal(volatileContext("x"), "<context>\nx\n</context>");
@@ -123,7 +126,7 @@ test("the shared system text is sent as a block of its own on Anthropic, so a br
   assert.ok(blocks[0]!.cache_control !== undefined && blocks[1]!.cache_control !== undefined);
   // Without an agent section there is nothing to split off.
   const solo = rig("anthropic-messages");
-  const plain = await open(solo, { promptLayout: { preamble: LAYOUT.preamble, project: LAYOUT.project! } });
+  const plain = await open(solo, { promptLayout: { completionRules: true, preamble: LAYOUT.preamble, project: LAYOUT.project! } });
   solo.reply("one");
   await (await plain.root().submit(input("r1", "hello"))).result();
   assert.equal(((await wireBody(solo.seen[0]!))["system"] as unknown[]).length, 1);
