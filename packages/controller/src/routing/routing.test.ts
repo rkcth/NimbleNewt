@@ -161,6 +161,43 @@ for (const backend of backends) {
     await refuses("invalid_command", () => routing.exclude(owner, { ...command, commandId: cid("again") }), (e) => assert.match(e.message, /already excluded/));
     await refuses("invalid_command", () => routing.select({ ...request(), surprise: true } as never));
   });
+
+  suite("a route's length and reasoning budget (card W07): set with the table or on its own, bounded, kept or removed field by field, and a route without one is as before", async ({ routing, owner, agent }) => {
+    await refuses("not_found", () => routing.setRouteBudget(owner, { commandId: cid("b"), route: "local/small", maxTokens: 100 }), (e) => assert.match(e.message, /no routing table/));
+    await install(routing, owner, { ...table, routes: { ...table.routes, "local/big": { contextTokens: 128_000, capabilities: ["tools", "reasoning"], maxTokens: 16_000, reasoningTokens: 4000 } } });
+    assert.deepEqual(await routing.budget("local/big"), { maxTokens: 16_000, reasoningTokens: 4000 });
+    assert.deepEqual(await routing.budget("local/small"), {}, "a route without a budget has none: the runtime decides");
+    assert.deepEqual(Object.keys((await routing.get())!.routes["local/small"]!).sort(), ["capabilities", "contextTokens"], "nothing is added to a route that sets no budget");
+    assert.equal(await routing.budget("nowhere/model"), undefined);
+    const before = (await routing.get())!.revision;
+    const set = await routing.setRouteBudget(owner, { commandId: cid("b"), route: "local/small", maxTokens: 8000 });
+    assert.deepEqual([set.revision, set.budget], [before + 1, { maxTokens: 8000 }]);
+    // A field left out keeps its value; null removes it.
+    assert.deepEqual((await routing.setRouteBudget(owner, { commandId: cid("b"), route: "local/small", reasoningTokens: 2000 })).budget, { maxTokens: 8000, reasoningTokens: 2000 });
+    assert.deepEqual((await routing.setRouteBudget(owner, { commandId: cid("b"), route: "local/small", maxTokens: null })).budget, { reasoningTokens: 2000 });
+    assert.deepEqual((await routing.setRouteBudget(owner, { commandId: cid("b"), route: "local/small", reasoningTokens: null })).budget, {});
+    assert.deepEqual(Object.keys((await routing.get())!.routes["local/small"]!).sort(), ["capabilities", "contextTokens"], "removing both leaves the route as it was");
+    // Bounds: whole numbers above 0, at most the bound and the route's context, the reasoning below the reply limit.
+    for (const [maxTokens, reasoningTokens, why] of [[0, undefined, /maxTokens: must be a whole number of tokens from 1 to 32000/], [-5, undefined, /maxTokens/], [1.5, undefined, /maxTokens/], ["100", undefined, /maxTokens/], [32_001, undefined, /from 1 to 32000/], [undefined, 0, /reasoningTokens/], [undefined, 1_000_001, /reasoningTokens: must be a whole number of tokens from 1 to 1000000/], [1000, 1000, /must be less than maxTokens \(1000\)/], [1000, 5000, /less than maxTokens/]] as const) {
+      await refuses("invalid_command", () => routing.setRouteBudget(owner, { commandId: cid("bad"), route: "local/small", ...(maxTokens === undefined ? {} : { maxTokens: maxTokens as number }), ...(reasoningTokens === undefined ? {} : { reasoningTokens }) }), (e) => assert.match(e.message, why));
+    }
+    await refuses("invalid_command", () => routing.setRouteBudget(owner, { commandId: cid("bad"), route: "local/big", maxTokens: 3000 }), (e) => assert.match(e.message, /less than maxTokens \(3000\)/)); // a lower reply limit must stay above the kept reasoning cap
+    await refuses("invalid_command", () => routing.setRouteBudget(owner, { commandId: cid("bad"), route: "local/small" }), (e) => assert.match(e.message, /give maxTokens, reasoningTokens or both/));
+    await refuses("invalid_command", () => routing.setRouteBudget(owner, { commandId: cid("bad"), route: "local/small", maxTokens: 10, surprise: 1 } as never));
+    await refuses("not_found", () => routing.setRouteBudget(owner, { commandId: cid("bad"), route: "local/tiny", maxTokens: 10 }), (e) => assert.match(e.message, /route local\/tiny is not in the routing table/));
+    await refuses("forbidden", () => routing.setRouteBudget(agent, { commandId: cid("bad"), route: "local/small", maxTokens: 10 }));
+    const rev = (await routing.get())!.revision;
+    await refuses("invalid_command", () => routing.setTable(owner, { commandId: cid("t"), expectedRevision: rev, table: { ...table, routes: { ...table.routes, "local/small": { contextTokens: 32_000, capabilities: ["tools"], maxTokens: 0 } } } }), (e) => assert.match(e.message, /table\.routes\.local\/small\.maxTokens/));
+    assert.deepEqual(await routing.budget("local/small"), {}, "nothing refused was applied");
+    // Exclusions are kept, the same command replays, and selection is not changed by a budget.
+    await routing.exclude(owner, { commandId: cid("x"), kind: "route", name: "free/open", reason: "flaky" });
+    const command = { commandId: "budget-once", route: "local/small", maxTokens: 4000 };
+    const first = await routing.setRouteBudget(owner, command);
+    const again = await routing.setRouteBudget(owner, command);
+    assert.deepEqual([again.replayed, again.revision], [true, first.revision]);
+    assert.equal((await routing.get())!.exclusions.length, 1);
+    assert.equal((await routing.select(request())).chosen, "local/small");
+  });
 }
 
 test("selection is a pure function of the table and the request", () => {

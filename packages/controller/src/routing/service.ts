@@ -7,11 +7,13 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { EMPTY_TOPOLOGY, TOPOLOGY_REF, assertLists, checkTopology, type ListRules, type Topology } from "./lists.js";
-import { ROUTING_LIMITS, checkRequest, checkTable, selectRoute, type Exclusion, type RouteRequest, type RoutingTable, type Selection } from "./policy.js";
+import { ROUTING_LIMITS, checkRequest, checkTable, selectRoute, type Exclusion, type RouteBudget, type RouteRequest, type RoutingTable, type Selection } from "./policy.js";
 
 const ROUTING: AggregateRef = { kind: "routing-table", id: "routing" };
 const EMPTY: RoutingTable = { providers: {}, routes: {}, profiles: {}, roles: {}, exclusions: [] };
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+
+const budgetOf = (entry: RouteBudget): RouteBudget => ({ ...(entry.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }), ...(entry.reasoningTokens === undefined ? {} : { reasoningTokens: entry.reasoningTokens }) });
 
 export interface RoutingBody extends RoutingTable {
   readonly updatedBy: string;
@@ -126,6 +128,51 @@ export class RoutingService {
       };
     });
     return { revision: r.revision, replayed: r.replayed };
+  }
+
+  /**
+   * Sets a route's length and reasoning budget (card W07): `maxTokens`, the most tokens one reply may hold, and `reasoningTokens`, the most of them it may spend reasoning. A field left out keeps its value; null removes it (the call then
+   * keeps what the agent's runtime asks for). The whole table is checked again, so the bounds are the table's. It applies from the next model call of the route: the relay reads the table at every call.
+   */
+  async setRouteBudget(owner: Principal, command: NoActor & { route: string; maxTokens?: number | null; reasoningTokens?: number | null }): Promise<{ revision: number; replayed: boolean; budget: RouteBudget }> {
+    this.#requireOwner(owner);
+    const r = await this.#runner.command("routing.budget.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
+      onlyKnown(command, ["commandId", "route", "maxTokens", "reasoningTokens"]);
+      const route = typeof command.route === "string" && command.route.length >= 1 && command.route.length <= 200 ? command.route : invalid("route", "must be a provider/model route name");
+      if (command.maxTokens === undefined && command.reasoningTokens === undefined) invalid("maxTokens", "give maxTokens, reasoningTokens or both (null removes one)");
+      const asked = { ...(command.maxTokens === undefined ? {} : { maxTokens: command.maxTokens }), ...(command.reasoningTokens === undefined ? {} : { reasoningTokens: command.reasoningTokens }) };
+      return {
+        payload: { route, ...asked } as unknown as JsonObject,
+        build: async () => {
+          const current = await this.#runner.get(ROUTING.kind, ROUTING.id);
+          if (current === undefined) throw new DomainError("not_found", "no routing table is configured", { field: "route" });
+          const before = current.body as unknown as RoutingBody;
+          const entry = Object.hasOwn(before.routes, route) ? before.routes[route]! : undefined;
+          if (entry === undefined) throw new DomainError("not_found", `route ${route} is not in the routing table`, { field: "route" });
+          const next: Record<string, unknown> = { ...entry };
+          for (const key of ["maxTokens", "reasoningTokens"] as const) {
+            const v = command[key];
+            if (v === null) delete next[key];
+            else if (v !== undefined) next[key] = v;
+          }
+          // The whole table is checked again, so a budget is bounded exactly as one given with the table.
+          const table = checkTable({ providers: before.providers, routes: { ...before.routes, [route]: next }, profiles: before.profiles, roles: before.roles });
+          const body: RoutingBody = { ...table, exclusions: before.exclusions, updatedBy: owner.id };
+          const budget = budgetOf(table.routes[route]!);
+          return { ref: ROUTING, creates: false, changes: [{ type: "update", ref: ROUTING, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { route, ...budget } as unknown as JsonObject };
+        },
+      };
+    });
+    const now = await this.get();
+    const entry = now !== undefined && Object.hasOwn(now.routes, command.route) ? now.routes[command.route]! : undefined;
+    return { revision: r.revision, replayed: r.replayed, budget: entry === undefined ? {} : budgetOf(entry) };
+  }
+
+  /** A route's length and reasoning budget as the relay applies it (card W07); `undefined` when there is no table or no such route. Read at every call, so a change applies to the next call. */
+  async budget(route: string): Promise<RouteBudget | undefined> {
+    const table = await this.get();
+    const entry = table !== undefined && Object.hasOwn(table.routes, route) ? table.routes[route]! : undefined;
+    return entry === undefined ? undefined : budgetOf(entry);
   }
 
   async get(): Promise<View<RoutingBody> | undefined> {

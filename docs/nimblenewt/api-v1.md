@@ -593,6 +593,16 @@ Arguments:
 
 Result: `{ budget?, spent }`.
 
+#### `routing.budgets`
+
+Each model route with its context size and its length and reasoning budget (none set: the agent's runtime decides). Owner, or someone given routing.write.
+
+Arguments:
+
+- none
+
+Result: `{ revision, routes: [{ route, contextTokens, maxTokens?, reasoningTokens? }] }`, by route name.
+
 #### `routing.controls`
 
 The controls in force (disabled, draining, cut over) and the failback policy. Owner only.
@@ -2953,6 +2963,19 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `routing.budget.set`
+
+The owner (or someone given routing.write) sets how long one reply of a model route may be (`maxTokens`) and how many of those tokens it may spend reasoning (`reasoningTokens`, less than maxTokens). Both go into every model call of the route from the next call on, in the field names of the route's endpoint; a reply cut off at the limit is continued in the same turn with a nudge to stop deliberating and act. A value left out keeps its earlier value; null removes it (the call then keeps what the agent's runtime asks for).
+
+Arguments:
+
+- `route`: the route, provider/model
+- `maxTokens` (optional): whole number of tokens from 1 to 1000000 (and at most the route's context), or null to remove the limit
+- `reasoningTokens` (optional): whole number of tokens from 1 to 1000000, or null to remove the cap
+- `commandId`: required
+
+Result: `{ revision, replayed, budget: { maxTokens?, reasoningTokens? } }`.
 
 #### `routing.failback.set`
 

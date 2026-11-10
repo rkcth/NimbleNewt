@@ -22,6 +22,7 @@ import type { BudgetService } from "../budgets/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
+import type { RoutingService } from "../routing/service.js";
 import type { FallbackService } from "../routing/fallback.js";
 import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { StatusService } from "../status/index.js";
@@ -184,6 +185,8 @@ export interface StateApiDeps {
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate" | "setResumeCondition">;
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
+  /** The routing table's route budgets (card W07). */
+  readonly routeBudgets?: Pick<RoutingService, "get" | "setRouteBudget">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen" | "archive" | "marks" | "mark">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline"> & Partial<Pick<ResumeCheckService, "forTask">>;
   readonly continuations?: ContinuationOps;
@@ -359,6 +362,7 @@ export class StateApi {
         ...(this.#deps.continuations === undefined ? {} : { continuations: this.#deps.continuations }),
         ...(this.#deps.handoffs === undefined ? {} : { handoffs: this.#deps.handoffs }),
         ...(this.#deps.cutover === undefined ? {} : { cutover: this.#deps.cutover }),
+        ...(this.#deps.routeBudgets === undefined ? {} : { routeBudgets: this.#deps.routeBudgets }),
         ...(this.#deps.modelBudget === undefined ? {} : { modelBudget: this.#deps.modelBudget }),
         ...(this.#deps.pauses === undefined ? {} : { pauses: this.#deps.pauses }),
 

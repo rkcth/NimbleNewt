@@ -236,7 +236,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
   retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
-  model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
+  model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down, and each route's reply limit and reasoning cap; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
@@ -322,7 +322,10 @@ export interface StatusDeps {
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
-  readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates">;
+  readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates"> & {
+    /** Each configured route's length and reasoning budget (card W07), from the routing table. Absent: the view says nothing about budgets. */
+    readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number; /** The endpoint kind the controller's own configuration names for the route (it names the request fields); absent when the controller has none. */ readonly kind?: string }[]>;
+  };
   /** The live jobs (card T07b). Absent: the view is not offered. */
   readonly jobs?: Pick<JobService, "live">;
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
@@ -714,6 +717,15 @@ export class StatusService {
     const down = health.items.filter((h) => h.state === "down");
     for (const h of down.slice(0, 20)) lines.push(line(`${shown(h.scope, 10)} ${shown(h.name, 64)} is down since ${shown(h.since, 30)} (${shown(h.lastClass, 20)})${h.needsOwner ? "; it needs you to restore it" : ""}.`, h.scope === "model" ? c : cite("route-health", `${h.scope}-${h.name}`)));
     if (down.length > 20 || health.truncated) lines.push(line("More targets are down than are shown.", c));
+    if (routes.budgets !== undefined) {
+      // How long a route's replies may be and how much of them may go on reasoning (card W07); a route with neither is left to the agent's runtime.
+      const budgets = await routes.budgets();
+      const set = budgets.filter((b) => b.maxTokens !== undefined || b.reasoningTokens !== undefined);
+      const b = cite("routing-table", "routing");
+      if (budgets.length > 0) lines.push(line(set.length === 0 ? "No route has a reply limit or a reasoning cap: each model call asks for what the agent's runtime decides." : `${set.length} route(s) have a reply limit or a reasoning cap (a reply cut off at its limit is continued with a nudge to stop deliberating and act):`, b));
+      for (const r of set.slice(0, 50)) lines.push(line(`${shown(r.route, 200)}: ${r.maxTokens === undefined ? "no reply limit" : `replies at most ${r.maxTokens} tokens`}, ${r.reasoningTokens === undefined ? "no reasoning cap" : `reasoning at most ${r.reasoningTokens} tokens`}${r.kind === undefined ? " (no endpoint kind is configured on the controller for this route: on an OpenAI-style endpoint the figures are sent only if the host names the kind; when they are not sent, the task's activity says so)" : ` (endpoint kind ${shown(r.kind, 40)})`}.`, b));
+      if (set.length > 50) lines.push(line(`${set.length - 50} more route(s) with a budget are not shown.`, b));
+    }
     return { observedAt: this.#runner.now(), lines };
   }
 
