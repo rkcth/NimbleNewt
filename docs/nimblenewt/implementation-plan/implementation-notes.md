@@ -6113,3 +6113,9 @@ What is left:
 - ASSUMPTION: an interface mismatch is a non-finish but not a false done, so it counts against the finish gate and not the 5 % false-done gate.
 - ASSUMPTION: a spec-fit item that comes from the base source's own behaviour (for example short()'s escaping of a control character) is allowed with a written reason rather than restated in the prompt.
 - ASSUMPTION: the Claude control agent gets edits accepted and the local tools only (Bash, Read, Edit, Write, Glob, Grep), no web tools and no MCP servers, to match Pi's offline run as closely as the CLI allows.
+
+## W01 bench fix: merge decisions (2026-11-10, lead)
+
+- ASSUMPTION: an interface-mismatch run (said done; the acceptance files do not type-check against its code) counts in the false-done gate, because the prompt CONTRACT now pins every name and signature. The review advised it; the stats test and README were changed to match.
+- The Claude control agent (`scripts/pi-eval/agents/claude-agent.mjs`) allows Bash without restriction and has only been run against a fake CLI; it must be run by hand first and read before any real use. It is not run by anything.
+- A new 54-run baseline (about 20 GPU hours on Radiance) and a Claude control repeat are NOT started: Rob said no Pi runs without his go-ahead.

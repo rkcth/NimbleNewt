@@ -169,8 +169,8 @@ descend from one that is seen, is missed; on other systems only the agent's own 
    - **stopped-early**: the agent stopped while working: unchecked PLAN.md steps, a thinking-only reply after tool calls,
      an announced next step, a reply that does not claim to be done, or a log that ends without `agent_end`.
    - **interface-mismatch**: the last reply says it is done (see `wrong`) and the build failed only in the acceptance
-     files: they do not type-check against the agent's code. Not a false done: a name or signature differs, which the
-     CONTRACT should have pinned (or the agent ignored it).
+     files: they do not type-check against the agent's code. It counts in the false-done gate: the CONTRACT pins every name
+     and signature, so a mismatch means the agent ignored it (decision of the lead, 2026-11-10).
    - **wrong** (false done): the last reply says it is done and the acceptance tests fail. A report given with every
      PLAN.md box ticked, a clean tree and a green last self-test is a done claim whatever its words; a closing caveat
      note ("Remaining risk / not done: ...") keeps it one (`doneClaim: done-with-caveats`). A report that says what is not

@@ -57,7 +57,8 @@ export function gatesFor(variant, groups) {
     lines.push(`${size} verified finish ${k}/${g.n} = ${pct(k / g.n)} [95% ${pct(w.low)}-${pct(w.high)}] gate >= ${pct(need)}: ${ok ? "ok" : "FAIL"}${ok && w.low < need ? " (interval still reaches below the gate)" : ""}`);
   }
   const n = mine.reduce((a, g) => a + g.n, 0);
-  const wrong = mine.reduce((a, g) => a + g.counts.wrong, 0);
+  // The contract now pins every name and signature, so a said-done run whose acceptance tests do not type-check ignored the contract: it counts toward the false-done gate (Rob's rule: nothing waits on him; lead's decision on the second review's advice).
+  const wrong = mine.reduce((a, g) => a + g.counts.wrong + (g.counts["interface-mismatch"] ?? 0), 0);
   const unclassified = mine.reduce((a, g) => a + g.counts.unclassified, 0) + mine.filter((g) => g.size === "?").reduce((a, g) => a + g.n, 0);
   if (n > 0) {
     const w = wilson(wrong, n);
