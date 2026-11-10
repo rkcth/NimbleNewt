@@ -17,7 +17,7 @@ test("every message of both directions survives a round trip through the line co
   const fromChild: FromChild[] = [
     { t: "ready", v: 1 }, { t: "bridge", id: 1, token: "tok", request: { op: "desk.read", callId: "c1", args: { recordId: "x" } } }, { t: "bridge", id: 2, token: "tok", request: { op: "task.get", callId: "c2" } },
     { t: "fetch", id: 9, url: "http://relay.invalid/m0/v1/chat/completions", method: "POST", headers: [["accept", "*/*"]], body: Buffer.from("{}").toString("base64") }, { t: "fetch", id: 10, url: "http://relay.invalid/m0/x", method: "GET", headers: [] },
-    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "completed", text: "ok", endKind: "no-work-end", visibleChars: 2 }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
+    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "completed", text: "ok", endKind: "no-work-end", visibleChars: 2 }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "checkpoint.ok", id: 6, checkpoint: { n: 2 }, durable: { verified: true } }, { t: "checkpoint.ok", id: 7, checkpoint: { n: 3 }, durable: { verified: false, error: "history_changed" } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
   ];
   const decoder = new LineDecoder();
   for (const m of toChild) assert.deepEqual(parseToChild(decoder.push(encodeMessage(m))[0]), m);
@@ -44,7 +44,9 @@ test("a line that is too long, or not JSON, ends the channel with a ChannelError
 test("messages that do not fit are refused whichever side sent them", () => {
   const bad: unknown[] = [null, [], 5, {}, { t: "nope" }, { t: "bridge", id: -1, token: "t", request: { op: "x", callId: "y" } }, { t: "bridge", id: 1.5, token: "t", request: { op: "x", callId: "y" } }, { t: "bridge", id: 1, token: 5, request: { op: "x", callId: "y" } },
     { t: "bridge", id: 1, token: "t", request: { op: "x" } }, { t: "bridge", id: 1, token: "t", request: { op: "x", callId: "y", args: [] } }, { t: "fetch", id: 1, url: "u", method: "GET", headers: [["a"]] }, { t: "fetch", id: 1, url: "u", method: "GET", headers: [], body: "not base64!" },
-    { t: "result", status: "done" }, { t: "checkpoint.ok", id: 1, checkpoint: [] }, { t: "fault", message: 5 }];
+    { t: "result", status: "done" }, { t: "checkpoint.ok", id: 1, checkpoint: [] }, { t: "fault", message: 5 },
+    // Card L04d: a durability check that does not say whether it passed, or whose reason is too long, is refused rather than read as passed.
+    { t: "checkpoint.ok", id: 1, checkpoint: {}, durable: {} }, { t: "checkpoint.ok", id: 1, checkpoint: {}, durable: { verified: "yes" } }, { t: "checkpoint.ok", id: 1, checkpoint: {}, durable: true }, { t: "checkpoint.ok", id: 1, checkpoint: {}, durable: { verified: false, error: "x".repeat(301) } }];
   for (const m of bad) assert.throws(() => parseFromChild(m), ChannelError, JSON.stringify(m));
   const badDown: unknown[] = [{ t: "start", v: 1, start: { ...start, model: { ...start.model, alias: "Bad Alias" } } }, { t: "start", v: 1, start: { ...start, cache: { retention: "forever" } } }, { t: "start", v: 1, start: { ...start, model: { ...start.model, input: ["video"] } } },
     { t: "bridge.reply", id: 1, reply: { ok: "yes" } }, { t: "fetch.chunk", id: 1, data: "***" }, { t: "fetch.head", id: 1, status: 200, statusText: "OK", headers: [[1, 2]] }, { t: "tell", id: 1 }, { t: "nope" }];

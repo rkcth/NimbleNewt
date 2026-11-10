@@ -122,8 +122,11 @@ export type FromChild =
   | { readonly t: "fetch.abort"; readonly id: number }
   /** `endKind` and `visibleChars` (card W02): how a completed turn ended and the length of its last reply's visible text (trimmed). A worker from before W02 sends neither: the host reads that as `unknown`. */
   | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number }
-  /** `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). */
-  | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number }
+  /**
+   * `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). `durable` (card L04d): the process read the checkpoint back from its store and checked that the stored history up to it is what
+   * the checkpoint describes; a process that did not check sends none, and the host reads that as not verified.
+   */
+  | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number; readonly durable?: CheckpointDurability }
   | { readonly t: "tell.ok"; readonly id: number }
   | { readonly t: "compact.ok"; readonly id: number; readonly contextTokens?: number }
   /** The lease ended (card H08b3): told on its own so the host sees it whether or not a turn is open (an unsolicited `result` has no waiter). `reason` is a `LossReason`. */
@@ -139,6 +142,14 @@ const str = (o: Obj, k: string, max = 1_000_000): string => (typeof o[k] === "st
 const optStr = (o: Obj, k: string, max?: number): string | undefined => (o[k] === undefined ? undefined : str(o, k, max));
 const int = (o: Obj, k: string): number => (Number.isSafeInteger(o[k]) && (o[k] as number) >= 0 ? (o[k] as number) : fail(`${k}: must be a whole number`));
 const obj = (o: Obj, k: string): Obj => (isObj(o[k]) ? (o[k] as Obj) : fail(`${k}: must be an object`));
+/** The read-back check of a checkpoint (card L04d): whether it passed and, when it did not, why (at most `CHECKPOINT_DURABILITY_ERROR` characters). */
+export interface CheckpointDurability { readonly verified: boolean; readonly error?: string }
+export const CHECKPOINT_DURABILITY_ERROR = 300;
+const durabilityOf = (o: Obj): CheckpointDurability => {
+  if (typeof o["verified"] !== "boolean") return fail("durable.verified: must be true or false");
+  const error = optStr(o, "error", CHECKPOINT_DURABILITY_ERROR);
+  return { verified: o["verified"] as boolean, ...(error === undefined ? {} : { error }) };
+};
 const headers = (o: Obj, k: string): HeaderList => {
   const list = o[k];
   if (!Array.isArray(list) || list.length > 200) return fail(`${k}: must be a list of [name, value]`);
@@ -233,7 +244,8 @@ export function parseFromChild(value: unknown): FromChild {
     }
     case "checkpoint.ok": {
       const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");
-      return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }) };
+      const durable = value["durable"] === undefined ? undefined : durabilityOf(obj(value, "durable"));
+      return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }), ...(durable === undefined ? {} : { durable }) };
     }
     case "lease.lost": return { t: "lease.lost", reason: str(value, "reason", 40) };
     case "lease.renew": return { t: "lease.renew", id: int(value, "id") };

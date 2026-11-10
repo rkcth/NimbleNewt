@@ -318,7 +318,7 @@ test("L02d review: a process name (the program's own choice) is quoted in what t
 test.after(() => { rmSync(root, { recursive: true, force: true }); void dirname; });
 
 // Card W02: the host carries how a turn ended. A process the test plays answers the start, the run and the checkpoint the host asks for; what its result says (or does not say) is what the host passes on.
-function scriptedProcess(result: FromChild) {
+function scriptedProcess(result: FromChild, durable?: { verified: boolean; error?: string }) {
   const written: ToChild[] = [];
   const launcher = {
     launch: async (request: LaunchRequest): Promise<SandboxRun> => {
@@ -332,7 +332,7 @@ function scriptedProcess(result: FromChild) {
             written.push(m);
             if (m.t === "start") send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars: 10, systemPromptChars: 0 });
             else if (m.t === "run") send(result);
-            else if (m.t === "checkpoint") send({ t: "checkpoint.ok", id: m.id, checkpoint: { n: 1 }, contextTokens: 5 });
+            else if (m.t === "checkpoint") send({ t: "checkpoint.ok", id: m.id, checkpoint: { n: 1 }, contextTokens: 5, ...(durable === undefined ? {} : { durable }) });
             else if (m.t === "close") finish({ exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "", stderr: "", stdoutTruncated: false } as RunResult);
           }
           return Promise.resolve();
@@ -373,4 +373,31 @@ test("every turn result from the host carries an end kind: the process's own, un
   const failed = await run({ t: "result", status: "failed", error: "the model did not answer" });
   assert.equal(failed.status, "failed");
   assert.equal(failed.endKind, "unknown");
+});
+
+test("the process's read-back check of a checkpoint goes on the checkpoint the host hands the controller; a process that ran none hands none (card L04d)", async () => {
+  const run = async (durable?: { verified: boolean; error?: string }) => {
+    const f = scriptedProcess({ t: "result", status: "completed", text: "done", endKind: "normal", visibleChars: 4 }, durable);
+    const p = localWorkerParts<unknown>({
+      launcher: f.launcher as never, app, protectedPaths: [], workspace: () => work, requireEnforced: false,
+      model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }),
+      namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+    });
+    const o = order([]);
+    const session = await p.sandbox.open(o.recipe, o);
+    try {
+      const runtime = await p.runtimes.open(o, {}, undefined);
+      const out = await runtime.run("go", "req-1");
+      const asked = await runtime.checkpoint();
+      await runtime.close();
+      return { turn: out.checkpoint as { nn: Record<string, unknown> } | undefined, asked: asked as { nn: Record<string, unknown> } };
+    } finally { await session.close(); }
+  };
+  const verified = await run({ verified: true });
+  assert.deepEqual(verified.turn?.nn["durable"], { verified: true }, "the turn's checkpoint says it was read back");
+  assert.deepEqual(verified.asked.nn["durable"], { verified: true }, "and so does one asked for");
+  const failed = await run({ verified: false, error: "the checkpoint did not read back: history_changed" });
+  assert.deepEqual(failed.turn?.nn["durable"], { verified: false, error: "the checkpoint did not read back: history_changed" });
+  const none = await run();
+  assert.equal(none.turn?.nn["durable"], undefined, "nothing is said for a process that did not check");
 });

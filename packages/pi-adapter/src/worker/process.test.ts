@@ -6,7 +6,7 @@ import { MemoryStorage } from "@earendil-works/pi-durable";
 import { LeaseWatchdog, LineDecoder, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { createOfflineModels } from "../testing/offline.js";
 import { WORK_END_TOOL } from "../bridge.js";
-import { runWorker, type WorkerHooks } from "./process.js";
+import { durabilityOf, runWorker, type WorkerHooks } from "./process.js";
 
 const start: ChannelStart = {
   attemptId: "att-1", agentId: "agent:ann", namespaceId: "abcdef0123456789", credential: "task-credential", storeDir: "/home/agent/pi", relayBase: "http://relay.invalid",
@@ -76,6 +76,7 @@ test("the process starts on the host's word, runs the turn, reaches the bridge o
   const cp = await h.next("checkpoint.ok");
   assert.equal(cp.id, 7);
   assert.equal(typeof cp.checkpoint, "object");
+  assert.deepEqual(cp.durable, { verified: true }, "the checkpoint was read back from the store and checked (card L04d)");
   h.send({ t: "tell", id: 8, text: "the recipe was widened" });
   assert.deepEqual(await h.next("tell.ok"), { t: "tell.ok", id: 8 });
   h.send({ t: "close" });
@@ -555,4 +556,16 @@ test("a work.end the controller refused is not an ending: the turn that stops af
   assert.equal(result.endKind, "no-work-end");
   h.send({ t: "close" });
   await h.done;
+});
+
+test("L04d: a checkpoint that does not read back, or whose check fails, is not verified, and says why on one bounded line", async () => {
+  const cp = { format: 2, conversationId: 1, at: 3, digest: `v1:sha256:${"0".repeat(64)}`, runtime: { name: "pi-durable", version: "x" }, historyFormat: "pi-durable:1", contractsVersion: 1 } as never;
+  assert.deepEqual(await durabilityOf({ verifyCheckpoint: async () => ({ valid: true }) } as never, cp), { verified: true });
+  const changed = await durabilityOf({ verifyCheckpoint: async () => ({ valid: false, reason: "history_changed", detail: "the history\nis not what was checkpointed" }) } as never, cp);
+  assert.equal(changed.verified, false);
+  assert.match(changed.error!, /^the checkpoint did not read back: history_changed: the history is not what was checkpointed$/);
+  const thrown = await durabilityOf({ verifyCheckpoint: async () => { throw new Error(`disk gone ${"x".repeat(500)}`); } } as never, cp);
+  assert.equal(thrown.verified, false);
+  assert.match(thrown.error!, /^the checkpoint could not be read back: disk gone/);
+  assert.ok(thrown.error!.length <= 300, "the reason fits the channel's bound");
 });
