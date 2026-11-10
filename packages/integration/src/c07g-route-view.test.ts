@@ -25,7 +25,7 @@ test("a task that moves to a route nobody has measured: the real process is meas
   const backend = process.platform === "darwin" ? "seatbelt" : "bubblewrap";
   const usable = real.capacity.available && real.capacity.backend === backend && !["/usr", "/bin", "/lib"].includes(nodeRoot);
   if (!usable) { if (required) assert.fail(`the sandbox is required but unusable: ${real.capacity.reason}`); return t.skip("the sandbox of this OS or a node install it can mount is unusable"); }
-  const model = await endpoint([{ call: { name: "nimblenewt__work-end", args: { result: "done" } } }, { text: "watered" }]);
+  const model = await endpoint([{ call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done" } } }, { text: "watered" }]);
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn c07g ")));
   const dirs = { checkout: join(directory, "checkout"), gitDir: join(directory, "git"), home: join(directory, "home"), scratch: join(directory, "scratch") };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });

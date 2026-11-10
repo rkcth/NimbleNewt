@@ -10,7 +10,7 @@ import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/contro
 import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, doneVerifier, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
 
-// Shared by the composed tests of cards W03, W04 and W05: the composed controller with the real local worker (bubblewrap, the worker process running Pi), the real checkout layout and a scripted OpenAI-compatible endpoint.
+// Shared by the composed tests of cards W03, W04, W05 and W10: the composed controller with the real local worker (bubblewrap, the worker process running Pi), the real checkout layout and a scripted OpenAI-compatible endpoint.
 export const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -47,7 +47,7 @@ async function model(steps: Step[]): Promise<{ server: Server; url: string; seen
   return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, seen, bodies };
 }
 
-export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string } = {}) {
+export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string; /** More start-up options of the controller (card W10: the second agent's model client). */ readonly start?: Partial<Parameters<typeof startController>[0]> } = {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn w03 ")));
   const shared = join(directory, "shared");
   mkdirSync(join(shared, "src"), { recursive: true });
@@ -59,6 +59,7 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
   const ws = new LocalWorkspaces({ root: join(directory, "work"), git, shared: () => shared, busy: () => local?.busyAttempts() ?? [], landing: () => ({ branch: "main", requirePermit: false }) });
   const answer = await model(steps);
   const c = await startController({
+    ...(options.start ?? {}),
     storage: { kind: "sqlite", path: join(directory, "c.sqlite") }, argv: [], env: {}, print: () => undefined,
     facts: { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" }, filesystem: async () => ({ type: "ext4", network: false }), features: [], harnesses: [PI],
     tools: { runner: { run: async () => { throw new Error("no script call runs in this test"); } } as never, isLocalHost: (hostId) => hostId === "host:w1", facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: process.versions.node }, packages: {}, cpus: 8, memoryMb: 16_384 }) },

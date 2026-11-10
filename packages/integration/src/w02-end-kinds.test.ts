@@ -27,7 +27,7 @@ describe("each turn's ending is classified by the worker process and carried to 
     { name: "a thinking-only reply", replies: [{ thinking: "I should look at the parser next." }], endKind: "empty-visible-text", visibleChars: 0 },
     { name: "a natural stop without work.end", replies: [{ text: "The parser is fixed and the tests pass." }], endKind: "no-work-end", visibleChars: 39 },
     { name: "an announced step and no tool call", replies: [{ text: "I fixed the parser. Now let me run the tests:" }], endKind: "announced-step-without-tool-call", visibleChars: 45 },
-    { name: "a turn ended with work.end", replies: [{ call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed" } } }, { text: "Ended: the parser is fixed." }], endKind: "normal", visibleChars: 27, ops: ["work.end"] },
+    { name: "a turn ended with work.end", replies: [{ call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed" } } }, { text: "Ended: the parser is fixed." }], endKind: "normal", visibleChars: 27, ops: ["work.end"] },
   ];
 
   for (const c of cases) {
@@ -67,7 +67,7 @@ describe("each turn's ending is classified by the worker process and carried to 
         assert.equal(result.endKind, c.endKind);
         assert.equal(result.visibleChars, c.visibleChars);
         assert.deepEqual(bridged.map((b) => b.op), c.ops ?? []);
-        if (c.ops !== undefined) assert.deepEqual(bridged[0]!.args, { result: "done", note: "parser fixed" });
+        if (c.ops !== undefined) assert.deepEqual(bridged[0]!.args, { report: "Done as the task asked.", result: "done", note: "parser fixed" });
       } finally {
         model.server.close();
         rmSync(directory, { recursive: true, force: true });

@@ -83,7 +83,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
   const steps: (Step | (() => Step))[] = [
     // Attempt one starts the job and ends.
     () => ({ call: { name: "nimblenewt__job-start", args: { tool, version: "1.0.0", input: { target: "site" }, label: "site build" } } }),
-    { call: { name: "nimblenewt__work-end", args: { result: "done" } } },
+    { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done" } } },
     { text: "the build runs" },
     // Attempt two reads it by its handle, stops it, and starts two more.
     () => ({ call: { name: "nimblenewt__job-status", args: { jobId: jobOne } } }),
@@ -91,7 +91,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
     () => ({ call: { name: "nimblenewt__job-cancel", args: { jobId: jobOne, reason: "not needed any more" } } }),
     () => ({ call: { name: "nimblenewt__job-start", args: { tool, version: "1.0.0", input: { target: "docs" } } } }),
     () => ({ call: { name: "nimblenewt__job-start", args: { tool, version: "1.0.0", input: { target: "logs" }, background: true } } }),
-    { call: { name: "nimblenewt__work-end", args: { result: "done" } } },
+    { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done" } } },
     { text: "all done" },
   ];
   const answer = await model(steps);

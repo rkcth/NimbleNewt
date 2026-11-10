@@ -35,7 +35,7 @@ import { checkValue, schemaProblems } from "./schema.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "maintenance.request", "maintenance.status", "turn.continue"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -134,7 +134,7 @@ export interface ToolExecutionDeps {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]);
 /** The most continuations of one turn the controller agrees to (card W04; the worker's own bound is 3). */
 const MAX_TURN_CONTINUATIONS = 10;
 /** The end kinds a continuation may name (card W02's, restated: the controller does not depend on the worker's contracts). */
@@ -308,6 +308,7 @@ export class ToolExecutionService {
             case "job.status": case "job.output": response = await this.#jobRead(context, request.op as BridgeOperation, args); break;
             case "job.cancel": response = await this.#jobCancel(context, args); break;
             case "work.end": response = await this.#workEnd(token, context, args); break;
+            case "work.note": case "work.answer": response = await this.#workWrite(token, context, request.op as "work.note" | "work.answer", args); break;
             case "maintenance.request": response = await this.#maintenanceRequest(token, context, args); break;
             case "maintenance.status": response = await this.#maintenanceStatus(token, context, args); break;
             case "turn.continue": response = this.#turnContinue(context, args); break;
@@ -469,12 +470,21 @@ export class ToolExecutionService {
    */
   async #workEnd(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
-    onlyKnown(args, ["submit", "result", "note", "message", "evidence"]);
+    onlyKnown(args, ["submit", "result", "note", "message", "evidence", "report"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
     if (response.ok) return ok(response.result);
-    // Card W05: a done the controller did not take is refused with the whole list of what failed (the controller's own fixed-format text, already bounded and redacted), not cut at the usual length of a refusal.
-    if (response.error.code === "invalid_command" && response.error.message.startsWith("work.end done was not accepted:")) return { ok: false, code: response.error.code, message: redactText(response.error.message).slice(0, DONE_REFUSAL_CHARS) };
+    // Card W05: a done the controller did not take is refused with the whole list of what failed (the controller's own fixed-format text, already bounded and redacted), not cut at the usual length of a refusal. Card W10: so are the second
+    // agent's questions about the report, and the refusal of an ending without a report (it carries the agent's notes).
+    if (response.error.code === "invalid_command" && (response.error.message.startsWith("work.end done was not accepted:") || response.error.message.startsWith("work.end needs a report:"))) return { ok: false, code: response.error.code, message: redactText(response.error.message).slice(0, DONE_REFUSAL_CHARS) };
     return refusal(response.error.code, response.error.message);
+  }
+
+  /** Card W10: a running note (`work.note`) or the answers to the second agent's questions (`work.answer`), through the same door every client uses, for the attempt the request came through. */
+  async #workWrite(token: unknown, c: Context, op: "work.note" | "work.answer", args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, op === "work.note" ? ["kind", "text"] : ["answers"]);
+    const response = await this.#deps.state.handle(token, { v: 1, op, commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
   /**

@@ -1,3 +1,4 @@
+import type { ReportInterrogatorPort } from "../dispatch/report.js";
 import type { PiStateSource } from "../backup/index.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { ContinuationService } from "../continuation/continuation.js";
@@ -228,6 +229,8 @@ export interface ComposeInput {
   readonly safeLongRunning?: (taskId: string, attemptId: string) => Promise<boolean>;
   /** Card W11: the jobs of a task an attempt that ends its turn can wait for (the job service's `waitable`). With it the attempt parks for them and their ends wake the task; whether the task is stopped is read from `stops`. */
   readonly jobWaits?: (taskId: string) => Promise<readonly string[]>;
+  /** Card W10: the second agent that questions a done before it is recorded succeeded (the controller's routed, metered client). Absent: no done is questioned, and each report says so. */
+  readonly interrogator?: ReportInterrogatorPort;
   /** Release-test jobs carried to the hosts the owner authorized (card X09b). */
   readonly release?: Pick<ReleaseService, "jobsFor" | "pickUp" | "reportFromHost" | "expire">;
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
@@ -695,6 +698,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses,
+      ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       routeChange: async (c) => {
         // The task's own text is in the prompt beside the view; `PROMPT_NOTE_RESERVE_CHARS` keeps room for the notes not measured here (the project's rules, a resume note), and the paragraph of what the task

@@ -13,8 +13,8 @@ test("a done before the work is written is refused with what failed, in the same
   if (launcher === undefined) return;
   const holder: { write?: () => void } = {};
   const x = await rig(launcher, [
-    { call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed" } } },
-    { before: async () => holder.write!(), call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed, b added", evidence: [{ item: "the new module", path: "src/b.ts" }] } } },
+    { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed" } } },
+    { before: async () => holder.write!(), call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed, b added", evidence: [{ item: "the new module", path: "src/b.ts" }] } } },
     { text: "Ended: the parser is fixed." },
   ]);
   try {

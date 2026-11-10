@@ -39,8 +39,9 @@ import { quoted } from "../status/explain.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, type DispatchBody, type DoneVerification, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
+import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type DoneVerification, type Interrogation, type InterrogationRound, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
+import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
 import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
@@ -210,6 +211,11 @@ export interface DispatcherDeps {
    * parks for a job (the due wakes are still worked when there are any).
    */
   readonly jobWakes?: { waitable(taskId: string): Promise<readonly string[]>; stopped?(taskId: string): Promise<boolean> };
+  /**
+   * Card W10: the second agent that questions an agent's done before it is recorded succeeded (a model client of its own, no tools, no shared conversation; see `ReportInterrogatorPort`). Absent: no done is questioned, and each
+   * done's report says so ("no second agent questioned it").
+   */
+  readonly interrogator?: ReportInterrogatorPort;
   /** The loops the dispatcher's tick runs after its own work: the services whose callers were said to be "the controller's loop". */
   readonly loops?: readonly DispatcherLoop[];
   /** The longest a loop may take in one tick before the tick goes on without it (it is reported as failed and not started again until it ends). Default 60 seconds; 0 turns the limit off. */
@@ -1006,8 +1012,8 @@ export class DispatcherService {
   }
 
   /** The contract a done is checked against: the one stored now, except that a change made by the attempt's own agent after the attempt began does not count (the agent cannot loosen its own checks); `undefined`: none stored. */
-  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[] } | undefined> {
-    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[] };
+  async #doneContract(b: DispatchBody): Promise<{ version: number; requiredEvidence: readonly string[]; checks: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] } | undefined> {
+    type Stored = { version?: number; changedBy?: string; requiredEvidence?: readonly string[]; checks?: readonly { name: string; run: readonly string[]; timeoutSeconds?: number }[]; expectedResult?: string; acceptanceCriteria?: readonly string[] };
     let c = (await this.#runner.get("task-contract", b.taskId))?.body as unknown as Stored | undefined;
     if (c === undefined) return undefined;
     const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
@@ -1017,7 +1023,210 @@ export class DispatcherService {
       c = (await this.#runner.get("task-contract-version", `${b.taskId}.${began}`))?.body as unknown as Stored | undefined;
       if (c === undefined) return undefined;
     }
-    return { version: c.version ?? 0, requiredEvidence: Array.isArray(c.requiredEvidence) ? c.requiredEvidence : [], checks: Array.isArray(c.checks) ? c.checks : [] };
+    return { version: c.version ?? 0, requiredEvidence: Array.isArray(c.requiredEvidence) ? c.requiredEvidence : [], checks: Array.isArray(c.checks) ? c.checks : [], ...(typeof c.expectedResult === "string" ? { expectedResult: c.expectedResult } : {}), ...(Array.isArray(c.acceptanceCriteria) ? { acceptanceCriteria: c.acceptanceCriteria.filter((x): x is string => typeof x === "string") } : {}) };
+  }
+
+  // ---- card W10: running notes, the report, and the second agent's questions ------------------------------------------------------
+
+  /**
+   * Adds one running note to the attempt (card W10): what the agent did, found, left or could not do. Staff only (the dispatcher's principal through the ending port; the agent writes through `work.note`, which checks it is the
+   * attempt's own). The same call (`key`) again writes nothing and answers as before; the same key with other text is refused. Bounded in count and size: past the bound the note is refused with a plain reason, never a note dropped
+   * silently. The first note (or report) of an attempt names it in the task's report record, in the same commit, so the next attempt and the owner's view find it.
+   */
+  async addNote(by: Principal, attemptId: string, note: { readonly key: string; readonly kind: WorkNoteKind; readonly text: string }): Promise<{ readonly notes: number; readonly replayed: boolean }> {
+    const d = await this.#controlled(by, attemptId);
+    if (typeof note.key !== "string" || note.key.length < 1 || note.key.length > 300) invalid("key", "must be 1 to 300 characters");
+    if (!isNoteKind(note.kind)) invalid("kind", "must be did, found, left or could-not");
+    const text = typeof note.text === "string" ? keptText(note.text, WORK_REPORT_LIMITS.note) : "";
+    if (text === "") invalid("text", "must be the note's text");
+    const same = (x: DispatchBody): WorkNote | undefined => x.notes?.find((n) => n.key === note.key);
+    const answer = (x: DispatchBody): { notes: number; replayed: boolean } => {
+      const s = same(x)!;
+      if (s.kind !== note.kind || s.text !== text) throw new DomainError("command_conflict", "this call already wrote a different note");
+      return { notes: x.notes!.length, replayed: true };
+    };
+    if (same(d.body) !== undefined) return answer(d.body);
+    let fresh = false;
+    const written = await this.#update(attemptId, (x) => {
+      fresh = false;
+      if (same(x) !== undefined) return x;
+      if (x.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+      const notes = x.notes ?? [];
+      if (notes.length >= WORK_REPORT_LIMITS.notes) throw new DomainError("invalid_command", `text: this attempt has ${notes.length} notes, the most it keeps; fold what you know into your report and end with work.end`, { field: "text" });
+      const size = notes.reduce((n, y) => n + y.text.length, 0);
+      if (size + text.length > WORK_REPORT_LIMITS.notesChars) throw new DomainError("invalid_command", `text: the notes of this attempt would hold more than ${WORK_REPORT_LIMITS.notesChars} characters; write a shorter note, or fold what you know into your report`, { field: "text" });
+      fresh = true;
+      return { ...x, notes: [...notes, { key: note.key, kind: note.kind, text, at: this.#runner.now() }] };
+    }, async (x) => (same(x) === undefined && (x.notes ?? []).length === 0 && x.report === undefined ? this.#reportPointerChange(x) : []));
+    return fresh ? { notes: written.notes?.length ?? 0, replayed: false } : answer(written);
+  }
+
+  /** The attempt's running notes, oldest first (card W10). Staff only. */
+  async notesOf(by: Principal, attemptId: string): Promise<readonly WorkNote[]> {
+    return (await this.#controlled(by, attemptId)).body.notes ?? [];
+  }
+
+  /**
+   * The agent answers the questions of the open round (card W10), one answer per question, in order. Staff only (the agent answers through `work.answer`). The same call again answers as before. Refused when no question is open
+   * or the round is answered already; the agent then calls work.end done again, and the second agent reads the answers.
+   */
+  async answerQuestions(by: Principal, attemptId: string, request: { readonly key: string; readonly answers: readonly string[] }): Promise<{ readonly round: number; readonly replayed: boolean }> {
+    const d = await this.#controlled(by, attemptId);
+    if (typeof request.key !== "string" || request.key.length < 1 || request.key.length > 300) invalid("key", "must be 1 to 300 characters");
+    if (!Array.isArray(request.answers) || request.answers.length === 0 || request.answers.length > WORK_REPORT_LIMITS.questions) invalid("answers", `must be a list of 1 to ${WORK_REPORT_LIMITS.questions} answers`);
+    const answers = request.answers.map((a, i) => { const t = typeof a === "string" ? keptText(a, WORK_REPORT_LIMITS.answer) : ""; return t === "" ? invalid(`answers[${i}]`, "must be the answer's text") : t; });
+    const answered = (x: DispatchBody): { round: number; replayed: boolean } | undefined => {
+      const rounds = x.interrogation?.rounds ?? [];
+      const i = rounds.findIndex((r) => r.answerKey === request.key);
+      if (i < 0) return undefined;
+      if (JSON.stringify(rounds[i]!.answers) !== JSON.stringify(answers)) throw new DomainError("command_conflict", "this call already gave different answers");
+      return { round: i + 1, replayed: true };
+    };
+    const before = answered(d.body);
+    if (before !== undefined) return before;
+    let round = 0;
+    const written = await this.#update(attemptId, (x) => {
+      if (answered(x) !== undefined) return x;
+      const q = x.interrogation;
+      if (x.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+      if (q === undefined || q.state !== "asking") throw new DomainError("invalid_transition", "no questions about your report are open; end with work.end, and answer the questions it gives you, if any");
+      const last = q.rounds[q.rounds.length - 1]!;
+      if (last.answers !== undefined) throw new DomainError("invalid_transition", "the questions of this round are answered already; call work.end done again with your report");
+      if (answers.length !== last.questions.length) invalid("answers", `give exactly one answer per question: ${last.questions.length} question(s) are open`);
+      round = q.rounds.length;
+      return { ...x, interrogation: { ...q, rounds: [...q.rounds.slice(0, -1), { ...last, answers, answerKey: request.key, answeredAt: this.#runner.now() }] } };
+    });
+    return answered(written) === undefined ? { round, replayed: false } : { ...answered(written)!, replayed: round === 0 };
+  }
+
+  /** Records the report of an ending that is not a done (card W10: partial, blocked and abandoned are not questioned). Staff only. The same call again writes nothing. */
+  async recordReport(by: Principal, attemptId: string, r: { readonly key: string; readonly result: string; readonly report: string }): Promise<void> {
+    const d = await this.#controlled(by, attemptId);
+    if (typeof r.key !== "string" || r.key.length < 1 || r.key.length > 300) invalid("key", "must be 1 to 300 characters");
+    const text = typeof r.report === "string" ? keptText(r.report, WORK_REPORT_LIMITS.report) : "";
+    if (text === "") invalid("report", "must be the report's text");
+    if (d.body.report?.key === r.key) return;
+    const report: AttemptReport = { key: r.key, result: clip(String(r.result), 40), text, at: this.#runner.now(), questioning: "not-asked" };
+    await this.#update(attemptId, (x) => (x.report?.key === r.key ? x : { ...x, report }), async (x) => (x.report?.key === r.key ? [] : this.#reportPointerChange(x)));
+  }
+
+  /**
+   * The second agent questions a done before it is recorded succeeded (card W10). Called after the controller's own check of the done passed or was skipped (card W05, which runs first and stays). The second agent is a separate model
+   * client with no tools and no share in the agent's conversation; it sees the task contract, the report, the notes and bounded evidence of the work (the check's verdict, the plan steps and the diff stat the host reports), and the
+   * questions and answers so far. Its answer:
+   * - `supported`: the done is taken; the report, with the questions and answers folded in, is recorded on the attempt. The second agent does not approve the work: acceptance stays with the review of a submission.
+   * - questions (at most `WORK_REPORT_LIMITS.questions` per round, `WORK_REPORT_LIMITS.rounds` rounds): the done is refused with them (`asking`), not counted; the agent answers with `work.answer` and calls work.end done again.
+   *   A done called again before the answers is refused without asking the second agent.
+   * - `unsupported` (or questions still after the last round): the done is refused with its reason and questions and goes back to the same agent in the same attempt, counted toward the task's go-ons (`STOPPED_EARLY_READMITS`, the
+   *   same per-task record as W03's early stops, W05's refused dones and W11's wakes) in the same commit; once they are used up the verdict is `exhausted` and the ending blocks the attempt with a blocker for the director.
+   * Without a second agent, or when none could be asked (no route answered, the daily cap on the controller's own calls is reached), the done is taken on the controller's checks and the report records that no second agent
+   * questioned it and why (`not-run`), never that one did. Each work.end call (`key`) gets one answer: asked again (a retry, a restart) it gets the recorded one without asking again. Staff only; calls of one attempt run one at a time.
+   */
+  async interrogateDone(by: Principal, attemptId: string, request: { readonly key: string; readonly report: string; readonly verified: "passed" | "skipped" }): Promise<ReportVerdict> {
+    await this.#controlled(by, attemptId);
+    if (typeof request.key !== "string" || request.key.length < 1 || request.key.length > 300) invalid("key", "must be 1 to 300 characters");
+    const earlier = this.#verifying.get(attemptId) ?? Promise.resolve();
+    const run = earlier.catch(() => undefined).then(() => this.#interrogateDone(attemptId, request));
+    const tail = run.catch(() => undefined);
+    this.#verifying.set(attemptId, tail);
+    try { return await run; } finally { if (this.#verifying.get(attemptId) === tail) this.#verifying.delete(attemptId); }
+  }
+
+  async #interrogateDone(attemptId: string, request: { readonly key: string; readonly report: string; readonly verified: "passed" | "skipped" }): Promise<ReportVerdict> {
+    const d = await this.#load(attemptId);
+    if (d === undefined || d.body.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+    const b = d.body;
+    const recorded = answerFor(b, request.key);
+    if (recorded !== undefined) return recorded;
+    const text = keptText(String(request.report ?? ""), WORK_REPORT_LIMITS.report);
+    if (text === "") invalid("report", "must be the report's text");
+    const open = b.interrogation?.state === "asking" ? b.interrogation : undefined;
+    const last = open?.rounds[open.rounds.length - 1];
+    if (last !== undefined && last.answers === undefined) return { state: "asking", message: unansweredMessage(last.questions) };
+    const rounds = open?.rounds ?? [];
+    const round = rounds.length + 1;
+    const prior = b.interrogation?.state === "unsupported" ? b.interrogation : undefined;
+    let answer: InterrogatorAnswer | undefined;
+    let why: string | undefined;
+    if (this.#deps.interrogator === undefined) why = "no second agent is set up on this controller";
+    else {
+      try {
+        answer = await this.#deps.interrogator.ask(await this.#interrogationInput(b, text, request.verified, rounds, round, prior === undefined ? undefined : { ...(prior.reason === undefined ? {} : { reason: prior.reason }), questions: prior.rounds[prior.rounds.length - 1]?.questions ?? [] }));
+      } catch (error) {
+        this.#options.onError?.(error);
+        why = `the second agent could not be asked: ${errorText(error).slice(0, 200)}`;
+      }
+    }
+    const questions = answer === undefined || answer.verdict === "supported" ? [] : answer.questions.map((q) => keptText(String(q), WORK_REPORT_LIMITS.question)).filter((q) => q !== "").slice(0, WORK_REPORT_LIMITS.questions);
+    // A round of questions after the last one is a verdict that the report does not hold; so is a round that asks nothing it can state.
+    const state: Interrogation["state"] = answer === undefined ? "not-run" : answer.verdict === "supported" ? "supported" : answer.verdict === "questions" && round <= WORK_REPORT_LIMITS.rounds && questions.length > 0 ? "asking" : "unsupported";
+    const reason = answer?.verdict === "unsupported" ? keptText(answer.reason, WORK_REPORT_LIMITS.reason) || "it gave no reason" : answer?.verdict === "questions" ? (questions.length === 0 ? "it asked no question it could state" : "it still had questions after the last round") : undefined;
+    const at = this.#runner.now();
+    const route = answer?.route === undefined ? undefined : clip(String(answer.route), 120);
+    let used = 0;
+    let lost = false;
+    const written = await this.#update(attemptId, (x) => {
+      if (lost) return x;
+      const cur = x.interrogation;
+      const base = cur?.state === "asking" ? cur : undefined;
+      const interrogated = cur !== undefined && cur.state !== "asking" ? { interrogated: [...(x.interrogated ?? []), { state: cur.state, ...(cur.verdictKey === undefined ? {} : { verdictKey: cur.verdictKey }), ...(cur.reason === undefined ? {} : { reason: cur.reason }), questions: cur.rounds[cur.rounds.length - 1]?.questions ?? [], rounds: cur.rounds.length, at: cur.at, ...(cur.counted === undefined ? {} : { counted: cur.counted }) }].slice(-WORK_REPORT_LIMITS.history) } : {};
+      const newRound: InterrogationRound[] = questions.length === 0 ? [] : [{ key: request.key, questions, at, ...(route === undefined ? {} : { route }) }];
+      if (state === "asking") return { ...x, ...interrogated, interrogation: { state, rounds: [...(base?.rounds ?? []), ...newRound], at } };
+      const exhausted = state === "unsupported" && used >= STOPPED_EARLY_READMITS;
+      const closed: Interrogation = { state, rounds: [...(base?.rounds ?? []), ...newRound], at, verdictKey: request.key, ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(route === undefined ? {} : { route }), ...(state === "unsupported" ? { counted: true, exhausted, goOn: used + 1 } : {}) };
+      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }) } : undefined;
+      return { ...x, ...interrogated, interrogation: closed, ...(report === undefined ? {} : { report }) };
+    }, async (x) => {
+      // Another process answered this call meanwhile: its answer stands and nothing is counted again.
+      lost = answerFor(x, request.key) !== undefined;
+      if (lost || state === "asking") return [];
+      const changes: Change[] = [];
+      if (state === "unsupported") {
+        const counted = await this.#stoppedEarlyCount(x.taskId);
+        used = counted !== undefined && counted.body.generation === x.generation ? counted.body.readmits : 0;
+        changes.push(...(await this.#stoppedEarlyChange(x)));
+      }
+      if (state !== "unsupported" || used >= STOPPED_EARLY_READMITS) changes.push(...(await this.#reportPointerChange(x)));
+      return changes;
+    });
+    const mine = answerFor(written, request.key);
+    if (mine === undefined) throw new DomainError("unavailable", "the questioning of the done could not be recorded; call work.end again");
+    return mine;
+  }
+
+  /** What the second agent is shown (card W10): the contract as the done is checked against it (an agent's own loosening does not count), the report, the notes, the controller's check and the host's account of the checkout. */
+  async #interrogationInput(b: DispatchBody, report: string, verified: "passed" | "skipped", rounds: readonly InterrogationRound[], round: number, earlier: { reason?: string; questions: readonly string[] } | undefined): Promise<InterrogationInput> {
+    const task = await this.#deps.projects.getTask(b.taskId).catch(() => undefined);
+    const c = await this.#doneContract(b).catch(() => undefined);
+    const progress = await this.#progressOf(b);
+    return {
+      taskId: b.taskId, attemptId: b.attemptId,
+      task: { title: task?.title ?? b.taskId, ...(c?.expectedResult === undefined ? {} : { expectedResult: c.expectedResult }), acceptanceCriteria: c?.acceptanceCriteria ?? [], requiredEvidence: c?.requiredEvidence ?? [], checks: (c?.checks ?? []).map((x) => x.name) },
+      report, notes: b.notes ?? [], evidence: { verified, plan: progress.plan, diff: progress.diff },
+      rounds: rounds.map((r) => ({ questions: r.questions, ...(r.answers === undefined ? {} : { answers: r.answers }) })),
+      ...(earlier === undefined ? {} : { earlier }), round, maxRounds: WORK_REPORT_LIMITS.rounds,
+    };
+  }
+
+  /** Names the attempt in its task's report record (card W10), in the same commit as its first note or its report. */
+  async #reportPointerChange(b: DispatchBody): Promise<Change[]> {
+    const ref: AggregateRef = { kind: WORK_REPORT_KIND, id: b.taskId };
+    const found = await this.#runner.get(WORK_REPORT_KIND, b.taskId);
+    const cur = found?.body as unknown as WorkReportTaskBody | undefined;
+    if (cur !== undefined && cur.attempts[cur.attempts.length - 1] === b.attemptId) return [];
+    const body = { taskId: b.taskId, attempts: [...(cur?.attempts ?? []).filter((a) => a !== b.attemptId), b.attemptId].slice(-WORK_REPORT_LIMITS.attempts) } as unknown as JsonObject;
+    return found === undefined ? [{ type: "create", ref, body }] : [{ type: "update", ref, expectedRevision: found.revision, body }];
+  }
+
+  /** What the next attempt of a task is told of the attempt before it (card W10): its report or its notes, quoted. Never stops the attempt. */
+  async #earlierReport(b: DispatchBody): Promise<string> {
+    try {
+      const pointer = (await this.#runner.get(WORK_REPORT_KIND, b.taskId))?.body as unknown as WorkReportTaskBody | undefined;
+      const before = [...(pointer?.attempts ?? [])].reverse().find((a) => a !== b.attemptId);
+      if (before === undefined) return "";
+      const other = await this.#load(before);
+      return other === undefined ? "" : earlierReportNote(other.body);
+    } catch (error) { this.#options.onError?.(error); return ""; }
   }
 
   /**
@@ -2125,7 +2334,7 @@ export class DispatcherService {
     // Card C07g: an attempt that starts on a route other than the one its task last ran on carries the context rebuilt for this route in its first prompt. The context is asked once more here (the same facts give the
     // same decision; facts that changed since the check give the view as it is now). A refusal or an error now starts nothing: the place is given back and the next pass checks the move again (and blocks on a refusal).
     // What the task was handed with, read now: it goes in the first prompt, and its size goes with the request for the route view, which has to leave room for it (card C07g).
-    const handed = await this.#handedInNote(b);
+    const handed = (await this.#handedInNote(b)) + (await this.#earlierReport(b));
     let view: { readonly text: string; readonly measured: boolean } | undefined;
     if (this.#deps.routeChange !== undefined) {
       const previous = ((await this.#runner.get(PLACED_KIND, b.taskId))?.body as unknown as { route?: string } | undefined)?.route;
@@ -3149,6 +3358,25 @@ export function doneRefusal(v: Pick<DoneVerification, "state" | "failures" | "ex
     ? "The go-ons of this task are used up, so the attempt ends now, blocked, with this list for the owner."
     : "Fix these and call work.end again; the controller checks again. A done that is not accepted counts toward this task's go-ons, and once they are used up the attempt ends blocked. If you cannot finish, end with work.end result blocked or partial and say why in the note.";
   return [head, ...lines, tail].join("\n");
+}
+
+/** The answer a work.end call already got from the questioning of its done (card W10), or undefined when that call has not been answered. */
+function answerFor(b: DispatchBody, key: string): ReportVerdict | undefined {
+  const q = b.interrogation;
+  const closed = (state: Interrogation["state"], reason: string | undefined, questions: readonly string[], exhausted: boolean, goOn: number): ReportVerdict =>
+    state === "unsupported" ? { state, exhausted, message: unsupportedMessage(reason ?? "", questions, exhausted, goOn), summary: unsupportedSummary(reason ?? "", questions) } : { state: state === "supported" ? "supported" : "not-run" };
+  if (q !== undefined) {
+    if (q.verdictKey === key) return closed(q.state, q.reason, q.rounds[q.rounds.length - 1]?.key === key ? q.rounds[q.rounds.length - 1]!.questions : [], q.exhausted === true, q.goOn ?? 1);
+    const i = q.rounds.findIndex((r) => r.key === key);
+    if (i >= 0) return { state: "asking", message: askingMessage(i + 1, WORK_REPORT_LIMITS.rounds, q.rounds[i]!.questions) };
+  }
+  const h = (b.interrogated ?? []).find((x) => x.verdictKey === key);
+  return h === undefined ? undefined : closed(h.state, h.reason, h.questions, false, 1);
+}
+
+/** The blocker's summary when a done the second agent found unsupported used up the task's go-ons (card W10). */
+function unsupportedSummary(reason: string, questions: readonly string[]): string {
+  return clip(`The agent said its work was done, and a second agent that questioned its report found it not supported, until the task's go-ons were used up: ${quoted(reason, WORK_REPORT_LIMITS.reason + 20)}. ${questions.length === 0 ? "" : `It asked: ${questions.map((q, i) => `${i + 1}. ${quoted(q, 200)}`).join(" ")}. `}The agent's report and notes are in the task's work report.`, 1000);
 }
 
 function verdictOf(v: DoneVerification): DoneVerdict {

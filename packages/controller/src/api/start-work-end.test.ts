@@ -63,21 +63,21 @@ test("work.end through the controller: the attempt ends with the result, a stran
     const state = async (id: string) => (await c.dispatch!.dispatcher.get(c.dispatch!.principal, id))!;
 
     // A stranger (another agent) and the owner are refused; the answer for the stranger does not say the attempt exists.
-    const refused = await call(c, two.token, "work.end", { attemptId: one.attempt, result: "done" }, "x1");
+    const refused = await call(c, two.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done" }, "x1");
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, "not_found");
-    assert.equal((await call(c, boot.token, "work.end", { attemptId: one.attempt }, "x2")).error.code, "forbidden");
+    assert.equal((await call(c, boot.token, "work.end", { report: "the report", attemptId: one.attempt }, "x2")).error.code, "forbidden");
 
     // The agent ends its own attempt: the intent is recorded and the attempt frozen; the tick completes it with the result.
-    const ended = await call(c, one.token, "work.end", { attemptId: one.attempt, result: "partial", note: "two beds left" }, "e1");
+    const ended = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "partial", note: "two beds left" }, "e1");
     assert.ok(ended.ok, JSON.stringify(ended));
     assert.equal(ended.result.item.state, "requested");
     assert.equal((await state(one.attempt)).state !== "finished", true);
     assert.ok((await state(one.attempt)).frozen !== undefined, "frozen at once");
-    const replay = await call(c, one.token, "work.end", { attemptId: one.attempt, result: "partial", note: "two beds left" }, "e1");
+    const replay = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "partial", note: "two beds left" }, "e1");
     assert.equal(replay.result.item.replayed, true);
     // A submit cannot be checked yet (the landing check is not bound): refused as unavailable, nothing recorded.
-    assert.equal((await call(c, three.token, "work.end", { attemptId: three.attempt, submit: true }, "s1")).error.code, "unavailable");
+    assert.equal((await call(c, three.token, "work.end", { report: "the report", attemptId: three.attempt, submit: true }, "s1")).error.code, "unavailable");
     const tick = await c.dispatch.dispatcher.tick();
     assert.ok(tick.loops.some((l) => l.name === "workend.complete" && l.ok), JSON.stringify(tick.loops.filter((l) => !l.ok)));
     const after = await state(one.attempt);
@@ -87,13 +87,13 @@ test("work.end through the controller: the attempt ends with the result, a stran
     assert.equal((await c.services.workEnd.get(one.attempt))?.state, "done");
 
     // An owner stop drops an open intent: nothing is finished on the agent's say-so afterwards.
-    assert.ok((await call(c, two.token, "work.end", { attemptId: two.attempt, result: "done" }, "e2")).ok);
+    assert.ok((await call(c, two.token, "work.end", { report: "the report", attemptId: two.attempt, result: "done" }, "e2")).ok);
     // The scripted host sends no checkpoint, so the ordinary stop is blocked in preparation and the owner chooses Force Stop (the emergency path of the same drop).
     const stop = await call(c, boot.token, "lifecycle.stop", { scope: { kind: "task", id: two.task }, mode: "stop", reason: "the owner stops it" }, "st1");
     assert.ok(stop.ok, JSON.stringify(stop));
     assert.equal((await c.services.workEnd.get(two.attempt))?.state, "dropped", "a stop in preparation drops the intent at once: nothing can complete it any more");
     assert.equal((await c.services.workEnd.get(two.attempt))?.typed, "owner_stop");
-    assert.equal((await call(c, two.token, "work.end", { attemptId: two.attempt, result: "done" }, "e2b")).result.item.state, "dropped", "asking again is the recorded (dropped) ending, nothing new");
+    assert.equal((await call(c, two.token, "work.end", { report: "the report", attemptId: two.attempt, result: "done" }, "e2b")).result.item.state, "dropped", "asking again is the recorded (dropped) ending, nothing new");
     const forced = await call(c, boot.token, "lifecycle.choose", { intentId: stop.result.intentId, choice: "force-stop", reason: "no checkpoint will come" }, "st2");
     assert.ok(forced.ok, JSON.stringify(forced));
     const dropped = await c.services.workEnd.get(two.attempt);
@@ -102,7 +102,7 @@ test("work.end through the controller: the attempt ends with the result, a stran
     assert.equal((await state(two.attempt)).outcome?.status, "abandoned");
 
     // A restart finds (the third attempt is still waiting for a place on the host; a running one would be ended by the shutdown itself) an open ending and completes it once.
-    assert.ok((await call(c, three.token, "work.end", { attemptId: three.attempt, result: "blocked", note: "no seeds" }, "e3")).ok);
+    assert.ok((await call(c, three.token, "work.end", { report: "the report", attemptId: three.attempt, result: "blocked", note: "no seeds" }, "e3")).ok);
     assert.equal((await c.services.workEnd.get(three.attempt))?.state, "requested");
     await c.close();
     c = await open(file, blobs);
@@ -141,7 +141,7 @@ test("work.end then the agent's turn completes: the attempt records the agent's 
     const finished = async (id: string) => { for (let n = 0; n < 200 && (await state(id)).state !== "finished"; n++) await new Promise((r) => setTimeout(r, 25)); };
     const first = await play(one);
     const second = await play(two);
-    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "blocked", note: "no seeds", message: "need seeds" }, "e1")).ok);
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "blocked", note: "no seeds", message: "need seeds" }, "e1")).ok);
     await first.complete({ status: "completed", text: "stopping" });
     await finished(one.attempt);
     const ended = await state(one.attempt);
@@ -152,7 +152,7 @@ test("work.end then the agent's turn completes: the attempt records the agent's 
     await c.dispatch!.dispatcher.tick();
     assert.equal((await c.services.workEnd.get(one.attempt))?.state, "done", "and the next tick leaves it as it is");
 
-    assert.ok((await call(c, two.token, "work.end", { attemptId: two.attempt, result: "done", note: "all beds" }, "e2")).ok);
+    assert.ok((await call(c, two.token, "work.end", { report: "the report", attemptId: two.attempt, result: "done", note: "all beds" }, "e2")).ok);
     await second.complete({ status: "failed", error: "the model broke" });
     await finished(two.attempt);
     const failed = await state(two.attempt);
@@ -169,7 +169,7 @@ test("an owner Stop whose preparation is still waiting drops the ending at once,
   try {
     const one = await attemptFor(c, owner, project, 1);
     await c.dispatch!.dispatcher.tick();
-    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done" }, "e1")).ok);
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done" }, "e1")).ok);
     const stop = await call(c, boot.token, "lifecycle.stop", { scope: { kind: "task", id: one.task }, mode: "stop", reason: "the owner stops it" }, "st1");
     assert.ok(stop.ok, JSON.stringify(stop));
     const rec = await c.services.workEnd.get(one.attempt);
@@ -192,12 +192,12 @@ test("a credential scoped to one task cannot end the same agent's attempt on ano
     await s.projects.transitionTask({ commandId: "rb", actor: owner.id, taskId: taskB, expectedRevision: 1, to: "ready" });
     await s.assignments.assignTask({ commandId: "asb", actor: owner.id, taskId: taskB, owner: { kind: "agent", id: one.agent } });
     const scopedB = (await s.taskCredentials.issue(owner, { commandId: "ib", taskId: taskB, agentId: `agent:${one.agent}` })).token;
-    const refused = await call(c, scopedB, "work.end", { attemptId: one.attempt }, "x1");
+    const refused = await call(c, scopedB, "work.end", { report: "the report", attemptId: one.attempt }, "x1");
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, "not_found");
     assert.equal(await c.services.workEnd.get(one.attempt), undefined, "nothing was recorded");
     const scopedA = (await s.taskCredentials.issue(owner, { commandId: "ia", taskId: one.task, agentId: `agent:${one.agent}` })).token;
-    const ok = await call(c, scopedA, "work.end", { attemptId: one.attempt }, "x2");
+    const ok = await call(c, scopedA, "work.end", { report: "the report", attemptId: one.attempt }, "x2");
     assert.ok(ok.ok, JSON.stringify(ok));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
@@ -213,7 +213,7 @@ test("work.end blocked while the task is paused, then the turn completes: the at
     const att = client.attempt(one.attempt, offer.placement);
     await att.accept();
     await att.honorContract(offer.order, FULL_ABILITIES);
-    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "blocked", note: "no seeds" }, "e1")).ok);
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "blocked", note: "no seeds" }, "e1")).ok);
     await c.services.pauses.pause(owner, { commandId: "pz", scope: { kind: "task", id: one.task }, reason: "plain pause" });
     await att.complete({ status: "completed", text: "stopping" });
     for (let n = 0; n < 200 && (await state(one.attempt)).state !== "finished"; n++) await new Promise((r) => setTimeout(r, 25));
@@ -232,7 +232,7 @@ test("an emergency stop of an attempt with an open ending drops the intent as em
   try {
     const one = await attemptFor(c, owner, project, 1);
     await c.dispatch!.dispatcher.tick();
-    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done" }, "e1")).ok);
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done" }, "e1")).ok);
     await c.dispatch!.dispatcher.stop(c.dispatch!.principal, one.attempt, { emergency: true, reason: "pull the plug" });
     const rec = await c.services.workEnd.get(one.attempt);
     assert.deepEqual([rec?.state, rec?.typed], ["dropped", "emergency_stop"]);
@@ -255,9 +255,9 @@ test("work.end { submit: true } records one code submission tied to the attempt 
     const one = await attemptFor(c, owner, project, 1, ["author"]);
     const two = await attemptFor(c, owner, project, 2, ["author"]);
     await c.dispatch!.dispatcher.tick();
-    const r1 = await call(c, one.token, "work.end", { attemptId: one.attempt, submit: true, result: "done" }, "s1");
+    const r1 = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1");
     assert.ok(r1.ok, JSON.stringify(r1));
-    assert.equal((await call(c, one.token, "work.end", { attemptId: one.attempt, submit: true, result: "done" }, "s1")).result.item.replayed, true);
+    assert.equal((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1")).result.item.replayed, true);
     await c.dispatch!.dispatcher.tick();
     const rec = await c.services.workEnd.get(one.attempt);
     assert.deepEqual([rec?.state, rec?.outcome], ["done", "submitted"], JSON.stringify(rec));
@@ -268,7 +268,7 @@ test("work.end { submit: true } records one code submission tied to the attempt 
     assert.deepEqual(staged, [one.attempt], "staged and submitted once, however often the sweep runs");
 
     // The landing branch moves into the agent's files while the ending settles: a plain end, a typed reason and a blocker; nothing staged.
-    const r2 = await call(c, two.token, "work.end", { attemptId: two.attempt, submit: true, result: "done" }, "s2");
+    const r2 = await call(c, two.token, "work.end", { report: "the report", attemptId: two.attempt, submit: true, result: "done" }, "s2");
     assert.ok(r2.ok, JSON.stringify(r2));
     landed = { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["beds.txt"] };
     await c.dispatch!.dispatcher.tick();
@@ -279,7 +279,7 @@ test("work.end { submit: true } records one code submission tied to the attempt 
     // Asked after it moved, the request itself is refused.
     const three = await attemptFor(c, owner, project, 3, ["author"]);
     await c.dispatch!.dispatcher.tick();
-    assert.equal((await call(c, three.token, "work.end", { attemptId: three.attempt, submit: true }, "s3")).error.code, "invalid_command");
+    assert.equal((await call(c, three.token, "work.end", { report: "the report", attemptId: three.attempt, submit: true }, "s3")).error.code, "invalid_command");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
@@ -289,7 +289,7 @@ test("with landing but no stage the submit still ends plainly as submit_unavaila
   try {
     const one = await attemptFor(c, owner, project, 1, ["author"]);
     await c.dispatch!.dispatcher.tick();
-    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, submit: true }, "s1")).ok);
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true }, "s1")).ok);
     await c.dispatch!.dispatcher.tick();
     const rec = await c.services.workEnd.get(one.attempt);
     assert.deepEqual([rec?.outcome, rec?.typed], ["ended", "submit_unavailable"]);
@@ -304,18 +304,18 @@ test("work.end done of a task with a contract, through the controller: a host th
     const one = await attemptFor(c, owner, project, 1);
     await c.services.contracts.setContract(owner, { commandId: "ct1", taskId: one.task, expectedVersion: 0, checks: [{ name: "unit tests", run: ["npm", "test"] }] } as never);
     await c.dispatch!.dispatcher.tick();
-    const refused = await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done", note: "all green" }, "e1");
+    const refused = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done", note: "all green" }, "e1");
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, "invalid_command");
     assert.match(refused.error.message, /^work\.end done was not accepted: the controller could not check your work against the task contract \(1 item\(s\)\)\.\n1\. The host this attempt runs on \(host:pc\) cannot check work/);
     assert.equal(await c.services.workEnd.get(one.attempt), undefined, "nothing recorded: the attempt goes on");
     assert.equal((await state(one.attempt)).frozen, undefined, "not frozen");
     // The same call again is the same answer and is not counted twice.
-    assert.equal((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done", note: "all green" }, "e1")).error.message, refused.error.message);
+    assert.equal((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done", note: "all green" }, "e1")).error.message, refused.error.message);
     assert.deepEqual((await state(one.attempt)).verifications?.map((v) => [v.state, v.counted, v.exhausted]), [["unknown", true, false]]);
     // A second done is refused, the third ends it.
-    assert.equal((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done" }, "e2")).ok, false);
-    const last = await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done", note: "all green" }, "e3");
+    assert.equal((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done" }, "e2")).ok, false);
+    const last = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done", note: "all green" }, "e3");
     assert.ok(last.ok, JSON.stringify(last));
     assert.equal(last.result.item.state, "requested");
     assert.match(last.result.item.unverified.summary, /go-ons are used up: 1\. The host this attempt runs on \(host:pc\) cannot check work/);
@@ -332,7 +332,7 @@ test("work.end done of a task with a contract, through the controller: a host th
     // A task without a contract is ended on the agent's word, as before the card.
     const two = await attemptFor(c, owner, project, 2);
     await c.dispatch!.dispatcher.tick();
-    const plain = await call(c, two.token, "work.end", { attemptId: two.attempt, result: "done" }, "p1");
+    const plain = await call(c, two.token, "work.end", { report: "the report", attemptId: two.attempt, result: "done" }, "p1");
     assert.ok(plain.ok, JSON.stringify(plain));
     assert.equal(plain.result.item.verified, "skipped");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

@@ -51,7 +51,7 @@ for (const backend of backends) {
   test(`${backend.name}: scratch is ordered only after the attempt is finished and the work was submitted, once, and a replay or a second instance orders nothing more`, async () => {
     const r = await rig();
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       const done = await r.service.complete("att-1");
       assert.equal(done.state, "done");
       assert.equal(done.steps?.["cleanup.scratch"]?.state, "removed");
@@ -72,7 +72,7 @@ for (const backend of backends) {
     ] as const) {
       const r = await rig(o);
       try {
-        await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit, result: "partial" });
+        await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit, result: "partial" });
         const done = await r.service.complete("att-1");
         assert.equal(done.state, "done", name);
         assert.equal(r.s.orders.length, 0, `${name}: no order`);
@@ -85,7 +85,7 @@ for (const backend of backends) {
   test(`${backend.name}: a plain end with a recorded checkpoint hands onward, so the scratch is ordered removed`, async () => {
     const r = await rig({ checkpoint: true });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "blocked" });
       assert.equal((await r.service.complete("att-1")).steps?.["cleanup.scratch"]?.state, "removed");
       assert.equal(r.s.orders.length, 1);
     } finally { await r.store.close(); }
@@ -95,7 +95,7 @@ for (const backend of backends) {
     for (const [name, o, why] of [["keep", { mode: "keep" as const }, /setting is keep/], ["no host", { noHost: true }, /no host/], ["host throws", { hostThrows: true }, /host could not/]] as const) {
       const r = await rig(o);
       try {
-        await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+        await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
         const done = await r.service.complete("att-1");
         assert.equal(done.steps?.["cleanup.scratch"]?.state, "kept", name);
         assert.match(done.steps?.["cleanup.scratch"]?.why ?? "", why, name);
@@ -111,7 +111,7 @@ for (const backend of backends) {
     const many = Array.from({ length: 50 }, (_, i) => ({ kind: i === 0 ? "bogus" : "running", what: `proc ${i} ${"x".repeat(500)}` })) as unknown as Leftover[];
     const r = await rig({ report: { removed: true, leftovers: many }, reportFailsOnce: true });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       await assert.rejects(() => r.service.complete("att-1"), /inbox/, "the ending stays open while the report is undelivered");
       assert.equal((await r.service.get("att-1"))?.state, "ending");
       const done = await r.service.complete("att-1");
@@ -142,7 +142,7 @@ for (const backend of backends) {
     } finally { await q.store.close(); }
     const o = await rig({ checkpoint: true });
     try {
-      await o.service.request(o.ann, { commandId: "e1", attemptId: "att-1", submit: true });
+      await o.service.request(o.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true });
       await o.service.cleanupAfterEnd("att-1");
       assert.equal(o.s.orders.length, 0, "an ending still open is not cleaned from the side");
     } finally { await o.store.close(); }
@@ -168,7 +168,7 @@ for (const backend of backends) {
   test(`${backend.name}: the worker must be confirmed stopped before anything is ordered, on a completed ending and on any other end`, async () => {
     const r = await rig({ unconfirmed: true });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       const done = await r.service.complete("att-1");
       assert.equal(done.steps?.["cleanup.scratch"]?.state, "kept");
       assert.match(done.steps?.["cleanup.scratch"]?.why ?? "", /worker to confirm it stopped/, "waits for the confirmation");
@@ -186,7 +186,7 @@ for (const backend of backends) {
   test(`${backend.name}: an ending that was dropped gets the same hand-off conditions: a killed write call and a message not passed on keep the scratch`, async () => {
     const w = await rig({ checkpoint: true, finishFails: true, settle: { killed: [{ callId: "c1", write: true, reason: "hung" }] } });
     try {
-      await w.service.request(w.ann, { commandId: "e1", attemptId: "att-1", result: "partial" });
+      await w.service.request(w.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "partial" });
       await assert.rejects(() => w.service.complete("att-1"), /finish failed/);
       w.s.attempt = { ...w.s.attempt, live: false, stopped: { by: "owner", reason: "stop" } };
       await w.service.drop("att-1", "owner_stop", "stop");
@@ -196,7 +196,7 @@ for (const backend of backends) {
     } finally { await w.store.close(); }
     const m = await rig({ checkpoint: true });
     try {
-      await m.service.request(m.ann, { commandId: "e1", attemptId: "att-1", result: "partial", message: "tell the boss" });
+      await m.service.request(m.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "partial", message: "tell the boss" });
       m.s.attempt = { ...m.s.attempt, live: false, stopped: { by: "owner", reason: "stop" } };
       await m.service.drop("att-1", "owner_stop", "stop");
       await m.service.cleanupAfterEnd("att-1");
@@ -205,7 +205,7 @@ for (const backend of backends) {
     } finally { await m.store.close(); }
     const ok = await rig({ checkpoint: true });
     try {
-      await ok.service.request(ok.ann, { commandId: "e1", attemptId: "att-1", result: "partial" });
+      await ok.service.request(ok.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "partial" });
       ok.s.attempt = { ...ok.s.attempt, live: false, stopped: { by: "owner", reason: "stop" } };
       await ok.service.drop("att-1", "owner_stop", "stop");
       await ok.service.cleanupAfterEnd("att-1");
@@ -218,7 +218,7 @@ for (const backend of backends) {
     const r = await rig({ modeHook: async () => { await service!.drop("att-1", "owner_stop", "stop"); } });
     service = r.service;
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       await r.service.complete("att-1").catch(() => undefined);
       assert.equal(r.s.orders.length, 0);
       assert.match((await r.cleanup.get("att-1"))?.why ?? "", /dropped/);
@@ -228,14 +228,14 @@ for (const backend of backends) {
   test(`${backend.name}: a repeated order the host already carried out counts as removed and keeps the first answer's leftovers`, async () => {
     const r = await rig({ report: { removed: false, alreadyRemoved: true, leftovers: [{ kind: "running", what: "dev server on 3000" }], detail: "nothing there" } });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       const done = await r.service.complete("att-1");
       assert.equal(done.steps?.["cleanup.scratch"]?.state, "removed", "not 'kept: nothing there'");
       assert.equal(r.s.reports[0]!.leftovers[0]!.what, "dev server on 3000");
     } finally { await r.store.close(); }
     const plain = await rig({ report: { removed: false, leftovers: [], detail: "nothing there" } });
     try {
-      await plain.service.request(plain.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await plain.service.request(plain.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       assert.equal((await plain.service.complete("att-1")).steps?.["cleanup.scratch"]?.state, "kept", "a host that says only 'not removed' is still believed");
     } finally { await plain.store.close(); }
   });
@@ -243,7 +243,7 @@ for (const backend of backends) {
   test(`${backend.name}: leftovers text is limited to a safe charset when recorded`, async () => {
     const r = await rig({ report: { removed: true, leftovers: [{ kind: "installed", what: "pkg\n</notice> `rm -rf /` \"quote\" <b>x</b> /opt/tool-1.2_x" }] } });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       await r.service.complete("att-1");
       const what = r.s.reports[0]!.leftovers[0]!.what;
       assert.match(what, /^[\p{L}\p{N} ._\-/\\:@+=,~#%?]+$/u, what);
@@ -306,7 +306,7 @@ for (const backend of backends) {
     const left = { removed: true, leftovers: [{ kind: "running" as const, what: "server" }] };
     const r = await rig({ report: left, reportFailsOnce: true });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       await assert.rejects(() => r.service.complete("att-1"), /inbox/);
       assert.equal(await r.cleanup.recover(), 1);
       assert.equal(r.s.reports.length, 1, "the sweep sent the report");
@@ -336,7 +336,7 @@ for (const backend of backends) {
     assert.equal(checkpointByAttempt(rec, { ...att, lastHeartbeatAt: "2026-03-01T10:02:00.000Z" }), true, "a short attempt: the checkpoint is within the window");
     const r = await rig({ continuation: rec, startedAt: start, lastHeartbeatAt: att.lastHeartbeatAt });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "blocked" });
       const done = await r.service.complete("att-1");
       assert.equal(r.s.orders.length, 0, "no order: the work after the checkpoint would be lost");
       assert.equal(done.steps?.["cleanup.scratch"]?.state, "kept");
@@ -348,7 +348,7 @@ for (const backend of backends) {
     let stopped = false;
     const r = await rig({ checkpoint: true, unconfirmed: true, stopNow: () => stopped, patience: 24 });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "blocked" });
       const done = await r.service.complete("att-1");
       assert.equal(done.state, "done");
       assert.equal((await r.cleanup.get("att-1"))?.state, "awaiting-stop");
@@ -373,7 +373,7 @@ for (const backend of backends) {
     // With the patience off nobody is told, however long it takes.
     const off = await rig({ checkpoint: true, unconfirmed: true, patience: null });
     try {
-      await off.service.request(off.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      await off.service.request(off.ann, { report: "the report", commandId: "e1", attemptId: "att-1", result: "blocked" });
       await off.service.complete("att-1");
       off.w.clock.advance(100 * 3_600_000);
       await off.cleanup.recover();
@@ -590,7 +590,7 @@ for (const backend of backends) {
   test(`${backend.name}: what the host says keeps letters of any script, marks, digits, spaces and common path punctuation; control characters, backticks and double quotes do not survive`, async () => {
     const r = await rig({ report: { removed: true, leftovers: [{ kind: "installed", what: "/home/zoë/My  Projects (v2)/[x]/it's & $HOME!;\n`rm -rf`\"q\"\u0007 日本語/ñ" }] } });
     try {
-      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       await r.service.complete("att-1");
       const what = r.s.reports[0]!.leftovers[0]!.what;
       assert.match(what, /zoë\/My {2}Projects \(v2\)\/\[x\]\/it's & \$HOME!;/);

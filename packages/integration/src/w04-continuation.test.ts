@@ -11,7 +11,7 @@ const NUDGE = /\[NimbleNewt: the turn goes on\] Remaining: the unchecked steps o
 test("an agent that yields thinking-only twice and then calls work.end is nudged twice in the same turn and succeeds in one run, with its nudges recorded (card W04)", async (t) => {
   const launcher = await sandbox(t);
   if (launcher === undefined) return;
-  const x = await rig(launcher, [{ thinking: "I should read the parser." }, { thinking: "Then fix it." }, { call: { name: "nimblenewt__work-end", args: { result: "done", note: "parser fixed" } } }, { text: "Ended: the parser is fixed." }]);
+  const x = await rig(launcher, [{ thinking: "I should read the parser." }, { thinking: "Then fix it." }, { call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "parser fixed" } } }, { text: "Ended: the parser is fixed." }]);
   try {
     await x.run();
     const d = await x.get();
