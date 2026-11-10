@@ -193,6 +193,14 @@ test("killProcessesInSync never stops this process or its parents, even when the
   const killed = killProcessesInSync(dir);
   assert.deepEqual(killed, [c.pid]);
   assert.ok(!killed.includes(process.pid) && !killed.includes(process.ppid));
+  // A process that itself carries the mark (a bench started from a marked shell) stops its marked child, never itself.
+  const runner = new URL("./lib/runner.mjs", import.meta.url).href;
+  const script = `import { spawn } from "node:child_process"; import { killProcessesInSync } from ${JSON.stringify(runner)};
+const c = spawn("sleep", ["30"], { stdio: "ignore", detached: true }); c.unref();
+await new Promise((r) => setTimeout(r, 100));
+process.stdout.write(JSON.stringify({ child: c.pid, killed: killProcessesInSync(${JSON.stringify(dir)}) }));`;
+  const r = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: tmpdir(), env: { ...process.env, PI_EVAL_RUN_DIR: dir }, encoding: "utf8" }));
+  assert.deepEqual(r.killed, [r.child], "the marked process stops its marked child and survives to report it");
 });
 
 // An acceptance suite: bench-owned tests at a fresh path, scored instead of the shipped tests, which still run for information.

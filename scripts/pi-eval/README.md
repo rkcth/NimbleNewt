@@ -100,7 +100,10 @@ node scripts/pi-eval/compare.mjs --results /srv/code/worktrees-pi/eval-results
 
 Run it from the repository root (the agent path is resolved from the current directory). The Claude run is not
 isolated any better than Pi's (see "Not done yet"): it runs as the same user, and Claude Code also loads that user's
-settings and memory, so read its log for paths outside the checkout before trusting a finish.
+settings and memory, so read its log for paths outside the checkout before trusting a finish. Bash is allowed without
+a restriction (only Edit and Write are limited to the checkout by `acceptEdits`), so a Bash command can read and write
+anything that user can, including the reference checkouts and other worktrees; run it only when nothing else is working
+in them. A full control pass (9 tasks, one repeat) is up to 9 runs of 60 to 180 minutes on the account's quota.
 
 `compare.mjs` groups records by their agent label (`--label`, else the agent's path) and shows per task and variant
 each agent's finishes and outcomes, then per agent: finishes, false done, interface mismatches, other endings and the
@@ -133,9 +136,11 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
 Throwaway checkouts are `/srv/code/worktrees-pi/eval-work/eval-<runId>` (`--work-root` / `PI_EVAL_WORK_ROOT`), in a
 directory of their own so the agent's parent directory is not the one holding the merged worktrees. Each is removed after
 its run, and on Ctrl-C (`--keep` keeps them; calibration checkouts are `eval-calibrate-<task>-<pid>`). On Linux, any
-process whose working directory is still inside a checkout when the agent ends, the run ends or Ctrl-C arrives (Pi starts
-its bash tools in their own process groups, so a hung test or a background server survives the group stop) is killed
-first; a process that `cd`s elsewhere is not seen, and on other systems only the agent's own process group is stopped.
+process left over when the agent ends, after each suite, when the run ends or when Ctrl-C arrives (Pi starts its bash
+tools in their own process groups, so a hung test or a background server survives the group stop) is killed first: one
+working inside the checkout, one carrying the run's `PI_EVAL_RUN_DIR` mark, or a descendant of either (never the bench
+itself or its parents). A process that both left the checkout and dropped or replaced its environment, and does not
+descend from one that is seen, is missed; on other systems only the agent's own process group is stopped.
 
 ## What a run does
 
@@ -269,7 +274,9 @@ capture, hidden tests copied in and run, classification and the report. One run 
 - **Variants C and D** wait for W04 (and D for a session the runner can relaunch).
 - **Spec fit is lexical.** It sees literals, regexes, property names and imports inside assertions; it does not see a
   demand built at run time (a helper that compares against a computed string), the order or count of outputs, or the
-  types an acceptance file relies on beyond its imports. The CONTRACT blocks were written by reading each acceptance file;
+  types an acceptance file relies on beyond its imports. A literal kept in a constant outside the assertions
+  (`const MARK = "..."; ... assert.ok(x.includes(MARK))`) is read as the test's own fixture, so it is never flagged:
+  check such constants by hand (on 2026-11-10 a search found each one to be a fixture input, a negative check, or text in the prompt or the base source). The CONTRACT blocks were written by reading each acceptance file;
   an interface mismatch in a new run still points at a gap there.
 - **Isolation is of the checkout, not the machine.** The agent's repository cannot reach the solution, but Pi runs as the
   same user and can read any file that user can: the other worktrees under `/srv/code/worktrees-pi` (several hold these
