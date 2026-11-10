@@ -260,3 +260,48 @@ test("doneState says what is not committed, the commits and changes ahead of the
     ], "paths are taken literally: a pattern matches no other file");
   } finally { await w.done(); }
 });
+
+test("doneState runs no filter, diff driver, hook or fsmonitor the agent's checkout names, even in a repository it nests, and takes odd evidence paths literally (card W05 second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    const made = await w.ws.ensure(scope);
+    const marker = join(w.dir, "ran");
+    const touch = `touch ${JSON.stringify(marker)}; cat`;
+    const evil = `[core]\n\tfsmonitor = ${touch}\n\thooksPath = .git/hooks\n[filter "evil"]\n\tclean = ${touch}\n\tprocess = ${touch}\n[diff "evil"]\n\ttextconv = ${touch}\n\tcommand = ${touch}\n`;
+    // A .git of its own at the top, and a repository nested in a folder (git takes it for a submodule entry and reads its head), each with commands in its configuration.
+    await writeFile(join(made.checkout, ".gitattributes"), "* filter=evil diff=evil\n");
+    await mkdir(join(made.checkout, ".git", "hooks"), { recursive: true });
+    await writeFile(join(made.checkout, ".git", "config"), evil);
+    const nested = join(made.checkout, "vendor", "lib");
+    await mkdir(nested, { recursive: true });
+    sh(nested, "init", "-q", "-b", "main");
+    await writeFile(join(nested, "x.txt"), "x\n");
+    sh(nested, "add", "-A"); sh(nested, "commit", "-q", "-m", "x");
+    await writeFile(join(nested, ".git", "config"), evil);
+    await writeFile(join(nested, ".gitattributes"), "* filter=evil\n");
+    // Paths an option parser or a pattern could misread, a folder behind a link, and the evidence the agent wrote.
+    await writeFile(join(made.checkout, "-n"), "dash\n");
+    await writeFile(join(made.checkout, "--all"), "dashes\n");
+    await writeFile(join(made.checkout, "src", "[ab].ts"), "brackets\n");
+    await mkdir(join(w.dir, "outside"));
+    await writeFile(join(w.dir, "outside", "secret.txt"), "outside the checkout\n");
+    await symlink(join(w.dir, "outside"), join(made.checkout, "out"));
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    const got = await w.ws.doneState(scope, ["-n", "--all", "src/[ab].ts", "src/a.ts", "out/secret.txt", "out", "vendor/lib", "vendor/lib/x.txt", ".git/config"]);
+    assert.equal(existsSync(marker), false, "nothing the checkout names was run");
+    assert.deepEqual(got?.evidence, [
+      { path: "-n", present: true },
+      { path: "--all", present: true },
+      { path: "src/[ab].ts", present: true },
+      { path: "src/a.ts", present: true },
+      { path: "out/secret.txt", present: false, why: "not in the checkout (or ignored)" },
+      { path: "out", present: false, why: "not a plain file" },
+      { path: "vendor/lib", present: false, why: "not a plain file" },
+      { path: "vendor/lib/x.txt", present: false, why: "not in the checkout (or ignored)" },
+      { path: ".git/config", present: false, why: "not in the checkout (or ignored)" },
+    ], "a dash is a path, a pattern is a path, nothing behind a link or inside a nested repository or git's own data is evidence");
+    assert.ok((got?.changed ?? 0) >= 6, "the change is seen");
+    assert.deepEqual((await readdir(made.gitDir)).filter((f) => f.startsWith("nn-index-")), [], "the throwaway index is removed");
+  } finally { await w.done(); }
+});
