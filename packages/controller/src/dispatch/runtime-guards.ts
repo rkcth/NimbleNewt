@@ -46,9 +46,10 @@ export interface GuardBinding {
   readonly confirms?: boolean;
   /**
    * Card C07i: the starting-size watch. Every first call these guards judge (admitted or refused, a route of unknown window too) is given to it with its size, the route's startup limit and what the call is made of; `worker` says
-   * which kind of host the attempt is on. It only records and tells: it never changes the call, and a failure of it never changes the decision.
+   * which kind of host the attempt is on. It only records and tells: it never changes the call, and a failure of it never changes the decision. The guards wait for it at most `waitMs` (default
+   * `START_SIZE_WAIT_MS`): a watch held up (a database that does not answer) goes on by itself, and the first call is not kept waiting for it.
    */
-  readonly startSize?: { readonly worker: "local" | "remote"; record(sample: StartSizeSample): Promise<void> };
+  readonly startSize?: { readonly worker: "local" | "remote"; record(sample: StartSizeSample): Promise<void>; readonly waitMs?: number };
 }
 
 /** The most admitted rounds kept for `confirm` at once; the oldest is forgotten past it (an attempt whose host never confirmed: it lost its process, or was refused after admission). Its usage is then not calibrated. */
@@ -70,6 +71,9 @@ function framed(id: string, sender: string, purpose: string, text: string): stri
 /** Card C07n: why a route nobody gives a window is refused, in the words the agent's refusal and the owner's blocker both read. */
 /** Card C07n review: a figure that is a context window — a positive safe integer. Anything else (0, negative, fractional, NaN, infinite, not a number) is no window, from the host or the routing table alike. */
 export const usableWindow = (w: unknown): number | undefined => (typeof w === "number" && Number.isSafeInteger(w) && w > 0 ? w : undefined);
+
+/** How long the guards wait for the starting-size watch before a first call goes on without it (card C07i): it only records and tells. */
+export const START_SIZE_WAIT_MS = 2_000;
 
 /** The window whose characters-per-token figure sizes a call on a route of unknown window for the watch (the budget's own figure does not depend on the window). */
 const NOMINAL_WINDOW = 131_072;
@@ -145,8 +149,14 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
         const key = `${round}${launch === undefined ? "" : `~${launch}`}`;
         // Card C07i: the watch is told of every call judged here; it never changes the decision.
         const watch = async (judged: Parameters<typeof startSizeSample>[6]): Promise<void> => {
-          if (binding.startSize === undefined) return;
-          try { await binding.startSize.record(startSizeSample(context, binding, order, call, binding.startSize.worker, key, judged)); } catch { /* the watch reports its own failures; the decision stands */ }
+          const watcher = binding.startSize;
+          if (watcher === undefined) return;
+          // The watch reports its own failures; the decision stands. It is awaited (so its record is in order with the call) but only so long.
+          let pending: Promise<unknown>;
+          try { pending = watcher.record(startSizeSample(context, binding, order, call, watcher.worker, key, judged)).catch(() => undefined); } catch { return; }
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([pending, new Promise<void>((resolve) => { timer = setTimeout(resolve, watcher.waitMs ?? START_SIZE_WAIT_MS); })]);
+          clearTimeout(timer);
         };
         // Card C07n: a route of unknown window is never admitted unchecked. A compaction cannot make a window known, so this refusal says it is final.
         if (window === undefined) { const refused = await refuseUnknownWindow(order, "first call"); await watch({ admitted: false }); return refused; }

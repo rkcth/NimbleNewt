@@ -10,7 +10,7 @@ import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate }
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, compactionKeep, startupItems, type DecisionDeps } from "../decisions/index.js";
-import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, START_PART_WORDS, type ContextRouteSettingsService, type HandoffFacts, type StartSizeSample } from "../context/index.js";
+import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, startSizeRecorder, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
 import type { LandingPolicyFigures } from "./landing-policy.js";
@@ -463,24 +463,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     return moved;
   };
   /**
-   * Card C07i: the starting-size watch, given every first call the guards judge on the local host and on each remote host. An alert it opens reaches the owner once (the notification's command ID is the alert's), and the task's
+   * Card C07i: the starting-size watch, given every first call the guards judge on the local host and on each remote host. An alert it opens reaches the owner once (the notification's command ID is the alert's; one whose telling failed is told at the task's next first call), and the task's
    * status shows it while it is open. A rising run is a Notice (nothing waits on the owner yet); a call past the owner's share of its limit is Needs you, since the next growth is refused. A failure is reported, never raised.
    */
   const startSizes = StartSizeService.withEpoch(storage, epoch, ro);
-  const startSize = (worker: "local" | "remote") => ({
-    worker,
-    record: async (sample: StartSizeSample): Promise<void> => {
-      try {
-        const r = await startSizes.record(principal, sample);
-        for (const a of r.opened) {
-          const top = a.contributors[0];
-          const what = a.kind === "trend" ? `rose over ${a.tokens.length - 1} hand-offs in a row (${a.tokens[0]} to ${a.tokens[a.tokens.length - 1]} tokens)` : `is ${a.share} percent of its route's startup limit`;
-          const detail = `Task ${sample.taskId}: its starting size ${what}${top === undefined ? "" : `; largest: ${START_PART_WORDS[top.part]} ${top.tokens}`}. Nothing was cut. See its start_size status.`;
-          await notifications.emitFromController({ commandId: `css-alert:${a.id}`, kind: "maintenance", level: a.kind === "share" ? "needs-you" : "notice", ref: { kind: "ctx-start-size", id: a.id }, projectId: r.projectId, label: `starting size of task ${sample.taskId} ${a.kind === "trend" ? "rising" : "near its limit"}`, detail: detail.slice(0, 200) });
-        }
-      } catch (error) { i.onError?.(error); }
-    },
-  });
+  const recordStartSize = startSizeRecorder(startSizes, principal, notifications, i.onError);
+  const startSize = (worker: "local" | "remote") => ({ worker, record: recordStartSize });
   const remedies = "choose a route with a larger window, reduce the task contract, supersede decisions or reassign the task";
   // Remote MCP servers (cards T03, H12g, H12k): built before the local host so the host is given the same connector and client the handle carries.
   const mcpParts = (() => {

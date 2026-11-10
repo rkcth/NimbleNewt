@@ -267,9 +267,38 @@ export class StartSizeService {
     return { ...(found.body as unknown as StartSizeBody), revision: found.revision, settings };
   }
 
-  /** The alerts open on a task, for the controller's own views (the task status). */
+  /** The alerts open on a task, for the controller's own views (the task status) and for telling the owner of them. */
   async openAlerts(taskId: string): Promise<readonly StartSizeAlert[]> {
     const b = (await this.#runner.get(KIND, seriesId(checkTaskId(taskId))))?.body as unknown as StartSizeBody | undefined;
     return [b?.alerts.trend, b?.alerts.share].filter((a): a is StartSizeAlert => a !== undefined && a.state === "open");
   }
+}
+
+/** What the recorder needs of the notifications: the controller's own emit, idempotent by command ID (a repeat of one already applied is answered with what it recorded and notifies nobody again). */
+export interface StartSizeNotify {
+  emitFromController(command: { commandId: string; kind: "maintenance"; level: "notice" | "needs-you"; ref: { kind: string; id: string }; projectId: string; label: string; detail: string }): Promise<unknown>;
+}
+
+/**
+ * The watch as the guards are given it (card C07i): records one first call, then tells the owner of every alert open on the task. The notification's command ID is the alert's, so an alert already told is a repeat that
+ * notifies nobody again, and one whose telling failed (the notifications were unavailable, or the controller stopped between the record and the telling) is told at the task's next first call instead of never: a
+ * repeat of the record itself opens nothing. A repeat refused as a different command (the owner answered the first notice and the item moved on) means it was told. Failures are reported, never raised.
+ */
+export function startSizeRecorder(service: Pick<StartSizeService, "record" | "openAlerts">, by: Principal, notify: StartSizeNotify, onError?: (error: unknown) => void): (sample: StartSizeSample) => Promise<void> {
+  return async (sample) => {
+    let projectId: string;
+    try { projectId = (await service.record(by, sample)).projectId; } catch (error) { onError?.(error); return; }
+    let open: readonly StartSizeAlert[];
+    try { open = await service.openAlerts(sample.taskId); } catch (error) { onError?.(error); return; }
+    for (const a of open) {
+      const top = a.contributors[0];
+      const what = a.kind === "trend" ? `rose over ${a.tokens.length - 1} hand-offs in a row (${a.tokens[0]} to ${a.tokens[a.tokens.length - 1]} tokens)` : `is ${a.share} percent of its route's startup limit`;
+      const detail = `Task ${sample.taskId}: its starting size ${what}${top === undefined ? "" : `; largest: ${START_PART_WORDS[top.part]} ${top.tokens}`}. Nothing was cut. See its start_size status.`;
+      try {
+        await notify.emitFromController({ commandId: `css-alert:${a.id}`, kind: "maintenance", level: a.kind === "share" ? "needs-you" : "notice", ref: { kind: "ctx-start-size", id: a.id }, projectId, label: `starting size of task ${sample.taskId} ${a.kind === "trend" ? "rising" : "near its limit"}`, detail: detail.slice(0, 200) });
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "command_conflict")) onError?.(error);
+      }
+    }
+  };
 }

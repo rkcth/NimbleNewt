@@ -71,6 +71,15 @@ for (const backend of backends) {
       // A watch that fails changes nothing: the call is admitted as it would have been.
       const { taskId: other } = await w.task("other", ann);
       assert.equal((await bind("local", true).admit({ ...order(0), taskId: other }, call(100), 1)).admit, true);
+      // A watch that is held up (its database does not answer) does not hold the first call: the guards wait for it only so long, local and of unknown window alike.
+      const hung = controllerGuards({
+        context, pause: w.pauses, messages: {} as never, system: w.dispatcherPrincipal, agent: async () => w.dispatcherPrincipal, assignee: async () => w.dispatcherPrincipal,
+        window: hostWindow, routeWindow: async () => undefined, startSize: { worker: "local", waitMs: 20, record: () => new Promise<void>(() => undefined) },
+      }).context!;
+      const began = Date.now();
+      assert.equal((await hung.admit({ ...order(1), taskId: other }, call(100), 1)).admit, true);
+      assert.equal((await hung.admit({ ...order(2), taskId: other, route: "unknown/model" }, call(100), 1)).admit, false);
+      assert.ok(Date.now() - began < 1500, `the first calls waited ${Date.now() - began} ms for the watch`);
 
       // Remote: judged before the offer, recorded as the remote host's, and the host is not given the controller's measure of the order.
       const placed: WorkOrder[] = [];

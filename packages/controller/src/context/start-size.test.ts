@@ -4,7 +4,8 @@ import { DomainError, ProjectService } from "../domain/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { START_SIZE_LIMITS, StartSizeService, risingRun, startSizeAlertText, type StartSizeSample } from "./index.js";
+import { NotificationService } from "../notifications/index.js";
+import { START_SIZE_LIMITS, StartSizeService, risingRun, startSizeAlertText, startSizeRecorder, type StartSizeNotify, type StartSizeSample } from "./index.js";
 
 after(stopServer);
 
@@ -165,5 +166,33 @@ for (const backend of backends) {
     await refuses("invalid_command", () => watch.record(host, sample(t, 1, -5)));
     await refuses("invalid_command", () => watch.record(host, sample(t, 1, 5, { parts: { secret: 3 } as never })));
     await refuses("invalid_command", () => watch.record(host, sample(t, 1, 5, { worker: "elsewhere" as never })));
+  });
+
+  suite("an alert whose telling failed is told at the task's next first call, once: a told alert is not told again, also after the owner's item moved on", async ({ watch, storage, owner, host, t, projects }) => {
+    const notifications = NotificationService.withEpoch(storage, projects.epoch, options);
+    let down = true;
+    const sent: string[] = [];
+    const notify: StartSizeNotify = { emitFromController: async (c) => { sent.push(c.commandId); if (down) throw new DomainError("unavailable", "the notifications are down"); return notifications.emitFromController(c); } };
+    const errors: unknown[] = [];
+    const record = startSizeRecorder(watch, host, notify, (e) => errors.push(e));
+    const told = async () => (await notifications.inbox(owner)).items.filter((i) => i.ref.kind === "ctx-start-size");
+    for (const [i, s] of [1000, 2000, 3000, 4000].entries()) await record(sample(t, i, s));
+    assert.equal(sent.length, 1, "the rise is told when it opens");
+    assert.equal(errors.length, 1);
+    assert.deepEqual(await told(), [], "and the telling failed");
+    // A replay of the same admission opens nothing, but the open alert is told again: this time it gets through.
+    down = false;
+    await record(sample(t, 3, 4000));
+    assert.equal((await told()).length, 1);
+    // Later first calls with the alert still open are repeats of the same notification: nobody is told twice.
+    await record(sample(t, 4, 5000));
+    await record(sample(t, 5, 6000));
+    const items = await told();
+    assert.deepEqual([items.length, items[0]!.count], [1, 1]);
+    // The owner's item moved on (settled): a repeat is refused as another command and is not an error, and no second item is made.
+    await notifications.settleFromController({ commandId: "settle-1", kind: "maintenance", ref: items[0]!.ref, projectId: items[0]!.projectId! });
+    await record(sample(t, 6, 7000));
+    assert.equal(errors.length, 1, String(errors.slice(1)));
+    assert.deepEqual((await told()).filter((i) => i.state !== "settled"), []);
   });
 }
