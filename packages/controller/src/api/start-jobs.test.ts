@@ -152,6 +152,9 @@ test("an agent starts a job through the bridge and keeps a durable handle; statu
       const started = good(await send("job.start", { tool: toolName, version: "1.0.0", input: { target: "site" }, label: "site build" }, "start-1"));
       handle = started["jobId"];
       assert.match(handle, /^job-[a-z2-7]{20}$/);
+      // Card W11: the reply says what the agent can rely on when the job ends.
+      assert.match(started["whenItEnds"], /this task is woken once to read it, unless the task is stopped, paused \(it is then woken when the pause is lifted\), finished or reassigned first/);
+      assert.match(started["whenItEnds"], /do not promise anyone any other notification/);
       assert.equal(good(await send("job.start", { tool: toolName, version: "1.0.0", input: { target: "site" }, label: "site build" }, "start-1"))["jobId"], handle, "the same call is the same job");
       // A different request under a used call ID is refused, not a second job.
       refused(await send("job.start", { tool: toolName, version: "1.0.0", input: { target: "other" } }, "start-1"), "invalid_command");
@@ -221,6 +224,8 @@ test("an agent starts a job through the bridge and keeps a durable handle; statu
     const view = (await c.chat!.submit(boot.token, { messageId: "m1", text: asked })).outcomes[0] as { status: string; lines?: readonly { text: string }[] };
     const lines = (view.lines ?? []).map((l) => l.text).join("\n");
     assert.match(lines, new RegExp(`${other2} "a_[a-z0-9]+\\.build 1\\.0\\.0" \\(tool\\) of task ${other}: cancellation requested.*not obeyed, Force Stop is offered`), lines);
+    // Card W11: the jobs view also says how the jobs that ended went and what became of their wake, so the owner can ask about one in their own words.
+    assert.match(lines, new RegExp(`job\\(s\\) ended most recently:\\n${handle} "site build" \\(tool\\) of task ${build}: cancelled at [^;]+; its task was not woken: the task's own agent stopped the job; you were told\\.`), lines);
     const order = `Force stop ${other2} now, it ignored the stop.`;
     say[order] = [{ kind: "command", op: "job.cancel", args: { jobId: other2, reason: "it ignored the stop", force: true }, evidence: order, basis: "owner" }];
     let outcome = (await c.chat!.submit(boot.token, { messageId: "m2", text: order })).outcomes[0] as { status: string; proposalId?: string };

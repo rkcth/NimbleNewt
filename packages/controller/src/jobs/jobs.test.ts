@@ -10,6 +10,7 @@ import type { PauseOptions } from "../lifecycle/index.js";
 import { JOB_LIMITS, JobService, LocalJobRuns, decideAtStart, type JobBody, type JobLauncher, type JobOptions, type JobProcessEnd } from "./index.js";
 import type { ScriptLaunch } from "../toolbridge/index.js";
 import { callToolAsJob, type McpJobCall, type RemoteToolResult } from "../mcp/index.js";
+import { JOB_WAKE_KIND, JOB_WAKES_INDEX, JOB_WAKE_LIMITS, wakeIdOf, type JobWakeBody, type JobWakesIndex } from "./wakes.js";
 
 after(stopServer);
 
@@ -911,4 +912,77 @@ for (const backend of backends) {
     await runs.close();
   });
 
+
+  suite("card W11: every final state of a waking job writes one wake record in the same commit, on the due list; a repeated end writes none; a reconciliation of an unknown outcome writes its own; model requests and a service without wakes write none", async (c) => {
+    const wakes = async (): Promise<JobWakeBody[]> => (await c.storage.listAggregates(JOB_WAKE_KIND, { limit: 1000 })).map((a) => a.body as unknown as JobWakeBody);
+    const index = async (): Promise<JobWakesIndex> => (await c.storage.getAggregate(JOB_WAKES_INDEX))!.body as unknown as JobWakesIndex;
+    const running = async (extra: Partial<Parameters<JobService["admit"]>[1]> = {}): Promise<string> => {
+      const id = await c.admit(c.t1, { attemptId: "att-aaaaaaaaaaaaaaaaaaaa", ...extra });
+      await c.jobs.report(c.worker, { commandId: cid("d"), jobId: id, state: "dispatched" });
+      await c.jobs.report(c.worker, { commandId: cid("r"), jobId: id, state: "running" });
+      return id;
+    };
+    // Off by default: nothing is written.
+    const off = await running();
+    await c.jobs.finish(c.worker, { commandId: cid("f"), jobId: off, outcome: "completed" });
+    assert.deepEqual(await wakes(), []);
+
+    const jobs = c.reopen({ wakes: true });
+    // Before any end the running jobs are what an attempt can wait for.
+    const completed = await running(), failed = await running(), cancelled = await running(), unknown = await running(), decided = await running();
+    assert.deepEqual((await jobs.waitable(c.t1)).sort(), [completed, failed, cancelled, unknown, decided].sort());
+    assert.deepEqual(await jobs.waitable(c.t2), []);
+    await jobs.finish(c.worker, { commandId: "fin-c", jobId: completed, outcome: "completed", exit: { code: 0 } });
+    await jobs.finish(c.worker, { commandId: "fin-c", jobId: completed, outcome: "completed", exit: { code: 0 } });
+    await jobs.finish(c.worker, { commandId: cid("f"), jobId: failed, outcome: "failed", exit: { code: 1, reason: "the job exited with code 1" } });
+    await jobs.requestCancel(c.owner, { commandId: cid("c"), jobId: cancelled, reason: "not needed" });
+    await jobs.confirmCancel(c.owner, { commandId: cid("u"), jobId: cancelled, result: "uncooperative" });
+    assert.equal((await wakes()).length, 2, "a stop that was not obeyed is not a final state");
+    await jobs.confirmCancel(c.owner, { commandId: cid("s"), jobId: cancelled, result: "stopped" });
+    await jobs.markUnknown(c.owner, { commandId: cid("k"), jobId: unknown, reason: "the host was lost" });
+    await jobs.decide(c.owner, { commandId: cid("dc"), jobId: decided, decision: "complete", reason: "the log says it finished", exit: { code: 0 } });
+    let all = await wakes();
+    assert.deepEqual(all.map((w) => [w.jobId, w.state, w.phase, w.status]).sort(), [[completed, "completed", "end", "due"], [failed, "failed", "end", "due"], [cancelled, "cancelled", "end", "due"], [unknown, "outcome_unknown", "end", "due"], [decided, "completed", "end", "due"]].sort());
+    assert.ok(all.every((w) => w.taskId === c.t1 && w.label === "build the project" && w.attemptId === "att-aaaaaaaaaaaaaaaaaaaa" && w.kind === "tool"));
+    assert.deepEqual((await index()).due, [completed, failed, cancelled, unknown, decided].map((j) => wakeIdOf(j, "end")));
+    assert.deepEqual((await index()).recent.map((r) => r.jobId), [completed, failed, cancelled, unknown, decided]);
+    // Ended with their wakes due, they are still what an attempt waits for (the wake comes at the next tick).
+    assert.deepEqual((await jobs.waitable(c.t1)).sort(), [completed, failed, cancelled, unknown, decided].sort());
+
+    await jobs.reconcile(c.owner, { commandId: cid("rc"), jobId: unknown, to: "failed", evidence: "the output file is empty" });
+    all = await wakes();
+    assert.equal(all.length, 6);
+    const rec = all.find((w) => w.phase === "reconciled")!;
+    assert.deepEqual([rec.jobId, rec.state, rec.status], [unknown, "failed", "due"]);
+    assert.equal((await index()).recent.length, 5, "a reconciliation is not a new end in the recent list");
+
+    // A model request is part of a turn: it wakes nothing.
+    const model = await c.admit(c.t1, { kind: "model_request", operationId: "model-1" });
+    await jobs.report(c.worker, { commandId: cid("d"), jobId: model, state: "dispatched" });
+    await jobs.finish(c.worker, { commandId: cid("f"), jobId: model, outcome: "completed" });
+    assert.equal((await wakes()).length, 6);
+
+    // The owner's view of the recent ends: newest first, only what the viewer may read.
+    const recent = await jobs.recentlyEnded(c.owner, 3);
+    assert.deepEqual(recent.map((r) => r.job.id), [decided, unknown, cancelled]);
+    assert.deepEqual(await jobs.recentlyEnded(c.stranger, 3), []);
+    assert.ok(JOB_WAKE_LIMITS.recent >= 5);
+  });
+
+  suite("card W11: the recent list is bounded and the due list past its bound records the end as not woken", async (c) => {
+    const jobs = c.reopen({ wakes: true });
+    // A due list already at its bound.
+    const full: JobWakesIndex = { due: Array.from({ length: JOB_WAKE_LIMITS.due }, (_, i) => `jwk-${String(i).padStart(20, "a")}`), recent: [] };
+    await c.storage.applyOperation({ operationId: "seed-index", epoch: c.epoch, actor: "test", correlationId: "seed-index", at: clock(), changes: [{ type: "create", ref: JOB_WAKES_INDEX, body: full as never }], audit: [{ type: "test.seed", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    for (let i = 0; i < JOB_WAKE_LIMITS.recent + 2; i++) {
+      const id = await c.admit(c.t1);
+      await jobs.report(c.worker, { commandId: cid("d"), jobId: id, state: "dispatched" });
+      await jobs.finish(c.worker, { commandId: cid("f"), jobId: id, outcome: "completed" });
+    }
+    const index = (await c.storage.getAggregate(JOB_WAKES_INDEX))!.body as unknown as JobWakesIndex;
+    assert.equal(index.due.length, JOB_WAKE_LIMITS.due);
+    assert.equal(index.recent.length, JOB_WAKE_LIMITS.recent);
+    const wakes = (await c.storage.listAggregates(JOB_WAKE_KIND, { limit: 1000 })).map((a) => a.body as unknown as JobWakeBody);
+    assert.ok(wakes.every((w) => w.status === "skipped" && /were already waiting/.test(w.reason ?? "")));
+  });
 }
