@@ -80,7 +80,7 @@ test("the owner sets a route's reply limit and reasoning cap through the state A
       assert.deepEqual((await call("routing.budgets", {})).result.routes, [{ route: "openrouter/qwen", contextTokens: 100_000 }, { route: "strata/qwen", contextTokens: 100_000, maxTokens: 8000, reasoningTokens: 2000 }]);
       const lines = await view();
       assert.match(lines, /1 route\(s\) have a reply limit or a reasoning cap \(a reply cut off at its limit is continued with a nudge to stop deliberating and act\):/);
-      assert.match(lines, /strata\/qwen: replies at most 8000 tokens, reasoning at most 2000 tokens\./);
+      assert.match(lines, /strata\/qwen: replies at most 8000 tokens, reasoning at most 2000 tokens \(no endpoint kind is configured on the controller for this route: on an OpenAI-style endpoint the figures are sent only if the host names the kind; when they are not sent, the task's activity says so\)\./, "the owner can tell why a budget may do nothing");
       assert.doesNotMatch(lines, /openrouter\/qwen:/, "a route without a budget is not listed");
     } finally { await c.close(); }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

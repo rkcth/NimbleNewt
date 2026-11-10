@@ -6,7 +6,7 @@ import type { RouteBudget } from "../routing/policy.js";
  *
  * | wire              | kind                                   | reply limit             | reasoning cap                                     |
  * |-------------------|----------------------------------------|-------------------------|---------------------------------------------------|
- * | messages          | any                                    | `max_tokens`            | `thinking.budget_tokens` (only when it reasons)    |
+ * | messages          | any                                    | `max_tokens`            | `thinking.budget_tokens` (only a fixed `enabled` budget; adaptive thinking: not sent) |
  * | chat/completions  | `openai`                               | `max_completion_tokens` | not sent: OpenAI takes an effort level, not tokens |
  * | chat/completions  | `vllm`, `radiance` (vLLM)              | `max_tokens`            | `thinking_token_budget`                           |
  * | chat/completions  | `llama-cpp`                            | `max_tokens`            | `thinking_budget_tokens`                          |
@@ -37,22 +37,27 @@ export function applyRouteBudget(body: Record<string, unknown>, wire: "chat/comp
   if (maxTokens === undefined && reasoningTokens === undefined) return { sent, notSent };
   if (wire === "messages") {
     if (maxTokens !== undefined) { body["max_tokens"] = maxTokens; sent["max_tokens"] = maxTokens; }
-    if (reasoningTokens !== undefined) {
-      const thinking = body["thinking"];
-      const reasons = thinking !== null && typeof thinking === "object" && !Array.isArray(thinking) && (thinking as { type?: unknown }).type !== "disabled";
-      if (reasons) {
-        const ceiling = num(body["max_tokens"]);
-        const asked = num((thinking as { budget_tokens?: unknown }).budget_tokens);
-        const cap = Math.min(reasoningTokens, asked ?? Infinity, ceiling === undefined ? Infinity : ceiling - 1);
+    const thinking = body["thinking"];
+    const type = thinking !== null && typeof thinking === "object" && !Array.isArray(thinking) ? (thinking as { type?: unknown }).type : undefined;
+    if (type === "enabled") {
+      // A fixed budget (the models that take one). Lowered to the cap, and always kept below max_tokens: Anthropic refuses `budget_tokens >= max_tokens`, so a lower reply limit alone would otherwise make every call of the route fail.
+      const ceiling = num(body["max_tokens"]);
+      const asked = num((thinking as { budget_tokens?: unknown }).budget_tokens);
+      const cap = Math.min(reasoningTokens ?? Infinity, asked ?? Infinity, ceiling === undefined ? Infinity : ceiling - 1);
+      if (Number.isFinite(cap) && cap !== asked) {
         if (cap < ANTHROPIC_MIN_THINKING) {
           body["thinking"] = { type: "disabled" };
-          notSent.push(`the reasoning cap (${reasoningTokens} tokens) is below the provider's smallest reasoning budget (${ANTHROPIC_MIN_THINKING}), so reasoning was turned off for the call`);
+          notSent.push(reasoningTokens !== undefined && cap === reasoningTokens
+            ? `the reasoning cap (${reasoningTokens} tokens) is below the provider's smallest reasoning budget (${ANTHROPIC_MIN_THINKING}), so reasoning was turned off for the call`
+            : `the reply limit (${ceiling} tokens) leaves no room for the provider's smallest reasoning budget (${ANTHROPIC_MIN_THINKING}), so reasoning was turned off for the call`);
         } else {
-          const { type: _type, budget_tokens: _budget, ...rest } = thinking as Record<string, unknown>;
-          body["thinking"] = { ...rest, type: "enabled", budget_tokens: cap };
+          body["thinking"] = { ...(thinking as Record<string, unknown>), budget_tokens: cap };
           sent["thinking.budget_tokens"] = cap;
         }
-      }
+      } else if (reasoningTokens !== undefined && asked !== undefined) sent["thinking.budget_tokens"] = asked;
+    } else if (reasoningTokens !== undefined && type !== undefined && type !== "disabled") {
+      // Adaptive (or any other) thinking takes an effort level, not tokens; current Claude models refuse a fixed budget (and some refuse thinking turned off), so the request is left as it is and that is said.
+      notSent.push(`the reasoning cap (${reasoningTokens} tokens) was not sent: this call uses ${String(type).slice(0, 40)} thinking, which takes an effort level, not a number of tokens`);
     }
     return { sent, notSent };
   }
@@ -73,7 +78,7 @@ export function applyRouteBudget(body: Record<string, unknown>, wire: "chat/comp
     const field = kind === "openai" ? undefined : CHAT_REASONING[kind];
     if (field === undefined) notSent.push(`the reasoning cap (${reasoningTokens} tokens) was not sent: ${kind === "openai" ? "this provider takes a reasoning effort level, not a number of tokens" : `the endpoint's kind (${kind}) has no known field for it`}`);
     else {
-      const ceiling = num(body["max_tokens"]);
+      const ceiling = num(body["max_tokens"]) ?? num(body["max_completion_tokens"]);
       const asked = num(body[field]);
       const cap = Math.max(0, Math.min(reasoningTokens, asked ?? Infinity, ceiling === undefined ? Infinity : ceiling - 1));
       body[field] = cap;

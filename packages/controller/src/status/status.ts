@@ -324,7 +324,7 @@ export interface StatusDeps {
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
   readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates"> & {
     /** Each configured route's length and reasoning budget (card W07), from the routing table. Absent: the view says nothing about budgets. */
-    readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number }[]>;
+    readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number; /** The endpoint kind the controller's own configuration names for the route (it names the request fields); absent when the controller has none. */ readonly kind?: string }[]>;
   };
   /** The live jobs (card T07b). Absent: the view is not offered. */
   readonly jobs?: Pick<JobService, "live">;
@@ -723,7 +723,7 @@ export class StatusService {
       const set = budgets.filter((b) => b.maxTokens !== undefined || b.reasoningTokens !== undefined);
       const b = cite("routing-table", "routing");
       if (budgets.length > 0) lines.push(line(set.length === 0 ? "No route has a reply limit or a reasoning cap: each model call asks for what the agent's runtime decides." : `${set.length} route(s) have a reply limit or a reasoning cap (a reply cut off at its limit is continued with a nudge to stop deliberating and act):`, b));
-      for (const r of set.slice(0, 50)) lines.push(line(`${shown(r.route, 200)}: ${r.maxTokens === undefined ? "no reply limit" : `replies at most ${r.maxTokens} tokens`}, ${r.reasoningTokens === undefined ? "no reasoning cap" : `reasoning at most ${r.reasoningTokens} tokens`}.`, b));
+      for (const r of set.slice(0, 50)) lines.push(line(`${shown(r.route, 200)}: ${r.maxTokens === undefined ? "no reply limit" : `replies at most ${r.maxTokens} tokens`}, ${r.reasoningTokens === undefined ? "no reasoning cap" : `reasoning at most ${r.reasoningTokens} tokens`}${r.kind === undefined ? " (no endpoint kind is configured on the controller for this route: on an OpenAI-style endpoint the figures are sent only if the host names the kind; when they are not sent, the task's activity says so)" : ` (endpoint kind ${shown(r.kind, 40)})`}.`, b));
       if (set.length > 50) lines.push(line(`${set.length - 50} more route(s) with a budget are not shown.`, b));
     }
     return { observedAt: this.#runner.now(), lines };

@@ -45,8 +45,11 @@ test("on Anthropic's Messages API the reply limit is max_tokens and the reasonin
   const r = apply(thinks, "messages", undefined, { maxTokens: 16_000, reasoningTokens: 4000 });
   assert.deepEqual([r.body["max_tokens"], r.body["thinking"]], [16_000, { type: "enabled", budget_tokens: 4000 }]);
   assert.deepEqual(r.sent, { max_tokens: 16_000, "thinking.budget_tokens": 4000 });
-  // An adaptive thinking request is given a fixed budget at the cap; a smaller budget asked is kept.
-  assert.deepEqual(apply({ ...thinks, thinking: { type: "adaptive", display: "summarized" } }, "messages", "claude", { reasoningTokens: 4000 }).body["thinking"], { display: "summarized", type: "enabled", budget_tokens: 4000 });
+  // An adaptive thinking request is left as it is (current Claude models refuse a fixed budget with a 400, so converting it would fail every call of the route), and that is said; a smaller budget asked is kept.
+  const adaptive = { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" } };
+  const ad = apply({ ...thinks, thinking: adaptive }, "messages", "claude", { maxTokens: 16_000, reasoningTokens: 4000 });
+  assert.deepEqual([ad.body["thinking"], ad.body["max_tokens"], ad.sent], [adaptive, 16_000, { max_tokens: 16_000 }]);
+  assert.match(ad.notSent.join(), /reasoning cap \(4000 tokens\) was not sent: this call uses adaptive thinking, which takes an effort level/);
   assert.deepEqual(apply({ ...thinks, thinking: { type: "enabled", budget_tokens: 2000 } }, "messages", "claude", { reasoningTokens: 4000 }).body["thinking"], { type: "enabled", budget_tokens: 2000 });
   // A call that does not reason is not made to.
   const plain = apply({ model: "c", messages: [], max_tokens: 64_000 }, "messages", "claude", { reasoningTokens: 4000 });
@@ -58,6 +61,14 @@ test("on Anthropic's Messages API the reply limit is max_tokens and the reasonin
   assert.match(low.notSent[0]!, /below the provider's smallest reasoning budget \(1024\)/);
   // The budget stays below the reply limit the body carries.
   assert.deepEqual(apply({ ...thinks, max_tokens: 3000 }, "messages", "claude", { reasoningTokens: 4000 }).body["thinking"], { type: "enabled", budget_tokens: 2999 });
+
+  // A reply limit alone still keeps the runtime's fixed budget below it (Anthropic refuses budget_tokens >= max_tokens), and turns reasoning off when no 1024 fits.
+  const lowered = apply({ ...thinks, thinking: { type: "enabled", budget_tokens: 8192, display: "summarized" } }, "messages", undefined, { maxTokens: 4000 });
+  assert.deepEqual([lowered.body["max_tokens"], lowered.body["thinking"], lowered.notSent], [4000, { type: "enabled", budget_tokens: 3999, display: "summarized" }, []]);
+  const tiny = apply(thinks, "messages", undefined, { maxTokens: 1000 });
+  assert.deepEqual(tiny.body["thinking"], { type: "disabled" });
+  assert.match(tiny.notSent.join(), /reply limit \(1000 tokens\) leaves no room for the provider's smallest reasoning budget/);
+  assert.deepEqual(apply({ ...thinks, thinking: { type: "enabled", budget_tokens: 2000 } }, "messages", undefined, { maxTokens: 16_000 }).body["thinking"], { type: "enabled", budget_tokens: 2000 }, "a budget already below the limit is kept");
 });
 
 test("a reasoning cap on an OpenAI-compatible server stays below the reply limit and lowers a larger budget the runtime asked for", () => {
@@ -65,6 +76,8 @@ test("a reasoning cap on an OpenAI-compatible server stays below the reply limit
   assert.equal(apply({ max_tokens: 30_000, thinking_token_budget: 1000 }, "chat/completions", "vllm", { reasoningTokens: 4000 }).body["thinking_token_budget"], 1000);
   assert.equal(apply({ max_tokens: 30_000, thinking_token_budget: 9000 }, "chat/completions", "vllm", { reasoningTokens: 4000 }).body["thinking_token_budget"], 4000);
   assert.deepEqual(apply({ max_tokens: 3000 }, "chat/completions", "vllm", {}), { body: { max_tokens: 3000 }, sent: {}, notSent: [] });
+  // The runtime's limit may be named max_completion_tokens: the cap stays below that one too.
+  assert.equal(apply({ max_completion_tokens: 3000 }, "chat/completions", "vllm", { reasoningTokens: 4000 }).body["thinking_token_budget"], 2999);
 });
 
 // ---- the relay -----------------------------------------------------------------------------------------------------------------------------------------------------------------------
