@@ -1,0 +1,6 @@
+{
+  "files": { "packages/controller/src/chat/w01-acceptance-flaky-proposal.test.ts": "w01-acceptance-flaky-proposal.test.ts" },
+  "support": [],
+  "testFiles": ["dist/chat/w01-acceptance-flaky-proposal.test.js"],
+  "allow": {}
+}
