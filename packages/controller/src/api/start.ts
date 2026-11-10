@@ -65,7 +65,7 @@ import { BUILTIN_COMMANDS } from "./operations.js";
 import { wideningDecision } from "./widening.js";
 import { IntegrationPolicyService, PolicyService, ProtectedBranchService } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
-import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
+import { ChatService, ChatSpendService, CoordinatorService, GuardedModelCall, chatRoutes, type ChatInterpreter, type CoordinatorModel, type ModelCall } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
 import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
 import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
@@ -111,8 +111,11 @@ export interface StartOptions {
    * controller treats every change as relevant, so every changed resume waits for the owner; with one, a change the reviewer judges
    * not to matter is committed without the owner. It is told the changes, the task's title and the next step its continuation
    * recorded, each quoted as data (`tellTask: false` leaves the last two out). An explicit `resume.review` wins over this.
+   * The model is the host's raw client; the controller puts it behind its own routed client (card L04d, as for the chat, U03b): a credit or authentication failure blocks that provider's routes, a rate limit or an
+   * outage cools the route down, and the tokens each call reports (`completeDetailed`) are counted against the daily cap on the controller's own model calls, at which no call is made and the check waits at the review.
+   * `routes` absent: the routing table's eligible list for `role` (default `safety-supervisor`, which every routing table must give a fallback list), read again at every review.
    */
-  readonly resumeReview?: { readonly model: ResumeReviewModel; readonly routes: ResumeReviewRoutes; readonly tellTask?: boolean };
+  readonly resumeReview?: { readonly model: ResumeReviewModel & Pick<ModelCall, "completeDetailed">; readonly routes?: ResumeReviewRoutes; readonly role?: string; readonly tellTask?: boolean };
   /**
    * Whether a checked resume may look at the task's own checkout to see how its recorded files and directories are now (card L04d),
    * instead of leaving every one of them `unknown`. Default: yes. `false` turns the reading off, `{ maxEntries, maxBytes }` bounds it
@@ -772,8 +775,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(typeof options.resumeProbe === "object" ? options.resumeProbe : {}),
       onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
     });
-    const reviewer = options.resumeReview === undefined || options.resume?.review !== undefined ? undefined : new ResumeReviewer(options.resumeReview.model, {
-      routes: options.resumeReview.routes,
+    // The reviewer's calls go through the controller's routed client (failures classified, blocked routes skipped) and are counted against the daily cap on the controller's own model calls (card L04d).
+    const reviewModel = options.resumeReview === undefined ? undefined : new GuardedModelCall(options.resumeReview.model, { spend: ChatSpendService.withEpoch(storage, epoch), onSpendFailure: (error) => options.onInternalError?.(error) });
+    const reviewer = options.resumeReview === undefined || reviewModel === undefined || options.resume?.review !== undefined ? undefined : new ResumeReviewer(reviewModel, {
+      routes: options.resumeReview.routes ?? chatRoutes(routing, { role: options.resumeReview.role ?? "safety-supervisor" }),
       ...(options.resumeReview.tellTask === false ? {} : {
         task: async (taskId: string) => {
           const task = await projects.getTask(taskId);

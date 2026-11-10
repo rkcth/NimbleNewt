@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { ChatSpendService } from "../chat/index.js";
 import type { ResumeReviewModel } from "../continuation/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
@@ -220,6 +221,55 @@ for (const store of stores) {
       assert.match(check.blocked?.reason ?? "", /no route gave a reasoned verdict/, JSON.stringify(check.blocked));
       assert.equal((await w.call(w.ann, "resume.commit", { checkId: check.id }, "c1")).error.code, "invalid_command", "the attempt is never started from it");
       assert.equal((await w.call(w.owner, "resume.approve", { taskId: w.task }, "o1")).error.code, "invalid_command", "there is nothing for the owner to approve: no verdict was given");
+    } finally { await w.close(); }
+  });
+
+  test(`${store.name}: the reviewer's model is behind the controller's routed client: its routes come from the routing table, a rate-limited route is cooled down and skipped, its tokens are counted, and at the daily cap no call is made (card L04d)`, async () => {
+    const asked: string[] = [];
+    let first = true;
+    const answer = (user: string): string => JSON.stringify(Object.fromEntries((user.match(/these ids: ([^\n]*)/)?.[1] ?? "").split(", ").filter((x) => x !== "").map((id) => [id, { relevant: false, rationale: "the task only reads the soil report" }])));
+    const model = {
+      complete: async (): Promise<string> => { throw new Error("the routed client asks for the detailed reply"); },
+      completeDetailed: async (route: string, request: { system: string; user: string }) => {
+        asked.push(route);
+        if (route === "mp/first" && first) { first = false; throw new Error("rate-limit: slow down"); }
+        return { text: answer(request.user), usage: { inputTokens: 100, outputTokens: 20 } };
+      },
+    };
+    const w = await begin(store, { resumeReview: { model } });
+    try {
+      const owner = await w.c.services.principals.authenticate(w.owner);
+      await w.c.services.routing.setTable(owner, { commandId: "rt", expectedRevision: 0, table: {
+        providers: { mp: { enabled: true, paid: false, location: "local" }, mq: { enabled: true, paid: false, location: "local" } },
+        routes: { "mp/first": { contextTokens: 32_000, capabilities: [] }, "mq/second": { contextTokens: 32_000, capabilities: [] } },
+        profiles: { sup: ["mp/first", "mq/second"] }, roles: { coordinator: "sup", "safety-supervisor": "sup" },
+      } } as never);
+      const spend = ChatSpendService.withEpoch(w.c.storage, w.c.epoch);
+      w.write("src/a.ts", "two");
+      assert.ok((await w.record([{ kind: "file", key: "src/a.ts", hash: sha("one") }], "d1")).ok);
+      const one = (await w.start("r1")).result.item;
+      assert.equal(one.phase, "ready", JSON.stringify(one));
+      assert.deepEqual(Object.values(one.verdicts as Record<string, { relevant: boolean }>).map((v) => v.relevant), [false]);
+      assert.deepEqual(asked, ["mp/first", "mq/second"], "the safety supervisor's list, in the table's order; the rate-limited route gave way to the next");
+      assert.equal(await spend.used(), 120, "the call that answered is counted");
+      assert.equal((await w.call(w.ann, "resume.commit", { checkId: one.id }, "c1")).result.item.phase, "done");
+
+      // The next review skips the route that is cooling down.
+      w.write("src/a.ts", "three");
+      assert.ok((await w.record([{ kind: "file", key: "src/a.ts", hash: sha("two") }], "d2")).ok);
+      const two = (await w.start("r2")).result.item;
+      assert.equal(two.phase, "ready", JSON.stringify(two));
+      assert.deepEqual(asked, ["mp/first", "mq/second", "mq/second"], "the cooling route was not asked");
+      assert.equal(await spend.used(), 240);
+      assert.equal((await w.call(w.ann, "resume.commit", { checkId: two.id }, "c2")).result.item.phase, "done");
+
+      // At the owner's daily cap no call is made: the check waits at the review.
+      await spend.setBudget(owner, { commandId: "cap", maxTokensPerDay: 240 });
+      w.write("src/a.ts", "four");
+      assert.ok((await w.record([{ kind: "file", key: "src/a.ts", hash: sha("three") }], "d3")).ok);
+      const three = (await w.start("r3")).result.item;
+      assert.deepEqual([three.phase, three.blocked?.type], ["blocked", "review_failed"], JSON.stringify(three));
+      assert.equal(asked.length, 3, "no model call past the cap");
     } finally { await w.close(); }
   });
 }
