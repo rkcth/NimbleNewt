@@ -98,7 +98,8 @@ export interface Decision {
 }
 
 const toMinutes = (hhmm: string): number => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
-function inWindow(window: NonNullable<GrantView["window"]>, now: string): boolean {
+/** Whether `now` falls in a grant's time window (hours UTC, optionally days of the week). */
+export function inWindow(window: NonNullable<GrantView["window"]>, now: string): boolean {
   const d = new Date(now);
   const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
   const start = toMinutes(window.start); const end = toMinutes(window.end);
