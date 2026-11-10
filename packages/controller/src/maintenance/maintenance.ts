@@ -5,7 +5,8 @@ import { onlyKnown, text } from "../domain/model.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
 import { allowsExactly } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
-import { effectiveOf } from "../security/grants.js";
+import { effectiveOf, MAX_DEPTH, type GrantRecordBody } from "../security/grants.js";
+import { inWindow } from "../policy/engine.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
@@ -136,6 +137,9 @@ export type RevertOutcome = { readonly outcome: "reverted"; readonly effect?: Js
  *
  * Package and extension requests: the applier MUST fetch only `spec.source` and MUST verify the fetched artifact against `spec.digest` (sha256 of the content the controller was told to expect) before anything is installed
  * or any install script runs, and MUST answer `failed` on a mismatch. The controller does not see the artifact; an applier that does not verify is not a valid applier.
+ * `spec.installScripts` is the requester's own claim, and a request that says `false` may have been approved without a review of install behaviour (a catalogue entry without scripts, or the owner's standing permission):
+ * when it is `false` the applier MUST install with every lifecycle and install script switched off (npm `--ignore-scripts` or the equivalent, implicit native builds included), and SHOULD answer `failed` when the
+ * verified artifact declares install scripts, so a false claim installs nothing that runs.
  *
  * `unsupported` means nothing was changed and leaves the change pending (safe restoration is not possible now); `failed` means it rolled back; a throw means the state is UNKNOWN: the request becomes `apply-uncertain`
  * and `revert` is called (as a verify-and-restore pass) before the request moves on.
@@ -348,6 +352,8 @@ export class MaintenanceService {
         const base = { agentId, kind, class: cls, spec, specDigest, reason, ...(rollbackPlan === undefined ? {} : { rollbackPlan }), requestedBy: by.id, requestedAt: now } as const;
         const changes: Change[] = [];
         if (by.kind === "agent" && s.eff.requestsPerDay !== undefined) changes.push(await this.#rateChange(agentId, now, s.eff.requestsPerDay));
+        // A standing permission revoked between this read and the write fails the write (asked again, the request then waits for a decider).
+        if (auto?.guard !== undefined) changes.push(...auto.guard);
         let body: MaintenanceBody;
         if (auto !== undefined) body = { ...base, status: auto.verdict === "approve" ? ("approved" as const) : ("rejected" as const), decision: { by: "controller", verdict: auto.verdict, via: "rule", rule: auto.rule, specDigest, at: now } };
         else {
@@ -375,7 +381,7 @@ export class MaintenanceService {
    * The owner's standing rules, applied at request time: a skill draft is allowed (and recorded); a preapproved catalogue entry (exact name, version and digest) and an allowed site are approved; a denied site is rejected; a package
    * or extension without install scripts is approved when the agent holds the owner's standing permission for that kind (`approve.maintenance.<kind>`, see `#standingGrant`), so permission already given asks no one again.
    */
-  async #autoDecision(agentId: string, kind: MaintenanceKind, cls: MaintenanceClass, spec: MaintenanceSpec, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }, now: string): Promise<{ verdict: "approve" | "reject"; rule: string } | undefined> {
+  async #autoDecision(agentId: string, kind: MaintenanceKind, cls: MaintenanceClass, spec: MaintenanceSpec, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }, now: string): Promise<{ verdict: "approve" | "reject"; rule: string; guard?: Change[] } | undefined> {
     if (!s.readable) return undefined;
     if (cls === "skill-draft") return { verdict: "approve", rule: "skill-draft" };
     if (kind === "network") {
@@ -384,7 +390,10 @@ export class MaintenanceService {
       if (rule === "allow" && s.eff.rules) return { verdict: "approve", rule: "site-allow" };
     }
     if ((kind === "package" || kind === "extension") && s.eff.rules && (s.body?.catalogue ?? []).some((e) => e.name === spec["name"] && e.version === spec["version"] && e.digest === spec["digest"] && e.source === spec["source"] && (spec["installScripts"] !== true || e.installScripts === true))) return { verdict: "approve", rule: "catalogue" };
-    if ((STANDING_KINDS as readonly string[]).includes(kind) && spec["installScripts"] !== true && s.eff.rules && await this.#standingGrant(agentId, kind, now)) return { verdict: "approve", rule: "standing-grant" };
+    if ((STANDING_KINDS as readonly string[]).includes(kind) && spec["installScripts"] === false && s.eff.rules) {
+      const guard = await this.#standingGrant(agentId, kind, now);
+      if (guard !== undefined) return { verdict: "approve", rule: "standing-grant", guard };
+    }
     return undefined;
   }
 
@@ -393,13 +402,41 @@ export class MaintenanceService {
    * environment belongs to no project) and no single resource, active, in its time window and not forbidden by a restriction. Only the owner makes such grants (an `approve.` grant is derived only by the owner), so an agent, a skill
    * or an extension cannot give itself one. A record that cannot be read gives no permission.
    */
-  async #standingGrant(agentId: string, kind: MaintenanceKind, now: string): Promise<boolean> {
+  async #standingGrant(agentId: string, kind: MaintenanceKind, now: string): Promise<Change[] | undefined> {
     try {
-      const principal = (await this.#runner.get("principal", agentId))?.body as unknown as { kind?: string; state?: string; name?: string; grants?: Principal["grants"] } | undefined;
-      if (principal?.kind !== "agent" || principal.state !== "active") return false;
+      const found = await this.#runner.get("principal", agentId);
+      const principal = found?.body as unknown as { kind?: string; state?: string; name?: string; grants?: Principal["grants"] } | undefined;
+      if (found === undefined || principal?.kind !== "agent" || principal.state !== "active") return undefined;
+      const action = `approve.maintenance.${kind}`;
       const eff = await effectiveOf(this.#runner, { id: agentId, kind: "agent", name: principal.name ?? agentId, grants: principal.grants ?? [] }, now);
-      return allowsExactly(eff, `approve.maintenance.${kind}`, undefined, { now });
-    } catch { return false; }
+      // A restriction, an expiry or a narrower scope ends it here.
+      if (!allowsExactly(eff, action, undefined, { now })) return undefined;
+      const fits = (g: { action: string; project: string; resource?: unknown; expiresAt?: string }): boolean => g.action === action && g.project === "*" && g.resource === undefined && (g.expiresAt === undefined || g.expiresAt > now);
+      // A grant given at enrollment carries no terms; the principal record holds it, so its revision fences the approval.
+      if ((principal.grants ?? []).some(fits)) return [{ type: "check", ref: { kind: "principal", id: agentId }, expectedRevision: found.revision }];
+      // A grant record counts only when every term it carries is one this check can judge (a time window, met now; whether it may be handed on): an environment, a spend limit, audiences, branches or the owner's
+      // free-text conditions are for a person or a reviewer to weigh, so such a grant leaves the request to a decider. The records it rests on fence the approval: a revocation written meanwhile fails the write.
+      for (const g of eff.grants) {
+        if (g.grantId === undefined || !fits(g)) continue;
+        const guard: Change[] = [];
+        let top: GrantRecordBody | undefined, whole = false;
+        for (let id: string | undefined = g.grantId, depth = 0; id !== undefined && depth <= MAX_DEPTH; depth++) {
+          const rec = await this.#runner.get("grant-record", id);
+          const body = rec?.body as unknown as GrantRecordBody | undefined;
+          if (rec === undefined || body === undefined || body.state !== "active") break;
+          top ??= body;
+          guard.push({ type: "check", ref: { kind: "grant-record", id }, expectedRevision: rec.revision });
+          if (body.source !== "derived") { whole = true; break; }
+          id = body.parentId;
+        }
+        if (!whole || top === undefined) continue;
+        const terms = top.terms ?? {};
+        if (Object.keys(terms).some((k) => k !== "window" && k !== "delegation")) continue;
+        if (terms.window !== undefined && !inWindow(terms.window, now)) continue;
+        return guard;
+      }
+      return undefined;
+    } catch { return undefined; }
   }
 
   // ---- deciding ------------------------------------------------------------------------------------------------------------------
@@ -529,15 +566,16 @@ export class MaintenanceService {
   }
 
   /** Whether an approval still stands: a rule approval needs its rule, a supervisor approval needs the supervisor's standing, and a site the owner has denied since is refused. */
-  async #standing(b: MaintenanceBody, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }): Promise<"ok" | "lapsed" | "denied" | "gone"> {
+  async #standing(b: MaintenanceBody, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }): Promise<{ readonly standing: "ok" | "lapsed" | "denied" | "gone"; readonly guard: Change[] }> {
     const agent = await this.#agent(b.agentId);
-    if (agent?.state !== "active") return "gone";
-    if (b.kind === "network" && s.readable && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") return "denied";
+    if (agent?.state !== "active") return { standing: "gone", guard: [] };
+    if (b.kind === "network" && s.readable && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") return { standing: "denied", guard: [] };
     const d = b.decision;
-    if (d === undefined || d.verdict !== "approve" || d.specDigest !== b.specDigest || sha({ agentId: b.agentId, kind: b.kind, spec: b.spec, rollbackPlan: b.rollbackPlan ?? null }) !== b.specDigest) return "lapsed";
-    if (d.via === "supervisor") return await this.#bossFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed";
-    if (d.via === "rule") { const again = await this.#autoDecision(b.agentId, b.kind, b.class, b.spec, s, this.#runner.now()); return again?.verdict === "approve" && again.rule === d.rule ? "ok" : "lapsed"; }
-    return "ok";
+    if (d === undefined || d.verdict !== "approve" || d.specDigest !== b.specDigest || sha({ agentId: b.agentId, kind: b.kind, spec: b.spec, rollbackPlan: b.rollbackPlan ?? null }) !== b.specDigest) return { standing: "lapsed", guard: [] };
+    if (d.via === "supervisor") return { standing: await this.#bossFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed", guard: [] };
+    // A rule approval is judged again; a standing permission also fences the claim with the grant records it rests on, so a revocation written between this check and the claim fails the claim.
+    if (d.via === "rule") { const again = await this.#autoDecision(b.agentId, b.kind, b.class, b.spec, s, this.#runner.now()); return again?.verdict === "approve" && again.rule === d.rule ? { standing: "ok", guard: again.guard ?? [] } : { standing: "lapsed", guard: [] }; }
+    return { standing: "ok", guard: [] };
   }
 
   /** Whether the claim in `b` still holds: its lease (renewed by the heartbeat) has not run out, or its holder is known dead only when the lease has not run out and the controller that held it is gone. */
@@ -579,7 +617,7 @@ export class MaintenanceService {
       if (b.status !== "approved" && b.status !== "applying") return b.status;
       const s = await this.#settings();
       if (this.#claimHeld(b, now, s.eff.leaseMs)) return b.status;
-      const standing = await this.#standing(b, s);
+      const { standing, guard: held } = await this.#standing(b, s);
       if (standing !== "ok") {
         // An application that may have started (an expired claim, an earlier try) is reverted before anything is decided about the request; it is not just sent back.
         const maybe = b.maybeApplied === true || b.applying !== undefined;
@@ -593,7 +631,7 @@ export class MaintenanceService {
       const attempts = (b.applying?.attempts ?? b.tries ?? 0) + 1;
       if (attempts > s.eff.attempts) { const { applying: _x, ...r } = b; await this.#move(found, "maintenance.failed", { ...r, status: "failed", failure: { reason: "the application did not finish after several tries; its effect is unknown", at: now } }); return "failed"; }
       // The claim write also checks the settings revision seen by the standing check: a denial written in between makes the claim fail and the loop judge again.
-      const guard: Change[] = s.found === undefined ? [] : [{ type: "check", ref: SETTINGS, expectedRevision: s.found.revision }];
+      const guard: Change[] = [...(s.found === undefined ? [] : [{ type: "check", ref: SETTINGS, expectedRevision: s.found.revision } as Change]), ...held];
       // Applications running at once are bounded: past the bound the request stays approved and a later tick takes it.
       if (this.#applying >= s.eff.maxApplies) return b.status;
       const claimed = await this.#move(found, "maintenance.claim", { ...b, status: "applying", maybeApplied: true, tries: attempts, applying: { epoch: this.#runner.epoch, since: now, renewedAt: now, attempts, token: randomUUID() } }, {}, guard);

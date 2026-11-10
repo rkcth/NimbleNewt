@@ -302,7 +302,7 @@ export class ToolExecutionService {
             case "job.cancel": response = await this.#jobCancel(context, args); break;
             case "work.end": response = await this.#workEnd(token, context, args); break;
             case "maintenance.request": response = await this.#maintenanceRequest(token, context, args); break;
-            case "maintenance.status": response = await this.#maintenanceStatus(token, args); break;
+            case "maintenance.status": response = await this.#maintenanceStatus(token, context, args); break;
           }
         }
       } finally {
@@ -479,13 +479,15 @@ export class ToolExecutionService {
   }
 
   /** Where one of the agent's maintenance requests stands (`maintenance.get` with the worker's task credential: only the agent's own requests are found). Text the controller or an applier wrote is cleaned of control characters. */
-  async #maintenanceStatus(token: unknown, args: JsonObject): Promise<BridgeResponse> {
+  async #maintenanceStatus(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, ["maintenanceId"]);
     const id = typeof args["maintenanceId"] === "string" && /^mnt-[a-z2-7]{20}$/.test(args["maintenanceId"]) ? args["maintenanceId"] : invalid("maintenanceId", "must be a maintenance ID (mnt-...)");
     const response = await this.#deps.state.handle(token, { v: 1, op: "maintenance.get", args: { maintenanceId: id } });
     if (!response.ok) return refusal(response.error.code, response.error.message);
     const item = (isObject(response.result["item"]) ? response.result["item"] : {}) as JsonObject;
+    // The state API also shows a supervisor its reports' requests; through the bridge an agent reads its own only, and another's reads like one that does not exist.
+    if (item["agentId"] !== c.agent.id) return refusal("not_found", "no such maintenance request");
     const textOf = (v: unknown): string | undefined => (typeof v === "string" ? plainText(v).slice(0, 300) : undefined);
     const decision = isObject(item["decision"]) ? item["decision"] : undefined;
     const failure = isObject(item["failure"]) ? item["failure"] : undefined;

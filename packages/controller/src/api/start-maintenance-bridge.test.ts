@@ -58,7 +58,9 @@ test("a worker asks for an environment change through the bridge and has the mai
     const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
     // Ann is an agent with a record (an environment belongs to an agent), the grants to work, and the owner's standing permission for extensions only.
     const ann = (await s.agents.create(owner, { commandId: "ag-ann", friendlyName: "Ann" } as never)).id;
-    const bob = (await s.agents.create(owner, { commandId: "ag-bob", friendlyName: "Bob" } as never)).id;
+    // Bob reports to Ann: the state API shows a supervisor its reports' requests, the bridge shows an agent its own only.
+    const bob = (await s.agents.create(owner, { commandId: "ag-bob", friendlyName: "Bob", supervisorId: ann } as never)).id;
+    const bobs = (await s.maintenance!.request(owner, { commandId: "m-bob", agentId: `agent:${bob}`, kind: "package", spec: { ...ext("bob-pad"), source: "https://registry.example.org/pkg" }, reason: "for Bob", rollbackPlan: "remove it" } as never)).maintenanceId;
     let g = 0;
     for (const grant of workGrants(project)) await s.grants.grant(owner, { commandId: `g-${g++}`, grantee: `agent:${ann}`, action: grant.action, project: grant.project, source: "direct", basis: "work" });
     await s.grants.grant(owner, { commandId: "g-standing", grantee: `agent:${ann}`, action: "approve.maintenance.extension", project: "*", source: "direct", basis: "Ann may add extensions to her own environment" });
@@ -94,6 +96,7 @@ test("a worker asks for an environment change through the bridge and has the mai
         assert.deepEqual([st["maintenanceId"], st["kind"], st["class"], st["status"]], [pkg["maintenanceId"], "package", "dependency", "pending"]);
         refused(await send("maintenance.status", { maintenanceId: "../etc" }, "ms-2"), "invalid_command");
         refused(await send("maintenance.status", { maintenanceId: "mnt-aaaaaaaaaaaaaaaaaaaa" }, "ms-3"), "not_found");
+        refused(await send("maintenance.status", { maintenanceId: bobs }, "ms-4"), "not_found");
       } catch (error) { failure = error; throw error; }
       return { status: "completed", text: "done" };
     };
@@ -110,5 +113,5 @@ test("a worker asks for an environment change through the bridge and has the mai
     assert.equal(applier.calls.filter((x) => x.op === "apply" && x.id === id).length, 1);
     // The package was never applied: it waits for the owner.
     assert.equal(applier.calls.some((x) => x.id === (seen["package"] as Reply)["maintenanceId"]), false);
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { release(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

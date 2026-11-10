@@ -26,6 +26,8 @@ interface World {
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
   storage: import("../storage/types.js").ControllerStorage;
+  /** A service on another view of the same storage (to step into the middle of a command). */
+  serviceOn(storage: import("../storage/types.js").ControllerStorage): MaintenanceService;
 }
 async function world(backendIndex: number, body: (w: World) => Promise<void>, heartbeatMs = 0): Promise<void> {
   const backend = backends[backendIndex]!;
@@ -47,7 +49,8 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     };
     const getBody = async (id: string) => { const a = (await open.storage.getAggregate({ kind: "maintenance", id }))!; return { ...(a.body as unknown as MaintenanceBody), revision: a.revision }; };
     const until = async (id: string, want: string): Promise<void> => { for (let i = 0; i < 200 && (await getBody(id)).status !== want; i++) await sleep(10); assert.equal((await getBody(id)).status, want); };
-    await body({ m, applier, owner, agents, grants, principals, time, service, make, body: getBody, until, storage: open.storage });
+    const serviceOn = (storage: import("../storage/types.js").ControllerStorage) => MaintenanceService.withEpoch(storage, projects.epoch, { applier, heartbeatMs }, options);
+    await body({ m, applier, owner, agents, grants, principals, time, service, make, body: getBody, until, storage: open.storage, serviceOn });
     await m.idle();
   } finally { await open.close(); }
 }
@@ -531,6 +534,59 @@ for (const [index, backend] of backends.entries()) {
       assert.equal(await w.m.drive(late.maintenanceId), "pending");
       assert.equal(w.applier.effects.has(late.maintenanceId), false, "nothing was applied");
       assert.equal((await request(w, ann.principal, "package", pkg("after-revoke"))).status, "pending", "a revoked standing permission approves nothing");
+    });
+  });
+}
+
+// ---- A09 second slice review (2026-11-10) -----------------------------------------------------------------------------------------------
+
+for (const [index, backend] of backends.entries()) {
+  test(`a standing permission counts only when every term it carries can be judged here: a time window that holds now, never the owner's conditions, environments or limits (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const make = async (label: string, terms?: Record<string, unknown>) => {
+        const a = await w.make(label);
+        await w.grants.grant(w.owner, { commandId: cid("g"), grantee: a.principal.id, action: "approve.maintenance.package", project: "*", source: "standing", basis: "packages", ...(terms === undefined ? {} : { terms: terms as never }) });
+        return a;
+      };
+      // The clock reads 10:00 UTC.
+      assert.equal((await request(w, (await make("Plain")).principal, "package", pkg("plain"))).status, "approved");
+      assert.equal((await request(w, (await make("Open", { window: { start: "09:00", end: "17:00" }, delegation: false })).principal, "package", pkg("open"))).status, "approved", "a window that holds now");
+      assert.equal((await request(w, (await make("Closed", { window: { start: "18:00", end: "20:00" } })).principal, "package", pkg("closed"))).status, "pending", "outside its window the permission gives nothing");
+      assert.equal((await request(w, (await make("Cond", { conditions: ["only packages from our own registry"] })).principal, "package", pkg("cond"))).status, "pending", "the owner's free-text conditions are for a decider to judge");
+      assert.equal((await request(w, (await make("Env", { environments: ["development"] })).principal, "package", pkg("env"))).status, "pending");
+      assert.equal((await request(w, (await make("Spend", { spendLimit: 0 })).principal, "package", pkg("spend"))).status, "pending");
+      // A permission given at enrollment carries no terms and counts.
+      const e = await w.make("Enrolled");
+      const rec = await w.storage.getAggregate({ kind: "principal", id: e.principal.id });
+      await w.principals.setGrants(w.owner, { commandId: cid("s"), principalId: e.principal.id, expectedRevision: rec!.revision, grants: [{ action: "approve.maintenance.extension", project: "*" }] });
+      assert.equal((await request(w, e.principal, "extension", pkg("enrolled"))).status, "approved");
+    });
+  });
+
+  test(`a standing permission revoked between the check at apply and the claim stops the application: the claim is fenced by the grant record (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const g = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ann.principal.id, action: "approve.maintenance.package", project: "*", source: "direct", basis: "packages" });
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "no safe restoration now" }];
+      const r = await request(w, ann.principal, "package", pkg("racy"));
+      assert.equal(r.status, "approved");
+      await settle(w);
+      assert.equal((await w.body(r.maintenanceId)).status, "approved");
+      // The owner revokes the permission while the drive is between its check and its claim: the grant record read for the check is the one before the revocation.
+      let armed = true;
+      const view = new Proxy(w.storage, { get: (t, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => {
+        const found = await t.getAggregate(ref as never);
+        if (armed && ref.kind === "grant-record" && ref.id === g.id) {
+          armed = false;
+          const v = (await w.grants.getGrant(g.id))!;
+          await w.grants.revoke(w.owner, { commandId: cid("v"), grantId: g.id, expectedRevision: v.revision, reason: "stop" });
+        }
+        return found;
+      } : (typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+      const racing = w.serviceOn(view as never);
+      assert.equal(await racing.drive(r.maintenanceId), "pending");
+      assert.equal(armed, false, "the revocation was written in the window");
+      assert.equal(w.applier.effects.has(r.maintenanceId), false, "nothing was applied");
     });
   });
 }
