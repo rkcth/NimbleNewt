@@ -274,3 +274,34 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: a route change is told the size of the earlier attempt's report the first prompt carries too, at the check before placement and at the start (card W10 review)`, async () => {
+    const store = await backend.open();
+    try {
+      let current = "cloud/big";
+      const w = await buildWorld(store.storage, { route: async () => choice(current) });
+      const noteChars: (number | undefined)[] = [];
+      const dispatcher = w.restart({ routeChange: async (c) => { noteChars.push(c.noteChars); return { ok: true }; } }, {});
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const made = await w.task("Prune roses", ann);
+      const plain = w.worker.script;
+      w.worker.script = async ({ order }) => { await dispatcher.addNote(w.dispatcherPrincipal, order.attemptId, { key: "n1", kind: "left", text: "the climbing rose by the gate is not pruned yet" }); return { status: "completed", text: "turn over", endKind: "normal" }; };
+      const run = async (): Promise<void> => { await w.heartbeatHost(); await dispatcher.tick(); await dispatcher.idle(); };
+      await run();
+      w.worker.script = plain;
+      const a = (await w.assignments.getAssignment(made.taskId))!;
+      const second = (await w.assignments.admitAttempt({ commandId: "w10-rc-again", actor: "inbox", taskId: made.taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" })).id;
+      current = "local/small";
+      await run();
+      const order = w.worker.starts.find((o) => o.attemptId === second);
+      assert.ok(order !== undefined, "the attempt started on the new route");
+      const at = order.content.indexOf("\n\nThe attempt before yours");
+      assert.ok(at > 0, `the first prompt carries the earlier attempt's notes: ${order.content}`);
+      const paragraph = order.content.slice(at);
+      assert.match(paragraph, /the climbing rose by the gate is not pruned yet/);
+      assert.ok(noteChars.length >= 2, `the route change was asked before placement and at the start: ${noteChars.length}`);
+      for (const n of noteChars) assert.equal(n, paragraph.length, "each ask counts the paragraph as it is, and nothing else");
+    } finally { await store.close(); }
+  });
+}

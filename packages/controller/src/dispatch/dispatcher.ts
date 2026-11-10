@@ -1167,14 +1167,16 @@ export class DispatcherService {
     let lost = false;
     const written = await this.#update(attemptId, (x) => {
       if (lost) return x;
+      // The attempt ended while the second agent was asked (an owner's stop, a lost worker): nothing is recorded on it and no go-on is counted for it.
+      if (x.state === "finished") throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
       const cur = x.interrogation;
       const base = cur?.state === "asking" ? cur : undefined;
-      const interrogated = cur !== undefined && cur.state !== "asking" ? { interrogated: [...(x.interrogated ?? []), { state: cur.state, ...(cur.verdictKey === undefined ? {} : { verdictKey: cur.verdictKey }), ...(cur.reason === undefined ? {} : { reason: cur.reason }), questions: cur.rounds[cur.rounds.length - 1]?.questions ?? [], rounds: cur.rounds.length, at: cur.at, ...(cur.counted === undefined ? {} : { counted: cur.counted }) }].slice(-WORK_REPORT_LIMITS.history) } : {};
+      const interrogated = cur !== undefined && cur.state !== "asking" ? { interrogated: [...(x.interrogated ?? []), { state: cur.state, ...(cur.verdictKey === undefined ? {} : { verdictKey: cur.verdictKey }), ...(cur.reason === undefined ? {} : { reason: cur.reason }), questions: cur.rounds[cur.rounds.length - 1]?.questions ?? [], rounds: cur.rounds.length, at: cur.at, ...(cur.counted === undefined ? {} : { counted: cur.counted }), ...(cur.goOn === undefined ? {} : { goOn: cur.goOn }) }].slice(-WORK_REPORT_LIMITS.history) } : {};
       const newRound: InterrogationRound[] = questions.length === 0 ? [] : [{ key: request.key, questions, at, ...(route === undefined ? {} : { route }) }];
       if (state === "asking") return { ...x, ...interrogated, interrogation: { state, rounds: [...(base?.rounds ?? []), ...newRound], at } };
       const exhausted = state === "unsupported" && used >= STOPPED_EARLY_READMITS;
       const closed: Interrogation = { state, rounds: [...(base?.rounds ?? []), ...newRound], at, verdictKey: request.key, ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }), ...(route === undefined ? {} : { route }), ...(state === "unsupported" ? { counted: true, exhausted, goOn: used + 1 } : {}) };
-      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }) } : undefined;
+      const report: AttemptReport | undefined = state !== "unsupported" || exhausted ? { key: request.key, result: state === "unsupported" ? "blocked" : "done", text, at, questioning: state === "unsupported" ? "unsupported" : state, qa: qaOf(closed.rounds), ...(reason === undefined ? {} : { reason }), ...(why === undefined ? {} : { why }) } : undefined;
       return { ...x, ...interrogated, interrogation: closed, ...(report === undefined ? {} : { report }) };
     }, async (x) => {
       // Another process answered this call meanwhile: its answer stands and nothing is counted again.
@@ -1219,7 +1221,7 @@ export class DispatcherService {
   }
 
   /** What the next attempt of a task is told of the attempt before it (card W10): its report or its notes, quoted. Never stops the attempt. */
-  async #earlierReport(b: DispatchBody): Promise<string> {
+  async #earlierReport(b: Pick<DispatchBody, "taskId" | "attemptId">): Promise<string> {
     try {
       const pointer = (await this.#runner.get(WORK_REPORT_KIND, b.taskId))?.body as unknown as WorkReportTaskBody | undefined;
       const before = [...(pointer?.attempts ?? [])].reverse().find((a) => a !== b.attemptId);
@@ -1859,7 +1861,7 @@ export class DispatcherService {
           // Whatever was remembered for this attempt (a "kept" from an earlier tick on the old route) is no longer true: a refusal or an error below must not leave it standing.
           this.#routeOk.delete(attemptId);
           let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length + (await this.#earlierReport({ taskId, attemptId })).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
           if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
           this.#remember(attemptId, cacheKey);
         }
@@ -3371,7 +3373,7 @@ function answerFor(b: DispatchBody, key: string): ReportVerdict | undefined {
     if (i >= 0) return { state: "asking", message: askingMessage(i + 1, WORK_REPORT_LIMITS.rounds, q.rounds[i]!.questions) };
   }
   const h = (b.interrogated ?? []).find((x) => x.verdictKey === key);
-  return h === undefined ? undefined : closed(h.state, h.reason, h.questions, false, 1);
+  return h === undefined ? undefined : closed(h.state, h.reason, h.questions, false, h.goOn ?? 1);
 }
 
 /** The blocker's summary when a done the second agent found unsupported used up the task's go-ons (card W10). */

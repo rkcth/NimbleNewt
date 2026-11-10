@@ -512,6 +512,18 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: a done the controller's checks refused until the go-ons ran out records its report as blocked, not questioned (W10 review)`, async () => {
+    const reported: { key: string; result: string; report: string }[] = [];
+    let questioned = 0;
+    const r = await rig({ verify: async () => ({ state: "failed", exhausted: true, message: "m", summary: "checks failed" }), w10: { interrogate: async () => { questioned++; return { state: "supported" }; }, recordReport: async (_id, request) => { reported.push({ ...request }); } } });
+    try {
+      const ended = await r.service.request(r.ann, { commandId: "u1", attemptId: "att-1", report: "Done, I think." });
+      assert.deepEqual([ended.result, ended.unverified?.summary], ["done", "checks failed"], "the agent's own result stays on the ending");
+      assert.deepEqual(reported, [{ key: scopedCommandId("agent:ann", "u1"), result: "blocked", report: "Done, I think." }], "the report on the attempt says how it ended");
+      assert.equal(questioned, 0, "a done its checks refused is never questioned");
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: running notes and answers go to the attempt by the agent's own call, only for its own running attempt (W10)`, async () => {
     const notes: { key: string; kind: string; text: string }[] = [];
     const answers: { key: string; answers: readonly string[] }[] = [];

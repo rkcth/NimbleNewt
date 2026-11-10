@@ -181,6 +181,8 @@ for (const backend of backends) {
       assert.equal(await countOf(w, taskId), 3, "the W05 refusal and the two unsupported reports, in the one W03 record");
       const d = await body(w, attemptId);
       assert.equal(d.report?.questioning, "unsupported", "the exhausted report is kept for the director");
+      assert.equal(d.report?.result, "blocked", "the attempt ends blocked, and its report says so (never done)");
+      assert.match(reportLines(d)[0]!, /ended blocked at .*; a second agent questioned it and found it not supported: "the report says the tests pass/);
       assert.deepEqual(d.interrogated?.map((x) => [x.state, x.verdictKey, x.counted]), [["unsupported", "k1", true]]);
     } finally { await store.close(); }
   });
@@ -268,6 +270,53 @@ for (const backend of backends) {
       assert.match(order.content, /- left to do: "the second bed\\u202e is not dug"/);
       assert.ok(!order.content.includes("‮"));
       assert.deepEqual(((await w.storage.getAggregate({ kind: WORK_REPORT_KIND, id: taskId }))?.body as { attempts: string[] }).attempts, [first], "the second attempt wrote nothing, so it is not named");
+    } finally { await store.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: an attempt that ends while the second agent is asked records nothing and counts no go-on; a replayed older unsupported verdict names its own go-on (W10 review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { taskId } = await w.task("stopped mid-question", ann);
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((ok) => { release = ok; });
+      let asked: () => void = () => undefined;
+      const askedNow = new Promise<void>((ok) => { asked = ok; });
+      const slow: ReportInterrogatorPort = { ask: async () => { asked(); await held; return { verdict: "unsupported", reason: "no proof", questions: ["Where is it?"], route: "local/judge" }; } };
+      w.dispatcher = w.restart({ interrogator: slow });
+      const P = w.dispatcherPrincipal;
+      let pending: Promise<ReportVerdict> | undefined;
+      const attemptId = await turn(w, async (id) => {
+        pending = w.dispatcher.interrogateDone(P, id, { key: "k1", report: "Done.", verified: "skipped" });
+        await askedNow;
+        // The owner ends the attempt while the second agent is still thinking.
+        assert.equal(await w.dispatcher.finishWith(w.owner, id, { result: "abandoned", note: "stopped by the owner" }), true);
+        release();
+      });
+      await refuses("invalid_transition", () => pending!, /no longer running/);
+      const d = await body(w, attemptId);
+      assert.equal(d.interrogation, undefined, "nothing was written on the ended attempt");
+      assert.equal(d.report, undefined);
+      assert.equal(await countOf(w, taskId), 0, "no go-on was counted for an attempt that had ended");
+
+      // An unsupported verdict that was closed and then moved to the history by a later questioning is replayed with the go-on it was.
+      const { taskId: t2 } = await w.task("replayed", ann);
+      const unsupported = { verdict: "unsupported" as const, reason: "no proof", questions: ["Where?"] };
+      w.dispatcher = w.restart({ interrogator: new ScriptedInterrogator([unsupported, unsupported, { verdict: "supported" }]) });
+      const v: ReportVerdict[] = [];
+      await turn(w, async (id) => {
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k1", report: "Done.", verified: "skipped" }));
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k2", report: "Done, see a.txt.", verified: "skipped" }));
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k3", report: "Done, a.txt holds it.", verified: "skipped" }));
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k2", report: "Done, see a.txt.", verified: "skipped" }));
+      });
+      assert.deepEqual(v.map((x) => x.state), ["unsupported", "unsupported", "supported", "unsupported"]);
+      assert.match((v[1] as { message: string }).message, /go-on 2 of 2/);
+      assert.equal((v[3] as { message: string }).message, (v[1] as { message: string }).message, "the replay from the history says the same as the first answer");
+      assert.equal(await countOf(w, t2), 2);
     } finally { await store.close(); }
   });
 }

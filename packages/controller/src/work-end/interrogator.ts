@@ -13,7 +13,8 @@ import type { ResumeReviewModel, ResumeReviewRoutes } from "../continuation/resu
  *
  * It cannot approve anything: its only answers are supported, questions, or unsupported. Acceptance of the work stays with the independent review of a submission.
  *
- * Failure rules: a route that throws is passed over for the next; when every route throws (or there is none), it throws, and the dispatcher records that the questioning did not run. A route that answered with something that is not a
+ * Failure rules: a route that throws is passed over for the next; when every route throws, the routes are asked once more after a short wait if some failure may pass (not a blocked or cooling route, the cap, or a credit,
+ * authentication, rate-limit or outage failure, which the routed client blocks or cools the route for); when they still all throw (or there is none), it throws, and the dispatcher records that the questioning did not run. A route that answered with something that is not a
  * verdict is also passed over, but when no route gave a verdict and one of them did answer, the answer is `unsupported` (fail closed): an agent's report cannot get past the questioning by making the second agent's answer unreadable.
  */
 export interface ReportInterrogatorOptions {
@@ -21,6 +22,11 @@ export interface ReportInterrogatorOptions {
   readonly routes: ResumeReviewRoutes;
   /** Told of each route that failed to answer, for the log; never the agent's text. */
   readonly onFailure?: (route: string, detail: string) => void;
+  /**
+   * How long to wait before the one second pass over the routes when every route failed and at least one failure may pass (not a route the routed client skips as blocked or cooling, not the daily cap). Default 2,000 ms.
+   * A second pass costs nothing for a skipped route or the cap (no call is made), so it only asks again what failed for a passing reason.
+   */
+  readonly retryDelayMs?: number;
 }
 
 export const INTERROGATOR_LIMITS = { answer: 20_000, notes: 4000, report: WORK_REPORT_LIMITS.report + 200, prompt: 24_000 } as const;
@@ -37,9 +43,11 @@ export class ReportInterrogator implements ReportInterrogatorPort {
   readonly #model: ResumeReviewModel;
   readonly #routes: () => Promise<readonly string[]>;
   readonly #onFailure: ReportInterrogatorOptions["onFailure"];
+  readonly #retryDelayMs: number;
 
   constructor(model: ResumeReviewModel, options: ReportInterrogatorOptions) {
     this.#model = model;
+    this.#retryDelayMs = options.retryDelayMs !== undefined && Number.isFinite(options.retryDelayMs) && options.retryDelayMs >= 0 ? Math.min(options.retryDelayMs, 30_000) : 2000;
     const given = options.routes;
     this.#routes = typeof given === "function" ? async () => await given() : async () => given;
     this.#onFailure = options.onFailure;
@@ -51,20 +59,29 @@ export class ReportInterrogator implements ReportInterrogatorPort {
     const user = promptOf(input);
     let last = "no route answered";
     let answered: string | undefined;
-    for (const route of routes) {
-      let reply: string;
-      try { reply = await this.#model.complete(route, { system: SYSTEM, user }); } catch (error) {
-        last = clipText(redactText(error instanceof Error ? error.message : String(error)), 200);
-        try { this.#onFailure?.(route, last); } catch { /* a failing log tells nothing */ }
-        continue;
+    // Two passes at most: a failure that may pass (a dropped connection, a server error the routed client does not cool the route for) is asked once more after a short wait, so a passing fault does not let a done through
+    // unquestioned. A route skipped as blocked or cooling, and the daily cap, fail again at once without a call, so the second pass is only made when some failure may pass.
+    for (let pass = 1; pass <= 2; pass++) {
+      let passing = false;
+      for (const route of routes) {
+        let reply: string;
+        try { reply = await this.#model.complete(route, { system: SYSTEM, user }); } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!/^(?:blocked|budget|credit|auth|rate-limit|outage): /.test(message)) passing = true;
+          last = clipText(redactText(message), 200);
+          try { this.#onFailure?.(route, last); } catch { /* a failing log tells nothing */ }
+          continue;
+        }
+        try { return { ...parseAnswer(reply, input.round > input.maxRounds), route } as InterrogatorAnswer; } catch (error) {
+          answered = route;
+          last = clipText(error instanceof Error ? error.message : String(error), 200);
+          try { this.#onFailure?.(route, last); } catch { /* as above */ }
+        }
       }
-      try { return { ...parseAnswer(reply, input.round > input.maxRounds), route } as InterrogatorAnswer; } catch (error) {
-        answered = route;
-        last = clipText(error instanceof Error ? error.message : String(error), 200);
-        try { this.#onFailure?.(route, last); } catch { /* as above */ }
-      }
+      if (answered !== undefined) return { verdict: "unsupported", reason: "the second agent's answer could not be read as a verdict", questions: ["Restate your report plainly: what you did, what you found, what is left and what you could not do, each with where it can be seen."], route: answered };
+      if (!passing || pass === 2) break;
+      await new Promise((ok) => setTimeout(ok, this.#retryDelayMs));
     }
-    if (answered !== undefined) return { verdict: "unsupported", reason: "the second agent's answer could not be read as a verdict", questions: ["Restate your report plainly: what you did, what you found, what is left and what you could not do, each with where it can be seen."], route: answered };
     throw new DomainError("unavailable", `no route answered the second agent's questions (${last})`);
   }
 }
@@ -83,7 +100,7 @@ export function promptOf(input: InterrogationInput): string {
     `Acceptance criteria: ${list(t.acceptanceCriteria, 300)}`,
     `Required evidence: ${list(t.requiredEvidence, 200)}`,
     `Contract checks the host ran: ${list(t.checks, 80)}`,
-    `CONTROLLER CHECK: ${input.evidence.verified === "passed" ? "the contract's evidence and checks passed" : "the contract names no evidence or checks, so nothing was checked mechanically"}. Plan (host): ${input.evidence.plan}. Changes (host): ${input.evidence.diff}.`,
+    `CONTROLLER CHECK: ${input.evidence.verified === "passed" ? "the contract's evidence and checks passed" : "the contract names no evidence or checks, so nothing was checked mechanically"}. Plan (host): ${input.evidence.plan}. Changes (host, quoted: the file names are the agent's): ${quoted(input.evidence.diff, 400)}.`,
     `REPORT ${quoted(input.report, INTERROGATOR_LIMITS.report)}`,
     `NOTES (${input.notes.length}):\n${notes.length === 0 ? "(none)" : notes.join("\n")}`,
     input.earlier === undefined ? "" : `AN EARLIER QUESTIONING of this attempt found the report not supported: ${quoted(input.earlier.reason ?? "", 320)}; it asked: ${list(input.earlier.questions, 320)}`,

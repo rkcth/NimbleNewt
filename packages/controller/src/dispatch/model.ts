@@ -202,7 +202,7 @@ export interface Interrogation {
   /** Which of the task's go-ons the refusal was (1-based). */
   readonly goOn?: number;
 }
-export interface InterrogationSummary { readonly state: Interrogation["state"]; readonly verdictKey?: string; readonly reason?: string; readonly questions: readonly string[]; readonly rounds: number; readonly at: string; readonly counted?: boolean }
+export interface InterrogationSummary { readonly state: Interrogation["state"]; readonly verdictKey?: string; readonly reason?: string; readonly questions: readonly string[]; readonly rounds: number; readonly at: string; readonly counted?: boolean; /** Which of the task's go-ons the refusal was (card W10). */ readonly goOn?: number }
 
 /**
  * The report an attempt ended with (card W10): the work.end call, its result, the agent's report (redacted; quoted whenever shown), the questions and answers of the second agent folded in, and how the questioning went

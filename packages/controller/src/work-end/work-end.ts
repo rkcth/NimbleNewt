@@ -304,7 +304,8 @@ export class WorkEndService {
         if (!asked.exhausted) throw new DoneNotVerified(asked.message);
         unverified = { summary: asked.summary.slice(0, 1000), blocker: "report_unsupported" };
       }
-    } else if (result !== "done" || unverified !== undefined) await this.#deps.attempts.recordReport?.(attemptId, { key: scoped, result, report });
+    // A done the controller's checks refused until the go-ons ran out ends the attempt blocked, so its report says blocked (the agent's own `result` stays on the ending record).
+    } else if (result !== "done" || unverified !== undefined) await this.#deps.attempts.recordReport?.(attemptId, { key: scoped, result: unverified !== undefined ? "blocked" : result, report });
     const body: WorkEndRecord = clean({ attemptId, taskId: attempt.taskId, projectId: attempt.projectId, agentId: attempt.agentId, state: "requested" as const, submit, result, note, message, evidence, verified, unverified, report, base, head, requestedAt: this.#runner.now() });
     // Indexed first: a crash between the two leaves an index entry without an intent (skipped), never an intent no sweep knows of.
     await this.#index(attemptId, undefined);
