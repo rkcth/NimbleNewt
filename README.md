@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **248 of 358 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **248 of 359 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -107,7 +107,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
-| Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 40% | 8 of 20 |
+| Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 38% | 8 of 21 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 77% | 17 of 22 |
@@ -170,7 +170,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 </details>
 
 <details>
-<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓░░░░░░░░ 8 of 20</summary>
+<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓░░░░░░░░ 8 of 21</summary>
 
 The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap.
 
@@ -193,7 +193,8 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 - [ ] **W06** · P36 · Give every Pi agent a completion-rules section of its system prompt _(needs W04, C06b)_
 - [ ] **W07** · P36 · Set a length and reasoning budget per route profile _(needs W04, R01)_
 - [ ] **W08** · P37 · Show the owner how each attempt ended _(needs W03, W04, W05, U05)_
-- [ ] **W09** · P38 · Pass the completion gates on the real worker and on a Radiance route before release _(needs W01, W05, W06, W07, W08)_
+- [ ] **W10** · P37 · Every attempt ends with a report written from running notes, and a second agent questions it _(needs W03, W05)_
+- [ ] **W09** · P38 · Pass the completion gates on the real worker and on the local route before release _(needs W01, W05, W06, W07, W08, W10)_
 
 </details>
 
@@ -642,9 +643,9 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 - [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
 - [ ] **X03** · P44 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U09b, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
 - [ ] **X02** · P45 · Run policy, isolation and adversarial campaign _(needs A06, U04, H12n, H12p, P08, P10, P10b, A07f, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
-- [ ] **X04** · P46 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
-- [ ] **X05** · P46 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
-- [ ] **X06** · P46 · Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
+- [ ] **X04** · P46 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03, W09)_
+- [ ] **X05** · P46 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03, W09)_
+- [ ] **X06** · P46 · Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, W09, G06)_
 - [ ] **X07** · P47 · Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
 - [ ] **X08** · P48 · Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
 

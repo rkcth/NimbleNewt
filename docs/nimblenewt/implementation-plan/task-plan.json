@@ -2070,19 +2070,38 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "W10",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Every attempt ends with a report written from running notes, and a second agent questions it",
+      "depends_on": [
+        "W03",
+        "W05"
+      ],
+      "deliverable": "Owner decision 2026-11-10 (Rob): an agent must always give a report when it ends, whether or not it submits code and whether it is coding or not. The agent keeps running notes as it works (what it did, what it found, what is left, what it could not do), kept in the attempt so they survive a restart and a hand-off, and work.end requires a report built from them (an end without a report is refused with a plain message telling the agent to write one; the blocked, partial and done results all carry a report). Before a done is recorded succeeded, a different agent questions the first about the report and the work against the task contract (bounded rounds, questions and answers kept with the attempt) and the answers are folded into the final report, which the owner and the next agent read. If the interrogation finds the work incomplete or the report unsupported, the work goes back to the same agent in the same attempt, counted with the stopped-early limit (W03) and not around it; after the limit the task gets a blocker for the CTO, not a question for the owner. The mechanical checks of W05 run first and stay. Agent and record text shown to the owner is quoted once. Applies to coding and non-coding tasks alike",
+      "acceptance_and_verification": "An end without a report is refused and the agent can write one and end again; notes written before a restart appear in the report; a coding task and a non-coding task each end with a report; a done whose report the second agent finds unsupported goes back to the agent with the questions and is not recorded succeeded; the second agent cannot be the first (separate attempt, no shared conversation), cannot approve the work itself (it only questions; acceptance stays with the independent review for submissions), and its rounds and text are bounded; the final report is readable through the state API and the chat by free-form words with no fixed phrase; repeated returns count toward the W03 limit and then raise the blocker",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "W09",
       "parent": "N03",
       "existing_issue": "AII-253",
-      "title": "Pass the completion gates on the real worker and on a Radiance route before release",
+      "title": "Pass the completion gates on the real worker and on the local route before release",
       "depends_on": [
         "W01",
         "W05",
         "W06",
         "W07",
-        "W08"
+        "W08",
+        "W10"
       ],
-      "deliverable": "The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on a local route and on a Radiance route whose model calls go through the controller's model relay (packages/pi-adapter/src/worker/relay-fetch.ts). This is a release gate",
-      "acceptance_and_verification": "A Radiance route is shown working end to end through the controller's relay (a real task from admission to a verified work.end); bench variants A to D are run on the real worker on both routes and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached",
+      "deliverable": "The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on the local route that uses the owner's AI server (Rob, 2026-11-10: every route is local; no cloud or Radiance-through-relay route is needed for this gate). This is a release gate",
+      "acceptance_and_verification": "A real task is shown working end to end on the local route from admission to a verified work.end and an accepted report; bench variants A to D are run on the real worker on that route and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -9042,7 +9061,8 @@
         "X02",
         "X03",
         "X09",
-        "F03"
+        "F03",
+        "W09"
       ],
       "deliverable": "Fresh-install and reboot/update/restore evidence on supported macOS",
       "acceptance_and_verification": "Full accepted scenario passes on exact build; containment limits explicit; no development-directory dependency; with each optional integration (local inference, MCP server, remote worker, cache backend) absent or failing, core lifecycle, chat and recovery still work and report it unavailable; core runs with optional adapter packages not installed; the controller runs as the chosen background service and planned OS shutdown is distinguished from a crash; UI settings persist across restart; clean uninstall leaves no service registration or data outside chosen folders and common setup needs no single-platform tooling",
@@ -9063,7 +9083,8 @@
         "X02",
         "X03",
         "X09",
-        "F03"
+        "F03",
+        "W09"
       ],
       "deliverable": "Fresh-install and reboot/update/restore evidence on supported Linux",
       "acceptance_and_verification": "Full accepted scenario passes on exact build; remote topology if selected verified; no developer credentials required; same optional-integration, service, settings and uninstall checks as X04; two distinct deployments configured from a release extract with no source edits",
@@ -9085,6 +9106,7 @@
         "X03",
         "X09",
         "F03",
+        "W09",
         "G06"
       ],
       "deliverable": "Fresh-install and reboot/update/restore evidence on supported Windows",

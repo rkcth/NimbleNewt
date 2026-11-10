@@ -30,7 +30,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F04n, F09 |
-| N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b, W01, W02, W03, W04, W05, W06, W07, W08, W09 |
+| N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b, W01, W02, W03, W04, W05, W06, W07, W08, W10, W09 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L02e, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07h, A07f, A07g |
@@ -790,12 +790,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Free-form questions such as why did the last attempt stop, or how far did it get, reach the view through the chat interpreter in a test with the model interpreter; the view shows end kind, nudges, plan progress and the agent_stopped_early blocker with its last text; the status and browser views show the same figures; no fixed phrase is needed.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### W09 — Pass the completion gates on the real worker and on a Radiance route before release
+### W10 — Every attempt ends with a report written from running notes, and a second agent questions it
 
 - **Parent:** N03 / AII-253.
-- **Blockers:** W01, W05, W06, W07, W08.
-- **Deliverable:** The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on a local route and on a Radiance route whose model calls go through the controller's model relay (packages/pi-adapter/src/worker/relay-fetch.ts). This is a release gate.
-- **Acceptance and verification:** A Radiance route is shown working end to end through the controller's relay (a real task from admission to a verified work.end); bench variants A to D are run on the real worker on both routes and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached.
+- **Blockers:** W03, W05.
+- **Deliverable:** Owner decision 2026-11-10 (Rob): an agent must always give a report when it ends, whether or not it submits code and whether it is coding or not. The agent keeps running notes as it works (what it did, what it found, what is left, what it could not do), kept in the attempt so they survive a restart and a hand-off, and work.end requires a report built from them (an end without a report is refused with a plain message telling the agent to write one; the blocked, partial and done results all carry a report). Before a done is recorded succeeded, a different agent questions the first about the report and the work against the task contract (bounded rounds, questions and answers kept with the attempt) and the answers are folded into the final report, which the owner and the next agent read. If the interrogation finds the work incomplete or the report unsupported, the work goes back to the same agent in the same attempt, counted with the stopped-early limit (W03) and not around it; after the limit the task gets a blocker for the CTO, not a question for the owner. The mechanical checks of W05 run first and stay. Agent and record text shown to the owner is quoted once. Applies to coding and non-coding tasks alike.
+- **Acceptance and verification:** An end without a report is refused and the agent can write one and end again; notes written before a restart appear in the report; a coding task and a non-coding task each end with a report; a done whose report the second agent finds unsupported goes back to the agent with the questions and is not recorded succeeded; the second agent cannot be the first (separate attempt, no shared conversation), cannot approve the work itself (it only questions; acceptance stays with the independent review for submissions), and its rounds and text are bounded; the final report is readable through the state API and the chat by free-form words with no fixed phrase; repeated returns count toward the W03 limit and then raise the blocker.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W09 — Pass the completion gates on the real worker and on the local route before release
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W01, W05, W06, W07, W08, W10.
+- **Deliverable:** The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on the local route that uses the owner's AI server (Rob, 2026-11-10: every route is local; no cloud or Radiance-through-relay route is needed for this gate). This is a release gate.
+- **Acceptance and verification:** A real task is shown working end to end on the local route from admission to a verified work.end and an accepted report; bench variants A to D are run on the real worker on that route and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A07h — Expire a standing grant only after it goes unused, and renew it each time a worker uses it
@@ -3157,7 +3165,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X04 — Qualify fresh macOS release candidate
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** X01, X02, X03, X09, F03.
+- **Blockers:** X01, X02, X03, X09, F03, W09.
 - **Deliverable:** Fresh-install and reboot/update/restore evidence on supported macOS.
 - **Acceptance and verification:** Full accepted scenario passes on exact build; containment limits explicit; no development-directory dependency; with each optional integration (local inference, MCP server, remote worker, cache backend) absent or failing, core lifecycle, chat and recovery still work and report it unavailable; core runs with optional adapter packages not installed; the controller runs as the chosen background service and planned OS shutdown is distinguished from a crash; UI settings persist across restart; clean uninstall leaves no service registration or data outside chosen folders and common setup needs no single-platform tooling.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -3165,7 +3173,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X05 — Qualify fresh Linux release candidate
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** X01, X02, X03, X09, F03.
+- **Blockers:** X01, X02, X03, X09, F03, W09.
 - **Deliverable:** Fresh-install and reboot/update/restore evidence on supported Linux.
 - **Acceptance and verification:** Full accepted scenario passes on exact build; remote topology if selected verified; no developer credentials required; same optional-integration, service, settings and uninstall checks as X04; two distinct deployments configured from a release extract with no source edits.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -3173,7 +3181,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X06 — Qualify fresh Windows release candidate
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** X01, X02, X03, X09, F03, G06.
+- **Blockers:** X01, X02, X03, X09, F03, W09, G06.
 - **Deliverable:** Fresh-install and reboot/update/restore evidence on supported Windows.
 - **Acceptance and verification:** Full accepted scenario passes on exact build; path/locking/process semantics exercised; no platform skips; same optional-integration, service, settings and uninstall checks as X04.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
