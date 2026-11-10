@@ -132,7 +132,9 @@ export class RemoteWorkerHost implements WorkerHost {
       // Nothing was offered: the host never sees the order (or the task credential in it), and the attempt fails with the reason.
       return { workerVersion: "remote", run: async () => ({ status: "failed", error: why }), checkpoint: async () => judged.order.resumeFrom ?? {}, restart: async () => { throw new DomainError("fenced", "the attempt was refused before it was offered"); }, stop: async () => undefined };
     }
-    const order = await this.#carry(judged.order);
+    // What the order's text is made of is the controller's own measure (card C07i): the host is not given it.
+    const { startParts: _sp, ...offered } = judged.order; void _sp;
+    const order = await this.#carry(offered);
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.options.requirements(order), inputs: this.options.inputs?.(order) ?? [] });
     return new RemoteWorkerHandle(this.remote, this.by, order.attemptId, placed.placement, this.options);
   }

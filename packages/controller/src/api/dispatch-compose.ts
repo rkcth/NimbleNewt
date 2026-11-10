@@ -10,7 +10,7 @@ import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate }
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, compactionKeep, startupItems, type DecisionDeps } from "../decisions/index.js";
-import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
+import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, startSizeRecorder, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
 import type { LandingPolicyFigures } from "./landing-policy.js";
@@ -462,6 +462,13 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     if (moved.rebuilt && moved.warning !== undefined) await notifications.emitFromController({ commandId: `ctx-unmeasured:${unmeasuredId}`, kind: "maintenance", level: "notice", ref: { kind: "route-move", id: unmeasuredId }, detail: `Route ${c.route.slice(0, 80)} has not been measured yet: the move was built on an assumed prompt size, and its first call will be checked with its real size.`.slice(0, 200), projectId: c.projectId }).catch((error: unknown) => i.onError?.(error));
     return moved;
   };
+  /**
+   * Card C07i: the starting-size watch, given every first call the guards judge on the local host and on each remote host. An alert it opens reaches the owner once (the notification's command ID is the alert's; one whose telling failed is told at the task's next first call), and the task's
+   * status shows it while it is open. A rising run is a Notice (nothing waits on the owner yet); a call past the owner's share of its limit is Needs you, since the next growth is refused. A failure is reported, never raised.
+   */
+  const startSizes = StartSizeService.withEpoch(storage, epoch, ro);
+  const recordStartSize = startSizeRecorder(startSizes, principal, notifications, i.onError);
+  const startSize = (worker: "local" | "remote") => ({ worker, record: recordStartSize });
   const remedies = "choose a route with a larger window, reduce the task contract, supersede decisions or reassign the task";
   // Remote MCP servers (cards T03, H12g, H12k): built before the local host so the host is given the same connector and client the handle carries.
   const mcpParts = (() => {
@@ -484,6 +491,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       routeWindow: async (order) => (await i.routing.get())?.routes[order.route]?.contextTokens,
       // And a stored conversation is judged whatever the embedder passed: a checkpoint of the worker package's shape says its size, and one that says nothing is not resumed.
       storedTokens: i.options.local.storedTokens ?? checkpointStoredTokens,
+      startSize: startSize("local"),
       // Card C07g: the worker's process is up and says what it sends besides the prompt; the route is measured with that, and the view built again on the measured figure before the first call.
       rebuildView: async (order, fixed, launch, promptChars) => {
         await context.measureRoute(principal, { taskId: order.taskId, attemptId: order.attemptId, launch, route: order.route, ...(order.harness === undefined ? {} : { harness: order.harness }), systemPromptChars: fixed.systemPromptChars, toolSchemaChars: fixed.toolSchemaChars });
@@ -634,6 +642,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           window: hostWindow, routeWindow, storedTokens: checkpointStoredTokens,
           // No remote operation reports the provider's input count, so no admitted round is kept waiting for one.
           confirms: false,
+          startSize: startSize("remote"),
         }).context!;
         // The first call as the controller can know it before the host's process is up, measured against the same window the guards judge it by.
         const firstCall = estimatedFirstCall(context, async (order) => usableWindow(hostWindow(order)) ?? usableWindow(await routeWindow(order)));

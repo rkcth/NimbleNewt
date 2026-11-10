@@ -70,6 +70,11 @@ export interface WorkOrder {
    * the references of what was cut. `measured` is false when the route's fixed part was not measured yet: a host that can measure its own process rebuilds that part before the first call (`RuntimeGuards.context.rebuildView`).
    */
   readonly startupView?: { readonly route: string; readonly measured: boolean; readonly chars: number };
+  /**
+   * What `content` is made of, in characters (card C07i): the task's own text, the project's rules, the paragraph of what the task was handed with and the rebuilt route view, and the records that paragraph names (where the
+   * originals are kept). Read by the controller's starting-size watch only; it is not sent to a remote host.
+   */
+  readonly startParts?: { readonly task: number; readonly rules: number; readonly handoff: number; readonly view: number; readonly refs?: readonly string[] };
   /** The dispatch contract (card H12a). A remote worker confirms it before its first tool call; a local host applies the same figures through its own builder. */
   readonly contract?: DispatchContract;
 }
