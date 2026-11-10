@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   CURRENT_CONFIG_VERSION, DEFAULT_LIMITS, Secret, describeConfig, directorySecrets, environmentSecrets, exportProfile, formatErrors, importProfile,
-  loadConfig, memorySecrets, migrateConfig, resolveSecrets, secretReferences, transferOptionsFromConfig, validateConfig, type ConfigMigration, type NimbleNewtConfig,
+  loadConfig, memorySecrets, migrateConfig, resolveSecrets, secretReferences, TRANSFER_STATE_FOLDER, transferOptionsFromConfig, validateConfig, type ConfigMigration, type NimbleNewtConfig,
 } from "./index.js";
 
 const example = (name: string): string => readFileSync(fileURLToPath(new URL(`../examples/${name}.example.json`, import.meta.url)), "utf8");
@@ -443,6 +443,24 @@ test("the start gets the transfer destinations as written and a secret lookup th
   const none = transferOptionsFromConfig(loadOk(parsed("private")), all);
   assert.deepEqual(none.targetEntries, []);
   assert.equal(await none.secrets("transfer.pg-url"), undefined);
+  // The journal and authority file live in one fixed folder under the data directory, given also with no destinations (a past transfer's authority is still checked).
+  assert.equal(options.stateDirectory, join(config.installation.dataDir, TRANSFER_STATE_FOLDER));
+  assert.equal(TRANSFER_STATE_FOLDER, "database-transfer");
+  assert.equal(none.stateDirectory, join(config.installation.dataDir, "database-transfer"));
+});
+
+test("a PostgreSQL controller database may name its schema, so the configuration can point at a transfer destination's own schema after a move (card F04l)", () => {
+  const doc = parsed("private");
+  assert.equal(doc.controller.storage.kind, "postgres");
+  const plain = loadOk(doc).controller.storage;
+  assert.equal(plain.kind === "postgres" ? plain.schema : "not postgres", undefined, "no schema: the controller's default");
+  doc.controller.storage.schema = "nn_moved";
+  const config = loadOk(doc);
+  assert.equal(config.controller.storage.kind === "postgres" ? config.controller.storage.schema : undefined, "nn_moved");
+  for (const bad of ["Moved", "1abc", "a-b", "", "a".repeat(42)]) {
+    doc.controller.storage.schema = bad;
+    assert.ok(messages(loadConfig(doc)).some((m) => m.startsWith("controller.storage.schema")), JSON.stringify(bad));
+  }
 });
 
 test("transfer destinations in the configuration: a PostgreSQL address only as a secret reference (a plain address is refused unechoed), names unique and plain, at most 16, listed as a secret use, kept out of public profiles and exports (card F04l)", async () => {

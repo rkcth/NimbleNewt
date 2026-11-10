@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **248 of 359 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **249 of 359 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,7 +106,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 17 of 19 |
 | Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 38% | 8 of 21 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 16 of 19</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 17 of 19</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -163,7 +163,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [x] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
 - [x] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
 - [x] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
-- [ ] **F04l** · P34 · Read database transfer targets from configuration and check Pi conversation stores _(needs F04e, F02)_
+- [x] **F04l** · P34 · Read database transfer targets from configuration and check Pi conversation stores _(needs F04e, F02)_
 - [ ] **F04m** · P34 · Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal _(needs F04e)_
 - [ ] **F04n** · P35 · Make a failed fence take-back in a database rollback leave the new database startable _(needs F04m)_
 

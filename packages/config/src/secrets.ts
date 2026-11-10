@@ -82,12 +82,17 @@ export function describeConfig(config: NimbleNewtConfig): string {
   return JSON.stringify(config, null, 2);
 }
 
+/** The folder under `installation.dataDir` that holds the database transfer journal and authority file (card F04l). */
+export const TRANSFER_STATE_FOLDER = "database-transfer";
+
 /**
- * What the controller's start needs to offer database transfers (card F04l): the destinations as the configuration lists them, and a secret lookup that answers ONLY the secrets those destinations
- * name (the controller is not handed the whole secret store). No destinations: an empty list and a lookup that answers nothing. The entries are the validated configuration, passed on as they are.
+ * What the controller's start needs to offer database transfers (card F04l): the destinations as the configuration lists them, a secret lookup that answers ONLY the secrets those destinations
+ * name (the controller is not handed the whole secret store), and the one fixed folder of the transfer journal and authority file, `<installation.dataDir>/database-transfer`. No destinations: an
+ * empty list and a lookup that answers nothing, but the folder is still given, so a start keeps checking which database a past transfer made the active one after the destinations are taken out
+ * of the configuration. The entries are the validated configuration, passed on as they are. A relative `dataDir` gives a relative folder, which the start refuses by name.
  */
-export function transferOptionsFromConfig(config: NimbleNewtConfig, resolver: SecretResolver): { readonly targetEntries: readonly unknown[]; readonly secrets: (name: string) => Promise<string | undefined> } {
+export function transferOptionsFromConfig(config: NimbleNewtConfig, resolver: SecretResolver): { readonly stateDirectory: string; readonly targetEntries: readonly unknown[]; readonly secrets: (name: string) => Promise<string | undefined> } {
   const entries = config.controller.databaseTransfer?.targets ?? [];
   const allowed = new Set(entries.flatMap((t) => (t.kind === "postgres" ? [t.url.secret] : [])));
-  return { targetEntries: structuredClone(entries) as readonly unknown[], secrets: async (name) => (allowed.has(name) ? resolver.resolve(name) : undefined) };
+  return { stateDirectory: join(config.installation.dataDir, TRANSFER_STATE_FOLDER), targetEntries: structuredClone(entries) as readonly unknown[], secrets: async (name) => (allowed.has(name) ? resolver.resolve(name) : undefined) };
 }

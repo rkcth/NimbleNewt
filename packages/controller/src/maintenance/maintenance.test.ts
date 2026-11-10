@@ -26,6 +26,8 @@ interface World {
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
   storage: import("../storage/types.js").ControllerStorage;
+  /** A service on another view of the same storage (to step into the middle of a command). */
+  serviceOn(storage: import("../storage/types.js").ControllerStorage): MaintenanceService;
 }
 async function world(backendIndex: number, body: (w: World) => Promise<void>, heartbeatMs = 0): Promise<void> {
   const backend = backends[backendIndex]!;
@@ -47,7 +49,8 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     };
     const getBody = async (id: string) => { const a = (await open.storage.getAggregate({ kind: "maintenance", id }))!; return { ...(a.body as unknown as MaintenanceBody), revision: a.revision }; };
     const until = async (id: string, want: string): Promise<void> => { for (let i = 0; i < 200 && (await getBody(id)).status !== want; i++) await sleep(10); assert.equal((await getBody(id)).status, want); };
-    await body({ m, applier, owner, agents, grants, principals, time, service, make, body: getBody, until, storage: open.storage });
+    const serviceOn = (storage: import("../storage/types.js").ControllerStorage) => MaintenanceService.withEpoch(storage, projects.epoch, { applier, heartbeatMs }, options);
+    await body({ m, applier, owner, agents, grants, principals, time, service, make, body: getBody, until, storage: open.storage, serviceOn });
     await m.idle();
   } finally { await open.close(); }
 }
@@ -479,3 +482,186 @@ test("the live index is covered over several ticks when it is longer than one pa
     } finally { limits.indexScan = was; }
   });
 });
+
+// ---- A09 standing permission (2026-11-10) -------------------------------------------------------------------------------------------
+
+for (const [index, backend] of backends.entries()) {
+  test(`a standing permission of the owner approves a package or extension without asking again, only the exact kind and without install scripts, never access or protected kinds; it is checked again at apply and cannot be self-granted (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const ben = await w.make("Ben");
+      // Without a standing permission the request waits for a decider.
+      const before = await request(w, ann.principal, "package", pkg("left-pad"));
+      assert.equal(before.status, "pending");
+      // The owner's standing permission for packages, installation-wide.
+      const g = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ann.principal.id, action: "approve.maintenance.package", project: "*", source: "direct", basis: "Ann may add packages to her own environment" });
+      const granted = await request(w, ann.principal, "package", pkg("right-pad"));
+      assert.equal(granted.status, "approved", "existing permission asks no one again");
+      await settle(w);
+      const done = await w.body(granted.maintenanceId);
+      assert.equal(done.status, "applied");
+      assert.equal(done.decision?.via, "rule"); assert.equal(done.decision?.rule, "standing-grant");
+      // Install scripts need an approval of the exact artifact: the standing permission does not cover them.
+      assert.equal((await request(w, ann.principal, "package", pkg("with-scripts", { installScripts: true }))).status, "pending");
+      // Only the exact kind: a package permission says nothing about extensions, mounts, sites or the protected base.
+      assert.equal((await request(w, ann.principal, "extension", pkg("ext-one"))).status, "pending");
+      assert.equal((await request(w, ann.principal, "network", { site: "pkgs.example.org" })).status, "pending");
+      assert.equal((await request(w, ann.principal, "base", { change: "add a compiler" })).status, "pending");
+      // Another agent's permission is not Ann's, and Ben's request is not Ann's.
+      assert.equal((await request(w, ben.principal, "package", pkg("ben-pad"))).status, "pending");
+      // Broad grants do not count: only the exact action names the standing permission.
+      await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.*", project: "*", source: "direct", basis: "broad" });
+      await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.maintenance.extension", project: "proj-aaaaaaaaaaaaaaaaaaaa", source: "direct", basis: "one project only" });
+      assert.equal((await request(w, ben.principal, "package", pkg("ben-two"))).status, "pending", "approve.* is not a standing permission for maintenance");
+      assert.equal((await request(w, ben.principal, "extension", pkg("ben-ext"))).status, "pending", "a grant for one project is not installation-wide");
+      // An agent cannot give itself one (only the owner grants, and an approval grant is derived only by the owner).
+      await refuses("forbidden", () => w.grants.grant(ben.principal, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.maintenance.package", project: "*", source: "direct", basis: "self" }));
+      await refuses("forbidden", () => w.grants.derive(ann.principal, { commandId: cid("g"), parentId: g.id, action: "approve.maintenance.package", project: "*", basis: "copy" }));
+      // A restriction wins over the standing permission.
+      const r = await w.grants.restrict(w.owner, { commandId: cid("x"), subject: ann.principal.id, action: "approve.maintenance.package", project: "*", reason: "hold installs" });
+      assert.equal((await request(w, ann.principal, "package", pkg("restricted-pad"))).status, "pending");
+      await w.grants.lift(w.owner, { commandId: cid("x"), restrictionId: r.id, expectedRevision: r.revision, reason: "go" });
+      // Approved under the permission, but safe restoration is not possible now (the applier answers unsupported): the change waits, approved. The permission is then revoked: the next drive finds the approval
+      // no longer stands (it is checked again at apply), and the request waits for a decider; nothing was applied.
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "no safe restoration now" }];
+      const late = await request(w, ann.principal, "package", pkg("late-pad"));
+      assert.equal(late.status, "approved");
+      await settle(w);
+      assert.equal((await w.body(late.maintenanceId)).status, "approved");
+      assert.match((await w.body(late.maintenanceId)).pendingReason ?? "", /no safe restoration/);
+      const view = (await w.grants.getGrant(g.id))!;
+      await w.grants.revoke(w.owner, { commandId: cid("v"), grantId: g.id, expectedRevision: view.revision, reason: "enough" });
+      assert.equal(await w.m.drive(late.maintenanceId), "pending");
+      assert.equal(w.applier.effects.has(late.maintenanceId), false, "nothing was applied");
+      assert.equal((await request(w, ann.principal, "package", pkg("after-revoke"))).status, "pending", "a revoked standing permission approves nothing");
+    });
+  });
+}
+
+// ---- A09 second slice review (2026-11-10) -----------------------------------------------------------------------------------------------
+
+for (const [index, backend] of backends.entries()) {
+  test(`a standing permission counts only when every term it carries can be judged here: a time window that holds now, never the owner's conditions, environments or limits (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const make = async (label: string, terms?: Record<string, unknown>) => {
+        const a = await w.make(label);
+        await w.grants.grant(w.owner, { commandId: cid("g"), grantee: a.principal.id, action: "approve.maintenance.package", project: "*", source: "standing", basis: "packages", ...(terms === undefined ? {} : { terms: terms as never }) });
+        return a;
+      };
+      // The clock reads 10:00 UTC.
+      assert.equal((await request(w, (await make("Plain")).principal, "package", pkg("plain"))).status, "approved");
+      assert.equal((await request(w, (await make("Open", { window: { start: "09:00", end: "17:00" }, delegation: false })).principal, "package", pkg("open"))).status, "approved", "a window that holds now");
+      assert.equal((await request(w, (await make("Closed", { window: { start: "18:00", end: "20:00" } })).principal, "package", pkg("closed"))).status, "pending", "outside its window the permission gives nothing");
+      assert.equal((await request(w, (await make("Cond", { conditions: ["only packages from our own registry"] })).principal, "package", pkg("cond"))).status, "pending", "the owner's free-text conditions are for a decider to judge");
+      assert.equal((await request(w, (await make("Env", { environments: ["development"] })).principal, "package", pkg("env"))).status, "pending");
+      assert.equal((await request(w, (await make("Spend", { spendLimit: 0 })).principal, "package", pkg("spend"))).status, "pending");
+      // A permission given at enrollment carries no terms and counts.
+      const e = await w.make("Enrolled");
+      const rec = await w.storage.getAggregate({ kind: "principal", id: e.principal.id });
+      await w.principals.setGrants(w.owner, { commandId: cid("s"), principalId: e.principal.id, expectedRevision: rec!.revision, grants: [{ action: "approve.maintenance.extension", project: "*" }] });
+      assert.equal((await request(w, e.principal, "extension", pkg("enrolled"))).status, "approved");
+    });
+  });
+
+  test(`a standing permission revoked between the check at apply and the claim stops the application: the claim is fenced by the grant record (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const g = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ann.principal.id, action: "approve.maintenance.package", project: "*", source: "direct", basis: "packages" });
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "no safe restoration now" }];
+      const r = await request(w, ann.principal, "package", pkg("racy"));
+      assert.equal(r.status, "approved");
+      await settle(w);
+      assert.equal((await w.body(r.maintenanceId)).status, "approved");
+      // The owner revokes the permission while the drive is between its check and its claim: the grant record read for the check is the one before the revocation.
+      let armed = true;
+      const view = new Proxy(w.storage, { get: (t, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => {
+        const found = await t.getAggregate(ref as never);
+        if (armed && ref.kind === "grant-record" && ref.id === g.id) {
+          armed = false;
+          const v = (await w.grants.getGrant(g.id))!;
+          await w.grants.revoke(w.owner, { commandId: cid("v"), grantId: g.id, expectedRevision: v.revision, reason: "stop" });
+        }
+        return found;
+      } : (typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+      const racing = w.serviceOn(view as never);
+      assert.equal(await racing.drive(r.maintenanceId), "pending");
+      assert.equal(armed, false, "the revocation was written in the window");
+      assert.equal(w.applier.effects.has(r.maintenanceId), false, "nothing was applied");
+    });
+  });
+}
+
+// ---- A09 second slice, second review (2026-11-10) ---------------------------------------------------------------------------------------
+
+/** A view of the storage that runs `act` once, the first time `when` matches a record read, and returns the record as it was before `act` (a write that lands between a check's read and its write). */
+const stepIn = (storage: World["storage"], when: (ref: { kind: string; id: string }) => boolean, act: () => Promise<void>): { view: World["storage"]; fired: () => boolean } => {
+  let armed = true;
+  const view = new Proxy(storage, { get: (t, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => {
+    const found = await t.getAggregate(ref as never);
+    if (armed && when(ref)) { armed = false; await act(); }
+    return found;
+  } : (typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+  return { view: view as never, fired: () => !armed };
+};
+
+for (const [index, backend] of backends.entries()) {
+  test(`every record a standing permission rests on fences it: a revocation written between the check and the request write refuses the write; the root of a derived grant and an enrollment grant fence the claim (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      // The request write: the grant is revoked after it was read for the check. The write fails (asked again, the request waits for a decider); nothing is approved on a revoked permission.
+      const ann = await w.make("Ann");
+      const g = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ann.principal.id, action: "approve.maintenance.package", project: "*", source: "standing", basis: "packages" });
+      const r1 = stepIn(w.storage, (ref) => ref.kind === "grant-record" && ref.id === g.id, async () => { const v = (await w.grants.getGrant(g.id))!; await w.grants.revoke(w.owner, { commandId: cid("v"), grantId: g.id, expectedRevision: v.revision, reason: "stop" }); });
+      await refuses("stale_revision", () => w.serviceOn(r1.view).request(ann.principal, { commandId: "racy-request", kind: "package", spec: pkg("racy-request"), reason: "needed", rollbackPlan: "undo it" }));
+      assert.equal(r1.fired(), true);
+      assert.equal((await w.m.request(ann.principal, { commandId: "racy-request", kind: "package", spec: pkg("racy-request"), reason: "needed", rollbackPlan: "undo it" })).status, "pending");
+
+      // A derived grant: the owner's root (approve.maintenance.*) does not itself count; the exact grant derived from it does, and the root's revocation between the check and the claim fails the claim.
+      const ben = await w.make("Ben");
+      const root = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.maintenance.*", project: "*", source: "standing", basis: "maintenance" });
+      assert.equal((await request(w, ben.principal, "package", pkg("ben-broad"))).status, "pending", "a prefix grant is not a standing permission");
+      await w.grants.derive(w.owner, { commandId: cid("g"), parentId: root.id, action: "approve.maintenance.package", project: "*", basis: "packages only" });
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "no safe restoration now" }];
+      const d = await request(w, ben.principal, "package", pkg("ben-derived"));
+      assert.equal(d.status, "approved");
+      await settle(w);
+      assert.equal((await w.body(d.maintenanceId)).status, "approved");
+      const r2 = stepIn(w.storage, (ref) => ref.kind === "grant-record" && ref.id === root.id, async () => { const v = (await w.grants.getGrant(root.id))!; await w.grants.revoke(w.owner, { commandId: cid("v"), grantId: root.id, expectedRevision: v.revision, reason: "stop" }); });
+      assert.equal(await w.serviceOn(r2.view).drive(d.maintenanceId), "pending");
+      assert.equal(r2.fired(), true);
+      assert.equal(w.applier.effects.has(d.maintenanceId), false, "nothing was applied on a revoked root");
+
+      // An enrollment grant: the principal record fences the claim, so grants replaced between the check and the claim fail it.
+      const cy = await w.make("Cy");
+      const rec = await w.storage.getAggregate({ kind: "principal", id: cy.principal.id });
+      await w.principals.setGrants(w.owner, { commandId: cid("s"), principalId: cy.principal.id, expectedRevision: rec!.revision, grants: [{ action: "approve.maintenance.package", project: "*" }] });
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "no safe restoration now" }];
+      const e = await request(w, cy.principal, "package", pkg("cy-enrolled"));
+      assert.equal(e.status, "approved");
+      await settle(w);
+      assert.equal((await w.body(e.maintenanceId)).status, "approved");
+      const r3 = stepIn(w.storage, (ref) => ref.kind === "principal" && ref.id === cy.principal.id, async () => { const p = (await w.storage.getAggregate({ kind: "principal", id: cy.principal.id }))!; await w.principals.setGrants(w.owner, { commandId: cid("s"), principalId: cy.principal.id, expectedRevision: p.revision, grants: [] }); });
+      assert.equal(await w.serviceOn(r3.view).drive(e.maintenanceId), "pending");
+      assert.equal(r3.fired(), true);
+      assert.equal(w.applier.effects.has(e.maintenanceId), false, "nothing was applied after the grant was taken away");
+    });
+  });
+}
+
+for (const [index, backend] of backends.entries()) {
+  test(`a derived standing permission is judged by the terms of every grant it rests on: a derived record without its parent's terms (an older record) does not shed the owner's conditions or time window (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const strip = async (id: string): Promise<void> => {
+        const rec = (await w.storage.getAggregate({ kind: "grant-record", id }))!;
+        const { terms: _t, ...rest } = rec.body as Record<string, unknown>;
+        await w.storage.applyOperation({ operationId: cid("legacy-op"), epoch: await w.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-10-31T10:00:00.000Z", changes: [{ type: "update", ref: { kind: "grant-record", id }, expectedRevision: rec.revision, body: rest as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+      };
+      for (const [name, terms, want] of [["Cond", { conditions: ["only from our registry"] }, "pending"], ["Late", { window: { start: "18:00", end: "20:00" } }, "pending"], ["Day", { window: { start: "09:00", end: "17:00" } }, "approved"]] as const) {
+        const a = await w.make(name);
+        const root = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: a.principal.id, action: "approve.maintenance.*", project: "*", source: "standing", basis: "maintenance", terms: terms as never });
+        const d = await w.grants.derive(w.owner, { commandId: cid("g"), parentId: root.id, action: "approve.maintenance.package", project: "*", basis: "packages" });
+        await strip(d.id);
+        assert.equal((await request(w, a.principal, "package", pkg(`${name.toLowerCase()}-pad`))).status, want, name);
+      }
+    });
+  });
+}

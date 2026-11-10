@@ -690,12 +690,25 @@
       ],
       "deliverable": "Split from F04e (2026-10-31): the engine, journal, authority file, owner operations and chat proposal exist, but targets are only passed to startController by the host in code; the production start reads them from the configuration (a PostgreSQL address as a secret reference, a SQLite path, a name each), with a PostgreSQL target that reports free room and empties its schema, and the Pi conversation stores are checked against the recovery points' checkpoints",
       "acceptance_and_verification": "A real start with a configured transfer target moves the database from chat; the PostgreSQL address never appears in chat, logs or the journal; a recovery point whose conversation checkpoint is missing refuses the transfer; capacity of a PostgreSQL destination is read from the server",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "9517bae8",
+          "4eafb11e",
+          "1bee123c",
+          "bd04d753",
+          "9980bec8"
+        ],
+        "ci_runs": [],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Database transfer targets come entirely from the configuration (PostgreSQL address as a secret reference, SQLite path, a name each); a PostgreSQL target reports free room read from the server and empties only a schema this controller created; the Pi conversation stores are checked against the recovery points' checkpoints; the address and password never appear in chat, logs, the journal or the state folder (an integration test starts the controller from a configuration file and moves the database from chat). Left: the launcher that reads an installation's configuration and secret store is card U14; free room is the owner's cap minus the server's database size because PostgreSQL gives no portable free-disk reading; installation.dataDir is not required to be absolute by the configuration. Green exhaustive run pending (to be added to ci_runs)."
+      }
     },
     {
       "id": "F04m",

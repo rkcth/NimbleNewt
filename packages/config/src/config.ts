@@ -9,7 +9,7 @@ export interface SecretRef {
 
 export type ControllerStorage =
   | { readonly kind: "sqlite"; readonly path: string }
-  | { readonly kind: "postgres"; readonly url: SecretRef; readonly maxConnections: number };
+  | { readonly kind: "postgres"; readonly url: SecretRef; readonly maxConnections: number; /** The schema the controller's tables live in (default `nimblenewt`), so a database moved to a transfer destination with its own schema can be named here after the move (card F04l). */ readonly schema?: string };
 
 /** A destination for a controller database transfer. A PostgreSQL address holds a password, so it is only ever a reference to a named secret. */
 export type TransferTargetEntry =
@@ -110,7 +110,7 @@ const SCHEMA: Schema = {
           discriminator: "kind",
           variants: {
             sqlite: { kind: "object", props: { kind: { kind: "literal", value: "sqlite" }, path: text() } },
-            postgres: { kind: "object", props: { kind: { kind: "literal", value: "postgres" }, url: secretRef, maxConnections: { kind: "integer", min: 1, max: 200 } } },
+            postgres: { kind: "object", optional: ["schema"], props: { kind: { kind: "literal", value: "postgres" }, url: secretRef, maxConnections: { kind: "integer", min: 1, max: 200 }, schema: text({ pattern: /^[a-z][a-z0-9_]{0,40}$/, hint: "lower-case letters, digits and underscores, starting with a letter (at most 41 characters)" }) } },
           },
         },
       },

@@ -616,6 +616,7 @@ for (const backend of backends) {
       out["artifact.publish"] = await send("artifact.publish", { name: "n", files: [{ path: "a.md", text: "a" }] }, "w7");
       out["tool.register"] = await send("tool.register", { name: "x", kind: "skill", version: "1.0.0", manifest: JSON.parse(JSON.stringify(manifest({ entryPoint: undefined, interpreter: undefined }))), instructionsRecordId: doc["id"] as string }, "w5");
       out["job.start"] = await send("job.start", { tool: "toolbox.build", input: {} }, "w8");
+      out["maintenance.request"] = await send("maintenance.request", { kind: "skill", spec: { name: "notes", digest: `sha256:${"a".repeat(64)}` }, reason: "keep notes" }, "w10");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -625,7 +626,7 @@ for (const backend of backends) {
       out["after"] = await send("desk.write", { kind: "note", title: "n", body: "b3", visibility: "shared", status: "accepted" }, "w6");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
