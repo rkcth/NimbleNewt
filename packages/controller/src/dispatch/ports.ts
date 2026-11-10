@@ -121,6 +121,16 @@ export interface WorkerHandle {
   stop(): Promise<void>;
 }
 
+/**
+ * What a host can say about the work in an attempt's checkout (card W03), for the blocker of an agent that kept stopping early: the steps of its `PLAN.md` that are checked and those that are not (the agent's own words, shown
+ * quoted), and the diff stat of the checkout against the task's base. Either part is absent when the host could not look.
+ */
+export interface WorkProgress {
+  readonly plan?: { readonly done: readonly string[]; readonly open: readonly string[] };
+  /** One line, e.g. `3 files changed, 10 insertions(+), 2 deletions(-); 1 commit ahead of the base`. */
+  readonly diffStat?: string;
+}
+
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
 export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
 
@@ -159,6 +169,8 @@ export interface WorkerHost {
   localWork?(attemptIds: readonly string[]): Promise<HostLocalWork>;
   /** Force Stop (card L02d): kill whatever this host still holds for these attempts, without asking first. A host that cannot leaves it out; one that fails throws (the stop looks again afterwards and names what is left). */
   endLocalWork?(attemptIds: readonly string[]): Promise<void>;
+  /** What the attempt's checkout holds (card W03): its plan progress and diff stat. A host that cannot look leaves it out; one that fails throws (the blocker then says the host could not tell). */
+  progress?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }): Promise<WorkProgress | undefined>;
   /** The host's side of integration, landing, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }

@@ -81,7 +81,9 @@ describe("the composed worker: Pi in a sandboxed process, the bridge across the 
       (text) => { notes = recordIdIn(text); return { call: { name: "nimblenewt__desk-write", args: { kind: "note", title: "double code", body: SOURCE, visibility: "shared", status: "accepted" }, id: "call_0" } }; },
       (text) => { code = recordIdIn(text); return { call: { name: "nimblenewt__tool-register", args: { name: "double", kind: "tool", version: "1.0.0", manifest: MANIFEST, instructionsRecordId: notes, executableRecordId: code }, id: "call_0" } }; },
       (text) => ({ call: { name: "nimblenewt__tool-invoke", args: { tool: /(a_[a-z0-9]+\.double)/.exec(text)![1]!, input: { n: 21 } }, id: "call_0" } }),
-      (text) => ({ text: `Done: ${/result[^0-9]{0,6}42/.test(text.slice(-600)) ? "42" : "no result"}` }),
+      // Card W03: the agent ends its turn with work.end, then reports.
+      (text) => ({ call: { name: "nimblenewt__work-end", args: { result: "done", note: `Done: ${/result[^0-9]{0,6}42/.test(text.slice(-600)) ? "42" : "no result"}` }, id: "call_0" } }),
+      () => ({ text: "Ended." }),
     ]);
     try {
       const { world, dispatcher, ann, attemptId } = await compose({ launcher, directory, runs, storage, model, app: appFromRepository(repository, { root: nodeRoot, executable: "bin/node" }) });
@@ -110,6 +112,7 @@ describe("the composed worker: Pi in a sandboxed process, the bridge across the 
       // opens with the tool listed.
       const contextOf = (seen: Seen): string => { const all = [...JSON.stringify(seen.body.messages).matchAll(/<context>\\n([\s\S]*?)\\n<\/context>/g)]; assert.equal(all.length, 1, "one volatile context per request"); return all[0]![1]!; };
       const firstTurn = model.seen.length;
+      // Five calls: the agent's work.end ends the attempt at once, so the reply after it is never asked for.
       assert.equal(firstTurn, 5);
       for (const seen of model.seen) { const context = contextOf(seen); assert.match(context, /^Catalogue tools you may use/); assert.doesNotMatch(context, /\.double /, "a tool registered during the turn is not declared within it"); }
       const next = await world.task("Double another number", ann);
@@ -148,7 +151,7 @@ describe("the composed worker: Pi in a sandboxed process, the bridge across the 
     const service = createTcpServer((socket) => { connections.push("connected"); socket.destroy(); });
     await new Promise<void>((ok) => service.listen(0, "127.0.0.1", ok));
     const port = (service.address() as { port: number }).port;
-    const model = await endpoint([() => ({ text: "nothing to do" })]);
+    const model = await endpoint([() => ({ call: { name: "nimblenewt__work-end", args: { result: "done", note: "nothing to do" } } }), () => ({ text: "nothing to do" })]);
     // The tampered program: the real worker process, with code of its own that reads the channel beside it, takes the credential from the start message and probes before the turn runs.
     const tampered = join(directory, "tampered");
     mkdirSync(tampered);
@@ -296,6 +299,8 @@ async function compose(x: { launcher: SandboxLauncher; directory: string; runs: 
     namespaceId: (order) => personalId(order.agentId),
     // A reviewer who answers at once: an ask that is parked is approved and the same request is made again with the same call ID.
     bridge: async (order, call, token, request) => {
+      // This world has no state API: the agent's work.end (card H12n, W03) ends its attempt directly, as the API operation would.
+      if ((request as { op?: string }).op === "work.end") { await dispatcher.finishWith(world.owner, order.attemptId, { result: "done" }); return { ok: true, result: { state: "done" } } as never; }
       const gateway = { attemptId: order.attemptId, call } as Pick<ToolGateway, "attemptId" | "call">;
       const first = await service.handle(token, gateway, request as never);
       if (first.ok && first.result["state"] === "awaiting-approval") {

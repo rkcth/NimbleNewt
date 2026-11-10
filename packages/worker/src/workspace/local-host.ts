@@ -1,11 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync, readdirSync, realpathSync } from "node:fs";
+import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import { WorkspaceError } from "./errors.js";
 import type { GitBridge } from "./git.js";
 import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy } from "./host.js";
 import { fold, plainName } from "./names.js";
+import { NOFOLLOW } from "./paths.js";
 
 /**
  * The production workspace port of a local worker host (card H12q): one folder layout for the checkouts on this machine, shared by the host that makes an attempt's workspace (`ensure`) and the host that answers the
@@ -85,6 +86,19 @@ export class LocalWorkspaces {
     return { shared, checkout: join(dir, "checkout"), gitDir: join(dir, "task.git"), bridgeState: this.#stateOf(shared), quarantineRoot: join(this.#options.root, "quarantine") };
   }
 
+  /**
+   * What a task's checkout holds (card W03, for the blocker of an agent that kept stopping early): the checked and unchecked steps of the agent's `PLAN.md` at the checkout's top (a Markdown checkbox list), and the diff
+   * stat of the checkout against the task's base. `PLAN.md` is read only when it is a plain file (not a link) of at most `PROGRESS_LIMITS.planBytes`; steps past `PROGRESS_LIMITS.steps` are left out and each step is cut to
+   * `PROGRESS_LIMITS.stepChars`. A part that cannot be read is left out (the controller says it is not known); no checkout at all is `undefined`.
+   */
+  async progress(call: { readonly taskId: string; readonly projectId: string }): Promise<{ plan?: { done: string[]; open: string[] }; diffStat?: string } | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    const plan = await readPlan(join(where.checkout, "PLAN.md"));
+    const diffStat = await this.#options.git.diffStat({ gitDir: where.gitDir, checkout: where.checkout }).catch(() => undefined);
+    return { ...(plan === undefined ? {} : { plan }), ...(diffStat === undefined ? {} : { diffStat }) };
+  }
+
   readonly #making = new Map<string, Promise<unknown>>();
 
   /**
@@ -139,4 +153,31 @@ export class LocalWorkspaces {
       if (info !== undefined && Date.now() - info.mtimeMs > 10 * 60_000) await rm(join(staging, name), { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+export const PROGRESS_LIMITS = { planBytes: 256 * 1024, steps: 200, stepChars: 200 } as const;
+const STEP = /^\s*(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s+(.*?)\s*$/;
+
+/** The checkbox steps of a plan file, or `undefined` when it is missing, is not a plain file, is too big, or has no checkbox step. Opened without following a link. */
+export async function readPlan(path: string): Promise<{ done: string[]; open: string[] } | undefined> {
+  let text: string;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.size > PROGRESS_LIMITS.planBytes) return undefined;
+    const handle = await open(path, constants.O_RDONLY | NOFOLLOW);
+    try {
+      const bytes = await handle.readFile();
+      if (bytes.length > PROGRESS_LIMITS.planBytes) return undefined;
+      text = bytes.toString("utf8");
+    } finally { await handle.close(); }
+  } catch { return undefined; }
+  const done: string[] = [], open_: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = STEP.exec(line);
+    if (m === null) continue;
+    if (done.length + open_.length >= PROGRESS_LIMITS.steps) break;
+    const step = Array.from(m[2]!).slice(0, PROGRESS_LIMITS.stepChars).join("");
+    (m[1] === " " ? open_ : done).push(step);
+  }
+  return done.length + open_.length === 0 ? undefined : { done, open: open_ };
 }

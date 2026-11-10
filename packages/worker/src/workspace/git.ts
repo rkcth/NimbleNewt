@@ -304,6 +304,23 @@ export class GitBridge {
   }
 
   /**
+   * The diff stat of the agent's work (card W03, for the blocker of an agent that kept stopping early): its net difference from the base, committed or not, new and ignored files included (the same throwaway index as `changes`),
+   * as git's one-line summary, and how many commits it is ahead of the base. Reads only: the checkout, its index and its refs are not touched.
+   */
+  async diffStat(options: { gitDir: string; checkout: string }): Promise<string> {
+    const base = await this.#base(options.gitDir);
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let short: string;
+    try {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A", "-f"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      short = (await this.#run(["diff", "--cached", "--shortstat", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.trim();
+    } finally { await rm(index, { force: true }); }
+    const ahead = Number.parseInt((await this.#run(["rev-list", "--count", `${base}..HEAD`], { gitDir: options.gitDir })).stdout.trim(), 10);
+    return `${short === "" ? "no changes" : short} against the task's base; ${Number.isSafeInteger(ahead) ? ahead : "an unknown number of"} commit(s) ahead of the base`;
+  }
+
+  /**
    * Carries the agent's changes into the shared workspace through the expected-version bridge, file by file: each write names the version of the file at the base commit, so a file someone else changed
    * is not overwritten and the agent's change is kept for review. Returns the outcome per file. The checkout is not touched.
    */

@@ -25,7 +25,7 @@ for (const backend of backends) {
       open: async (order, call, from, lease) => {
         log.push(`runtime open${from === undefined ? "" : ` from ${JSON.stringify(from)}`}`);
         return (o.runtime ?? ((_o, c) => ({
-          run: async () => { const r = await c({ callId: "c1", tool: { name: "read-file", version: "1" }, args: { path: "a" } }, { kind: "local", run: async () => ({ text: "contents" }) }); return { status: "completed", text: r.state }; },
+          run: async () => { const r = await c({ callId: "c1", tool: { name: "read-file", version: "1" }, args: { path: "a" } }, { kind: "local", run: async () => ({ text: "contents" }) }); return { status: "completed", endKind: "normal", text: r.state }; },
           checkpoint: async () => ({ saved: true }), close: async () => { log.push("runtime close"); },
         })))(order, call, from, log, lease);
       },

@@ -155,6 +155,7 @@ const HINTS: Readonly<Record<BlockerType, string>> = {
   dispatch_blocked: "change the route, the harness, the budget or the task, then the dispatcher starts it",
   missing_context: "supply the context the resume needs, or change the task so it does not need it",
   resume_churn: "look at what keeps changing under the task, settle it, then resume again",
+  agent_stopped_early: "read what the agent last said, its plan and its changes, then assign the task again or change it",
 };
 
 /** The first words of the route: what kind of obstacle it is. */

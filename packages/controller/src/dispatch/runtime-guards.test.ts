@@ -214,7 +214,7 @@ for (const backend of backends) {
       const roomy = new LocalWorker({
         hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "v3", capabilities: () => CAPS, guards: { context: judged.context! },
         sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
-        runtimes: { open: async () => ({ firstCall: () => ({ systemPromptChars: 1000, toolSchemaChars: 1000, startupTokens: 100, replyReserveTokens: 200 }), run: async () => { ran = true; return { status: "completed" as const }; }, checkpoint: async () => ({}), close: async () => undefined }) },
+        runtimes: { open: async () => ({ firstCall: () => ({ systemPromptChars: 1000, toolSchemaChars: 1000, startupTokens: 100, replyReserveTokens: 200 }), run: async () => { ran = true; return { status: "completed" as const, endKind: "normal" as const }; }, checkpoint: async () => ({}), close: async () => undefined }) },
       });
       const third = w.restart({ workers: [roomy], route });
       await third.tick();

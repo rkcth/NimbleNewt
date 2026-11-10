@@ -18,10 +18,11 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
  * - `dispatch_blocked`: the dispatcher cannot start the attempt for a reason that waiting will not fix (no eligible route, a harness that cannot recover the task, an exhausted budget); a person changes the route, the task or the budget (card H12).
  * - `missing_context`: a checked resume found that context the task cannot continue without is not there (card L04); a person supplies it or changes the task.
  * - `resume_churn`: the inputs a checked resume was reviewing kept changing, so it never reached a state it could commit (card L04); a person looks at what keeps changing.
+ * - `agent_stopped_early`: the agent's turns kept ending before it said its work was done (no work.end, or a reply cut off or with nothing visible), and the readmits from its checkpoint were used up (card W03); a person reads what it last said, its plan and its diff, then assigns the task again or changes it.
  * - `context_overflow`: the context kept running out (a first call that does not fit, a summary that could not be made, repeated overflow); a person changes the route, the task or the budget (card C07b).
  */
-export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked" | "missing_context" | "resume_churn";
-export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked", "missing_context", "resume_churn"];
+export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked" | "missing_context" | "resume_churn" | "agent_stopped_early";
+export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked", "missing_context", "resume_churn", "agent_stopped_early"];
 
 /**
  * What kind of obstacle a blocker is (card U05), so a status answer can say what stands in the way and the route out:

@@ -153,3 +153,40 @@ test("the bridge state of a shared tree is the same whichever spelling of its pa
     assert.equal(a.bridgeState, b.bridgeState);
   } finally { await w.done(); }
 });
+
+// Card W03: what an attempt's checkout holds, for the blocker of an agent that kept stopping early: its plan's checked and unchecked steps and the diff stat against the base. Read only; what cannot be read is left out.
+test("progress reads the plan's checkbox steps and the diff stat of the checkout, and leaves out what it cannot read (card W03)", { skip }, async () => {
+  const w = await world();
+  try {
+    assert.equal(await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }), undefined, "no checkout yet: nothing to say");
+    const made = await w.ws.ensure({ taskId: "tsk-one", projectId: "prj-one" });
+    assert.deepEqual(await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }), { diffStat: "no changes against the task's base; 0 commit(s) ahead of the base" }, "no PLAN.md: the plan is left out");
+    await writeFile(join(made.checkout, "PLAN.md"), "# Plan\r\n\n- [x] read the code\n- [ ] fix the parser\n  * [X] nested and done\n1. [ ] run the tests\n- plain line\n- [] not a box\n");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 1;\nexport const b = 2;\n");
+    const before = execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "status", "--porcelain"], { encoding: "utf8" });
+    const got = await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" });
+    assert.deepEqual(got?.plan, { done: ["read the code", "nested and done"], open: ["fix the parser", "run the tests"] });
+    assert.equal(got?.diffStat, "2 files changed, 9 insertions(+) against the task's base; 0 commit(s) ahead of the base");
+    assert.equal(execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "status", "--porcelain"], { encoding: "utf8" }), before, "reading changes nothing in the checkout's index");
+    // A commit in the checkout counts as ahead.
+    execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/nonexistent-hooks", "-c", "commit.gpgsign=false", "add", "-A"]);
+    execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/nonexistent-hooks", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "step"]);
+    assert.match((await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }))?.diffStat ?? "", /; 1 commit\(s\) ahead of the base$/);
+    // A plan that is too big, or a directory by that name, is not read.
+    await writeFile(join(made.checkout, "PLAN.md"), `- [ ] x\n${"a".repeat(256 * 1024)}`);
+    assert.equal((await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }))?.plan, undefined);
+    await rm(join(made.checkout, "PLAN.md"));
+    await mkdir(join(made.checkout, "PLAN.md"));
+    assert.equal((await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }))?.plan, undefined);
+  } finally { await w.done(); }
+});
+
+test("a plan that is a link is not followed (card W03)", { skip: skip !== false ? skip : process.platform === "win32" ? "links need privileges on Windows" : false }, async () => {
+  const w = await world();
+  try {
+    const made = await w.ws.ensure({ taskId: "tsk-one", projectId: "prj-one" });
+    await writeFile(join(w.dir, "outside.md"), "- [ ] secret step\n");
+    execFileSync("ln", ["-s", join(w.dir, "outside.md"), join(made.checkout, "PLAN.md")]);
+    assert.equal((await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" }))?.plan, undefined);
+  } finally { await w.done(); }
+});

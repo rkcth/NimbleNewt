@@ -104,7 +104,7 @@ for (const backend of backends) {
     assert.deepEqual(JSON.parse(Buffer.from(await next.fetchFile(latest.artifactId, "checkpoint.json")).toString()), { turn: 2, fresh: true }, "the checkpoint the old host sent when asked, after its first");
     // And carries on: a call, then the result, which finishes the attempt once.
     assert.equal((await next.call(READ("c3"), local("three"))).state, "confirmed");
-    await next.complete({ status: "completed", text: "done on r2" });
+    await next.complete({ status: "completed", text: "done on r2", endKind: "normal" });
     await c.current.idle();
     const end = (await c.current.get(c.owner, attemptId))!;
     assert.deepEqual([end.state, end.outcome!.status, end.hostId], ["finished", "succeeded", r2.id]);

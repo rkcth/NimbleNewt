@@ -6,7 +6,7 @@ import type { Capabilities, HostService } from "../hosts/index.js";
 import type { Principal } from "../security/principals.js";
 import type { JsonObject } from "../storage/types.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
-import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, HostLocalWork, WorkOrder, WorkerTurnResult } from "./ports.js";
+import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, HostLocalWork, WorkOrder, WorkerTurnResult, WorkProgress } from "./ports.js";
 
 /** An isolation session for one attempt (card A03's launcher, behind a port): the host opens one with the recipe the dispatcher stated and closes it when the attempt ends or the recipe changes. */
 export interface SandboxSession {
@@ -118,6 +118,8 @@ export interface LocalWorkerOptions {
   readonly guards?: RuntimeGuards;
   /** This host's side of integration, checkout refresh and quarantine for the checkouts it holds (card H12m): the worker package's `WorkspaceHost.run` fits it. Absent: those requests are refused for this host. */
   readonly workspace?: WorkspacePort;
+  /** What a task's checkout on this host holds (card W03): the worker package's `LocalWorkspaces.progress` fits it. Absent: this host does not report it. */
+  readonly progress?: (scope: { readonly taskId: string; readonly projectId: string }) => Promise<WorkProgress | undefined>;
   /** Told when a guard fails (the attempt goes on; a guard never silently stops working). */
   readonly onGuardError?: (attemptId: string, what: string, error: unknown) => void;
 }
@@ -169,6 +171,7 @@ export class LocalWorker implements WorkerHost {
   readonly ownerPolicy: boolean;
   readonly #options: LocalWorkerOptions;
   readonly workspace?: WorkspacePort;
+  readonly progress?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }) => Promise<WorkProgress | undefined>;
   #sequence = 0;
   #beat = 0;
   /** For each attempt whose turn is running here, how much work (tool calls, model calls) it has in flight (card H12q). */
@@ -176,6 +179,8 @@ export class LocalWorker implements WorkerHost {
 
   constructor(options: LocalWorkerOptions) {
     if (options.workspace !== undefined) this.workspace = options.workspace;
+    const progress = options.progress;
+    if (progress !== undefined) this.progress = async (_attemptId, scope) => progress({ taskId: scope.taskId, projectId: scope.projectId });
     this.hostId = options.hostId;
     this.resources = options.resources;
     this.ownerPolicy = options.ownerPolicy === true;

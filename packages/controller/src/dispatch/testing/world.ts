@@ -40,8 +40,15 @@ export class ScriptedHandle implements WorkerHandle {
   stopped = 0;
   /** When set, `stop` fails with it (a sandbox that would not die). */
   stopError: Error | undefined;
-  constructor(readonly order: WorkOrder, private readonly script: WorkerScript, version: string) { this.workerVersion = version; }
-  run(gateway: ToolGateway): Promise<WorkerTurnResult> { return this.script({ order: this.order, gateway, worker: this }); }
+  constructor(readonly order: WorkOrder, private readonly script: WorkerScript, version: string, private readonly endsNormally = true) { this.workerVersion = version; }
+  /**
+   * A scripted worker is a worker of today (card W02): a completed turn says how it ended. A script that does not say is an agent that finished properly (`normal`), so the tests of everything else see the attempt succeed as before;
+   * a test of how turns end (card W03) gives the kind itself, and `ScriptedWorker.endsNormally = false` makes the worker an older one that says nothing.
+   */
+  async run(gateway: ToolGateway): Promise<WorkerTurnResult> {
+    const result = await this.script({ order: this.order, gateway, worker: this });
+    return this.endsNormally && result.status === "completed" && !("endKind" in result) ? { ...result, endKind: "normal" } : result;
+  }
   async checkpoint(): Promise<JsonObject> { this.checkpoints++; return { n: this.checkpoints, attempt: this.order.attemptId }; }
   async restart(recipe: { revision: string }, from: JsonObject): Promise<void> { this.restarts.push({ recipe: recipe.revision, from }); }
   async tell(text: string): Promise<void> { this.told.push(text); }
@@ -58,12 +65,16 @@ export class ScriptedWorker implements WorkerHost {
   /** Attempts the dispatcher asked this host to let go of with no handle in hand (a restarted controller). */
   readonly released: { attemptId: string; reason: string }[] = [];
   async release(attemptId: string, reason: string): Promise<void> { this.released.push({ attemptId, reason }); }
+  /** False: the worker is an older one whose completed turns say nothing about how they ended (see `ScriptedHandle.run`). */
+  endsNormally = true;
+  /** What the host says the attempt's checkout holds (card W03); absent: the host does not report it. */
+  progress?: NonNullable<WorkerHost["progress"]>;
   constructor(readonly hostId: string, public script: WorkerScript, readonly resources = { cpus: 1, memoryMb: 1024 }, private readonly version = "worker-1.0.0") {}
   async start(order: WorkOrder): Promise<WorkerHandle> {
     if (this.failToStart !== undefined) throw this.failToStart;
     this.starts.push(order);
     if (this.startGate !== undefined) await this.startGate;
-    const handle = new ScriptedHandle(order, (c) => this.script(c), this.version);
+    const handle = new ScriptedHandle(order, (c) => this.script(c), this.version, this.endsNormally);
     this.handles.push(handle);
     return handle;
   }

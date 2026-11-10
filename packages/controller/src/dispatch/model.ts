@@ -114,14 +114,22 @@ export interface DispatchBody {
   readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number } };
   /**
    * How the attempt's last turn ended (card W02): the worker's classification of its last reply (`unknown` when the worker did not say), the length of that reply's visible text when it said, and when the dispatcher recorded it.
-   * Recorded only: the attempt's outcome does not depend on it yet (W03 acts on it).
+   * A completed turn whose kind is not `normal` (and whose agent did not end the attempt with work.end) is a stop before the work was said to be done (card W03, `stoppedEarly`).
    */
   readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string };
+  /**
+   * The runs of this attempt that stopped early (card W03): a turn that completed without the agent's work.end, or whose end kind is not `normal`. Each run ended `stopped-early`; the first `STOPPED_EARLY_READMITS` of a task were
+   * readmitted from the checkpoint on the same conversation and host (`readmitted: true`), and the one after them ended the attempt (its outcome is `stopped-early`). `round` numbers the readmits, and names the turn's request
+   * (`cmd:adm:<attempt>:se<round>`), so the conversation takes a new input instead of answering with the one it already holds.
+   */
+  readonly stoppedEarly?: readonly { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; readonly readmitted: boolean }[];
+  readonly turnRound?: number;
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;
   /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */
   readonly workerStopped?: boolean;
-  readonly outcome?: { readonly status: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly at: string };
+  /** `stopped-early` (card W03): the agent kept stopping before it said its work was done, and its readmits were used up; the task has an `agent_stopped_early` blocker. The assignment records such an attempt `abandoned`. */
+  readonly outcome?: { readonly status: "succeeded" | "failed" | "abandoned" | "stopped-early"; readonly summary: string; readonly at: string };
   /**
    * When the attempt held a worker slot (card M03h, the usage sink): one span per run, opened when the record turns `running` and closed when it leaves `running` (it parks, waits after a controller shutdown, or
    * finishes), stamped by the dispatcher's clock in the same commit. A resumed attempt therefore has one span per run, and its waiting between them is not counted. The newest `DISPATCH_LIMITS.slotSpans` are kept;
@@ -176,6 +184,11 @@ export interface ToolOperationBody {
   /** The revisions the call was judged under. */
   readonly judgedAt: { readonly policy: { readonly installation: number; readonly project?: number }; readonly decisions: number };
 }
+
+/** How many times a task's attempt is readmitted after it stopped early (card W03); the stop after them ends it with a blocker. Counted per task and assignment generation, in storage. */
+export const STOPPED_EARLY_READMITS = 2;
+/** The per-task count of those readmits (one record per task). */
+export const STOPPED_EARLY_KIND = "dispatch-stopped-early";
 
 export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300, slotSpans: 64 } as const;
 export const DISPATCHER_ACTOR = "dispatcher";

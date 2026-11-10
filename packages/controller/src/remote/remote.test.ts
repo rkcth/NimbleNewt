@@ -47,8 +47,8 @@ for (const backend of backends) {
     assert.ok(until > c.clock.now());
     await attempt.usage({ costMicros: 5 });
     await attempt.acknowledgeDecisions();
-    const stored = await attempt.complete({ status: "completed", text: "done" });
-    assert.deepEqual(stored, { status: "completed", text: "done" });
+    const stored = await attempt.complete({ status: "completed", text: "done", endKind: "normal" });
+    assert.deepEqual(stored, { status: "completed", text: "done", endKind: "normal" });
     await c.current.idle();
     const dispatch = (await c.current.get(c.owner, attemptId))!;
     assert.equal(dispatch.state, "finished");
@@ -67,7 +67,8 @@ for (const backend of backends) {
     assert.deepEqual(stored, { status: "completed", text: "Now let me run the tests:", endKind: "announced-step-without-tool-call", visibleChars: 25 });
     await c.current.idle();
     const d = (await c.current.get(c.owner, attemptId))!;
-    assert.equal(d.outcome!.status, "succeeded");
+    // W03: a turn that did not end normally is not success; a remote result that carries no checkpoint cannot go on in the same conversation, so it ends stopped-early at once.
+    assert.equal(d.outcome!.status, "stopped-early");
     assert.deepEqual([d.turnEnd?.endKind, d.turnEnd?.visibleChars], ["announced-step-without-tool-call", 25]);
     const second = await c.started(r1, "t2");
     assert.deepEqual(await second.attempt.complete({ status: "completed", text: "y", endKind: "finished-nicely" as never }), { status: "completed", text: "y" }, "a kind this controller does not know is left out");

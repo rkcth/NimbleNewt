@@ -103,7 +103,8 @@ test("the composed local host runs an attempt through the real relay, guards and
   const answer = await model([
     { call: { name: "nimblenewt__desk-write", args: { kind: "note", title: "seed plan", body: "Order tomato seeds.", visibility: "shared", status: "accepted" } } },
     { call: { name: "nimblenewt__desk-write", args: { kind: "note", title: "second note", body: "Water on Fridays.", visibility: "shared", status: "accepted" } } },
-    { text: "all done", hold: lastStep.promise },
+    { call: { name: "nimblenewt__work-end", args: { result: "done", note: "seed plan written" } }, hold: lastStep.promise },
+    { text: "all done" },
   ]);
   const mcp = await mcpServer();
   const dialed: string[] = [];
