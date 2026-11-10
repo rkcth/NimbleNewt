@@ -775,10 +775,10 @@ export class ChatService {
       if (typeof wanted !== "string") return refuse("invalid_command", "Which database should it move to? Nothing in your message names one; database.transfer.status shows the names.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "database.transfer.preview", args: { target: wanted } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
-      const plan = found.result["item"] as { token: string; direction: string; to: { name: string }; totalRows: number; ok: boolean; claimsReleased: number; uncertainEffects: number; findings: { severity: string; text: string }[]; steps: string[] };
+      const plan = found.result["item"] as { token: string; direction: string; to: { name: string }; totalRows: number; bytesNeeded: number; freeBytes?: number; ok: boolean; claimsReleased: number; uncertainEffects: number; findings: { severity: string; text: string }[]; steps: string[] };
       if (!plan.ok) return refuse("invalid_transition", `the database cannot be moved now: ${plan.findings.filter((f) => f.severity === "error").map((f) => f.text).join("; ")}`);
       args["confirm"] = plan.token;
-      fillNotes.push(`Transfer plan, worked out just now (${plan.direction}, to ${plan.to.name}): ${plan.totalRows} records; ${plan.claimsReleased} claims are released; ${plan.uncertainEffects} uncertain actions stay uncertain. Steps: ${plan.steps.join(" ")} Warnings: ${plan.findings.filter((f) => f.severity === "warning").map((f) => f.text).join(" ") || "none"}`);
+      fillNotes.push(`Transfer plan, worked out just now (${plan.direction}, to ${plan.to.name}): ${plan.totalRows} records; room: about ${plan.bytesNeeded} bytes needed, ${plan.freeBytes === undefined ? "free room at the destination not known" : `${plan.freeBytes} free at the destination`}; ${plan.claimsReleased} claims are released; ${plan.uncertainEffects} uncertain actions stay uncertain. Steps: ${plan.steps.join(" ")} Warnings: ${plan.findings.filter((f) => f.severity === "warning").map((f) => f.text).join(" ") || "none"}`);
     }
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];

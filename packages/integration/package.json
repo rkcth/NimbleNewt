@@ -18,6 +18,7 @@
     "@earendil-works/chord": "1.3.0",
     "@earendil-works/pi-ai": "1.3.0",
     "@earendil-works/pi-durable": "1.3.0",
+    "@nimblenewt/config": "0.0.0",
     "@nimblenewt/contracts": "0.0.0",
     "@nimblenewt/controller": "0.0.0",
     "@nimblenewt/pi-adapter": "0.0.0",

@@ -263,6 +263,12 @@ test("a real start with a PostgreSQL destination in the configuration (address o
       const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
       const proposalId = (shown[0] as { proposalId?: string }).proposalId;
       assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+      // The room the owner is shown is the entry's cap less what the server reports for the database (card F04l), read just before and after the proposal.
+      const size = async (): Promise<number> => withClient(url, async (client) => Number((await client.query("SELECT pg_database_size(current_database())::text AS n")).rows[0].n));
+      const room = /room: about (\d+) bytes needed, (\d+) free at the destination/.exec(JSON.stringify(shown));
+      assert.ok(room !== null, JSON.stringify(shown));
+      const after = await size();
+      assert.ok(Number(room[2]) >= 900_000_000 - after - 1_048_576 && Number(room[2]) <= 900_000_000 - after + 1_048_576 && Number(room[2]) < 900_000_000, `free ${room[2]}, server size ${after}`);
       seen += JSON.stringify(shown) + status;
       const done = await c.chat!.applyProposal(boot.token, { commandId: "ap-p1", proposalId: proposalId! });
       assert.equal(done.applied, true, JSON.stringify(done));

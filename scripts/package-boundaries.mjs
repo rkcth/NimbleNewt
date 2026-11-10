@@ -14,8 +14,8 @@ export const ALLOWED = {
   worker: ["@nimblenewt/contracts"],
   ui: [],
   // Tests that run the controller, the Pi adapter and the worker's sandbox together (cards S09, T06b). It holds no product code and nothing depends on it, which is why
-  // it alone may depend on both.
-  integration: ["@nimblenewt/contracts", "@nimblenewt/controller", "@nimblenewt/pi-adapter", "@nimblenewt/worker", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
+  // it alone may depend on both. It may also load the configuration (card F04l: a start from a configuration file, as a host does it).
+  integration: ["@nimblenewt/config", "@nimblenewt/contracts", "@nimblenewt/controller", "@nimblenewt/pi-adapter", "@nimblenewt/worker", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
 };
 
 /**
