@@ -268,9 +268,10 @@ export class WorkerProcess {
     return ok.contextTokens === undefined ? {} : { contextTokens: ok.contextTokens };
   }
 
-  async checkpoint(): Promise<{ readonly checkpoint: { readonly [key: string]: never }; readonly contextTokens?: number }> {
+  /** `durable` (card L04d): the process's read-back check of the checkpoint, when it ran one. */
+  async checkpoint(): Promise<{ readonly checkpoint: { readonly [key: string]: never }; readonly contextTokens?: number; readonly durable?: { readonly verified: boolean; readonly error?: string } }> {
     const ok = await this.#ask<Extract<FromChild, { t: "checkpoint.ok" }>>((id) => ({ t: "checkpoint", id }));
-    return { checkpoint: ok.checkpoint as never, ...(ok.contextTokens === undefined ? {} : { contextTokens: ok.contextTokens }) };
+    return { checkpoint: ok.checkpoint as never, ...(ok.contextTokens === undefined ? {} : { contextTokens: ok.contextTokens }), ...(ok.durable === undefined ? {} : { durable: ok.durable }) };
   }
   async tell(text: string): Promise<void> { await this.#ask((id) => ({ t: "tell", id, text })); }
 

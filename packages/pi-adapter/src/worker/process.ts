@@ -2,7 +2,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import type { Storage } from "@earendil-works/pi-durable";
-import { ChannelError, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
+import { CHECKPOINT_DURABILITY_ERROR, ChannelError, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
@@ -109,6 +109,18 @@ export function contextPolicyOf(context: ChannelStart["context"]): AdapterContex
       onHookFailure: (error: unknown) => { console.error(`compaction hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
     } : {}),
   };
+}
+
+/**
+ * The durability check of a checkpoint just taken (card L04d): the conversation's history up to the checkpoint is read from the store again and checked against it (the adapter's own `verifyCheckpoint`: format, runtime,
+ * the entry is a completed-turn boundary and the history digests the same). Never throws: a check that could not run is "not verified", with why, so the controller keeps the capture as incomplete instead of resuming from it.
+ */
+export async function durabilityOf(adapter: Pick<PiAdapter, "verifyCheckpoint">, checkpoint: Parameters<PiAdapter["verifyCheckpoint"]>[0]): Promise<CheckpointDurability> {
+  const why = (text: string): string => text.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, CHECKPOINT_DURABILITY_ERROR);
+  try {
+    const verdict = await adapter.verifyCheckpoint(checkpoint);
+    return verdict.valid ? { verified: true } : { verified: false, error: why(`the checkpoint did not read back: ${verdict.reason}: ${verdict.detail}`) };
+  } catch (error) { return { verified: false, error: why(`the checkpoint could not be read back: ${String((error as Error)?.message ?? error)}`) }; }
 }
 
 /** A rough size of the stored conversation in tokens (three characters to a token, the budget's own estimate), for the resume decision. */
@@ -287,7 +299,14 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       case "checkpoint":
         if (adapter === undefined) return fault("the process was not started", message.id);
         if (lostFault(message.id)) return;
-        try { const checkpoint = JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never; const tokens = await contextTokens(adapter); send({ t: "checkpoint.ok", id: message.id, checkpoint, ...(tokens === undefined ? {} : { contextTokens: tokens }) }); } catch (error) { fault(`checkpoint failed: ${String((error as Error)?.message ?? error)}`, message.id); }
+        try {
+          const taken = await adapter.root().checkpoint();
+          const checkpoint = JSON.parse(JSON.stringify(taken)) as never;
+          const tokens = await contextTokens(adapter);
+          // The durability check of card L04d: the history is read back from the store and the checkpoint is checked against it, so "verified" says the store holds what the checkpoint describes.
+          const durable = await durabilityOf(adapter, taken);
+          send({ t: "checkpoint.ok", id: message.id, checkpoint, ...(tokens === undefined ? {} : { contextTokens: tokens }), durable });
+        } catch (error) { fault(`checkpoint failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
       case "tell":
         if (adapter === undefined || started === undefined) return fault("the process was not started", message.id);

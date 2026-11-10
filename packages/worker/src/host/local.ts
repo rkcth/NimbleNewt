@@ -435,9 +435,10 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let contextTokens: number | undefined = typeof nn?.["contextTokens"] === "number" ? (nn["contextTokens"] as number) : undefined;
       // A checkpoint that did not say how big the conversation is (taken in the middle of a turn) is not an empty one: the stored conversation's own size is the estimate (it counts what the model no longer sees too, so it errs towards refusing and compacting).
       if (contextTokens === undefined) { const stored = estimateStoredTokens(join(entry.workspace.home, "pi")); if (stored !== undefined) contextTokens = stored; }
-      const wrapCheckpoint = (taken: { readonly checkpoint: JsonObj; readonly contextTokens?: number }): JsonObj => {
+      // `nn.durable` (card L04d) is the process's read-back check of the checkpoint, as it said it: the controller captures a continuation from this checkpoint as complete only when it passed.
+      const wrapCheckpoint = (taken: { readonly checkpoint: JsonObj; readonly contextTokens?: number; readonly durable?: { readonly verified: boolean; readonly error?: string } }): JsonObj => {
         if (taken.contextTokens !== undefined) contextTokens = taken.contextTokens;
-        return { pi: taken.checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }) } };
+        return { pi: taken.checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }), ...(taken.durable === undefined ? {} : { durable: { ...taken.durable } }) } };
       };
       return {
         firstCall: (content) => ({ systemPromptChars: process.info.systemPromptChars ?? UNKNOWN_SYSTEM_PROMPT_CHARS, toolSchemaChars: process.info.toolSchemaChars ?? 0, startupTokens: Math.ceil(content.length / 3) + (contextTokens ?? 0), replyReserveTokens: model.maxTokens }),
