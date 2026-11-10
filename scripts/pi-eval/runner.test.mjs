@@ -169,3 +169,116 @@ test("a sibling checkout whose name starts like the run's own is foreign; a vari
   writeFileSync(bad, readFileSync(set.file, "utf8").replace('"A":', '"../../x":'));
   assert.throws(() => loadTaskset(bad), /variant "..\/..\/x": name must be/);
 });
+
+test("leftovers outside the checkout are stopped too: a server a test started in /tmp (it carries the run's mark) and its helper with an emptied environment", { skip: process.platform !== "linux" }, async () => {
+  const pidFile = join(root, "outside.pid");
+  const r = await runOne(ctx("straggler-outside", { agentEnv: { STUB_AGENT_MODE: "straggler-outside", STUB_AGENT_PID_FILE: pidFile } }), set.tasks[0], "A", 1);
+  const pids = readFileSync(pidFile, "utf8").trim().split(" ").map(Number);
+  assert.equal(pids.length, 2);
+  assert.ok(r.stragglersKilled >= 2, JSON.stringify(r));
+  for (const pid of pids) {
+    let alive = true;
+    for (let i = 0; i < 50 && alive; i++) { try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 20)); } catch { alive = false; } }
+    assert.equal(alive, false, `process ${pid} is gone`);
+  }
+});
+
+test("killProcessesInSync never stops this process or its parents, even when they carry the run's mark", { skip: process.platform !== "linux" }, async () => {
+  const dir = join(root, "marked");
+  mkdirSync(dir, { recursive: true });
+  // A child started with the mark, from a cwd outside `dir`: it is stopped; this test process (not marked) is not.
+  const c = spawn("sleep", ["30"], { cwd: tmpdir(), env: { ...process.env, PI_EVAL_RUN_DIR: dir }, stdio: "ignore", detached: true });
+  c.unref();
+  await new Promise((res) => setTimeout(res, 100));
+  const killed = killProcessesInSync(dir);
+  assert.deepEqual(killed, [c.pid]);
+  assert.ok(!killed.includes(process.pid) && !killed.includes(process.ppid));
+});
+
+// An acceptance suite: bench-owned tests at a fresh path, scored instead of the shipped tests, which still run for information.
+const accept = (extra = {}) => {
+  const bench = join(root, `bench-acc-${Math.random().toString(36).slice(2, 8)}`);
+  mkdirSync(join(bench, "tasks"), { recursive: true });
+  mkdirSync(join(bench, "prompts"), { recursive: true });
+  mkdirSync(join(bench, "acceptance", "tiny"), { recursive: true });
+  writeFileSync(join(bench, "tasks", "tiny.md"), `Make add() add.\n${extra.prompt ?? ""}`);
+  writeFileSync(join(bench, "prompts", "a.md"), "Task {{TASK_ID}}:\n{{TASK}}\n");
+  writeFileSync(join(bench, "acceptance", "tiny", "w01-acceptance-tiny.test.mjs"), extra.test ?? "import assert from 'node:assert/strict';\nimport { test } from 'node:test';\nimport { add } from './lib.mjs';\ntest('adds', () => assert.equal(add(2, 3), 5));\n");
+  writeFileSync(join(bench, "acceptance", "tiny", "acceptance.json"), JSON.stringify({ files: { "w01-acceptance-tiny.test.mjs": "w01-acceptance-tiny.test.mjs" }, testFiles: ["w01-acceptance-tiny.test.mjs"], allow: extra.allow ?? {} }));
+  writeFileSync(join(bench, "taskset.json"), JSON.stringify({
+    agent: { provider: "stub", model: "stub" },
+    defaults: { repeats: 1, timeoutMinutes: { S: 1 }, copy: [], setup: extra.setup ?? null, test: { argv: ["node", "--test", "{{TEST_FILES}}"] } },
+    variants: { A: { prompt: "prompts/a.md" } },
+    tasks: [{ id: "tiny", size: "S", base, solution, prompt: "tasks/tiny.md", hiddenFiles: ["lib.test.mjs"], testFiles: ["lib.test.mjs"] }],
+  }));
+  return loadTaskset(join(bench, "taskset.json"));
+};
+
+test("with an acceptance suite, the run is scored on it and the shipped tests are an informational score beside it", async () => {
+  const s = accept();
+  assert.equal(s.tasks[0].acceptance.files[0].dest, "w01-acceptance-tiny.test.mjs");
+  const r = await runOne(ctx("solve", { set: s }), s.tasks[0], "A", 1);
+  assert.equal(r.outcome, "verified-finish", r.reason);
+  assert.equal(r.hidden.tests, 1);
+  assert.deepEqual({ passed: r.shipped.passed, tests: r.shipped.tests }, { passed: true, tests: 1 });
+  assert.ok(existsSync(join(r.artifacts, "hidden-tests.log")) && existsSync(join(r.artifacts, "shipped-tests.log")));
+  const stopped = await runOne(ctx("first-turn", { set: s }), s.tasks[0], "A", 1);
+  assert.equal(stopped.outcome, "stopped-early");
+  assert.equal(stopped.shipped.passed, false);
+});
+
+test("calibration of an acceptance suite: base fails, solution passes, and spec fit flags a demand the prompt never states until it is justified", async () => {
+  const ok = await calibrateOne(ctx("first-turn", { set: accept() }), accept().tasks[0]);
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(ok.suite, "acceptance");
+  assert.equal(ok.specFit.ok, true);
+  assert.equal(ok.shipped.passed, true);
+  const wording = "import assert from 'node:assert/strict';\nimport { test } from 'node:test';\nimport { add } from './lib.mjs';\nconst said = 'the sum is ready';\ntest('adds', () => { assert.equal(add(2, 3), 5); assert.match(String(add(1, 1)), /^2$/); assert.doesNotMatch(said, /a sentence nobody wrote down/); });\n";
+  const flagged = await calibrateOne(ctx("first-turn"), accept({ test: wording }).tasks[0]);
+  assert.equal(flagged.ok, false);
+  assert.deepEqual(flagged.specFit.unjustified.map((u) => u.key), ["/a sentence nobody wrote down/"]);
+  assert.equal(flagged.base.passed, false);
+  assert.equal(flagged.solution.passed, true, "the tests themselves are calibrated: only the spec fit fails");
+  const allowed = await calibrateOne(ctx("first-turn"), accept({ test: wording, allow: { "/a sentence nobody wrote down/": "asserted absent, not present" } }).tasks[0]);
+  assert.equal(allowed.ok, true, JSON.stringify(allowed.specFit));
+  const stated = await calibrateOne(ctx("first-turn"), accept({ test: wording, prompt: "CONTRACT: nothing says a sentence nobody wrote down.\n" }).tasks[0]);
+  assert.equal(stated.specFit.flagged, 0);
+});
+
+test("an acceptance file must have a fresh w01-acceptance-* name", () => {
+  const s = accept();
+  const file = s.file;
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  raw.tasks[0].acceptance = { files: { "lib.test.mjs": "w01-acceptance-tiny.test.mjs" }, testFiles: ["lib.test.mjs"] };
+  raw.tasks[0].acceptance.dir = "acceptance/tiny";
+  writeFileSync(file, JSON.stringify(raw));
+  assert.throws(() => loadTaskset(file), /must be named w01-acceptance-\*/);
+});
+
+test("acceptance tests that do not type-check against the agent's code score a done claim as interface-mismatch, not a false done", async () => {
+  // A stand-in for tsc: it reports a type error in the acceptance file only, and exits non-zero.
+  const setup = { argv: ["node", "-e", "console.log('w01-acceptance-tiny.test.mjs(3,10): error TS2305: Module has no exported member add.'); process.exit(2)"] };
+  const s = accept({ setup });
+  const r = await runOne(ctx("claims-done", { set: s }), s.tasks[0], "A", 1);
+  assert.equal(r.hidden.interfaceMismatch, true);
+  assert.equal(r.outcome, "interface-mismatch", r.reason);
+  // An error in the agent's own file is its build failing: a false done.
+  const own = accept({ setup: { argv: ["node", "-e", "console.log('lib.mjs(1,1): error TS1005: x'); console.log('w01-acceptance-tiny.test.mjs(3,10): error TS2305: y'); process.exit(2)"] } });
+  const w = await runOne(ctx("claims-done", { set: own }), own.tasks[0], "A", 1);
+  assert.equal(w.hidden.interfaceMismatch, false);
+  assert.equal(w.outcome, "wrong", w.reason);
+});
+
+test("a control run: one repeat per task with another agent (--agent, --label) is recorded beside the first and compared per task", async () => {
+  const s = accept();
+  const results = join(root, "control-results");
+  const runCli = (label, mode) => execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", s.file, "--repo", repo, "--variants", "A", "--repeats", "1", "--agent", join(here, "stub-agent.mjs"), "--label", label, "--results", results, "--work-root", join(root, "control-work"), "--no-report"], { env: { ...process.env, STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, stdio: "pipe" });
+  runCli("pi-stand-in", "first-turn");
+  runCli("control-stand-in", "solve");
+  const recs = readFileSync(join(results, "results.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(recs.map((r) => [r.agent, r.outcome]), [["pi-stand-in", "stopped-early"], ["control-stand-in", "verified-finish"]]);
+  assert.ok(recs.every((r) => r.agentPath.endsWith("stub-agent.mjs")));
+  const out = execFileSync(process.execPath, [join(here, "compare.mjs"), "--results", results], { encoding: "utf8" });
+  assert.match(out, /\| tiny\s+\| S\s+\| A\s+\| 0\/1 S\s+\| 1\/1 F\s+\|/);
+  assert.match(out, /control-stand-in: 1\/1 verified finish, 0 false done, 0 interface mismatch, 0 other; shipped wording \(informational\) 1\/1/);
+});

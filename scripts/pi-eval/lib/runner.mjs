@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
+import { readCorpus, specFit } from "./specfit.mjs";
 import { expandArgv, renderPrompt } from "./taskset.mjs";
 
 const IS_WIN = process.platform === "win32";
@@ -125,45 +126,111 @@ async function leakedHidden({ repo, solution, files, dir }) {
   return leaked;
 }
 
-/** Builds, then runs the task's tests on the checkout. passed only on exit 0 with tests counted and none failing. */
-export async function runHiddenTests({ task, dir, artifacts, onSpawn }) {
+/** The files `tsc` reported errors in (`path(line,col): error TS...`), repository-relative with forward slashes. */
+export function tscErrorFiles(output) {
+  const files = new Set();
+  for (const m of String(output).matchAll(/^([^\s(][^(\n]*?)\(\d+,\d+\): error TS\d+/gm)) files.add(m[1].replace(/\\/g, "/").replace(/^\.\//, ""));
+  return [...files].sort();
+}
+
+/**
+ * The suite a run is scored on. With an acceptance suite: its bench-owned files (written at fresh paths) plus support
+ * files from the solution. Without one (older task sets): the shipped hidden files, as before.
+ */
+export const scoredSuite = (task) => task.acceptance
+  ? { label: "acceptance", hiddenFiles: [...task.acceptance.files.map((f) => f.dest), ...task.acceptance.support], testFiles: task.acceptance.testFiles, testNamePatterns: task.acceptance.testNamePatterns ?? [] }
+  : { label: "hidden", hiddenFiles: task.hiddenFiles, testFiles: task.testFiles, testNamePatterns: [] };
+
+/** Writes the acceptance suite into the checkout: the bench's own files, and the support files from the solution. */
+export async function copyAcceptance({ repo, task, dir }) {
+  for (const f of task.acceptance.files) {
+    const target = join(dir, ...f.dest.split("/"));
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, await readFile(f.src));
+  }
+  if (task.acceptance.support.length > 0) await copyHidden({ repo, solution: task.solution, files: task.acceptance.support, dir });
+}
+
+/**
+ * Builds, then runs one suite's tests on the checkout. passed only on a clean build and exit 0 with tests counted and
+ * none failing. `interfaceMismatch`: the build failed and every type error is in the suite's own files, i.e. the tests
+ * do not type-check against the agent's code (a name, field or signature differs), as opposed to the agent's own code
+ * not building. Logs go to `<prefix>-setup.log` and `<prefix>-tests.log`.
+ */
+export async function runSuite({ task, suite, dir, artifacts, prefix = "hidden", onSpawn, env = {} }) {
   const worktreeUrl = pathToFileURL(dir).href;
   const started = Date.now();
-  let setupCode = null;
+  let setupCode = null, errorFiles = [];
   if (task.setup) {
-    const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: task.setup.env, timeoutMs: 20 * 60_000, outFile: join(artifacts, "hidden-setup.log"), onSpawn });
+    const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: { ...task.setup.env, ...env }, timeoutMs: 20 * 60_000, outFile: join(artifacts, `${prefix}-setup.log`), onSpawn });
     setupCode = s.code;
+    errorFiles = tscErrorFiles(s.output);
   }
   const t = task.test;
-  const r = await runCommand(expandArgv(t.argv, { worktree: dir, worktreeUrl, testFiles: task.testFiles }), { cwd: join(dir, ...(t.cwd ?? ".").split("/")), env: t.env, timeoutMs: (t.timeoutMinutes ?? 30) * 60_000, outFile: join(artifacts, "hidden-tests.log"), onSpawn });
+  const testFiles = [...(suite.testNamePatterns ?? []).map((p) => `--test-name-pattern=${p}`), ...suite.testFiles];
+  const r = await runCommand(expandArgv(t.argv, { worktree: dir, worktreeUrl, testFiles }), { cwd: join(dir, ...(t.cwd ?? ".").split("/")), env: { ...t.env, ...env }, timeoutMs: (t.timeoutMinutes ?? 30) * 60_000, outFile: join(artifacts, `${prefix}-tests.log`), onSpawn });
   const counts = testCounts(r.output);
   // The build must succeed too: tsc emits despite type errors, and a hidden test file the agent's code does not typecheck
   // against (or a stale dist file left by an agent-written test of the same name) must never count as a pass.
   const built = setupCode === null || setupCode === 0;
-  return { ran: true, passed: built && r.code === 0 && !r.timedOut && (counts.tests ?? 0) > 0 && counts.fail === 0, built, exitCode: r.code, timedOut: r.timedOut, setupExitCode: setupCode, ...counts, durationMs: Date.now() - started };
+  const own = new Set(suite.hiddenFiles);
+  const interfaceMismatch = !built && errorFiles.length > 0 && errorFiles.every((f) => own.has(f));
+  return { ran: true, passed: built && r.code === 0 && !r.timedOut && (counts.tests ?? 0) > 0 && counts.fail === 0, built, interfaceMismatch, typeErrorFiles: errorFiles.slice(0, 20), exitCode: r.code, timedOut: r.timedOut, setupExitCode: setupCode, ...counts, durationMs: Date.now() - started };
 }
 
+/** The scored suite of a task (see scoredSuite), its logs named hidden-*.log as before. */
+export const runHiddenTests = ({ task, dir, artifacts, onSpawn, env }) => runSuite({ task, suite: scoredSuite(task), dir, artifacts, prefix: "hidden", onSpawn, env });
+
+/** The environment variable every command the runner starts for a run carries, set to the run's checkout. */
+export const RUN_MARK = "PI_EVAL_RUN_DIR";
+
 /**
- * Stops every process still working inside `dir` (Linux: read from /proc). Pi starts its bash tools in their own process
+ * Stops every process left over from a run (Linux: read from /proc). Pi starts its bash tools in their own process
  * groups, so stopping the agent's group can leave a hung test run or a background server behind; it must not keep writing
- * into the checkout while the hidden tests run, nor outlive the run. A process counts only when its working directory is
- * `dir` itself or below it (a sibling `dir`-prefixed directory does not), compared on the real path, since /proc reports
- * resolved paths. This process is never signalled. Synchronous, so an exit handler can use it. Returns the PIDs signalled.
- * Elsewhere (no /proc) a no-op that returns [].
+ * into the checkout while the hidden tests run, nor outlive the run. A process is the run's when
+ *   - its working directory is `dir` itself or below it (a sibling `dir`-prefixed directory does not), compared on the
+ *     real path, since /proc reports resolved paths; or
+ *   - its environment carries `PI_EVAL_RUN_DIR=<dir>` (every command the runner starts gets it, and children inherit it:
+ *     an embedded PostgreSQL a test started works in its own data directory under /tmp, not in the checkout); or
+ *   - it descends from such a process (PostgreSQL's helper processes rewrite their environment area for `ps`).
+ * This process and its ancestors are never signalled. Synchronous, so an exit handler can use it. Returns the PIDs
+ * signalled. Elsewhere (no /proc) a no-op that returns [].
  */
 export function killProcessesInSync(dir) {
   if (process.platform !== "linux") return [];
-  let root = resolve(dir);
+  const given = resolve(dir);
+  let root = given;
   try { root = realpathSync(root); } catch { /* gone: match the path as given */ }
   if (root === sep) return []; // never "every process"
-  const killed = [];
+  const marks = [...new Set([given, root])].map((d) => Buffer.from(`\0${RUN_MARK}=${d}\0`));
   let pids = [];
-  try { pids = readdirSync("/proc").filter((n) => /^\d+$/.test(n)); } catch { return killed; }
+  try { pids = readdirSync("/proc").filter((n) => /^\d+$/.test(n)).map(Number); } catch { return []; }
+  const parent = new Map();
+  const matched = new Set();
   for (const pid of pids) {
-    if (Number(pid) === process.pid) continue;
-    let cwd;
-    try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { continue; } // gone, or another user's process
-    if (cwd === root || cwd.startsWith(root + sep)) { try { process.kill(Number(pid), "SIGKILL"); killed.push(Number(pid)); } catch { /* gone or not ours */ } }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      parent.set(pid, Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]));
+    } catch { continue; } // gone
+    let cwd = null;
+    try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { /* another user's process */ }
+    if (cwd !== null && (cwd === root || cwd.startsWith(root + sep))) { matched.add(pid); continue; }
+    try {
+      const env = Buffer.concat([Buffer.from([0]), readFileSync(`/proc/${pid}/environ`), Buffer.from([0])]);
+      if (marks.some((m) => env.includes(m))) matched.add(pid);
+    } catch { /* not readable */ }
+  }
+  // Never this process or the ones that started it (a bench started from inside a marked shell must not stop itself).
+  const protectedPids = new Set();
+  for (let p = process.pid; p > 1 && !protectedPids.has(p); p = parent.get(p) ?? 0) protectedPids.add(p);
+  const victims = new Set();
+  for (const pid of parent.keys()) {
+    for (let p = pid, hops = 0; p > 1 && hops < 64; p = parent.get(p) ?? 0, hops++) if (matched.has(p)) { victims.add(pid); break; }
+  }
+  const killed = [];
+  for (const pid of [...victims].sort((a, b) => a - b)) {
+    if (protectedPids.has(pid)) continue;
+    try { process.kill(pid, "SIGKILL"); killed.push(pid); } catch { /* gone or not ours */ }
   }
   return killed;
 }
@@ -220,18 +287,19 @@ export async function runOne(ctx, task, variantName, repeat) {
     runId, batchId: ctx.batchId, taskId: task.id, size: task.size, variant: variantName, repeat,
     base: task.base, solution: task.solution, benchCommit: ctx.benchCommit,
     route: { provider: ctx.set.agent.provider, model: ctx.set.agent.model, thinking: ctx.set.agent.thinking ?? null },
-    agent: ctx.agentLabel, startedAt: null, endedAt: null, wallMs: null, exitCode: null, timedOut: false,
+    agent: ctx.agentLabel, agentPath: ctx.agentPath ?? ctx.agentLabel, startedAt: null, endedAt: null, wallMs: null, exitCode: null, timedOut: false,
     nudges: 0, artifacts,
   };
   const log = (m) => ctx.log?.(`[${runId}] ${m}`);
+  const mark = { [RUN_MARK]: dir };
   ctx.activeDirs?.add(dir);
   try {
     log(`preparing ${dir} at ${task.base.slice(0, 8)}`);
     await prepareCheckout({ repo: ctx.repo, commit: task.base, dir, copy: task.copy, depsFrom: ctx.depsFrom, forbidden: [task.solution] });
-    const leaked = await leakedHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
+    const leaked = await leakedHidden({ repo: ctx.repo, solution: task.solution, files: [...task.hiddenFiles, ...(task.acceptance?.support ?? [])], dir });
     if (leaked.length > 0) throw new Error(`hidden files already present at the base: ${leaked.join(", ")}`);
     if (task.setup) {
-      const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl: pathToFileURL(dir).href }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: task.setup.env, timeoutMs: 20 * 60_000, outFile: join(artifacts, "setup.log"), onSpawn: (child) => ctx.children?.add(child) });
+      const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl: pathToFileURL(dir).href }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: { ...task.setup.env, ...mark }, timeoutMs: 20 * 60_000, outFile: join(artifacts, "setup.log"), onSpawn: (child) => ctx.children?.add(child) });
       record.setupExitCode = s.code;
     }
     const template = await readFile(variant.promptPath, "utf8");
@@ -244,7 +312,7 @@ export async function runOne(ctx, task, variantName, repeat) {
     const t0 = Date.now();
     const a = await runCommand([...ctx.agent, dir, promptFile, logFile], {
       cwd: dir, timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, outFile: join(artifacts, "agent-stderr.log"),
-      env: { PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...(ctx.agentEnv ?? {}) },
+      env: { PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...(ctx.agentEnv ?? {}), ...mark },
       onSpawn: (child) => ctx.children?.add(child),
     });
     record.wallMs = Date.now() - t0;
@@ -258,20 +326,35 @@ export async function runOne(ctx, task, variantName, repeat) {
     const plan = existsSync(join(dir, "PLAN.md")) ? planProgress(readFileSync(join(dir, "PLAN.md"), "utf8")) : null;
     const ch = await changesOf(dir, task.base);
     await writeFile(join(artifacts, "diffstat.txt"), `${ch.fullStat}\n`);
-    log("copying the hidden tests in and running them");
-    await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
-    const hidden = await runHiddenTests({ task, dir, artifacts, onSpawn: (child) => ctx.children?.add(child) });
+    const onSpawn = (child) => ctx.children?.add(child);
+    let hidden, shipped = null;
+    if (task.acceptance) {
+      // Scored: the acceptance suite alone (only what the prompt pins). Then, for information only, the card's shipped
+      // test files, which also carry wording later review rounds settled on.
+      log("copying the acceptance tests in and running them");
+      await copyAcceptance({ repo: ctx.repo, task, dir });
+      hidden = await runHiddenTests({ task, dir, artifacts, onSpawn, env: mark });
+      killProcessesInSync(dir);
+      log("copying the shipped tests in and running them (informational)");
+      await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
+      const s = await runSuite({ task, suite: { hiddenFiles: task.hiddenFiles, testFiles: task.testFiles }, dir, artifacts, prefix: "shipped", onSpawn, env: mark });
+      shipped = { passed: s.passed, built: s.built, interfaceMismatch: s.interfaceMismatch, tests: s.tests, pass: s.pass, fail: s.fail };
+    } else {
+      log("copying the hidden tests in and running them");
+      await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
+      hidden = await runHiddenTests({ task, dir, artifacts, onSpawn, env: mark });
+    }
     const marks = [...(ctx.referenceDirs ?? [ctx.repo]), task.solution.slice(0, 8), ctx.resultsDir].filter(Boolean);
     // Watched roots: the reference checkouts, the directory that holds them (sibling worktrees carry merged solutions),
     // the results, and the work root's siblings. The run's own checkout is never counted.
     const watched = [...(ctx.referenceDirs ?? [ctx.repo]).flatMap((d) => [d, dirname(d)]), ctx.resultsDir, dirname(ctx.workRoot)].filter(Boolean);
     const foreign = foreignPaths(summary.toolCommands, { ownDir: dir, watched });
     const contaminated = foreign.length > 0 || summary.toolCommands.some((c) => marks.some((m) => c.includes(m)));
-    const verdict = classify({ summary, hidden, plan, changed: ch.changed, timedOut: a.timedOut, exitCode: a.code });
+    const verdict = classify({ summary, hidden, plan, changed: ch.changed, dirty: ch.dirty, timedOut: a.timedOut, exitCode: a.code });
     Object.assign(record, verdict, {
       stopReason: summary.last?.stopReason ?? null, visibleChars: summary.last?.visibleChars ?? 0, lastText: summary.last?.visibleTail.slice(-300) ?? "",
-      turns: summary.turns, toolCalls: summary.toolCalls, tokens: summary.tokens, sessionId: summary.sessionId,
-      plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, contaminated, foreignPaths: foreign,
+      turns: summary.turns, toolCalls: summary.toolCalls, tokens: summary.tokens, sessionId: summary.sessionId, selfTest: summary.lastSelfTest,
+      plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, shipped, contaminated, foreignPaths: foreign,
     });
   } catch (e) {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
@@ -292,16 +375,37 @@ export async function calibrateOne(ctx, task) {
   const artifacts = join(ctx.resultsDir, "calibration", task.id);
   await mkdir(join(artifacts, "base"), { recursive: true });
   await mkdir(join(artifacts, "solution"), { recursive: true });
-  const out = { taskId: task.id, at: new Date().toISOString(), benchCommit: ctx.benchCommit };
+  const out = { taskId: task.id, at: new Date().toISOString(), benchCommit: ctx.benchCommit, suite: scoredSuite(task).label };
+  const env = { [RUN_MARK]: dir };
   ctx.activeDirs?.add(dir);
   try {
     await prepareCheckout({ repo: ctx.repo, commit: task.base, dir, copy: task.copy, depsFrom: ctx.depsFrom, forbidden: [task.solution] });
-    await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
-    out.base = await runHiddenTests({ task, dir, artifacts: join(artifacts, "base"), onSpawn });
+    if (task.acceptance) {
+      // Fresh paths: an acceptance file must exist neither at the base nor at the solution, so it can never be (or
+      // overwrite) a file of the card or of an agent working from the base.
+      const taken = [];
+      for (const f of task.acceptance.files) for (const c of [task.base, task.solution]) if ((await git(["-C", ctx.repo, "cat-file", "-e", `${c}:${f.dest}`])).code === 0) taken.push(`${f.dest}@${c.slice(0, 8)}`);
+      if (taken.length > 0) throw new Error(`acceptance paths are not fresh: ${taken.join(", ")}`);
+      // Spec fit, read against the base checkout before anything is copied in.
+      const files = await Promise.all(task.acceptance.files.map(async (f) => ({ name: f.dest, text: await readFile(f.src, "utf8") })));
+      const fit = specFit({ files, prompt: await readFile(task.promptPath, "utf8"), corpus: readCorpus(dir), allow: task.acceptance.allow });
+      out.specFit = { ok: fit.ok, demands: fit.demands, flagged: fit.flagged.length, unjustified: fit.unjustified.map((f) => ({ key: f.key, kind: f.kind, file: f.file, line: f.line })), stale: fit.stale };
+      await copyAcceptance({ repo: ctx.repo, task, dir });
+    } else {
+      await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
+    }
+    out.base = await runHiddenTests({ task, dir, artifacts: join(artifacts, "base"), onSpawn, env });
+    killProcessesInSync(dir);
     await mustGit(["-C", dir, "fetch", "-q", "--no-tags", ctx.repo, task.solution]);
     await mustGit(["-C", dir, "checkout", "-q", "-f", task.solution]);
-    out.solution = await runHiddenTests({ task, dir, artifacts: join(artifacts, "solution"), onSpawn });
-    out.ok = out.base.passed === false && out.solution.passed === true;
+    out.solution = await runHiddenTests({ task, dir, artifacts: join(artifacts, "solution"), onSpawn, env });
+    killProcessesInSync(dir);
+    if (task.acceptance && !ctx.skipShipped) {
+      // The shipped suites at the solution: the informational "matches shipped wording" score's ceiling.
+      const s = await runSuite({ task, suite: { hiddenFiles: task.hiddenFiles, testFiles: task.testFiles }, dir, artifacts: join(artifacts, "solution"), prefix: "shipped", onSpawn, env });
+      out.shipped = { passed: s.passed, tests: s.tests, pass: s.pass, fail: s.fail };
+    }
+    out.ok = out.base.passed === false && out.solution.passed === true && (out.specFit?.ok ?? true);
   } catch (e) {
     out.ok = false; out.error = String(e?.message ?? e).slice(0, 500);
   } finally {
