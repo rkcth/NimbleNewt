@@ -630,6 +630,23 @@ for (const backend of backends) {
     assert.ok(["fenced", "unauthenticated"].includes(bad(after).code), JSON.stringify(after));
   });
 
+  suite("W04 review: a turn that yields while a call of its attempt waits for an approval is not continued (it parks); once the call is decided and made, it may be", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const name = await c.install(s, "check", "1.0.0");
+      const input = { tool: name, input: { url: "https://example.org", depth: 2 } };
+      assert.equal(good(await s.send("tool.invoke", input, "first-use"))["state"], "awaiting-approval");
+      out["parked"] = await s.send("turn.continue", { n: 1, max: 3, endKind: "no-work-end" }, "nudge:p:1");
+      await c.invoke(s, input, "first-use");
+      out["after"] = await s.send("turn.continue", { n: 1, max: 3, endKind: "no-work-end" }, "nudge:p:1");
+    });
+    await c.tick();
+    assert.equal(bad(out["parked"]!).code, "awaiting_approval");
+    assert.deepEqual(good(out["after"]!), { go: true, n: 1, max: 3, endKind: "no-work-end" }, "the refused call ID may be asked again");
+  });
+
   suite("a pause stops every write an agent makes through the bridge (desk, task, message, registration) and reads go on", async (c) => {
     const ann = await c.agentFor("ann");
     const { taskId } = await c.task("t", ann);
