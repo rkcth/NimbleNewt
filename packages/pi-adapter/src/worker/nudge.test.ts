@@ -27,3 +27,9 @@ test("W04: a nudge's call ID is the same for the same turn and number and differ
   assert.notEqual(nudgeCallId("req-1", 1), nudgeCallId("req-2", 1));
   assert.match(nudgeCallId("req-1", 3), /^[A-Za-z0-9._:-]{1,120}$/);
 });
+
+test("W07: a reply cut off at the output limit is nudged to stop deliberating and act, and only that stop gets those words", () => {
+  assert.match(nudgeText("length"), /^Your last reply was cut off at the output limit: stop deliberating, act\./);
+  assert.doesNotMatch(nudgeText("stop"), /stop deliberating/);
+  assert.ok(!LENGTH_NUDGE_LEAD.includes("\""));
+});

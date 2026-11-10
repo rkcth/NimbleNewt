@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { redactText } from "../security/redact.js";
 import type { PiCachePolicy } from "../inference-cache/index.js";
+import type { RouteBudget } from "../routing/policy.js";
+import { applyRouteBudget, type BudgetApplied } from "./route-budget.js";
 import { ModelStreamDecoder, ModelStreamRefused, type ModelStreamCall, type ModelStreamTap } from "./model-stream.js";
 
 /**
@@ -18,6 +20,8 @@ export interface ModelEndpoint {
   /** The API's base address, such as `http://llama:8080/v1`. */
   readonly url: string;
   readonly headers?: () => Promise<Readonly<Record<string, string>>> | Readonly<Record<string, string>>;
+  /** What the endpoint is (`vllm`, `radiance`, `llama-cpp`, `openai`, ...: the inference-cache kinds, C06). It names the request fields of a route's length and reasoning budget (card W07); without it they are not sent on `chat/completions`. */
+  readonly kind?: string;
 }
 
 export interface ModelRelayOptions {
@@ -87,6 +91,12 @@ export class ModelRelay {
     readonly gate?: () => Promise<string | undefined>;
     /** Records the reply's stream against the generation it began under, and holds back the reply of a generation that was interrupted or superseded (card L05b). Absent: replies are passed on and not recorded. */
     readonly stream?: ModelStreamTap;
+    /** The route's length and reasoning budget (card W07), asked before every call so a change applies to the next call. Absent, or a call with nothing set: the body is sent as the runtime built it. A budget that cannot be read fails the call (the owner's limit is not dropped silently). */
+    readonly budget?: () => Promise<RouteBudget | undefined> | RouteBudget | undefined;
+    /** The endpoint's kind when the endpoint itself does not say it (the owner's cache endpoint configuration). */
+    readonly kind?: string;
+    /** Told what of the budget each call carried and what was not sent, with why. Must return at once; a throw is ignored. */
+    readonly onBudget?: (applied: BudgetApplied) => void;
   }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
     const route = attempt.route;
     const maxBody = this.#options.maxBodyBytes ?? 8 * 1024 * 1024;
@@ -126,6 +136,19 @@ export class ModelRelay {
           let asked: unknown;
           try { asked = (JSON.parse(Buffer.from(body ?? new Uint8Array()).toString("utf8")) as { model?: unknown }).model; } catch { return refuse("the body is not JSON"); }
           if (asked !== attempt.model) refuse("the body names another model");
+        }
+        if (attempt.budget !== undefined && rest !== "messages/count_tokens") {
+          // The route's budget (card W07) goes into the body here, after the runtime built it and before the cache settings, in the field names of the endpoint's kind.
+          let budget: RouteBudget | undefined;
+          try { budget = await attempt.budget(); } catch (error) { this.#options.onError?.(route, redactText(error instanceof Error ? error.message : String(error)).slice(0, 300)); refuse("the route's length and reasoning budget could not be read"); }
+          if (budget !== undefined && (budget.maxTokens !== undefined || budget.reasoningTokens !== undefined)) {
+            let json: unknown;
+            try { json = JSON.parse(Buffer.from(body ?? new Uint8Array()).toString("utf8")); } catch { return refuse("the body is not JSON, so the route's budget cannot be applied"); }
+            if (json === null || typeof json !== "object" || Array.isArray(json)) refuse("the body is not a JSON object, so the route's budget cannot be applied");
+            const applied = applyRouteBudget(json as Record<string, unknown>, rest as "chat/completions" | "messages", endpoint!.kind ?? attempt.kind, budget);
+            body = Buffer.from(JSON.stringify(json), "utf8");
+            try { attempt.onBudget?.(applied); } catch { /* the call is not affected */ }
+          }
         }
         if (body !== undefined && cache?.payload !== undefined && /json/i.test(headers.get("content-type") ?? "")) {
           // The backend's cache settings go into the body here, as they did when Pi made the call itself. A body that is not a JSON object is sent as it is.

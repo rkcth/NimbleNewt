@@ -12,6 +12,9 @@ import type { EventService } from "../events/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
 import type { FallbackService } from "../routing/fallback.js";
+import { ROUTING_LIMITS } from "../routing/policy.js";
+import type { RoutingService } from "../routing/service.js";
+import { allowsExactly } from "../security/access.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
@@ -172,6 +175,8 @@ export interface Context {
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate" | "setResumeCondition">;
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
+  /** The routing table's route budgets (card W07). */
+  readonly routeBudgets?: Pick<RoutingService, "get" | "setRouteBudget">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen" | "archive" | "marks" | "mark">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline"> & Partial<Pick<ResumeCheckService, "forTask">>;
   /** Continuations captured by hosts and the dependencies a task's work relied on (card L04c). */
@@ -305,6 +310,7 @@ const jobOf = async (c: Context, jobId: unknown): Promise<View<JobBody>> => {
 const jobItem = (job: View<JobBody>): JsonObject => asJson(job);
 const modelBudgetOf = (c: Context): NonNullable<Context["modelBudget"]> => c.modelBudget ?? unavailable("model budgets");
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
+const routeBudgetsOf = (c: Context): NonNullable<Context["routeBudgets"]> => c.routeBudgets ?? unavailable("route budgets");
 const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => {
   const h = c.handoffs ?? unavailable("hand-off");
   // The sender's drafts and responsibilities are not shown to everyone who may control the task (card L03g).
@@ -774,6 +780,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "maxCostMicros", "maxTokens", "maxFailedAttempts"]); await modelBudgetOf(c).setBudget(c.principal, { commandId: need(id), ...a } as never); return asJson({ ok: true }); } },
   { name: "model-budget.get", kind: "query", summary: "Owner only: a task's model limits and what it has used so far (cost, tokens, calls, failed attempts).", args: { taskId: "the task" }, result: "`{ budget?, spent }`.",
     run: async (c, a) => { only(a, ["taskId"]); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner reads model budgets"); const m = modelBudgetOf(c); const taskId = str(a, "taskId"); return asJson({ ...(await m.budget(taskId) === undefined ? {} : { budget: await m.budget(taskId) }), spent: await m.spend(taskId) } as never); } },
+  { name: "routing.budget.set", kind: "command", summary: "The owner (or someone given routing.write) sets how long one reply of a model route may be (`maxTokens`) and how many of those tokens it may spend reasoning (`reasoningTokens`, less than maxTokens). Both go into every model call of the route from the next call on, in the field names of the route's endpoint; a reply cut off at the limit is continued in the same turn with a nudge to stop deliberating and act. A value left out keeps its earlier value; null removes it (the call then keeps what the agent's runtime asks for).", args: { route: "the route, provider/model", "maxTokens?": `whole number of tokens from 1 to ${ROUTING_LIMITS.maxTokens} (and at most the route's context), or null to remove the limit`, "reasoningTokens?": `whole number of tokens from 1 to ${ROUTING_LIMITS.reasoningTokens}, or null to remove the cap`, commandId: "required" },
+    result: "`{ revision, replayed, budget: { maxTokens?, reasoningTokens? } }`.",
+    run: async (c, a, id) => { only(a, ["route", "maxTokens", "reasoningTokens"]); return asJson(await routeBudgetsOf(c).setRouteBudget(c.principal, { commandId: need(id), route: str(a, "route"), ...(a["maxTokens"] === undefined ? {} : { maxTokens: a["maxTokens"] as number | null }), ...(a["reasoningTokens"] === undefined ? {} : { reasoningTokens: a["reasoningTokens"] as number | null }) })); } },
+  { name: "routing.budgets", kind: "query", summary: "Each model route with its context size and its length and reasoning budget (none set: the agent's runtime decides). Owner, or someone given routing.write.", args: {},
+    result: "`{ revision, routes: [{ route, contextTokens, maxTokens?, reasoningTokens? }] }`, by route name.",
+    run: async (c, a) => { only(a, []); if (!allowsExactly(c.principal, "routing.write", "*")) throw new DomainError("forbidden", "only the owner, or someone given routing.write, reads the route budgets"); const t = await routeBudgetsOf(c).get(); return asJson({ revision: t?.revision ?? 0, routes: t === undefined ? [] : Object.entries(t.routes).map(([route, e]) => ({ route, contextTokens: e.contextTokens, ...(e.maxTokens === undefined ? {} : { maxTokens: e.maxTokens }), ...(e.reasoningTokens === undefined ? {} : { reasoningTokens: e.reasoningTokens }) })).sort((x, y) => (x.route < y.route ? -1 : x.route > y.route ? 1 : 0)) } as never); } },
   { name: "routing.failback.set", kind: "command", summary: "Sets how a target that failed comes back: manual, or automatic after enough good probes over enough time (and never automatically if it failed soon after its last restore).", args: { policy: "{ mode: manual|automatic, minProbes, stableSeconds, holdDownSeconds }", commandId: "required" },
     result: "`{ revision, replayed }`.",
     run: async (c, a, id) => { only(a, ["policy"]); return asJson(await cutoverOf(c).setFailbackPolicy(c.principal, { commandId: need(id), ...a } as never)); } },

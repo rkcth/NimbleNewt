@@ -19,7 +19,17 @@ export interface RouteEntry {
   /** How fast the route reads a prompt and writes a reply, in tokens a second, when the owner knows (card V01c). Stall detection uses the reading speed until it has measured the route. */
   readonly readTokensPerSecond?: number;
   readonly writeTokensPerSecond?: number;
+  /**
+   * The most tokens one reply of this route may hold (card W07): the relay puts it in every model call it sends for the route, in the field the endpoint's kind uses. Absent: the call keeps what the agent's runtime asked for (today's behaviour).
+   * A reply cut off at this limit is continued in the same turn (W04) with a nudge to stop deliberating and act.
+   */
+  readonly maxTokens?: number;
+  /** The most tokens one reply of this route may spend reasoning (card W07): a cap, so a call that does not reason is not made to, and one that asks for more is given this much. Absent: no cap is sent. Less than `maxTokens` when both are set. */
+  readonly reasoningTokens?: number;
 }
+
+/** A route's length and reasoning budget (card W07), as the relay applies it to one call. */
+export type RouteBudget = Pick<RouteEntry, "maxTokens" | "reasoningTokens">;
 
 export interface Exclusion {
   readonly target: { readonly kind: "provider" | "route"; readonly name: string };
@@ -69,7 +79,7 @@ export interface Selection {
   readonly candidates: readonly Candidate[];
 }
 
-export const ROUTING_LIMITS = { providers: 50, routes: 200, profiles: 20, perProfile: 20, roles: 50, exclusions: 100, name: 64, capability: 40, capabilities: 20, contextTokens: 10_000_000, reason: 500 } as const;
+export const ROUTING_LIMITS = { providers: 50, routes: 200, profiles: 20, perProfile: 20, roles: 50, exclusions: 100, name: 64, capability: 40, capabilities: 20, contextTokens: 10_000_000, reason: 500, maxTokens: 1_000_000, reasoningTokens: 1_000_000 } as const;
 
 const NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const ROUTE = /^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
@@ -110,7 +120,7 @@ export function checkTable(value: unknown): Omit<RoutingTable, "exclusions"> {
     routeName(name, `table.routes.${name}`);
     const provider = name.slice(0, name.indexOf("/"));
     if (own(providers, provider) === undefined) invalid(`table.routes.${name}`, `names unknown provider ${provider}`);
-    const e = exact(raw, `table.routes.${name}`, ["contextTokens", "capabilities", "readTokensPerSecond", "writeTokensPerSecond"]);
+    const e = exact(raw, `table.routes.${name}`, ["contextTokens", "capabilities", "readTokensPerSecond", "writeTokensPerSecond", "maxTokens", "reasoningTokens"]);
     const ct = e["contextTokens"];
     if (typeof ct !== "number" || !Number.isSafeInteger(ct) || ct < 1 || ct > ROUTING_LIMITS.contextTokens) invalid(`table.routes.${name}.contextTokens`, `must be a whole number from 1 to ${ROUTING_LIMITS.contextTokens}`);
     const caps = e["capabilities"];
@@ -124,7 +134,7 @@ export function checkTable(value: unknown): Omit<RoutingTable, "exclusions"> {
       if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 1_000_000) return invalid(`table.routes.${name}.${field}`, "must be a number of tokens a second above 0 and at most 1000000");
       return { [field]: v };
     };
-    routes[name] = { contextTokens: ct as number, capabilities: list, ...speed("readTokensPerSecond"), ...speed("writeTokensPerSecond") };
+    routes[name] = { contextTokens: ct as number, capabilities: list, ...speed("readTokensPerSecond"), ...speed("writeTokensPerSecond"), ...checkBudget(e, `table.routes.${name}`, ct as number) };
   }
   const profiles: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   for (const [name, raw] of record(top["profiles"], "table.profiles", ROUTING_LIMITS.profiles)) {
@@ -146,6 +156,23 @@ export function checkTable(value: unknown): Omit<RoutingTable, "exclusions"> {
     roles[name] = profile;
   }
   return { providers, routes, profiles, roles };
+}
+
+/**
+ * A route's length and reasoning budget (card W07): whole numbers of tokens above 0, at most `ROUTING_LIMITS.maxTokens` / `.reasoningTokens`; a reply limit no larger than the route's context, and a reasoning cap below the reply limit when
+ * both are set (reasoning and the answer share the reply's tokens on the OpenAI-compatible servers, and Anthropic's Messages API requires the reasoning budget to be below `max_tokens`). Absent fields stay absent.
+ */
+export function checkBudget(e: Readonly<Record<string, unknown>>, field: string, contextTokens: number): RouteBudget {
+  const whole = (key: "maxTokens" | "reasoningTokens", max: number): number | undefined => {
+    const v = e[key];
+    if (v === undefined) return undefined;
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1 || v > max) return invalid(`${field}.${key}`, `must be a whole number of tokens from 1 to ${max}`);
+    return v;
+  };
+  const maxTokens = whole("maxTokens", Math.min(ROUTING_LIMITS.maxTokens, contextTokens));
+  const reasoningTokens = whole("reasoningTokens", ROUTING_LIMITS.reasoningTokens);
+  if (maxTokens !== undefined && reasoningTokens !== undefined && reasoningTokens >= maxTokens) invalid(`${field}.reasoningTokens`, `must be less than maxTokens (${maxTokens}): the reasoning is part of the reply`);
+  return { ...(maxTokens === undefined ? {} : { maxTokens }), ...(reasoningTokens === undefined ? {} : { reasoningTokens }) };
 }
 
 /** Checks a request completely. */

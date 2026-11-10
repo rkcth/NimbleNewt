@@ -599,7 +599,17 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       relayEnded.forget(relays, clock());
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }), stream: streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, { attemptId: order.attemptId, taskId: order.taskId, generation: order.generation }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
+        // The route's length and reasoning budget (card W07), read from the routing table at every call; what could not be sent is a step of the task's activity, once per attempt and reason.
+        const told = new Set<string>();
+        const onBudget = (applied: { readonly notSent: readonly string[] }): void => {
+          const key = applied.notSent.join("\n");
+          if (applied.notSent.length === 0 || told.has(key)) return;
+          told.add(key);
+          const summary = `Route ${order.route}: ${applied.notSent.join("; ")}.`.slice(0, 3900);
+          void ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: `rbudget:${order.attemptId}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`, taskId: order.taskId, kind: "model-selected", summary, manifest: { refs: [{ kind: "task", id: order.taskId }] } } as never).catch((error: unknown) => i.onError?.(error));
+        };
+        const kind = i.options.cache?.endpoints[order.route]?.config.kind;
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), budget: async () => { const routes = (await i.routing.get())?.routes; const e = routes !== undefined && Object.hasOwn(routes, order.route) ? routes[order.route]! : undefined; return e === undefined ? undefined : { ...(e.maxTokens === undefined ? {} : { maxTokens: e.maxTokens }), ...(e.reasoningTokens === undefined ? {} : { reasoningTokens: e.reasoningTokens }) }; }, ...(kind === undefined ? {} : { kind }), onBudget, onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }), stream: streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, { attemptId: order.attemptId, taskId: order.taskId, generation: order.generation }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
         relays.set(order.attemptId, found);
       }
       return found.relay;
