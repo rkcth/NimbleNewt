@@ -42,6 +42,8 @@ export interface HostTurnResult {
   readonly endKind: HostEndKind;
   /** The length of the last reply's visible text (trimmed), when the process said. */
   readonly visibleChars?: number;
+  /** Card W04: how many times the process continued the turn after it yielded without a tool call or work.end, when it said (any status). */
+  readonly nudges?: number;
 }
 export interface CacheFigures { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
 
@@ -460,7 +462,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           try { checkpoint = wrapCheckpoint(await process.checkpoint()); } catch { checkpoint = undefined; }
           // Only a completed turn has an ending to classify; a worker that says nothing (one from before W02) is read as unknown, never as normal.
           const endKind = result.status === "completed" ? endKindOf(result.endKind) : "unknown";
-          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) }, endKind, ...(result.status === "completed" && result.visibleChars !== undefined ? { visibleChars: result.visibleChars } : {}) };
+          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) }, endKind, ...(result.status === "completed" && result.visibleChars !== undefined ? { visibleChars: result.visibleChars } : {}), ...(result.nudges === undefined ? {} : { nudges: result.nudges }) };
         },
         async checkpoint() {
           try { return wrapCheckpoint(await process.checkpoint()); } catch (error) {

@@ -76,6 +76,19 @@ for (const backend of backends) {
     assert.equal((await c.current.get(c.owner, second.attemptId))!.turnEnd?.endKind, "unknown");
   });
 
+  suite("W04: a remote host's result may say how many nudges the turn had; the attempt records them, and a figure that is not a count is refused", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1);
+    await wireRefuses("invalid_command", () => attempt.complete({ status: "completed", text: "x", endKind: "normal", nudges: 101 }), 400);
+    await wireRefuses("invalid_command", () => attempt.complete({ status: "completed", text: "x", endKind: "normal", nudges: -1 }), 400);
+    assert.deepEqual(await attempt.complete({ status: "completed", text: "done", endKind: "normal", nudges: 2 }), { status: "completed", text: "done", endKind: "normal", nudges: 2 });
+    await c.current.idle();
+    const d = (await c.current.get(c.owner, attemptId))!;
+    assert.equal(d.outcome!.status, "succeeded");
+    assert.equal(d.turnEnd?.nudges, 2);
+    assert.equal(d.nudgesUsed, 2);
+  });
+
   suite("only the owner and the dispatcher place, move, end and steer attempts; a host, an agent or a client cannot, and none can read the records", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, order } = await c.started(r1);
