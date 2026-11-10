@@ -280,7 +280,16 @@ export class GrantService {
       const ref = derivedId("grt", scopedCommandId(owner.id, command.commandId));
       const found = await this.#runner.get("grant-record", ref).catch(() => undefined);
       const b = found?.body as unknown as GrantRecordBody | undefined;
-      if (found === undefined || b === undefined || b.grantee !== command.grantee || b.action !== command.action || b.project !== command.project || b.decidedBy !== owner.id) throw error;
+      // Only the length may differ, and only in the way the upgrade changed it: an end date recorded then, an idle window asked for now. Anything else is the conflict it was.
+      const same = (x: unknown, y: unknown) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+      const sameExceptLength = (b: GrantRecordBody): boolean => {
+        try {
+          return b.grantee === command.grantee && b.action === command.action && b.project === command.project && b.decidedBy === owner.id && b.source === command.source
+            && b.basis === plain(command.basis, "basis", GRANT_LIMITS.basis) && b.notBefore === checkTime(command.notBefore, "notBefore") && same(b.resource, checkResource(command.resource)) && same(b.terms, checkTerms(command.terms))
+            && command.idleDays !== undefined && command.expiresAt === undefined && b.idleDays === undefined && b.expiresAt !== undefined;
+        } catch { return false; }
+      };
+      if (found === undefined || b === undefined || !sameExceptLength(b)) throw error;
       return { id: found.id, revision: found.revision, replayed: true };
     }
   }
@@ -547,7 +556,7 @@ export class GrantService {
     const due: { id: string; revision: number; body: GrantRecordBody }[] = [];
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list("grant-record", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
-      for (const a of page) { after = a.id; const b = a.body as unknown as GrantRecordBody; if (b.lapseNoticedAt === undefined && lapsedFromNonUse(b, now)) due.push({ id: a.id, revision: a.revision, body: b }); }
+      for (const a of page) { after = a.id; const b = a.body as unknown as GrantRecordBody; if (b.lapseNoticedAt === undefined && lapsedFromNonUse(b, now) && !(b.expiresAt !== undefined && b.expiresAt <= (idleEnd(b) as string))) due.push({ id: a.id, revision: a.revision, body: b }); }
       if (page.length < 500) break;
     }
     due.sort((x, y) => (idleEnd(x.body) as string).localeCompare(idleEnd(y.body) as string) || x.id.localeCompare(y.id));
@@ -662,8 +671,9 @@ export async function recordGrantUse(runner: CommandRunner, actor: string, grant
       if (!GRANT_ID.test(id)) break;
       const found = await runner.get("grant-record", id);
       const body = found?.body as unknown as GrantRecordBody | undefined;
-      if (found === undefined || body === undefined) break;
-      if (body.idleDays !== undefined && holdsItself(body, now) && (body.lastUsedAt ?? "").slice(0, 10) < day) {
+      // A grant that does not hold renews nothing, the grant it rests on included.
+      if (found === undefined || body === undefined || !holdsItself(body, now)) break;
+      if (body.idleDays !== undefined && (body.lastUsedAt ?? "").slice(0, 10) < day) {
         try {
           const r = await runner.command("grant.use", { commandId: `grant-use-${id}-${day}`, actor }, async () => ({
             payload: { grantId: id as string, day },

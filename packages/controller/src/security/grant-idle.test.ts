@@ -90,6 +90,13 @@ for (const backend of backends) {
     await assert.rejects(() => grantsAt(at(50)).derive(ann, { commandId: cid("d"), parentId: parent.id, action: "attempt.work", project: a, basis: "again" }), /holds no such grant/);
   });
 
+  suite("a derived grant that no longer holds renews nothing, not even the grant it rests on", async ({ grantsAt, owner, a, ta, ann }) => {
+    const parent = await idle(grantsAt(T0), owner, a);
+    const ended = await grantsAt(T0).derive(ann, { commandId: cid("d"), parentId: parent.id, action: "attempt.work", project: a, resource: { kind: "task", id: ta }, basis: "two days", expiresAt: at(2) });
+    assert.equal(await grantsAt(at(5)).recordUse("service:dispatcher", [ended.id]), 0);
+    assert.equal((await grantsAt(T0).getGrant(parent.id))!.lastUsedAt, T0, "the parent's window was not restarted");
+  });
+
   suite("the owner is told once, in plain words, when a grant lapses from non-use; a revoked or still-live grant is not reported", async ({ grantsAt, owner, a }) => {
     const lapsing = await idle(grantsAt(T0), owner, a);
     const live = await idle(grantsAt(T0), owner, a, { action: "task.read" });
@@ -126,5 +133,19 @@ for (const backend of backends) {
     assert.equal(again.id, first.id);
     assert.equal(again.replayed, true);
     await assert.rejects(() => grantsAt(at(1)).grant(owner, { commandId, grantee: "agent:ann", action: "task.read", project: a, source: "standing", basis: "made before", idleDays: 30 }), /different command/);
+    // Only the length may differ, and only from an end date to an idle window: other terms, the reason or another end date are still a conflict, never a silent return of the old grant.
+    const same = { commandId, grantee: "agent:ann", action: "attempt.work", project: a, source: "standing", basis: "made before" } as const;
+    for (const other of [{ idleDays: 30, terms: { environments: ["production"] } }, { idleDays: 30, basis: "another reason" }, { expiresAt: at(5) }, { idleDays: 30, expiresAt: at(30) }, { idleDays: 30, source: "direct" }, { idleDays: 30, resource: { kind: "project", id: a } }]) {
+      await assert.rejects(() => grantsAt(at(1)).grant(owner, { ...same, ...other } as never), /different command/, JSON.stringify(other));
+    }
+  });
+
+  suite("a grant that ended on its own date is not reported as lapsed from non-use", async ({ grantsAt, owner, a }) => {
+    const both = await idle(grantsAt(T0), owner, a, { expiresAt: at(10) });
+    const told: LapsedGrant[] = [];
+    assert.equal(await grantsAt(at(40)).noticeLapsed("service:dispatcher", async (l) => { told.push(l); }), 0);
+    assert.deepEqual(told, []);
+    assert.deepEqual(await grantsAt(at(40)).lapsedCovering("agent:ann", "attempt.work", a, at(40)), [], "nor named in a blocker");
+    assert.ok((await grantsAt(T0).getGrant(both.id))!.expiresAt);
   });
 }

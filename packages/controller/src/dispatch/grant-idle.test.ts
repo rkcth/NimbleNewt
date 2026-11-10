@@ -45,6 +45,20 @@ for (const backend of backends) {
     assert.ok((await blockers(c)).every((b) => b.type !== "grant_needed"));
   });
 
+  suite("a task that waits for a host is not placed, so it does not renew the grant", async (c) => {
+    const { ann, grantId } = await withIdleGrant(c);
+    const made = (await c.grants.getGrant(grantId))!;
+    // No host has been heard from for twenty days: the task passes the grant check and then waits.
+    c.clock.advance(20 * DAY);
+    await c.task("waits", ann);
+    for (let i = 0; i < 3; i++) { assert.equal((await c.run()).started.length, 0); c.clock.advance(DAY); }
+    const after = (await c.grants.getGrant(grantId))!;
+    assert.deepEqual([after.lastUsedAt, after.revision], [made.lastUsedAt, made.revision], "waiting is not use");
+    await c.heartbeatHost();
+    assert.equal((await c.run()).started.length, 1);
+    assert.equal((await c.grants.getGrant(grantId))!.lastUsedAt, c.clock.now(), "placing it is");
+  });
+
   suite("a task that stalls because its grant lapsed from non-use names the lapsed right in its blocker", async (c) => {
     const { ann, grantId } = await withIdleGrant(c);
     c.clock.advance(31 * DAY); await c.heartbeatHost();

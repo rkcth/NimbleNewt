@@ -1412,7 +1412,7 @@ export class DispatcherService {
     }
     // 7. Grants: the task's instructions and the standing policy determine them, or the owner is asked.
     const contract = await this.#contractOf(taskId);
-    const missing = await this.#missingGrants(agentId, task.projectId, taskId, contract.tools);
+    const { missing, recordUse } = await this.#missingGrants(agentId, task.projectId, taskId, contract.tools);
     if (missing.length > 0) {
       // A right that was given and then lapsed from non-use (card A07h) is named, so the stall does not look like a right that was never given.
       const lapsed = await this.#lapsedRights(agentId, task.projectId, taskId, missing);
@@ -1471,6 +1471,8 @@ export class DispatcherService {
     }
     this.#pinnedWaits.delete(attemptId);
     this.#refusedWaits.delete(attemptId);
+    // The task is placed now, so the grants it needs were used (card A07h). Not earlier: a task that waits for a host, a route or a context rebuild uses nothing, and must not keep an unused grant open.
+    await recordUse();
     return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed?.commit === undefined ? {} : { resume: resumed.commit }), ...(resumed?.note === undefined ? {} : { resumeNote: resumed.note }) };
   }
 
@@ -1478,21 +1480,23 @@ export class DispatcherService {
    * The rights the attempt cannot run without, as the agent holds them now: `attempt.work` and `task.read` on the task (a task can be handed to an agent that lacks them, e.g. by a meeting decision, and the owner is only warned),
    * and the tools the task's contract names. An agent missing any is not admitted: the normal grant blocker names what is missing, and once the owner grants it the next tick dispatches.
    */
-  async #missingGrants(agentId: string, projectId: string, taskId: string, tools: readonly string[]): Promise<string[]> {
+  async #missingGrants(agentId: string, projectId: string, taskId: string, tools: readonly string[]): Promise<{ missing: string[]; recordUse: () => Promise<void> }> {
     const needed = ["attempt.work", "task.read", ...tools.filter((t) => t !== "attempt.work" && t !== "task.read")];
+    const nothing = async () => undefined;
     const stored = (await this.#runner.get("principal", agentId))?.body as unknown as { grants: readonly { action: string; project: string; resource?: { kind: string; id: string }; expiresAt?: string }[]; kind: string; state: string } | undefined;
-    if (stored === undefined || stored.state !== "active") return needed;
+    if (stored === undefined || stored.state !== "active") return { missing: needed, recordUse: nothing };
     const held = await this.#agentGrants(agentId);
     const missing = needed.filter((t) => !held.covers(t, projectId, taskId));
-    if (missing.length === 0) {
-      // Placing the task uses the grants that cover what it needs (card A07h): a grant with an idle window starts its window again, written at most once a day per grant. A failure to record it never holds up the task.
-      const used = [...new Set(needed.flatMap((t) => held.usedFor(t, projectId, taskId)))];
-      if (used.length > 0) {
+    if (missing.length > 0) return { missing, recordUse: nothing };
+    // Placing the task uses the grants that cover what it needs (card A07h): a grant with an idle window starts its window again, written at most once a day per grant. The caller records it only once the
+    // task is actually placed; a failure to record it never holds up the task.
+    const used = [...new Set(needed.flatMap((t) => held.usedFor(t, projectId, taskId)))];
+    return {
+      missing, recordUse: used.length === 0 ? nothing : async () => {
         const { recordGrantUse } = await import("../security/grants.js");
         try { await recordGrantUse(this.#runner, this.#deps.principal.id, used, held.now); } catch (error) { this.#options.onError?.(error); }
-      }
-    }
-    return missing;
+      },
+    };
   }
 
   /** Whether an action is covered by what the agent holds now: its enrolment grants and its grant records (the same snapshot the credential would carry); and which grant records cover it. */
