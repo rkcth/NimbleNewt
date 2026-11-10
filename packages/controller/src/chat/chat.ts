@@ -816,6 +816,8 @@ export class ChatService {
           if (when === undefined) return refuse("unsupported_value", `The day the right ${what} is not a day your message gives, so nothing was drawn up. Which day should it ${what}?`);
           args[key] = when;
         }
+        // An idle window (card A07h) is a number like any other value of the command: it is the owner's or nobody's, so it must be a length their own words give.
+        if (args["idleDays"] !== undefined && !(typeof args["idleDays"] === "number" && Number.isSafeInteger(args["idleDays"]) && args["idleDays"] >= 1 && lengthInWords(args["idleDays"], words))) return refuse("unsupported_value", "How long the right may go unused before it lapses is not a length your message gives, so nothing was drawn up. How many days unused should end it?");
         // A right that would end before it ever starts is not a right: said here, rather than proposing something the records refuse when it is confirmed.
         if (typeof args["notBefore"] === "string" && typeof args["expiresAt"] === "string" && args["expiresAt"] <= args["notBefore"]) return refuse("invalid_command", `That right would be over before it began, so nothing was drawn up: it would end ${args["expiresAt"] === args["notBefore"] ? "on the same moment it starts" : "before it starts"}. Which days did you mean?`);
         // An end already past is a right nobody could ever use: confirming it would leave the owner believing a right exists that does nothing (a day with no year read into the wrong year, say).

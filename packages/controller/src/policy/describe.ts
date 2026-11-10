@@ -11,7 +11,7 @@ export function describePolicyContext(c: AgentPolicyContext): string {
     `- Goes to the owner: ${list(c.decidedBy.owner)}.`,
   ];
   if (c.reservedForOwner.length > 0) lines.push(`- Only the owner may review: ${list(c.reservedForOwner)}.`);
-  if (c.approvals.length > 0) lines.push(`- Approvals you hold: ${c.approvals.map((a) => `${a.action}${a.environments === undefined ? "" : ` in ${a.environments.join("/")}`}${a.expiresAt === undefined ? "" : ` until ${a.expiresAt}`}`).join("; ")}.`);
+  if (c.approvals.length > 0) lines.push(`- Approvals you hold: ${c.approvals.map((a) => `${a.action}${a.environments === undefined ? "" : ` in ${a.environments.join("/")}`}${a.expiresAt === undefined ? "" : ` until ${a.expiresAt}`}${a.idleDays === undefined ? "" : ` (lapses after ${a.idleDays} day${a.idleDays === 1 ? "" : "s"} unused; each use renews it)`}`).join("; ")}.`);
   if (c.recentChanges.length > 0) lines.push(`- Latest changes: ${c.recentChanges.slice(-3).map((h) => `${h.summary} (${h.scope}, ${h.by})`).join("; ")}.`);
   return lines.join("\n");
 }

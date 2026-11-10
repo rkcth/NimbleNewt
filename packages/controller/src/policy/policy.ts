@@ -49,7 +49,7 @@ export interface EffectivePolicy {
   /** When a change starts to count: policy is read at every evaluation, and a command waiting for approval is checked again as it runs. */
   readonly takesEffect: "next evaluation";
   /** For a principal asked about: the grants it holds and the restrictions on it, with their terms. */
-  readonly grants?: readonly { id: string; action: string; project: string; terms?: unknown; expiresAt?: string }[];
+  readonly grants?: readonly { id: string; action: string; project: string; terms?: unknown; expiresAt?: string; /** Card A07h: it lapses after this many days unused; each use renews it. */ idleDays?: number; lastUsedAt?: string }[];
   readonly restrictions?: readonly { action: string; project: string; reason?: string }[];
 }
 
@@ -63,7 +63,7 @@ export interface AgentPolicyContext {
   /** Tools only the owner may review. */
   readonly reservedForOwner: readonly string[];
   /** The approval grants the principal holds in this project, with what they are limited to. */
-  readonly approvals: readonly { id: string; action: string; environments?: readonly string[]; expiresAt?: string }[];
+  readonly approvals: readonly { id: string; action: string; environments?: readonly string[]; expiresAt?: string; /** Card A07h: it lapses after this many days unused; each use renews it. */ idleDays?: number }[];
   readonly revisions: { readonly installation: number; readonly project?: number };
   /** The latest changes to the policy, whoever made them (the screen, the API or a conversation), newest last. */
   readonly recentChanges: readonly { scope: string; revision: number; at: string; by: string; summary: string }[];
@@ -220,7 +220,7 @@ export class PolicyService {
     };
     if (about !== undefined) {
       const held = await this.#grants.held(about, this.#runner.now());
-      out.grants = held.map(({ id, body }) => ({ id, action: body.action, project: body.project, ...(body.terms === undefined ? {} : { terms: body.terms }), ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }) }));
+      out.grants = held.map(({ id, body }) => ({ id, action: body.action, project: body.project, ...(body.terms === undefined ? {} : { terms: body.terms }), ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }), ...(body.idleDays === undefined ? {} : { idleDays: body.idleDays }), ...(body.lastUsedAt === undefined ? {} : { lastUsedAt: body.lastUsedAt }) }));
       const principal = await this.#principal(about);
       out.restrictions = principal === undefined ? [] : ((await this.#grants.effective(principal, this.#runner.now())).restrictions ?? []).map((r) => ({ action: r.action, project: r.project, ...(r.reason === undefined ? {} : { reason: r.reason }) }));
     }
@@ -289,7 +289,18 @@ export class PolicyService {
       // Only asked for when it can matter: a protected-branch change. Without a way to read roles nobody counts as an integrator.
       ...(input.branchProtected === true && this.#roles !== undefined ? { actorRoles: await this.#roles(input.principalId) } : {}),
     };
-    return evaluate(this.#view(inst.body, proj, await this.#reserved(project)), request, held, restricted);
+    const decision = evaluate(this.#view(inst.body, proj, await this.#reserved(project)), request, held, restricted);
+    if (decision.via === "grant" && decision.grantId !== undefined) {
+      // The approval grant was used (card A07h): its idle window starts again, recorded at most once a day. A failure to record it does not change the decision.
+      try { await this.#grants.recordUse("service:dispatcher", [decision.grantId], now); } catch { /* recorded on a later use */ }
+      return decision;
+    }
+    if (decision.mode === "allow" || decision.mode === "deny" || cls === "unknown") return decision;
+    // The question this action now asks would not be asked if an approval grant had not lapsed from non-use: the reasons say which, so the stall is not silent.
+    const lapsed = [...await this.#grants.lapsedCovering(input.principalId, `approve.tool.${input.tool}`, project, now), ...await this.#grants.lapsedCovering(input.principalId, `approve.class.${cls}`, project, now)][0];
+    if (lapsed === undefined) return decision;
+    const last = lapsed.body.lastUsedAt === undefined ? "" : `, last used ${lapsed.body.lastUsedAt.slice(0, 10)}`;
+    return { ...decision, reasons: [...decision.reasons, `approval grant ${lapsed.id} (${lapsed.body.action}) would have covered it, but it lapsed after ${lapsed.body.idleDays as number} day${lapsed.body.idleDays === 1 ? "" : "s"} unused${last}`] };
   }
 
   /**
@@ -343,7 +354,7 @@ export class PolicyService {
     const recent = (scope: string, body: PolicyBody | undefined) => (body?.history ?? []).slice(-5).map((h) => ({ scope, ...h }));
     return {
       profile: view_.profile, allCommandGate: view_.allCommandGate, environment, decidedBy, reservedForOwner: [...reserved],
-      approvals: held.map(({ id, body }) => ({ id, action: body.action, ...(body.terms?.environments === undefined ? {} : { environments: body.terms.environments }), ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }) })),
+      approvals: held.map(({ id, body }) => ({ id, action: body.action, ...(body.terms?.environments === undefined ? {} : { environments: body.terms.environments }), ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }), ...(body.idleDays === undefined ? {} : { idleDays: body.idleDays }) })),
       revisions: { installation: inst.revision, ...(proj === undefined ? {} : { project: proj.revision }) },
       recentChanges: [...recent("installation", inst.body), ...recent(project, projBody)].sort((a, b) => a.at.localeCompare(b.at)),
     };

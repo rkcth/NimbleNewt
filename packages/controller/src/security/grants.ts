@@ -62,6 +62,45 @@ export interface GrantRecordBody {
   readonly revokedReason?: string;
   /** When the owner revoked it (grants revoked before card A07d have none). */
   readonly revokedAt?: string;
+  /**
+   * The idle window, in days (card A07h): the grant lapses once it has gone this long without being used, and each use starts the window again. Absent: the grant does not lapse from non-use
+   * (grants made before A07h, and those with an explicit end date, keep their old meaning).
+   */
+  readonly idleDays?: number;
+  /** When the grant was last used (set when it is made, for a grant with an idle window), recorded at most once per `useWriteInterval` per grant (a day, or an hour for a one-day window). */
+  readonly lastUsedAt?: string;
+  /** When the owner was told that the grant lapsed from non-use (so they are told once). */
+  readonly lapseNoticedAt?: string;
+}
+
+const DAY_MS = 86_400_000;
+/** The longest idle window a grant may have, in days (about a hundred years: a sanity bound on the number, not a cap on use). */
+export const IDLE_DAYS_CEILING = 36_500;
+/** When a grant with an idle window lapses if it goes unused from now on; undefined for a grant without one. */
+export function idleEnd(body: Pick<GrantRecordBody, "idleDays" | "lastUsedAt">): string | undefined {
+  if (body.idleDays === undefined) return undefined;
+  const last = body.lastUsedAt === undefined ? Number.NaN : Date.parse(body.lastUsedAt);
+  // A window with no recorded start (never written by this code) is taken as lapsed: a right nobody can date does not stay open.
+  return Number.isFinite(last) ? new Date(last + body.idleDays * DAY_MS).toISOString() : new Date(0).toISOString();
+}
+/** Whether an active grant has lapsed from non-use at `now` (card A07h). A grant without an idle window never does. */
+export function lapsedFromNonUse(body: GrantRecordBody, now: string): boolean {
+  const end = idleEnd(body);
+  return body.state === "active" && end !== undefined && end <= now;
+}
+/** Whether a grant record holds at `now` on its own terms: active, inside its window, and not lapsed from non-use. A derived grant also needs its parent (see `holdsWith`). */
+function holdsItself(body: GrantRecordBody, now: string): boolean {
+  if (body.state !== "active" || (body.notBefore !== undefined && body.notBefore > now) || (body.expiresAt !== undefined && body.expiresAt <= now)) return false;
+  return !lapsedFromNonUse(body, now);
+}
+function holdsWith(byId: ReadonlyMap<string, GrantRecordBody>, now: string): (body: GrantRecordBody, depth: number) => boolean {
+  const holds = (body: GrantRecordBody, depth: number): boolean => {
+    if (!holdsItself(body, now)) return false;
+    if (body.source !== "derived") return true;
+    const parent = body.parentId === undefined ? undefined : byId.get(body.parentId);
+    return parent !== undefined && depth < MAX_DEPTH && holds(parent, depth + 1) && within(body, parent);
+  };
+  return holds;
 }
 
 const ENVIRONMENT = /^[a-z][a-z0-9-]{0,39}$/;
@@ -127,6 +166,8 @@ export interface GrantInput extends NoActor {
   readonly basis: string;
   readonly notBefore?: string;
   readonly expiresAt?: string;
+  /** An idle window in days (card A07h): the grant lapses once unused this long, and each use renews it. */
+  readonly idleDays?: number;
   readonly terms?: GrantTerms;
 }
 
@@ -230,7 +271,27 @@ export class GrantService {
   /** The owner grants authority. */
   async grant(owner: Principal, command: GrantInput): Promise<{ id: string; revision: number; replayed: boolean }> {
     requireOwner(owner);
-    return this.#grant(owner, command);
+    try {
+      return await this.#grant(owner, command);
+    } catch (error) {
+      // A retry, after an upgrade, of a grant that was already made under the same command ID (card A07h changed how a standing grant's length is recorded: an idle window, not an end date). The grant
+      // made the first time stands; it is not made a second time or refused. Anything that differs in what is granted is still a conflict.
+      if (!(error instanceof DomainError) || error.code !== "command_conflict" || typeof command.commandId !== "string") throw error;
+      const ref = derivedId("grt", scopedCommandId(owner.id, command.commandId));
+      const found = await this.#runner.get("grant-record", ref).catch(() => undefined);
+      const b = found?.body as unknown as GrantRecordBody | undefined;
+      // Only the length may differ, and only in the way the upgrade changed it: an end date recorded then, an idle window asked for now. Anything else is the conflict it was.
+      const same = (x: unknown, y: unknown) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+      const sameExceptLength = (b: GrantRecordBody): boolean => {
+        try {
+          return b.grantee === command.grantee && b.action === command.action && b.project === command.project && b.decidedBy === owner.id && b.source === command.source
+            && b.basis === plain(command.basis, "basis", GRANT_LIMITS.basis) && b.notBefore === checkTime(command.notBefore, "notBefore") && same(b.resource, checkResource(command.resource)) && same(b.terms, checkTerms(command.terms))
+            && command.idleDays !== undefined && command.expiresAt === undefined && b.idleDays === undefined && b.expiresAt !== undefined;
+        } catch { return false; }
+      };
+      if (found === undefined || b === undefined || !sameExceptLength(b)) throw error;
+      return { id: found.id, revision: found.revision, replayed: true };
+    }
   }
 
   /**
@@ -294,7 +355,7 @@ export class GrantService {
 
   async #grant(owner: Principal, command: GrantInput): Promise<{ id: string; revision: number; replayed: boolean }> {
     return this.#runner.command("grant.create", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
-      onlyKnown(command, ["commandId", "grantee", "action", "project", "resource", "source", "basis", "notBefore", "expiresAt", "terms"]);
+      onlyKnown(command, ["commandId", "grantee", "action", "project", "resource", "source", "basis", "notBefore", "expiresAt", "idleDays", "terms"]);
       const terms = checkTerms(command.terms);
       const grantee = typeof command.grantee === "string" && PRINCIPAL.test(command.grantee) && !command.grantee.startsWith("owner:") ? command.grantee : invalid("grantee", "must be an agent or host ID (the owner needs no grant)");
       const action = checkAction(command.action);
@@ -305,13 +366,17 @@ export class GrantService {
       const notBefore = checkTime(command.notBefore, "notBefore");
       const expiresAt = checkTime(command.expiresAt, "expiresAt");
       if (notBefore !== undefined && expiresAt !== undefined && expiresAt <= notBefore) invalid("expiresAt", "must be after notBefore");
+      const idleDays = command.idleDays === undefined ? undefined : Number.isSafeInteger(command.idleDays) && command.idleDays >= 1 && command.idleDays <= IDLE_DAYS_CEILING ? command.idleDays : invalid("idleDays", `must be a whole number of days from 1 to ${IDLE_DAYS_CEILING}`);
       return {
-        payload: { grantee, action, project, ...(resource === undefined ? {} : { resource: resource as unknown as JsonObject }), source, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), ...(terms === undefined ? {} : { terms: terms as unknown as JsonObject }) },
+        payload: { grantee, action, project, ...(resource === undefined ? {} : { resource: resource as unknown as JsonObject }), source, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), ...(idleDays === undefined ? {} : { idleDays }), ...(terms === undefined ? {} : { terms: terms as unknown as JsonObject }) },
         build: async () => {
           if ((await this.#runner.get("principal", grantee)) === undefined) throw new DomainError("not_found", `principal ${grantee} does not exist`);
           if (!mayHold(grantee.slice(0, grantee.indexOf(":")), action)) throw new DomainError("invalid_command", `action: ${grantee.startsWith("service:") ? "a service may hold only recovery actions" : "a client may hold only conversation actions"}, not ${action}`, { field: "action" });
           const ref: AggregateRef = { kind: "grant-record", id: derivedId("grt", scopedCommandId(owner.id, command.commandId)) };
-          const body: GrantRecordBody = { grantee, action, project, ...(resource === undefined ? {} : { resource }), source, decidedBy: owner.id, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), ...(terms === undefined ? {} : { terms }), state: "active" };
+          // The idle window starts when the grant is made (or when it starts, if later): an unused grant closes by itself.
+          const made = this.#runner.now();
+          const start = notBefore !== undefined && notBefore > made ? notBefore : made;
+          const body: GrantRecordBody = { grantee, action, project, ...(resource === undefined ? {} : { resource }), source, decidedBy: owner.id, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), ...(terms === undefined ? {} : { terms }), ...(idleDays === undefined ? {} : { idleDays, lastUsedAt: start }), state: "active" };
           return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { grantee, action, project, source } };
         },
       };
@@ -337,7 +402,7 @@ export class GrantService {
           const found = await this.#runner.get("grant-record", parentId);
           const parent = found?.body as unknown as GrantRecordBody | undefined;
           // Not yours, not there and not active all read the same.
-          if (found === undefined || parent === undefined || parent.state !== "active" || (principal.kind !== "owner" && parent.grantee !== principal.id)) throw new DomainError("forbidden", `${principal.id} holds no such grant`);
+          if (found === undefined || parent === undefined || parent.state !== "active" || lapsedFromNonUse(parent, this.#runner.now()) || (principal.kind !== "owner" && parent.grantee !== principal.id)) throw new DomainError("forbidden", `${principal.id} holds no such grant`);
           let depth = 1;
           for (let p: GrantRecordBody | undefined = parent; p?.source === "derived" && depth <= MAX_DEPTH; depth++) p = p.parentId === undefined ? undefined : ((await this.#runner.get("grant-record", p.parentId))?.body as unknown as GrantRecordBody | undefined);
           if (depth > MAX_DEPTH) throw new DomainError("forbidden", `derivation is limited to ${MAX_DEPTH} levels`);
@@ -363,10 +428,14 @@ export class GrantService {
     }).then((r) => ({ id: r.id, revision: r.revision, replayed: r.replayed }));
   }
 
-  /** The owner revokes a grant. Anything derived from it stops counting with it. Takes effect for the next snapshot of the grantee. */
-  async revoke(owner: Principal, command: NoActor & { grantId: string; expectedRevision: number; reason: string }): Promise<void> {
+  /**
+   * The owner revokes a grant. Anything derived from it stops counting with it. Takes effect for the next snapshot of the grantee. Returns the revision the record is left at.
+   * `expectedRevision` is the revision the owner saw. An active grant's terms never change after it is made: the only writes to it before a revocation are bookkeeping (a recorded use, card A07h, and
+   * the lapse notice), so a later revision of a grant that is still active is accepted. A use must never stand in the way of the owner taking a right back.
+   */
+  async revoke(owner: Principal, command: NoActor & { grantId: string; expectedRevision: number; reason: string }): Promise<{ revision: number }> {
     requireOwner(owner);
-    await this.#runner.command("grant.revoke", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
+    return this.#runner.command("grant.revoke", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
       onlyKnown(command, ["commandId", "grantId", "expectedRevision", "reason"]);
       const id = typeof command.grantId === "string" && GRANT_ID.test(command.grantId) ? command.grantId : invalid("grantId", "is not a grant ID");
       const expected = checkRevision(command.expectedRevision);
@@ -374,15 +443,18 @@ export class GrantService {
       return {
         payload: { grantId: id, expectedRevision: expected, reason },
         build: async () => {
-          const current = await this.#runner.existing("grant-record", id, expected);
+          const current = await this.#runner.get("grant-record", id);
+          if (current === undefined) throw new DomainError("not_found", `grant-record ${id} does not exist`);
           const body = current.body as unknown as GrantRecordBody;
+          // A later revision is accepted only for a grant that is still active (bookkeeping only); a revoked grant seen at an older revision is the stale view it always was.
+          if (current.revision < expected || (body.state !== "active" && current.revision !== expected)) throw new DomainError("stale_revision", `grant-record ${id} is at revision ${current.revision}, not ${expected}`, { currentRevision: current.revision });
           if (body.state === "revoked") throw new DomainError("invalid_command", `grant ${id} is already revoked`, { field: "grantId" });
           const ref: AggregateRef = { kind: "grant-record", id };
           const next: GrantRecordBody = { ...body, state: "revoked", revokedBy: owner.id, revokedReason: reason, revokedAt: this.#runner.now() };
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { grantee: body.grantee, action: body.action } };
         },
       };
-    });
+    }).then((r) => ({ revision: r.revision }));
   }
 
   /** The owner forbids an action for a principal (or `*`: everyone but the owner). A restriction beats any grant while it is active. */
@@ -468,6 +540,66 @@ export class GrantService {
     return effectiveOf(this.#runner, principal, now);
   }
 
+  /** See `lapsedCovering`. */
+  lapsedCovering(principalId: string, action: string, project: string, now: string = this.#runner.now(), resource?: ResourceRef): Promise<{ id: string; body: GrantRecordBody }[]> {
+    return lapsedCovering(this.#runner, principalId, action, project, now, resource);
+  }
+
+  /**
+   * Records that grants were used at `now` (card A07h): each one with an idle window, or the grant with one that a derived grant rests on, has its window started again. Written only once the
+   * recorded use is `useWriteInterval` old (a day, or a 24th of a shorter window), so busy work does not rewrite the record for every call and a one-day window does not lapse in steady use. A grant
+   * that does not hold any more (revoked, ended, already lapsed) is left as it is: use never brings a lapsed grant back. Returns how many records were written.
+   */
+  recordUse(actor: string, grantIds: readonly string[], now: string = this.#runner.now()): Promise<number> {
+    return recordGrantUse(this.#runner, actor, grantIds, now);
+  }
+
+  /**
+   * Tells the owner, once per grant, about each grant that lapsed from non-use (card A07h), oldest lapse first and at most `limit` told (and at most `limit` failed tells) a pass: `tell` is given the grant, the agent's and the project's names
+   * (as recorded; the caller quotes them) and when it was last used. After `tell` succeeds the grant is marked as told; a `tell` that fails leaves it to be told on the next pass.
+   */
+  async noticeLapsed(actor: string, tell: (lapse: LapsedGrant) => Promise<unknown>, limit = 20): Promise<number> {
+    const now = this.#runner.now();
+    const due: { id: string; revision: number; body: GrantRecordBody }[] = [];
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("grant-record", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of page) { after = a.id; const b = a.body as unknown as GrantRecordBody; if (b.lapseNoticedAt === undefined && lapsedFromNonUse(b, now) && !(b.expiresAt !== undefined && b.expiresAt <= (idleEnd(b) as string))) due.push({ id: a.id, revision: a.revision, body: b }); }
+      if (page.length < 500) break;
+    }
+    due.sort((x, y) => (idleEnd(x.body) as string).localeCompare(idleEnd(y.body) as string) || x.id.localeCompare(y.id));
+    let told = 0;
+    // A tell that fails does not hold up the grants after it (one bad notice must not starve the rest): the pass goes on, and the first failure is raised at the end so the loop reports it.
+    let failed: unknown;
+    let failures = 0;
+    for (const g of due) {
+      if (told >= limit || failures >= limit) break;
+      const who = (await this.#runner.get("principal", g.body.grantee))?.body as { name?: unknown } | undefined;
+      const project = g.body.project === "*" ? undefined : (await this.#runner.get("project", g.body.project))?.body as { name?: unknown } | undefined;
+      try {
+        await tell({
+          grantId: g.id, grantee: g.body.grantee, ...(typeof who?.name === "string" ? { granteeName: who.name } : {}), action: g.body.action, project: g.body.project,
+          ...(typeof project?.name === "string" ? { projectName: project.name } : {}), idleDays: g.body.idleDays as number, ...(g.body.lastUsedAt === undefined ? {} : { lastUsedAt: g.body.lastUsedAt }), lapsedAt: idleEnd(g.body) as string,
+        });
+      } catch (error) { failures++; failed ??= error; continue; }
+      try {
+        await this.#runner.command("grant.lapse-noticed", { commandId: `grant-lapsed-${g.id}`, actor }, async () => ({
+          payload: { grantId: g.id },
+          build: async () => {
+            const current = await this.#runner.existing("grant-record", g.id, g.revision);
+            const ref: AggregateRef = { kind: "grant-record", id: g.id };
+            return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...(current.body as unknown as GrantRecordBody), lapseNoticedAt: now } as unknown as JsonObject }], detail: { grantId: g.id } };
+          },
+        }));
+        told++;
+      } catch (error) {
+        // Revoked or otherwise changed meanwhile: it is looked at again on the next pass (and the notice itself is a replay by its command ID, so the owner is not told twice).
+        if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict")) throw error;
+      }
+    }
+    if (failed !== undefined) throw failed;
+    return told;
+  }
+
   /** The grant records a principal holds at `now`, with their terms (for the approval policy). */
   held(principalId: string, now: string): Promise<{ id: string; body: GrantRecordBody }[]> {
     return heldRecords(this.#runner, principalId, now);
@@ -499,12 +631,7 @@ export async function heldRecords(runner: CommandRunner, principalId: string, no
     for (const a of page) { const b = a.body as unknown as GrantRecordBody; byId.set(a.id, b); if (b.grantee === principalId) mine.push({ id: a.id, body: b }); after = a.id; }
     if (page.length < 500) break;
   }
-  const holds = (body: GrantRecordBody, depth: number): boolean => {
-    if (body.state !== "active" || (body.notBefore !== undefined && body.notBefore > now) || (body.expiresAt !== undefined && body.expiresAt <= now)) return false;
-    if (body.source !== "derived") return true;
-    const parent = body.parentId === undefined ? undefined : byId.get(body.parentId);
-    return parent !== undefined && depth < MAX_DEPTH && holds(parent, depth + 1) && within(body, parent);
-  };
+  const holds = holdsWith(byId, now);
   return mine.filter(({ body }) => holds(body, 0));
 }
 
@@ -525,12 +652,7 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
     for (const a of page) { const b = a.body as unknown as GrantRecordBody; byId.set(a.id, b); if (b.grantee === principal.id) mine.push({ id: a.id, body: b }); after = a.id; }
     if (page.length < 500) break;
   }
-  const holds = (body: GrantRecordBody, depth: number): boolean => {
-    if (body.state !== "active" || (body.notBefore !== undefined && body.notBefore > now) || (body.expiresAt !== undefined && body.expiresAt <= now)) return false;
-    if (body.source !== "derived") return true;
-    const parent = body.parentId === undefined ? undefined : byId.get(body.parentId);
-    return parent !== undefined && depth < MAX_DEPTH && holds(parent, depth + 1) && within(body, parent);
-  };
+  const holds = holdsWith(byId, now);
   for (const { id, body } of mine) if (holds(body, 0)) grants.push({ action: body.action, project: body.project, ...(body.resource === undefined ? {} : { resource: body.resource }), grantId: id, ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }) });
   for (let after: string | undefined; ;) {
     const page = await runner.list("restriction-record", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
@@ -549,6 +671,114 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
     .filter((g) => (g.project === "*" || g.project === scope.projectId) && (g.resource === undefined || (g.resource.kind === "task" && g.resource.id === scope.taskId) || g.resource.kind === "service" || (g.resource.kind === "project" && g.resource.id === scope.projectId)))
     .map((g) => ({ ...g, project: scope.projectId }));
   return { ...principal, grants: kept, restrictions, asOf: now };
+}
+
+/**
+ * How long after the recorded use a new use is written (card A07h): a day, or a 24th of the window when that is shorter (an hour for a one-day window). The recorded use is never older than this
+ * behind the real one, so a grant used at least once in every `window - interval` stays open, and busy work does not rewrite the record for every call.
+ */
+export function useWriteInterval(idleDays: number): number {
+  return Math.min(DAY_MS, Math.floor((idleDays * DAY_MS) / 24));
+}
+
+/** See `GrantService.recordUse`. */
+export async function recordGrantUse(runner: CommandRunner, actor: string, grantIds: readonly string[], now: string): Promise<number> {
+  const at = Date.parse(now);
+  let written = 0;
+  const seen = new Set<string>();
+  for (const first of grantIds) {
+    // A derived grant renews the grant it rests on (its own end follows its parent's).
+    for (let id: string | undefined = first, depth = 0; id !== undefined && depth <= MAX_DEPTH && !seen.has(id); depth++) {
+      seen.add(id);
+      if (!GRANT_ID.test(id)) break;
+      const found = await runner.get("grant-record", id);
+      const body = found?.body as unknown as GrantRecordBody | undefined;
+      // A grant that does not hold renews nothing, the grant it rests on included.
+      if (found === undefined || body === undefined || !holdsItself(body, now)) break;
+      const last = body.lastUsedAt === undefined ? Number.NaN : Date.parse(body.lastUsedAt);
+      if (body.idleDays !== undefined && Number.isFinite(last) && at - last >= useWriteInterval(body.idleDays)) {
+        const from = body.lastUsedAt as string;
+        try {
+          // Named by the use it replaces: uses at the same moment from two places are one write (the second is a replay or a conflict, and either way nothing more to write).
+          const r = await runner.command("grant.use", { commandId: `grant-use-${id}-${from}`, actor }, async () => ({
+            payload: { grantId: id as string, from },
+            build: async () => {
+              const current = await runner.get("grant-record", id as string);
+              const b = current?.body as unknown as GrantRecordBody | undefined;
+              if (current === undefined || b === undefined || b.idleDays === undefined || !holdsItself(b, now)) throw new DomainError("invalid_command", `grant ${id as string} does not hold, so its use is not recorded`, { field: "grantId" });
+              if (b.lastUsedAt !== from) throw new DomainError("stale_revision", `grant ${id as string} was used meanwhile`);
+              const ref: AggregateRef = { kind: "grant-record", id: id as string };
+              const next: GrantRecordBody = { ...b, lastUsedAt: now };
+              return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { grantId: id as string } };
+            },
+          }));
+          if (!r.replayed) written++;
+        } catch (error) {
+          // Another use got there first, or the grant changed meanwhile (revoked, lapsed): nothing to write.
+          if (!(error instanceof DomainError) || !["stale_revision", "command_conflict", "invalid_command"].includes(error.code)) throw error;
+        }
+      }
+      id = body.source === "derived" ? body.parentId : undefined;
+    }
+  }
+  return written;
+}
+
+/** The grant records of an effective principal (from `effectiveOf`) that cover `action` in `project` on `resource` at `now`, each on its own: the grants that a use of that action rests on. */
+export function grantsCovering(principal: Principal, action: string, project: string, now: string, resource?: ResourceRef): string[] {
+  return principal.grants.filter((g) => g.grantId !== undefined && allows({ ...principal, grants: [g] }, action, project, { now, ...(resource === undefined ? {} : { resource }) })).map((g) => g.grantId as string);
+}
+
+/**
+ * Records a use of the grants covering `actions` (card A07h) from a path that is asked many times (every request a running attempt makes): a grant looked at in the last hour, by this runner, is not read
+ * again. An hour is the shortest `useWriteInterval`, so this costs no renewal; a failure is swallowed (the use is recorded on a later call).
+ */
+const recentUse = new WeakMap<CommandRunner, Map<string, number>>();
+export async function noteUseOf(runner: CommandRunner, actor: string, principal: Principal, actions: readonly string[], project: string, now: string, resource?: ResourceRef): Promise<void> {
+  try {
+    const at = Date.parse(now);
+    const seen = recentUse.get(runner) ?? new Map<string, number>();
+    recentUse.set(runner, seen);
+    const ids = [...new Set(actions.flatMap((a) => grantsCovering(principal, a, project, now, resource)))].filter((id) => { const t = seen.get(id); return t === undefined || at - t >= 3_600_000 || at < t; });
+    if (ids.length === 0) return;
+    for (const id of ids) seen.set(id, at);
+    if (seen.size > 10_000) seen.clear();
+    await recordGrantUse(runner, actor, ids, now);
+  } catch { /* recorded on a later use */ }
+}
+
+/** A grant that lapsed from non-use, as `GrantService.noticeLapsed` hands it on. */
+export interface LapsedGrant {
+  readonly grantId: string;
+  readonly grantee: string;
+  readonly granteeName?: string;
+  readonly action: string;
+  readonly project: string;
+  readonly projectName?: string;
+  readonly idleDays: number;
+  readonly lastUsedAt?: string;
+  readonly lapsedAt: string;
+}
+
+/**
+ * The grants of a principal that lapsed from non-use and would have covered `action` in `project` (on `resource`, when given) at `now` (card A07h): what a stalled task names in its blocker instead of
+ * only saying the right is missing. Revoked and ended grants are not listed (they did not lapse).
+ */
+export async function lapsedCovering(runner: CommandRunner, principalId: string, action: string, project: string, now: string, resource?: ResourceRef): Promise<{ id: string; body: GrantRecordBody }[]> {
+  const out: { id: string; body: GrantRecordBody }[] = [];
+  for (let after: string | undefined; ;) {
+    const page = await runner.list("grant-record", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+    for (const a of page) {
+      after = a.id;
+      const b = a.body as unknown as GrantRecordBody;
+      if (b.grantee !== principalId || b.source === "derived" || !lapsedFromNonUse(b, now) || (b.expiresAt !== undefined && b.expiresAt <= now)) continue;
+      if (!covers(b.action, action) || (b.project !== "*" && b.project !== project)) continue;
+      if (b.resource !== undefined && !(resource !== undefined && (sameResource(b.resource, resource) || (b.resource.kind === "project" && b.resource.id === project)))) continue;
+      out.push({ id: a.id, body: b });
+    }
+    if (page.length < 500) break;
+  }
+  return out;
 }
 
 function requireOwner(principal: Principal): void {

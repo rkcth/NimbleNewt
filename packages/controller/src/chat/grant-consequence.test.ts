@@ -4,7 +4,7 @@ import { ConfigurationService } from "../configuration/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PolicyService, type Profile } from "../policy/index.js";
 import { ReviewService } from "../review/index.js";
-import { GrantService, type GrantRecordBody } from "../security/index.js";
+import { GrantService, idleEnd, type GrantRecordBody } from "../security/index.js";
 import { PolicyEditService, type Outcome } from "./index.js";
 import { cid, openWorld, options } from "./testing/harness.js";
 
@@ -117,7 +117,7 @@ for (const backend of backends) {
         assert.equal(held.length, before + 1, `${profile}: one grant, and only from the confirmed proposal`);
         assert.deepEqual([held[before]!.body.terms?.spendUnlimited, held[before]!.body.terms?.spendLimit], [true, undefined]);
         assert.match(shown(o, out.reply), /Length: 30 days/i, `${profile}: the default length is stated on the proposal too, not read out of the sentence`);
-        assert.equal(held[before]!.body.expiresAt, "2026-11-21T10:00:00.000Z", "the length is the 30-day default the proposal showed");
+        assert.equal(idleEnd(held[before]!.body), "2026-11-21T10:00:00.000Z", "the length is the 30-day default the proposal showed");
       }
     } finally { await x.w.close(); }
   });

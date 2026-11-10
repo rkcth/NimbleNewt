@@ -665,7 +665,8 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
  * (`grantDateInWords`, checked in the chat) or none, and with none the line says the right never runs out. A date is the owner's own text and goes through `short`, once, like every other value here.
  */
 function grantMeaning(args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
-  const end = typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : "no end: it never runs out and stays until you revoke it";
+  const idle = typeof args["idleDays"] === "number" ? `; lapses once unused for ${args["idleDays"]} day${args["idleDays"] === 1 ? "" : "s"}, each use renews it` : "";
+  const end = (typeof args["expiresAt"] === "string" ? `ends ${short(args["expiresAt"])}` : typeof args["idleDays"] === "number" ? "no end date" : "no end: it never runs out and stays until you revoke it") + idle;
   const start = typeof args["notBefore"] === "string" ? `; starts ${short(args["notBefore"])}` : "";
   const scope = args["project"];
   const reach = scope === "*" ? "; everywhere: it covers every project, including ones made later" : typeof scope === "string" ? `; only in ${labels[scope] === undefined ? short(scope) : quotedText(labels[scope], 60)}` : "";

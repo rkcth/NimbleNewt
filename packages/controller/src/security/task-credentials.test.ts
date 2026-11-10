@@ -45,6 +45,22 @@ for (const backend of backends) {
       } finally { await world.close(); }
     });
 
+  suite("card A07h: an attempt that runs longer than a one-day idle window keeps the rights it rests on; a right it never uses still lapses", async (c) => {
+    const work = await c.grants.grant(c.owner, { commandId: cid("g"), grantee: c.ann, action: "attempt.work", project: c.a, source: "standing", basis: "keep going", idleDays: 1 });
+    const unused = await c.grants.grant(c.owner, { commandId: cid("g"), grantee: c.ann, action: "task.create", project: c.a, source: "standing", basis: "not needed", idleDays: 1 });
+    const { token } = await c.tc.issue(c.owner, { commandId: cid("i"), taskId: c.ta, agentId: c.ann });
+    for (let i = 0; i < 3 * 48; i++) {
+      minutes(30);
+      const p = await c.tc.authenticate(token);
+      assert.equal(allows(p, "attempt.work", c.a, { resource: { kind: "task", id: c.ta } }), true, `still working after ${(i + 1) / 2} hours`);
+    }
+    const held = (await c.grants.held(c.ann, new Date(now).toISOString())).map((g) => g.id);
+    assert.ok(held.includes(work.id));
+    assert.ok(!held.includes(unused.id), "presenting the credential is not a use of every right");
+    const revision = (await c.grants.getGrant(work.id))!.revision;
+    assert.ok(revision >= 60 && revision <= 80, `written about once an hour, not on every request (${revision})`);
+  });
+
   suite("a task credential carries only the grants of its task's project, and reaches no other project, task or project-less action", async (c) => {
     const { token } = await c.tc.issue(c.owner, { commandId: cid("i"), taskId: c.ta, agentId: c.ann });
     const p = await c.tc.authenticate(token);

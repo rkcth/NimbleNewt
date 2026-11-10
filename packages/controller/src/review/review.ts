@@ -6,7 +6,7 @@ import type { Availability } from "../conversations/conversations.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type HostBody } from "../hosts/hosts.js";
 import { allows, inTaskScope, toolAction } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
-import { effectiveOf } from "../security/grants.js";
+import { effectiveOf, noteUseOf } from "../security/grants.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
@@ -345,6 +345,11 @@ export class ReviewService {
         };
       },
     }));
+    // Deciding used the reviewer's review right (card A07h): a grant with an idle window that the reviewer holds for it is renewed.
+    if (reviewer.kind !== "owner" && fresh !== undefined) {
+      const decided = (await this.#runner.get("review", id))?.body as unknown as ReviewBody | undefined;
+      if (decided !== undefined) await noteUseOf(this.#runner, "service:dispatcher", fresh, ["review.decide"], decided.binding.projectId, this.#runner.now());
+    }
     if (this.#onDecided !== undefined && (verdict === "allow" || verdict === "deny")) {
       const after = (await this.#runner.get("review", id))?.body as unknown as ReviewBody | undefined;
       if (after !== undefined) { try { await this.#onDecided({ requestId: id, taskId: after.binding.taskId, verdict, decidedBy: reviewer.id, tool: after.operation.name, reason }); } catch { /* the record of a verdict never changes it */ } }
