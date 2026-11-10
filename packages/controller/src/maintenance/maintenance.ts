@@ -3,7 +3,9 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, text } from "../domain/model.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
+import { allowsExactly } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
+import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
@@ -39,6 +41,8 @@ const REQ = "maintenance", SETTINGS: AggregateRef = { kind: "maintenance-setting
 const WIDENING: readonly MaintenanceKind[] = ["network", "mount", "package", "extension", "host-policy", "base"];
 /** Kinds the owner may hand to supervisors (per kind, off by default). The protected kinds are never handed over. */
 const BOSS_KINDS: readonly MaintenanceKind[] = ["package", "extension", "mount", "network"];
+/** Kinds a standing permission of the owner (`approve.maintenance.<kind>`) approves without asking anyone, and only without install scripts: broader access is reviewed per change, protected changes are the owner's, and install scripts run only after an approval of the exact artifact. */
+const STANDING_KINDS: readonly MaintenanceKind[] = ["package", "extension"];
 /** A source is an https URL without credentials. The message never repeats it (it may carry a secret). */
 export function checkSource(v: unknown, field: string): string {
   const s = lone(v, field, 200);
@@ -340,7 +344,7 @@ export class MaintenanceService {
         const s = await this.#settings();
         if (by.kind === "agent" && !s.eff.requests) throw new DomainError("forbidden", "maintenance requests are switched off by the owner");
         const now = this.#runner.now();
-        const auto = this.#autoDecision(kind, cls, spec, s);
+        const auto = await this.#autoDecision(agentId, kind, cls, spec, s, now);
         const base = { agentId, kind, class: cls, spec, specDigest, reason, ...(rollbackPlan === undefined ? {} : { rollbackPlan }), requestedBy: by.id, requestedAt: now } as const;
         const changes: Change[] = [];
         if (by.kind === "agent" && s.eff.requestsPerDay !== undefined) changes.push(await this.#rateChange(agentId, now, s.eff.requestsPerDay));
@@ -367,8 +371,11 @@ export class MaintenanceService {
     return { maintenanceId: id, status, revision: result.revision, replayed: result.replayed };
   }
 
-  /** The owner's standing rules, applied at request time: a skill draft is allowed (and recorded); a preapproved catalogue entry (exact name, version and digest) and an allowed site are approved; a denied site is rejected. */
-  #autoDecision(kind: MaintenanceKind, cls: MaintenanceClass, spec: MaintenanceSpec, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }): { verdict: "approve" | "reject"; rule: string } | undefined {
+  /**
+   * The owner's standing rules, applied at request time: a skill draft is allowed (and recorded); a preapproved catalogue entry (exact name, version and digest) and an allowed site are approved; a denied site is rejected; a package
+   * or extension without install scripts is approved when the agent holds the owner's standing permission for that kind (`approve.maintenance.<kind>`, see `#standingGrant`), so permission already given asks no one again.
+   */
+  async #autoDecision(agentId: string, kind: MaintenanceKind, cls: MaintenanceClass, spec: MaintenanceSpec, s: { readonly body: SettingsBody | undefined; readonly eff: MaintenanceEffective; readonly readable: boolean }, now: string): Promise<{ verdict: "approve" | "reject"; rule: string } | undefined> {
     if (!s.readable) return undefined;
     if (cls === "skill-draft") return { verdict: "approve", rule: "skill-draft" };
     if (kind === "network") {
@@ -377,7 +384,22 @@ export class MaintenanceService {
       if (rule === "allow" && s.eff.rules) return { verdict: "approve", rule: "site-allow" };
     }
     if ((kind === "package" || kind === "extension") && s.eff.rules && (s.body?.catalogue ?? []).some((e) => e.name === spec["name"] && e.version === spec["version"] && e.digest === spec["digest"] && e.source === spec["source"] && (spec["installScripts"] !== true || e.installScripts === true))) return { verdict: "approve", rule: "catalogue" };
+    if ((STANDING_KINDS as readonly string[]).includes(kind) && spec["installScripts"] !== true && s.eff.rules && await this.#standingGrant(agentId, kind, now)) return { verdict: "approve", rule: "standing-grant" };
     return undefined;
+  }
+
+  /**
+   * Whether the agent holds, as stored now, the owner's standing permission for this kind of change: a grant whose action is exactly `approve.maintenance.<kind>` (never `*`, `approve.*` or another prefix), for every project (`*`, an
+   * environment belongs to no project) and no single resource, active, in its time window and not forbidden by a restriction. Only the owner makes such grants (an `approve.` grant is derived only by the owner), so an agent, a skill
+   * or an extension cannot give itself one. A record that cannot be read gives no permission.
+   */
+  async #standingGrant(agentId: string, kind: MaintenanceKind, now: string): Promise<boolean> {
+    try {
+      const principal = (await this.#runner.get("principal", agentId))?.body as unknown as { kind?: string; state?: string; name?: string; grants?: Principal["grants"] } | undefined;
+      if (principal?.kind !== "agent" || principal.state !== "active") return false;
+      const eff = await effectiveOf(this.#runner, { id: agentId, kind: "agent", name: principal.name ?? agentId, grants: principal.grants ?? [] }, now);
+      return allowsExactly(eff, `approve.maintenance.${kind}`, undefined, { now });
+    } catch { return false; }
   }
 
   // ---- deciding ------------------------------------------------------------------------------------------------------------------
@@ -514,7 +536,7 @@ export class MaintenanceService {
     const d = b.decision;
     if (d === undefined || d.verdict !== "approve" || d.specDigest !== b.specDigest || sha({ agentId: b.agentId, kind: b.kind, spec: b.spec, rollbackPlan: b.rollbackPlan ?? null }) !== b.specDigest) return "lapsed";
     if (d.via === "supervisor") return await this.#bossFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed";
-    if (d.via === "rule") { const again = this.#autoDecision(b.kind, b.class, b.spec, s); return again?.verdict === "approve" && again.rule === d.rule ? "ok" : "lapsed"; }
+    if (d.via === "rule") { const again = await this.#autoDecision(b.agentId, b.kind, b.class, b.spec, s, this.#runner.now()); return again?.verdict === "approve" && again.rule === d.rule ? "ok" : "lapsed"; }
     return "ok";
   }
 

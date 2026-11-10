@@ -479,3 +479,58 @@ test("the live index is covered over several ticks when it is longer than one pa
     } finally { limits.indexScan = was; }
   });
 });
+
+// ---- A09 standing permission (2026-11-10) -------------------------------------------------------------------------------------------
+
+for (const [index, backend] of backends.entries()) {
+  test(`a standing permission of the owner approves a package or extension without asking again, only the exact kind and without install scripts, never access or protected kinds; it is checked again at apply and cannot be self-granted (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const ben = await w.make("Ben");
+      // Without a standing permission the request waits for a decider.
+      const before = await request(w, ann.principal, "package", pkg("left-pad"));
+      assert.equal(before.status, "pending");
+      // The owner's standing permission for packages, installation-wide.
+      const g = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ann.principal.id, action: "approve.maintenance.package", project: "*", source: "direct", basis: "Ann may add packages to her own environment" });
+      const granted = await request(w, ann.principal, "package", pkg("right-pad"));
+      assert.equal(granted.status, "approved", "existing permission asks no one again");
+      await settle(w);
+      const done = await w.body(granted.maintenanceId);
+      assert.equal(done.status, "applied");
+      assert.equal(done.decision?.via, "rule"); assert.equal(done.decision?.rule, "standing-grant");
+      // Install scripts need an approval of the exact artifact: the standing permission does not cover them.
+      assert.equal((await request(w, ann.principal, "package", pkg("with-scripts", { installScripts: true }))).status, "pending");
+      // Only the exact kind: a package permission says nothing about extensions, mounts, sites or the protected base.
+      assert.equal((await request(w, ann.principal, "extension", pkg("ext-one"))).status, "pending");
+      assert.equal((await request(w, ann.principal, "network", { site: "pkgs.example.org" })).status, "pending");
+      assert.equal((await request(w, ann.principal, "base", { change: "add a compiler" })).status, "pending");
+      // Another agent's permission is not Ann's, and Ben's request is not Ann's.
+      assert.equal((await request(w, ben.principal, "package", pkg("ben-pad"))).status, "pending");
+      // Broad grants do not count: only the exact action names the standing permission.
+      await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.*", project: "*", source: "direct", basis: "broad" });
+      await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.maintenance.extension", project: "proj-aaaaaaaaaaaaaaaaaaaa", source: "direct", basis: "one project only" });
+      assert.equal((await request(w, ben.principal, "package", pkg("ben-two"))).status, "pending", "approve.* is not a standing permission for maintenance");
+      assert.equal((await request(w, ben.principal, "extension", pkg("ben-ext"))).status, "pending", "a grant for one project is not installation-wide");
+      // An agent cannot give itself one (only the owner grants, and an approval grant is derived only by the owner).
+      await refuses("forbidden", () => w.grants.grant(ben.principal, { commandId: cid("g"), grantee: ben.principal.id, action: "approve.maintenance.package", project: "*", source: "direct", basis: "self" }));
+      await refuses("forbidden", () => w.grants.derive(ann.principal, { commandId: cid("g"), parentId: g.id, action: "approve.maintenance.package", project: "*", basis: "copy" }));
+      // A restriction wins over the standing permission.
+      const r = await w.grants.restrict(w.owner, { commandId: cid("x"), subject: ann.principal.id, action: "approve.maintenance.package", project: "*", reason: "hold installs" });
+      assert.equal((await request(w, ann.principal, "package", pkg("restricted-pad"))).status, "pending");
+      await w.grants.lift(w.owner, { commandId: cid("x"), restrictionId: r.id, expectedRevision: r.revision, reason: "go" });
+      // Approved under the permission, but safe restoration is not possible now (the applier answers unsupported): the change waits, approved. The permission is then revoked: the next drive finds the approval
+      // no longer stands (it is checked again at apply), and the request waits for a decider; nothing was applied.
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "no safe restoration now" }];
+      const late = await request(w, ann.principal, "package", pkg("late-pad"));
+      assert.equal(late.status, "approved");
+      await settle(w);
+      assert.equal((await w.body(late.maintenanceId)).status, "approved");
+      assert.match((await w.body(late.maintenanceId)).pendingReason ?? "", /no safe restoration/);
+      const view = (await w.grants.getGrant(g.id))!;
+      await w.grants.revoke(w.owner, { commandId: cid("v"), grantId: g.id, expectedRevision: view.revision, reason: "enough" });
+      assert.equal(await w.m.drive(late.maintenanceId), "pending");
+      assert.equal(w.applier.effects.has(late.maintenanceId), false, "nothing was applied");
+      assert.equal((await request(w, ann.principal, "package", pkg("after-revoke"))).status, "pending", "a revoked standing permission approves nothing");
+    });
+  });
+}
