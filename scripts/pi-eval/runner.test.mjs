@@ -298,6 +298,8 @@ test("W06: a variant whose prompt carries the completion rules gets the worker's
   const shipped = loadTaskset(join(here, "taskset.json"));
   for (const v of ["B", "C", "D"]) assert.ok(readFileSync(shipped.variants[v].promptPath, "utf8").includes(COMPLETION_RULES_PLACEHOLDER), `variant ${v} uses the completion rules`);
   assert.ok(!readFileSync(shipped.variants.A.promptPath, "utf8").includes(COMPLETION_RULES_PLACEHOLDER), "variant A stays the plain prompt");
+  // On the Pi command line there is no work.end: the note says the report replaces it, so the rules' "never end with prose alone" does not forbid the only ending the agent has.
+  assert.match(readFileSync(shipped.variants.B.promptPath, "utf8"), /end instead with a short final report that starts with the result[^\n]*takes the place of the work\.end call/);
   const task = { id: "t1" };
   const text = renderPrompt(readFileSync(shipped.variants.B.promptPath, "utf8"), { task, taskText: "Do {{COMPLETION_RULES}} nothing.", worktreeUrl: "file:///w", completionRules: COMPLETION_RULES });
   assert.ok(text.includes(COMPLETION_RULES) && text.includes("Do {{COMPLETION_RULES}} nothing."), "the rules go where the template says; the task text is inserted as it is");
