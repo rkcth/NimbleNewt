@@ -4,5 +4,5 @@ export { PRINCIPAL_KINDS, PRINCIPAL_LIMITS, PrincipalService, grants as checkGra
 export { CREDENTIAL_PATTERNS, findCredentialShapes, type CredentialPattern } from "./credential-patterns.js";
 export { REDACTED, redact, redactText } from "./redact.js";
 export { SecureApi, type SecureDependencies } from "./secured.js";
-export { GrantService, GRANT_LIMITS, checkTerms, heldRecords, within, type DeriveInput, type GrantInput, type GrantRecordBody, type GrantSource, type GrantTerms, type ResourceRef, type RestrictInput, type RestrictionBody } from "./grants.js";
+export { GrantService, GRANT_LIMITS, IDLE_DAYS_CEILING, checkTerms, heldRecords, idleEnd, lapsedCovering, lapsedFromNonUse, recordGrantUse, within, type LapsedGrant, type DeriveInput, type GrantInput, type GrantRecordBody, type GrantSource, type GrantTerms, type ResourceRef, type RestrictInput, type RestrictionBody } from "./grants.js";
 export { DISPATCHER_PRINCIPAL, TaskCredentialService, type IssuedTaskCredential, type TaskCredentialBody } from "./task-credentials.js";

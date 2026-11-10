@@ -3,7 +3,7 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
-import type { GrantService } from "../security/grants.js";
+import { idleEnd, lapsedFromNonUse, type GrantService } from "../security/grants.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { ReviewBody } from "../review/index.js";
@@ -288,7 +288,7 @@ export class ApprovalLoadService {
     if (p.state !== "accepted" || p.decidedAt === undefined) throw new DomainError("invalid_command", `proposal ${found.id} was offered again after this acceptance`, { field: "proposalId" });
     const grant = await this.#grants.grant(owner, {
       commandId: scopedCommandId(owner.id, `accept-grant-${found.id}-${done.revision}`), grantee: p.requester, action: p.suggestion.action, project: p.suggestion.project, source: "standing",
-      basis: `accepted from standing-rule proposal ${found.id}: approved ${p.count} times; ${dayWord(p.suggestion.days)}: ${p.chosenLength?.why ?? "the usual length"}`.slice(0, 500), expiresAt: addDays(p.decidedAt!, p.suggestion.days), terms: { environments: p.suggestion.environments },
+      basis: `accepted from standing-rule proposal ${found.id}: approved ${p.count} times; ${dayWord(p.suggestion.days)}: ${p.chosenLength?.why ?? "the usual length"}`.slice(0, 500), idleDays: p.suggestion.days, terms: { environments: p.suggestion.environments },
     });
     if (p.grantId === undefined) {
       await this.#runner.command("approval.link", { commandId: scopedCommandId(owner.id, `accept-link-${found.id}-${done.revision}`), actor: owner.id }, async () => ({
@@ -404,8 +404,10 @@ export class ApprovalLoadService {
     if (old.state !== "accepted" || old.via === "profile" || old.grantId === undefined) return kept;
     const grant = await this.#grants.getGrant(old.grantId);
     if (grant === undefined) return kept;
-    const ended = grant.expiresAt !== undefined && grant.expiresAt <= now;
-    const early = grant.state === "revoked" && (grant.revokedAt === undefined || grant.expiresAt === undefined || grant.revokedAt < grant.expiresAt);
+    // A grant with an idle window (card A07h) ends when it lapses from non-use: that is its full term.
+    const end = grant.expiresAt ?? idleEnd(grant);
+    const ended = end !== undefined && end <= now;
+    const early = grant.state === "revoked" && (grant.revokedAt === undefined || end === undefined || grant.revokedAt < end);
     if (early) kept.push({ days: old.suggestion.days, revoked: true });
     else if (ended || grant.state === "revoked") kept.push({ days: old.suggestion.days, revoked: false });
     return kept.slice(-HISTORY_KEPT);
@@ -431,7 +433,7 @@ export class ApprovalLoadService {
   async #grantLive(grantId: string | undefined, now: string): Promise<boolean> {
     if (grantId === undefined) return false;
     const grant = await this.#grants.getGrant(grantId);
-    return grant !== undefined && grant.state === "active" && (grant.expiresAt === undefined || grant.expiresAt > now);
+    return grant !== undefined && grant.state === "active" && (grant.expiresAt === undefined || grant.expiresAt > now) && !lapsedFromNonUse(grant, now);
   }
 
   /** The reviews that matter now: those still waiting, and those settled within the window. Older settled ones are skipped without counting against the limit. */

@@ -1413,7 +1413,12 @@ export class DispatcherService {
     // 7. Grants: the task's instructions and the standing policy determine them, or the owner is asked.
     const contract = await this.#contractOf(taskId);
     const missing = await this.#missingGrants(agentId, task.projectId, taskId, contract.tools);
-    if (missing.length > 0) return block("grant", "grant_needed", `the task needs ${missing.join(", ")} and no one has given ${missing.length === 1 ? "it" : "them"} to ${agentId}`);
+    if (missing.length > 0) {
+      // A right that was given and then lapsed from non-use (card A07h) is named, so the stall does not look like a right that was never given.
+      const lapsed = await this.#lapsedRights(agentId, task.projectId, taskId, missing);
+      const them = missing.length === 1 ? "it" : "them";
+      return block("grant", "grant_needed", (lapsed === "" ? `the task needs ${missing.join(", ")} and no one has given ${them} to ${agentId}` : `the task needs ${missing.join(", ")} and ${agentId} no longer holds ${them}${lapsed}`).slice(0, 800));
+    }
     // 5c. A task that last ran on another route has its context built again for this one (card C07f); essential constraints that do not fit keep the attempt from starting.
     // It comes after the cheap checks (budget, grants), and an answer of "fits" is kept for the attempt, the route and the configuration it was given for, so a start that waits for a host does not read the owner's decisions again every tick.
     if (this.#deps.routeChange !== undefined) {
@@ -1478,16 +1483,45 @@ export class DispatcherService {
     const stored = (await this.#runner.get("principal", agentId))?.body as unknown as { grants: readonly { action: string; project: string; resource?: { kind: string; id: string }; expiresAt?: string }[]; kind: string; state: string } | undefined;
     if (stored === undefined || stored.state !== "active") return needed;
     const held = await this.#agentGrants(agentId);
-    return needed.filter((t) => !held(t, projectId, taskId));
+    const missing = needed.filter((t) => !held.covers(t, projectId, taskId));
+    if (missing.length === 0) {
+      // Placing the task uses the grants that cover what it needs (card A07h): a grant with an idle window starts its window again, written at most once a day per grant. A failure to record it never holds up the task.
+      const used = [...new Set(needed.flatMap((t) => held.usedFor(t, projectId, taskId)))];
+      if (used.length > 0) {
+        const { recordGrantUse } = await import("../security/grants.js");
+        try { await recordGrantUse(this.#runner, this.#deps.principal.id, used, held.now); } catch (error) { this.#options.onError?.(error); }
+      }
+    }
+    return missing;
   }
 
-  /** Whether an action is covered by what the agent holds now: its enrolment grants and its grant records (the same snapshot the credential would carry). */
-  async #agentGrants(agentId: string): Promise<(action: string, projectId: string, taskId: string) => boolean> {
+  /** Whether an action is covered by what the agent holds now: its enrolment grants and its grant records (the same snapshot the credential would carry); and which grant records cover it. */
+  async #agentGrants(agentId: string): Promise<{ now: string; covers: (action: string, projectId: string, taskId: string) => boolean; usedFor: (action: string, projectId: string, taskId: string) => string[] }> {
     const stored = (await this.#runner.get("principal", agentId))?.body as unknown as { name: string; grants: readonly { action: string; project: string; resource?: { kind: string; id: string }; expiresAt?: string }[] };
     const { effectiveOf } = await import("../security/grants.js");
     const now = this.#runner.now();
     const principal = await effectiveOf(this.#runner, { id: agentId, kind: "agent", name: stored.name, grants: stored.grants as never }, now);
-    return (action, projectId, taskId) => allows(principal, action, projectId, { resource: { kind: "task", id: taskId }, now });
+    return {
+      now,
+      covers: (action, projectId, taskId) => allows(principal, action, projectId, { resource: { kind: "task", id: taskId }, now }),
+      usedFor: (action, projectId, taskId) => principal.grants.filter((g) => g.grantId !== undefined && allows({ ...principal, grants: [g] }, action, projectId, { resource: { kind: "task", id: taskId }, now })).map((g) => g.grantId as string),
+    };
+  }
+
+  /** For a blocker: the missing rights that the agent did hold under a grant that lapsed from non-use (card A07h), in words; empty when none did. */
+  async #lapsedRights(agentId: string, projectId: string, taskId: string, missing: readonly string[]): Promise<string> {
+    try {
+      const { lapsedCovering, idleEnd } = await import("../security/grants.js");
+      const now = this.#runner.now();
+      const parts: string[] = [];
+      for (const action of missing) {
+        const found = (await lapsedCovering(this.#runner, agentId, action, projectId, now, { kind: "task", id: taskId }))[0];
+        if (found === undefined) continue;
+        const last = found.body.lastUsedAt === undefined ? "" : `, last used ${found.body.lastUsedAt.slice(0, 10)}`;
+        parts.push(`${action}: grant ${found.id} lapsed on ${(idleEnd(found.body) as string).slice(0, 10)} after ${found.body.idleDays as number} day${found.body.idleDays === 1 ? "" : "s"} unused${last}`);
+      }
+      return parts.length === 0 ? "" : `; the right lapsed from non-use (${parts.join("; ")}): grant it again to let the task go on`;
+    } catch (error) { this.#options.onError?.(error); return ""; }
   }
 
   async #pickHost(harness: string | undefined, pinned: string | undefined, probe: HostProbe): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean; refused?: true }> {
