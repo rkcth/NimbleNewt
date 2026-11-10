@@ -1,0 +1,21 @@
+{
+  "files": {
+    "packages/controller/src/dispatch/w01-acceptance-c07m-brief.test.ts": "w01-acceptance-c07m-brief.test.ts",
+    "packages/controller/src/dispatch/w01-acceptance-c07m-call.test.ts": "w01-acceptance-c07m-call.test.ts",
+    "packages/controller/src/dispatch/w01-acceptance-c07m-hops.test.ts": "w01-acceptance-c07m-hops.test.ts",
+    "packages/controller/src/context/w01-acceptance-c07m.test.ts": "w01-acceptance-c07m.test.ts",
+    "packages/controller/src/api/w01-acceptance-c07m-api.test.ts": "w01-acceptance-c07m-api.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/dispatch/w01-acceptance-c07m-brief.test.js",
+    "dist/dispatch/w01-acceptance-c07m-call.test.js",
+    "dist/dispatch/w01-acceptance-c07m-hops.test.js",
+    "dist/context/w01-acceptance-c07m.test.js",
+    "dist/api/w01-acceptance-c07m-api.test.js"
+  ],
+  "allow": {
+    "/\\[the controller restarted; carry on from the checkpoint\\nthe stored conversation is \\d+ tokens, over \\d+ \\(60% of this model's \\d+\\); starting fresh from the continuation record\\]$/": "C07l regression check copied unchanged from the base's first-call-hops.test.ts (passes at the base): the text is produced by base code (the rules note, the worker's fresh-start resume note) that this card does not change",
+    "/Rules that bind you in this project[^\\n]*\\n- Approval profile: /": "C07l regression check copied unchanged from the base's first-call-hops.test.ts (passes at the base): the text is produced by base code (the rules note, the worker's fresh-start resume note) that this card does not change"
+  }
+}
