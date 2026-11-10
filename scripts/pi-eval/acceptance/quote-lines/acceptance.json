@@ -1,0 +1,15 @@
+{
+  "files": {
+    "packages/controller/src/chat/w01-acceptance-quote-lines.test.ts": "w01-acceptance-quote-lines.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/chat/w01-acceptance-quote-lines.test.js"
+  ],
+  "allow": {
+    "/^Change task: taskId=\"Fix the login screen\\\\u202e now\\\\u200b\\\\ud800 \\u{1F600}\"/u": "the fixture TITLE through quotedText (escaping is in the base status/explain.ts); the CONTRACT gives this very line with <emoji> standing for the fixture's U+1F600, and 'Change task' is the base verb",
+    "/, title=Ship the login screen$/": "the fixture's own title argument shown bare as the line's last field, as at the base; the CONTRACT says a non-label value stays bare (`, title=Ship the login screen`)",
+    "/alternative=\"keep the nightly build at midnight\\\\u202e tonight\\\\u200b\" on topic \"nightly\\\\u200b build schedule\"/": "the fixture's statement and topic through quotedText (base escaping: whitespace folds to a space, U+202E/U+200B become \\uXXXX), in the form `alternative=<quoted> on topic <quoted>` the prompt states",
+    "/decisionId=\"Move the build to one\\\\u202e; 2 changes left to carry out\"/": "the fixture label for mdc-1 through quotedText (base escaping); the CONTRACT says a label is exactly quotedText(label, CHAT_LIMITS.line)"
+  }
+}
