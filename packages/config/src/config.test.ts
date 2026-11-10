@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   CURRENT_CONFIG_VERSION, DEFAULT_LIMITS, Secret, describeConfig, directorySecrets, environmentSecrets, exportProfile, formatErrors, importProfile,
-  loadConfig, memorySecrets, migrateConfig, resolveSecrets, secretReferences, transferOptionsFromConfig, validateConfig, type ConfigMigration, type NimbleNewtConfig,
+  loadConfig, memorySecrets, migrateConfig, resolveSecrets, secretReferences, TRANSFER_STATE_FOLDER, transferOptionsFromConfig, validateConfig, type ConfigMigration, type NimbleNewtConfig,
 } from "./index.js";
 
 const example = (name: string): string => readFileSync(fileURLToPath(new URL(`../examples/${name}.example.json`, import.meta.url)), "utf8");
@@ -443,6 +443,10 @@ test("the start gets the transfer destinations as written and a secret lookup th
   const none = transferOptionsFromConfig(loadOk(parsed("private")), all);
   assert.deepEqual(none.targetEntries, []);
   assert.equal(await none.secrets("transfer.pg-url"), undefined);
+  // The journal and authority file live in one fixed folder under the data directory, given also with no destinations (a past transfer's authority is still checked).
+  assert.equal(options.stateDirectory, join(config.installation.dataDir, TRANSFER_STATE_FOLDER));
+  assert.equal(TRANSFER_STATE_FOLDER, "database-transfer");
+  assert.equal(none.stateDirectory, join(config.installation.dataDir, "database-transfer"));
 });
 
 test("transfer destinations in the configuration: a PostgreSQL address only as a secret reference (a plain address is refused unechoed), names unique and plain, at most 16, listed as a secret use, kept out of public profiles and exports (card F04l)", async () => {
