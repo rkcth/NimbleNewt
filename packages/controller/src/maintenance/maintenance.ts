@@ -5,7 +5,7 @@ import { onlyKnown, text } from "../domain/model.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
 import { allowsExactly } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
-import { effectiveOf, MAX_DEPTH, type GrantRecordBody } from "../security/grants.js";
+import { effectiveOf, MAX_DEPTH, recordGrantUse, type GrantRecordBody } from "../security/grants.js";
 import { inWindow } from "../policy/engine.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -340,6 +340,7 @@ export class MaintenanceService {
     const id = derivedId("mnt", commandId);
     const ref: AggregateRef = { kind: REQ, id };
     let notice: MaintenanceNotice | undefined;
+    let standingUsed: string[] = [];
     const result = await this.#runner.command("maintenance.request", { commandId, actor: by.id }, async () => ({
       payload: { agentId, kind, spec, reason, rollbackPlan: rollbackPlan ?? null },
       build: async (): Promise<Built> => {
@@ -354,6 +355,7 @@ export class MaintenanceService {
         if (by.kind === "agent" && s.eff.requestsPerDay !== undefined) changes.push(await this.#rateChange(agentId, now, s.eff.requestsPerDay));
         // A standing permission revoked between this read and the write fails the write (asked again, the request then waits for a decider).
         if (auto?.guard !== undefined) changes.push(...auto.guard);
+        standingUsed = auto?.rule === "standing-grant" ? (auto.guard ?? []).filter((c) => c.ref.kind === "grant-record").map((c) => c.ref.id) : [];
         let body: MaintenanceBody;
         if (auto !== undefined) body = { ...base, status: auto.verdict === "approve" ? ("approved" as const) : ("rejected" as const), decision: { by: "controller", verdict: auto.verdict, via: "rule", rule: auto.rule, specDigest, at: now } };
         else {
@@ -371,6 +373,8 @@ export class MaintenanceService {
       },
     }));
     if (!result.replayed && notice !== undefined && this.#notify !== undefined) await this.#notify(notice).catch(() => undefined);
+    // The owner's standing permission approved this request, so it was used (card A07h): a grant with an idle window starts its window again (the grant the approval rests on, and those its chain rests on).
+    if (!result.replayed && standingUsed.length > 0) await recordGrantUse(this.#runner, "service:dispatcher", standingUsed, this.#runner.now()).catch(() => undefined);
     const a = await this.#runner.get(REQ, id);
     const status = (a?.body as unknown as MaintenanceBody | undefined)?.status ?? "pending";
     if (!result.replayed && status === "approved") this.background(this.drive(id));

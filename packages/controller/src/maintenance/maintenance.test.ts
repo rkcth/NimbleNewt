@@ -665,3 +665,26 @@ for (const [index, backend] of backends.entries()) {
     });
   });
 }
+
+// ---- A07h: a standing permission with an idle window is used each time it approves a request ------------------------------------------
+
+for (const [index, backend] of backends.entries()) {
+  test(`card A07h: a standing permission that approves a request is used, so its idle window starts again; one left unused lapses and asks again (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const DAY = 86_400_000;
+      const ann = await w.make("Ann");
+      const g = await w.grants.grant(w.owner, { commandId: cid("g"), grantee: ann.principal.id, action: "approve.maintenance.package", project: "*", source: "standing", basis: "packages", idleDays: 30 });
+      w.time.ms += 20 * DAY;
+      assert.equal((await request(w, ann.principal, "package", pkg("day-twenty"))).status, "approved");
+      await settle(w);
+      assert.equal((await w.grants.getGrant(g.id))!.lastUsedAt, new Date(w.time.ms).toISOString(), "the approval was a use");
+      // Forty days after it was made, twenty after its last use: still in force.
+      w.time.ms += 20 * DAY;
+      assert.equal((await request(w, ann.principal, "package", pkg("day-forty"))).status, "approved");
+      await settle(w);
+      // Unused for its whole window: it lapses, and the next request waits for a decider.
+      w.time.ms += 31 * DAY;
+      assert.equal((await request(w, ann.principal, "package", pkg("day-seventy-one"))).status, "pending");
+    });
+  });
+}

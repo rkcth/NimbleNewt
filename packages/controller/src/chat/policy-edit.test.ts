@@ -57,6 +57,13 @@ test("the owner's order needs the verb of that move, no negation, no musing, and
   assert.equal(lengthInWords(90, "apply it, 90"), false, "a number needs a unit");
   assert.equal(lengthInWords(90, "make it a 90-day grant"), true);
   assert.equal(lengthInWords(14, "for 2 weeks"), true);
+  // Card A07h: lengths in words as the owner writes them (teens, tens, compounds, "a couple of", "a hundred"); "twenty one" is 21, not 1.
+  for (const [days, text] of [[15, "keep it for fifteen days"], [45, "forty-five days unused"], [21, "twenty one days"], [60, "sixty days"], [14, "a couple of weeks"], [100, "a hundred days"], [30, "a month"], [14, "two weeks"], [90, "ninety days"], [180, "six months"]] as const) {
+    assert.equal(lengthInWords(days, text), true, text);
+  }
+  assert.equal(lengthInWords(1, "twenty one days"), false, "the compound is one number");
+  assert.equal(lengthInWords(30, "forever"), false);
+  assert.equal(lengthInWords(30, "no end"), false);
   // the verb of the mode, the negations of stopping, and the target in the same sentence
   assert.equal(ownerOrders("asking me about commits", "Stop asking me about commits in development.", "cell:owner", [/commit/i]), false);
   assert.equal(ownerOrders("ask me about commits", "No need to ask me about commits.", "cell:owner", [/commit/i]), false);

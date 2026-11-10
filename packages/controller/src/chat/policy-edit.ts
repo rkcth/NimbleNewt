@@ -235,14 +235,26 @@ export function ownerOrders(evidence: string, wording: string, move: string, tar
   return sentences.some((x) => norm(x).includes(wanted) && verb.test(x) && targets.every((t) => t.test(x)) && !NEGATION.test(x) && !MUSING.test(x));
 }
 
-const NUMBER_WORDS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, twenty: 20, thirty: 30 };
-/** Whether the owner's own words state this number of days ("90", "a week", "two weeks", "a fortnight", "a month" as 28 to 31 days, "a year" as 365 or 366, "3 months" as 84 to 93). */
+const UNIT_WORDS: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const TEEN_WORDS: Readonly<Record<string, number>> = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TEN_WORDS: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const NUMBER_WORDS: Readonly<Record<string, number>> = { ...UNIT_WORDS, ...TEEN_WORDS, ...TEN_WORDS, a: 1, an: 1, "a couple of": 2, "couple of": 2, "a hundred": 100, "one hundred": 100, hundred: 100 };
+const alt = (o: Readonly<Record<string, number>>) => Object.keys(o).sort((x, y) => y.length - x.length).join("|");
+/** A number in the owner's words: digits, or words such as "a", "two", "fifteen", "forty-five", "twenty one", "a hundred" (longest form first, so "twenty one" is not read as "one"). */
+const NUMBER_PHRASE = `\\d+|(?:${alt(TEN_WORDS)})[ -](?:${alt(UNIT_WORDS)})|${alt(NUMBER_WORDS)}`;
+function numberOf(phrase: string): number {
+  if (/^\d+$/.test(phrase)) return Number(phrase);
+  const [tens, unit] = phrase.split(/[ -]/);
+  if (unit !== undefined && TEN_WORDS[tens!] !== undefined && UNIT_WORDS[unit] !== undefined) return TEN_WORDS[tens!]! + UNIT_WORDS[unit]!;
+  return NUMBER_WORDS[phrase]!;
+}
+/** Whether the owner's own words state this number of days ("90", "a week", "two weeks", "fifteen days", "forty-five days", "a fortnight", "a month" as 28 to 31 days, "a year" as 365 or 366, "3 months" as 84 to 93). */
 export function lengthInWords(days: number, text: string): boolean {
   // Record IDs and anything shaped like one are not the owner's numbers.
   const t = text.replace(CURLY, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ").replace(/\b(pedit|prop|turn|thr|agt|proj|task|grt)-\S+/g, " ");
-  const re = new RegExp(`(?:^|[^0-9a-z])(\\d+|${Object.keys(NUMBER_WORDS).join("|")})[ -]?(day|week|fortnight|month|year)s?\\b`, "g");
+  const re = new RegExp(`(?:^|[^0-9a-z])(${NUMBER_PHRASE})[ -]?(day|week|fortnight|month|year)s?\\b`, "g");
   for (const m of t.matchAll(re)) {
-    const n = /^\d+$/.test(m[1]!) ? Number(m[1]) : NUMBER_WORDS[m[1]!]!;
+    const n = numberOf(m[1]!);
     const [lo, hi] = m[2] === "day" ? [n, n] : m[2] === "week" ? [7 * n, 7 * n] : m[2] === "fortnight" ? [14 * n, 14 * n] : m[2] === "month" ? [28 * n, 31 * n] : [365 * n, 366 * n];
     if (days >= lo && days <= hi) return true;
   }
@@ -805,9 +817,10 @@ export class PolicyEditService {
       case "revoke": {
         const out: AppliedRef[] = [];
         for (const [k, g] of op.grants.entries()) {
-          await d.grants.revoke(owner, { commandId: `${id}-rk${k}`, grantId: g.id, expectedRevision: g.revision, reason: `revoked by the owner in chat, edit ${id}` });
-          out.push({ kind: "grant-record", id: g.id, revision: g.revision + 1 });
-          await note({ kind: "grant-record", id: g.id, revision: g.revision + 1 });
+          // A recorded use (card A07h) may have moved the grant on since the proposal; the revocation still goes through and the revision it left is the one reported.
+          const r = await d.grants.revoke(owner, { commandId: `${id}-rk${k}`, grantId: g.id, expectedRevision: g.revision, reason: `revoked by the owner in chat, edit ${id}` });
+          out.push({ kind: "grant-record", id: g.id, revision: r.revision });
+          await note({ kind: "grant-record", id: g.id, revision: r.revision });
         }
         return { applied: out, takesEffect: "from the grantee's next snapshot" };
       }

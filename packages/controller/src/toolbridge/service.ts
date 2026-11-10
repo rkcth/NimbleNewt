@@ -644,7 +644,8 @@ export class ToolExecutionService {
    * A version revoked between the record and the launch is refused whatever was chosen (a choice of `finish` is about calls already running).
    */
   async #authorizeStart(c: Context, v: VersionBody, facts: HostFacts, own: AbortController): Promise<void> {
-    const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false });
+    // The access the tool asks for is used now (card A07h: a grant with an idle window that only tools use is renewed by their runs).
+    const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false, uses: v.manifest.requestedAccess });
     const lost = v.manifest.requestedAccess.filter((action) => !allows(now, action, c.projectId, { resource: { kind: "task", id: c.taskId } }));
     if (lost.length > 0) throw new Error(`the task's credential no longer holds ${lost.slice(0, BRIDGE_LIMITS.access).join(", ")}`);
     const ready = await this.#deps.catalog.authorizeRun(c.agent, { commandId: `bridge-run:${c.attemptId}:${c.callId}`, name: v.name, version: v.version, taskId: c.taskId, projectId: c.projectId, host: facts });

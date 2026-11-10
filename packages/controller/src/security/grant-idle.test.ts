@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { GrantService, PrincipalService, allows, type LapsedGrant, type Principal } from "./index.js";
+import { GrantService, PrincipalService, allows, useWriteInterval, type LapsedGrant, type Principal } from "./index.js";
 
 after(stopServer);
 
@@ -147,5 +147,55 @@ for (const backend of backends) {
     assert.deepEqual(told, []);
     assert.deepEqual(await grantsAt(at(40)).lapsedCovering("agent:ann", "attempt.work", a, at(40)), [], "nor named in a blocker");
     assert.ok((await grantsAt(T0).getGrant(both.id))!.expiresAt);
+  });
+
+  suite("the owner's revocation is never blocked by a recorded use: an older revision of a still-active grant is accepted", async ({ grantsAt, owner, a, ann, revision }) => {
+    const g = await idle(grantsAt(T0), owner, a);
+    const seen = await revision(g.id);
+    // The owner looks at the grant (revision `seen`); the agent then uses it on two later days, which moves the record on.
+    await grantsAt(at(1)).recordUse("service:dispatcher", [g.id]);
+    await grantsAt(at(2)).recordUse("service:dispatcher", [g.id]);
+    assert.equal(await revision(g.id), seen + 2);
+    const r = await grantsAt(at(2, 1)).revoke(owner, { commandId: cid("rv"), grantId: g.id, expectedRevision: seen, reason: "done with it" });
+    assert.equal(r.revision, seen + 3);
+    assert.equal((await grantsAt(T0).getGrant(g.id))!.state, "revoked");
+    assert.equal(await holds(grantsAt(at(2, 2)), ann, a, at(2, 2)), false);
+    // A revision the grant never had is still refused, and an already revoked grant stays a refusal.
+    const other = await idle(grantsAt(T0), owner, a, { action: "task.read" });
+    await assert.rejects(() => grantsAt(at(3)).revoke(owner, { commandId: cid("rv"), grantId: other.id, expectedRevision: 9, reason: "x" }), /revision/);
+    await assert.rejects(() => grantsAt(at(3)).revoke(owner, { commandId: cid("rv"), grantId: g.id, expectedRevision: seen, reason: "again" }), /revision/, "a revoked grant seen at an older revision is a stale view");
+    await assert.rejects(() => grantsAt(at(3)).revoke(owner, { commandId: cid("rv"), grantId: g.id, expectedRevision: r.revision, reason: "again" }), /already revoked/);
+  });
+
+  suite("a one-day window in steady use does not lapse, whatever time of day it was made; writes stay bounded", async ({ grantsAt, owner, ann, revision }) => {
+    // Made just after midnight UTC: a once-a-UTC-day write would leave the recorded use a whole day old by the next midnight and the grant would lapse in the middle of steady use.
+    const made = "2026-11-10T00:30:00.000Z";
+    const p = await grantsAt(made).recordUse("service:dispatcher", []);
+    assert.equal(p, 0);
+    const g = await grantsAt(made).grant(owner, { commandId: cid("g"), grantee: "agent:ann", action: "attempt.work", project: "*", source: "standing", basis: "short", idleDays: 1 });
+    const start = await revision(g.id);
+    const step = 20 * 60_000;
+    let t = Date.parse(made);
+    for (let i = 0; i < 3 * 72; i++) {
+      t += step;
+      const now = new Date(t).toISOString();
+      assert.equal(await holds(grantsAt(now), ann, "proj-x", now), true, `still held at ${now}`);
+      await grantsAt(now).recordUse("service:dispatcher", [g.id]);
+    }
+    const writes = (await revision(g.id)) - start;
+    assert.ok(writes >= 70 && writes <= 73, `about once an hour over three days, not every use (${writes})`);
+    assert.equal(useWriteInterval(1), 3_600_000);
+    assert.equal(useWriteInterval(30), DAY);
+  });
+
+  suite("a lapse notice that cannot be given does not keep the others from being given", async ({ grantsAt, owner, a }) => {
+    const first = await idle(grantsAt(T0), owner, a);
+    const second = await idle(grantsAt(at(1)), owner, a, { action: "task.read" });
+    const told: string[] = [];
+    // The oldest lapse fails to be told; the next is still told and marked, and the failure is still raised for the loop to report.
+    await assert.rejects(() => grantsAt(at(40)).noticeLapsed("service:dispatcher", async (l) => { if (l.grantId === first.id) throw new Error("bad notice"); told.push(l.grantId); }), /bad notice/);
+    assert.deepEqual(told, [second.id]);
+    assert.equal(await grantsAt(at(41)).noticeLapsed("service:dispatcher", async (l) => { told.push(l.grantId); }), 1);
+    assert.deepEqual(told, [second.id, first.id]);
   });
 }
