@@ -6,7 +6,7 @@ import { WORK_END_TOOL } from "../bridge.js";
  * how to end, including the honest way out for an agent that is stuck (blocked or partial), so a nudge never leaves done as the only ending it names. A reply cut off at the output limit (the route's reply limit, card W07) gets the same nudge with its own lead: it was cut off, stop deliberating, act.
  */
 export const NUDGE_TEXT = `Remaining: the unchecked steps of your PLAN.md. Make the next tool call now. When every step is done and committed, end with ${WORK_END_TOOL} as your last call. If you cannot go on, end with ${WORK_END_TOOL} with result blocked or partial and say why in the note; do not report done for work that is not done. A reply without a tool call does not end the work.`;
-export const LENGTH_NUDGE_LEAD = "Your last reply was cut off at the output limit: stop deliberating, act. Keep your reasoning short and do the next step instead of planning it further.";
+export const LENGTH_NUDGE_LEAD = "Your last reply was cut off at the output limit: stop deliberating, act. Keep your reasoning short and do the next step instead of planning it further; if you were writing something long, write it in smaller parts.";
 
 export function nudgeText(stopReason: string): string {
   return stopReason === "length" ? `${LENGTH_NUDGE_LEAD} ${NUDGE_TEXT}` : NUDGE_TEXT;

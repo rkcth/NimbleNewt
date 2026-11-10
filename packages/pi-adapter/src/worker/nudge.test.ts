@@ -32,4 +32,5 @@ test("W07: a reply cut off at the output limit is nudged to stop deliberating an
   assert.match(nudgeText("length"), /^Your last reply was cut off at the output limit: stop deliberating, act\./);
   assert.doesNotMatch(nudgeText("stop"), /stop deliberating/);
   assert.ok(!LENGTH_NUDGE_LEAD.includes("\""));
+  assert.match(LENGTH_NUDGE_LEAD, /write it in smaller parts/, "a reply cut off while writing a long file or tool call is told how to fit");
 });
