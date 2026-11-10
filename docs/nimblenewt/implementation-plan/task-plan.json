@@ -2091,6 +2091,24 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "A07h",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Expire a standing grant only after it goes unused, and renew it each time a worker uses it",
+      "depends_on": [
+        "A07d",
+        "A02"
+      ],
+      "deliverable": "Owner decision 2026-11-10 (Rob): a hard end date on a grant makes long unattended coding unreliable, because work stalls silently at an arbitrary moment. A standing grant (including one made through the chat) lapses only after it has gone unused for its window (the grants.defaultDays setting, for example 30 days) and each time a worker uses the grant to place or run a task that needs it the window restarts. An unused grant still closes by itself, so a forgotten right does not stay open. Chat grants get no absolute maximum: grants.maxDays stays an optional owner setting that is unset by default, and the chat no longer needs to cap or refuse a length for it. An owner who sets a grant with an explicit end date keeps that end date. When a grant lapses from non-use the owner gets one plain message that names the right and the last time it was used (agent and record text quoted once), and a task that stalls because a right has lapsed says so in its blocker instead of going quiet. Use is recorded where the grant is checked at placement (packages/controller/src/agents/agents.ts lines 417, 437 and 461 and packages/controller/src/dispatch/dispatcher.ts line 1478), written at most once per grant per day so busy work does not rewrite the principal for every call",
+      "acceptance_and_verification": "A grant used by a task every few days is still live after 100 days; a grant left unused past its window is no longer applied and the owner is told once in plain words; a grant with an explicit end date still ends on that date; a chat grant of any length is not refused by a cap unless the owner set grants.maxDays; the recorded use is written at most once a day per grant (counted in a test) on every storage backend; a stalled task names the lapsed right in its blocker; no fixed phrase is needed anywhere in the owner's words; the existing standing-grant length choice (A07d) still offers lengths as the idle window",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "C07",
       "parent": "N07",
       "existing_issue": "AII-257",
@@ -9697,6 +9715,7 @@
         "C07o",
         "C07p",
         "C07q",
+        "A07h",
         "L02b",
         "H08b",
         "U06b",
