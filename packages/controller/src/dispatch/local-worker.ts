@@ -281,6 +281,9 @@ export class LocalWorker implements WorkerHost {
     // A stored conversation over the resume share is not continued: the attempt starts fresh, and the agent is told why (C07b). Card C07n: it is continued only when its size was judged — a checkpoint
     // whose size nobody says (no reader, or one that answers nothing, and not one of the worker package's shape either) is left behind, not carried in unchecked.
     const { from, note } = await judgeResume(guards?.context, order, report);
+    // Card C07i: the first call is judged (and its size watched) for the order as it is sent: without a stored conversation that is not carried, and with the note that says why.
+    const { resumeFrom: _rf, resumeNote: _rn, ...plain } = order; void _rf; void _rn;
+    const sent: WorkOrder = { ...plain, ...(from === undefined ? {} : { resumeFrom: from }), ...(note === undefined ? {} : { resumeNote: note }) };
     let sandbox = await options.sandbox.open(order.recipe, order);
     this.#remember(order.attemptId, sandbox);
     let gateway: ToolGateway | undefined;
@@ -343,7 +346,7 @@ export class LocalWorker implements WorkerHost {
           const first = rt.firstCall(text);
           if (first === undefined) return undefined;
           const compactable = pass === 1 && rt.compact !== undefined;
-          const decision = await guards.context.admit(order, first, ++round, compactable, launch);
+          const decision = await guards.context.admit(sent, first, ++round, compactable, launch);
           if (decision.admit) return undefined;
           refusal = decision.reasons.join("; ") || "the first call is over the context budget";
           // A refusal a smaller call cannot change (card C07n: the route's window is not known) is final at once: nothing is compacted for it.

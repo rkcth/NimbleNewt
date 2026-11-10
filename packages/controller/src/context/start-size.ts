@@ -183,7 +183,7 @@ export class StartSizeService {
    * Records one first call (the dispatcher's guards, as the controller: never an agent). Returns the alerts this call opened, for the caller to tell the owner; a repeat of the same admission records nothing new and
    * opens nothing. A later admission of an attempt already recorded (another round or launch) replaces that attempt's point and is not a new hand-off.
    */
-  async record(by: Principal, sample: StartSizeSample): Promise<{ readonly opened: readonly StartSizeAlert[]; readonly replayed: boolean }> {
+  async record(by: Principal, sample: StartSizeSample): Promise<{ readonly opened: readonly StartSizeAlert[]; readonly replayed: boolean; readonly projectId: string }> {
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not record starting sizes; it is the controller's watch`);
     onlyKnown(sample, ["taskId", "attemptId", "key", "route", "worker", "tokens", "window", "limitTokens", "admitted", "parts", "refs"]);
     const taskId = checkTaskId(sample.taskId);
@@ -247,7 +247,7 @@ export class StartSizeService {
             return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref, body: body as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { opened: opened.map((a) => a.kind) }, contention: async () => new DomainError("stale_revision", "the starting sizes of this task were recorded at the same moment") };
           },
         }));
-        return { opened: r.replayed ? [] : opened, replayed: r.replayed };
+        return { opened: r.replayed ? [] : opened, replayed: r.replayed, projectId: task.projectId };
       } catch (error) {
         if (!(error instanceof DomainError) || error.code !== "stale_revision" || attempt >= 8) throw error;
       }
