@@ -26,6 +26,14 @@ test("the stores are the pi folders of the homes made from the root; other entri
     }
     assert.deepEqual(await stores.source.list(), [{ id: "task-a", dir: join(root, "task-a", "pi") }, { id: "task-b", dir: join(root, "task-b", "pi") }]);
     assert.equal(stores.final("task-a"), join(root, "task-a", "pi"));
+    assert.equal(stores.final("not-made-yet"), join(root, "not-made-yet", "pi"), "a home not made yet is restored to (the restore makes it)");
+    assert.equal(stores.final("no-conversation"), join(root, "no-conversation", "pi"));
+    // Review of K01i: a restore never follows a link an agent could have put in its home (it would move what the link names aside and write there).
+    if (process.platform !== "win32") {
+      assert.equal(stores.final("linked-home"), undefined, "a home that is a link is not restored to");
+      assert.equal(stores.final("linked-pi"), undefined, "a pi folder that is a link is not restored to");
+    }
+    assert.equal(stores.final("pi-is-a-file"), undefined, "a pi that is a file is not restored over");
     assert.equal(stores.final("../x"), undefined);
     assert.equal(stores.final(".."), undefined);
     assert.throws(() => stores.home("../escape"), /home key/);

@@ -97,6 +97,17 @@ const maybe = (row: Row, key: string): string | undefined => (row[key] === null 
 const key = (ref: AggregateRef): string => `${ref.kind}/${ref.id}`;
 const sortedBy = <T>(items: readonly T[], keyOf: (item: T) => string): T[] => [...items].sort((a, b) => compareCodePoints(keyOf(a), keyOf(b)));
 const SCHEMA_NAME = /^[a-z][a-z0-9_]{0,40}$/;
+/**
+ * The address without an `application_name` of its own (card K01i): the driver lets the address override the pool's settings, and every controller session must carry the controller's name, because a restore
+ * is swapped in only while no session of that name is connected (`restore-swap.ts`). An address that is not a URL is used as it is.
+ */
+export function withControllerApplication(connectionString: string): string {
+  let u: URL;
+  try { u = new URL(connectionString); } catch { return connectionString; }
+  if (!u.searchParams.has("application_name") && !u.searchParams.has("fallback_application_name")) return connectionString;
+  u.searchParams.delete("application_name"); u.searchParams.delete("fallback_application_name");
+  return u.toString();
+}
 
 // int8 (bigint) columns hold counters and revisions, which the contract bounds at 2^53 - 1; read them as numbers, not strings.
 const types = { getTypeParser: (oid: number, format?: "text" | "binary") => (oid === 20 ? (value: string) => Number(value) : pg.types.getTypeParser(oid, format as "text")) };
@@ -175,7 +186,7 @@ export class PostgresStorage implements ControllerStorage {
       statementTimeoutMs: number("statementTimeoutMs", options.statementTimeoutMs, 30_000, 1, 3_600_000),
     };
     const pool = new pg.Pool({
-      connectionString: options.connectionString,
+      connectionString: withControllerApplication(options.connectionString),
       max: resolved.maxConnections,
       connectionTimeoutMillis: resolved.connectTimeoutMs,
       idleTimeoutMillis: 30_000,

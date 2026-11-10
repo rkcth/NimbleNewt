@@ -1,3 +1,4 @@
+import { lstatSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { isAbsolute, join, normalize } from "node:path";
 
@@ -34,7 +35,20 @@ export class LocalConversationStores {
   }
 
   /** Where the conversation store of `id` goes back on a restore; undefined for an ID that is not a key of this host. Pass it as `dispatch.local.piState.final`. */
-  readonly final = (id: string): string | undefined => (validConversationKey(id) ? join(this.#root, id, "pi") : undefined);
+  /**
+   * A home or a `pi` folder that is a link (or not a folder) is not a place to restore to: an agent may replace its own `pi` folder with a link, and a restore that followed it would move whatever the link names
+   * aside and put the conversation there. Such a store is not mapped here (the controller then restores it into its own data directory). One not made yet is mapped (the restore makes it).
+   */
+  readonly final = (id: string): string | undefined => {
+    if (!validConversationKey(id)) return undefined;
+    const home = join(this.#root, id);
+    for (const p of [home, join(home, "pi")]) {
+      let info: ReturnType<typeof lstatSync> | undefined;
+      try { info = lstatSync(p); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") break; return undefined; }
+      if (!info.isDirectory()) return undefined;
+    }
+    return join(home, "pi");
+  };
 
   /** Every conversation store on this host. Pass it as `dispatch.local.piState.source`. */
   readonly source = {

@@ -9,7 +9,7 @@ import type { LedgerEntry } from "../retention/ledger.js";
 import { canonicalJson } from "../storage/json.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
-import { PostgresStorage, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
+import { PostgresStorage, PostgresSwapBusy, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { postgresFingerprint } from "../transfer/transfer.js";
 import { UnlockFailed, type BackupKey } from "./crypto.js";
 import type { MaintenanceBarrier } from "./barrier.js";
@@ -418,7 +418,11 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
       journal = { stamp: journal.stamp, mode: "back", moves: journal.moves, at: journal.at };
       await writeJournal(data, k, journal);
     }
-    const why = failure === undefined ? "an earlier attempt to put things back was interrupted" : `${(failure as NodeJS.ErrnoException).code ?? "error"} while moving files into place`;
+    const code = (failure as NodeJS.ErrnoException | undefined)?.code;
+    const why = failure === undefined ? "an earlier attempt to put things back was interrupted"
+      : failure instanceof PostgresSwapBusy ? `the schema was not swapped: ${failure.message}`
+      : code === "42501" ? "the PostgreSQL role this controller uses may not rename the schema (it must own it and may create schemas in the database)"
+      : `${code ?? "error"} while moving files into place`;
     await rollBack(data, k, journal, options, live);
     // The failure is recorded (atomically) before the journal goes: a crash in between leaves the journal, whose rollback has nothing left to do, and the next start records it again.
     await writeFailedMarker(data, k, pending, why, now());
@@ -634,6 +638,11 @@ export class StagedRestore {
       const margin = await this.#marginOf();
       const shown = this.#previewed.get(nonce);
       await this.#checkMargin(manifest, margin, shown);
+      // PostgreSQL: a role that may not rename the live schema would stage a restore that no start can swap in; it is refused now, plainly (the driver's own error may name the server, so it is not shown).
+      if (liveDb.pg?.port.swapRefusal !== undefined) {
+        const why = await liveDb.pg.port.swapRefusal(liveDb.pg.schema).catch((error: unknown) => `the PostgreSQL server could not be asked whether this controller's role may swap a restore in (${(error as NodeJS.ErrnoException).code ?? "error"}); nothing was changed`);
+        if (why !== undefined) throw new DomainError("unavailable", why);
+      }
       let unlock: BackupKey | undefined;
       if (manifest.encryption !== undefined) {
         if (this.#o.unlock === undefined) throw new DomainError("unavailable", "the backup is encrypted and no unlock method is set up on this host");
@@ -685,10 +694,11 @@ export class StagedRestore {
         this.#pending = { pending, release };
         try { this.#o.onStaged?.(pending); } catch { /* the host's notice failing does not undo a staged restore */ }
         this.#restartFailed = undefined;
+        const plan: RestorePlan = { token: String(confirm), ...(await this.#plan(path, manifest, false)), ...(result.effectsMarkedUncertain === undefined ? {} : { effectsToMarkUncertain: result.effectsMarkedUncertain }), deliveriesToResend: result.deliveriesToResend };
         const automatic = this.#o.restart?.automatic;
         // A moment after the reply (the API records the command's outcome first): the host closes this controller and starts it again. A failure is kept for the status, and the owner restarts by hand.
+        // Scheduled last, once nothing else here can fail: an apply that fails withdraws the restore, and no restart is made for it.
         if (automatic !== undefined) this.#restartTimer = setTimeout(() => { this.#restartTimer = undefined; void (async () => { try { await automatic(); } catch (error) { this.#restartFailed = (error instanceof Error ? error.message : String(error)).slice(0, 300); } })(); }, this.#o.restart?.delayMs ?? 1000);
-        const plan: RestorePlan = { token: String(confirm), ...(await this.#plan(path, manifest, false)), ...(result.effectsMarkedUncertain === undefined ? {} : { effectsToMarkUncertain: result.effectsMarkedUncertain }), deliveriesToResend: result.deliveriesToResend };
         return { plan, pending, result, safetyCopy: basename(safety.path), ...(lastSeq === undefined || backupSeq === undefined ? {} : { changesDiscarded: Math.max(0, lastSeq - backupSeq) }), restart: this.restartNotice() };
       } catch (error) {
         // A failure after the marker was written withdraws it too: the staged copies it names are removed below.

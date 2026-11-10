@@ -47,6 +47,8 @@ export interface PostgresRestorePort {
   unswap(s: SchemaSwap): Promise<void>;
   /** Drops a staged schema this restore made (the name must be a staged name of `live`). Gone already is a success. */
   dropStaged(live: string, staged: string): Promise<void>;
+  /** Why the database role could not make the swap (it must own `live` and may create schemas in the database: PostgreSQL's rule for a schema rename), or undefined when it can. Asked before a restore is prepared. */
+  swapRefusal?(live: string): Promise<string | undefined>;
 }
 
 function check(s: SchemaSwap): void {
@@ -90,6 +92,13 @@ export function postgresRestorePort(connectionString: string): PostgresRestorePo
     dropStaged: async (live, staged) => {
       if (!SCHEMA_NAME.test(live) || !SCHEMA_NAME.test(staged) || !/^nnrs_[0-9a-f]{8}_[0-9]{8}t[0-9]{6}z$/.test(staged) || !staged.startsWith(stagedSchemaOf(live, "20000101T000000Z").slice(0, 14))) throw new Error("only a staged restore schema of this installation may be dropped");
       await withClient(connectionString, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${staged} CASCADE`); });
+    },
+    swapRefusal: async (live) => {
+      if (!SCHEMA_NAME.test(live)) throw new Error("invalid schema name");
+      const row = await withClient(connectionString, async (c) => (await c.query("SELECT has_database_privilege(current_database(), 'CREATE') AS can_create, (SELECT pg_has_role(nspowner, 'USAGE') FROM pg_namespace WHERE nspname = $1) AS owns", [live])).rows[0] as { can_create: boolean; owns: boolean | null } | undefined);
+      if (row?.owns === false) return `the PostgreSQL role this controller uses does not own the schema ${live}, so it cannot rename it to swap a restore in (PostgreSQL lets only the schema's owner rename it); have the database administrator make this role the schema's owner, or restore from the command line`;
+      if (row?.can_create !== true) return `the PostgreSQL role this controller uses may not create schemas in this database, so a restore cannot be staged in a new schema or swapped in (a schema rename needs CREATE on the database); have the database administrator grant it, or restore from the command line`;
+      return undefined;
     },
   };
 }
