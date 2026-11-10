@@ -1159,7 +1159,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { pending?, barrier, markerProblem? } }`; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again).
+Result: `{ item: { pending?, barrier, markerProblem?, restart?, kept? } }`; `restart` (while a restore waits for its start) says whether the controller restarts itself and what the owner must do otherwise, with `failed` when an automatic restart failed; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again); `kept` (PostgreSQL, when any) lists the schemas earlier restores kept aside (`<schema>_br_<stamp>`, oldest first) with a note: NimbleNewt never drops them, the owner removes them by hand.
 
 #### `database.transfer.status`
 
@@ -3982,7 +3982,7 @@ Arguments:
 - `confirm`: the token from backup.restore.preview
 - `method` (optional): passcode or recovery, for an encrypted backup (default passcode)
 
-Result: `{ item: { name, restartRequired: true, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend, blobsSkippedDeleted, changesDiscarded? } }`; `blobsSkippedDeleted` counts artifact files not put back because the artifact was deleted on the retention ledger; `changesDiscarded` is the exact number of recorded changes the restore will discard.
+Result: `{ item: { name, restartRequired: true, restart: { automatic, instruction }, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend, blobsSkippedDeleted, changesDiscarded? } }`; `restart` says whether this host restarts the controller itself or what the owner must do to restart it; `blobsSkippedDeleted` counts artifact files not put back because the artifact was deleted on the retention ledger; `changesDiscarded` is the exact number of recorded changes the restore will discard.
 
 #### `backup.restore.cancel`
 
