@@ -60,3 +60,28 @@ test("the owner disables, drains, cuts over and re-enables a target through the 
     await second.close();
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("the owner sets a route's reply limit and reasoning cap through the state API and reads them in the routing view, which says nothing new for a route without them (card W07)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rbud-"));
+  try {
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4 });
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const rob = await c.services.principals.authenticate(boot.token);
+      await c.services.routing.setTable(rob, { commandId: "t1", expectedRevision: 0, table });
+      const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
+      const view = async (): Promise<string> => (await call("status.ask", { request: { kind: "model_routes" } })).result.item.lines.map((l: { text: string }) => l.text).join("\n");
+      assert.match(await view(), /No route has a reply limit or a reasoning cap: each model call asks for what the agent's runtime decides\./);
+      const set = await call("routing.budget.set", { route: "strata/qwen", maxTokens: 8000, reasoningTokens: 2000 }, "b1");
+      assert.equal(set.ok, true, JSON.stringify(set));
+      assert.deepEqual(set.result.budget, { maxTokens: 8000, reasoningTokens: 2000 });
+      const bad = await call("routing.budget.set", { route: "strata/qwen", maxTokens: 0 }, "b2");
+      assert.deepEqual([bad.ok, bad.error?.code], [false, "invalid_command"]);
+      assert.deepEqual((await call("routing.budgets", {})).result.routes, [{ route: "openrouter/qwen", contextTokens: 100_000 }, { route: "strata/qwen", contextTokens: 100_000, maxTokens: 8000, reasoningTokens: 2000 }]);
+      const lines = await view();
+      assert.match(lines, /1 route\(s\) have a reply limit or a reasoning cap \(a reply cut off at its limit is continued with a nudge to stop deliberating and act\):/);
+      assert.match(lines, /strata\/qwen: replies at most 8000 tokens, reasoning at most 2000 tokens \(no endpoint kind is configured on the controller for this route: on an OpenAI-style endpoint the figures are sent only if the host names the kind; when they are not sent, the task's activity says so\)\./, "the owner can tell why a budget may do nothing");
+      assert.doesNotMatch(lines, /openrouter\/qwen:/, "a route without a budget is not listed");
+    } finally { await c.close(); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

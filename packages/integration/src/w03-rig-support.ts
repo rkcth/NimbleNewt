@@ -19,15 +19,19 @@ const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignor
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 
 /** One scripted reply: a text (a natural stop), a tool call, or thinking only with no visible text (card W04). */
-export interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object }; readonly thinking?: string; /** Run before the reply is sent (the call is open meanwhile). */ readonly before?: () => Promise<void> }
-async function model(steps: Step[]): Promise<{ server: Server; url: string; seen: string[] }> {
+export interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object }; readonly thinking?: string; /** Run before the reply is sent (the call is open meanwhile). */ readonly before?: () => Promise<void>; /** The text reply is cut off at the output limit (`finish_reason: length`, card W07). */ readonly length?: boolean }
+async function model(steps: Step[]): Promise<{ server: Server; url: string; seen: string[]; bodies: Record<string, unknown>[] }> {
   const seen: string[] = [];
+  // Every request body as the provider received it (card W07 checks the route's budget here, at the far side of the relay).
+  const bodies: Record<string, unknown>[] = [];
   let at = 0;
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", async () => {
-      seen.push(JSON.stringify((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { messages: unknown }).messages));
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      bodies.push(body);
+      seen.push(JSON.stringify(body["messages"]));
       const step = steps[Math.min(at++, steps.length - 1)]!;
       await step.before?.();
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -35,15 +39,15 @@ async function model(steps: Step[]): Promise<{ server: Server; url: string; seen
       const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
       if (step.call !== undefined) { res.write(sse({ tool_calls: [{ index: 0, id: `call_${at}`, type: "function", function: { name: step.call.name, arguments: JSON.stringify(step.call.args) } }] }, null)); res.write(sse({}, "tool_calls", usage)); }
       else if (step.thinking !== undefined) { res.write(sse({ reasoning_content: step.thinking }, null)); res.write(sse({}, "stop", usage)); }
-      else { res.write(sse({ content: `${step.text ?? "done"}` }, null)); res.write(sse({}, "stop", usage)); }
+      else { res.write(sse({ content: `${step.text ?? "done"}` }, null)); res.write(sse({}, step.length === true ? "length" : "stop", usage)); }
       res.end("data: [DONE]\n\n");
     });
   });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
-  return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, seen };
+  return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, seen, bodies };
 }
 
-export async function rig(launcher: SandboxLauncher, steps: Step[]) {
+export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string } = {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn w03 ")));
   const shared = join(directory, "shared");
   mkdirSync(join(shared, "src"), { recursive: true });
@@ -63,7 +67,7 @@ export async function rig(launcher: SandboxLauncher, steps: Step[]) {
       local: {
         window: () => 32768,
         build: (services) => {
-          const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }) } : undefined) });
+          const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }), ...(options.kind === undefined ? {} : { kind: options.kind }) } : undefined) });
           const parts = localWorkerParts<Pick<ToolGateway, "call">["call"]>({
             launcher, app: appFromRepository(repository, { root: nodeRoot, executable: "bin/node" }), protectedPaths: [],
             workspace: async (order) => {

@@ -132,6 +132,13 @@ export interface DispatchBody {
    * (`STOPPED_EARLY_READMITS`), and `exhausted` that they were used up, so the attempt ends blocked with the list.
    */
   readonly verifications?: readonly DoneVerification[];
+  /**
+   * Card W11: the attempt ended its turn while jobs of its task ran, and parked to wait for them (its place given back, its hold, credential, checkpoint and host kept, as for a parked call) instead of being readmitted at once as a
+   * stop before the work was done. The first of those jobs to reach a final state wakes it (the dispatcher's job wakes). The job IDs, at most `JOB_WAKE_LIMITS.waitsOn`.
+   */
+  readonly waitsOnJobs?: readonly string[];
+  /** Card W11: how many times a job's end woke this attempt; it names the turn's request (`...:wk<n>`), so the conversation takes the wake as a new input. */
+  readonly wakeRound?: number;
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;
   /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */
@@ -211,7 +218,7 @@ export const DONE_VERIFY_LIMITS = { kept: 6, failures: 12, failure: 900, message
 
 /** How many times a task's attempt is readmitted after it stopped early (card W03); the stop after them ends it with a blocker. Counted per task and assignment generation, in storage. */
 export const STOPPED_EARLY_READMITS = 2;
-/** The per-task count of those readmits (one record per task). */
+/** The per-task count of those readmits (one record per task). Card W11 counts the job wakes of the task in the same record (`wakes`, `wakeTimes`, `noticeTimes`), so the two together are bounded. */
 export const STOPPED_EARLY_KIND = "dispatch-stopped-early";
 
 export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300, slotSpans: 64 } as const;

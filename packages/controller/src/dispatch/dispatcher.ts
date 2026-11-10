@@ -44,6 +44,7 @@ import { ToolPath, type Loaded } from "./tools.js";
 import { sealContract } from "../remote/contract.js";
 import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
+import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
@@ -203,6 +204,12 @@ export interface DispatcherDeps {
    * attempt whose store is busy waits for the attempt that holds it; without it only the placement itself refuses.
    */
   readonly storeOwner?: (agentId: string, attemptId: string) => Promise<{ readonly hostId: string; readonly busy: boolean } | undefined>;
+  /**
+   * Card W11: the jobs of a task. With it, an attempt whose turn ends without work.end while jobs of its task run (or have just ended with their wake still due) parks to wait for them instead of being readmitted as a stop before
+   * the work was done, and the job wakes the job service records are worked on every tick. `stopped` says whether a Stop or Suspend of the task (or of a scope above it) is in force: a stopped task is not woken. Absent: no attempt
+   * parks for a job (the due wakes are still worked when there are any).
+   */
+  readonly jobWakes?: { waitable(taskId: string): Promise<readonly string[]>; stopped?(taskId: string): Promise<boolean> };
   /** The loops the dispatcher's tick runs after its own work: the services whose callers were said to be "the controller's loop". */
   readonly loops?: readonly DispatcherLoop[];
   /** The longest a loop may take in one tick before the tick goes on without it (it is reported as failed and not started again until it ends). Default 60 seconds; 0 turns the limit off. */
@@ -287,6 +294,8 @@ export interface TickReport {
   readonly scanned: number;
   /** True when the scan of assignments reached its end in this tick (so it saw every assignment since it began). */
   readonly complete: boolean;
+  /** Card W11: the attempts a job's end woke in this tick (readmitted, admitted, or told in a note before they start). */
+  readonly woken?: readonly string[];
 }
 
 const LIMIT_KEYS = ["cpus", "memoryMb", "diskMb", "processes"] as const;
@@ -340,7 +349,11 @@ const nudgeTotal = (x: DispatchBody, turnEnd: { readonly turnEnd?: NonNullable<D
 interface StoppedEarlyEnd { readonly run: NonNullable<DispatchBody["stoppedEarly"]>[number]; readonly summary: string }
 interface EndOptions { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean; agentEnded?: boolean; early?: EarlyStop }
 /** The per-task count of readmits after an early stop (card W03), for the assignment generation it was counted in. */
-interface StoppedEarlyCount { readonly taskId: string; readonly generation: number; readonly readmits: number; readonly attempts: readonly string[] }
+interface StoppedEarlyCount {
+  readonly taskId: string; readonly generation: number; readonly readmits: number; readonly attempts: readonly string[];
+  /** Card W11: the job wakes of the task in this generation, when the recent ones were, and when the owner was last told of ended jobs (the last hour's). */
+  readonly wakes?: number; readonly wakeTimes?: readonly string[]; readonly noticeTimes?: readonly string[];
+}
 /** How long the blocker of an agent that stopped early waits for its host to say what the checkout holds. */
 const PROGRESS_MS = 10_000;
 /** The bounds of what the blocker shows: the agent's last text, each plan step, and how many open steps are named. */
@@ -508,6 +521,9 @@ export class DispatcherService {
     // 2. The priority the contract has now, for every request that still waits (no stored contract version is rewritten).
     const reprioritized = await this.#reprioritize();
     await this.#annotate().catch((error: unknown) => { if (isDomainError(error, "stale_epoch")) throw error; this.#options.onError?.(error); });
+    // 2b. Card W11: jobs that reached a final state wake their tasks (an attempt woken here starts below, in this tick).
+    const woken: string[] = [];
+    try { woken.push(...await this.#wakeJobs(failures)); } catch (error) { if (isDomainError(error, "stale_epoch")) throw error; failures.push({ taskId: "", attemptId: "", error: errorText(error) }); }
     // 3. Waiting claims: get a request, or start when the place has come.
     for (const id of await this.#liveIds()) {
       const d = await this.#load(id);
@@ -561,7 +577,7 @@ export class DispatcherService {
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? redactText(error.message).slice(0, 200) : "failed" });
       }
     }
-    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, adopted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };
+    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, adopted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete, ...(woken.length === 0 ? {} : { woken }) };
   }
 
   /**
@@ -804,6 +820,9 @@ export class DispatcherService {
     this.#stopsAsked.set(d.body.attemptId, stopped);
     try { await this.#stopNow(by, d, stopped, options); } finally { if (this.#stopsAsked.get(d.body.attemptId) === stopped) this.#stopsAsked.delete(d.body.attemptId); }
   }
+
+  /** Where the next tick's look at the due job wakes begins (card W11), when there are more than one tick looks at. */
+  #wakeCursor = 0;
 
   readonly #stopsAsked = new Map<string, { readonly by: "owner" | "emergency"; readonly reason: string }>();
 
@@ -1355,11 +1374,14 @@ export class DispatcherService {
     const now = this.#runner.now();
     const contract = await this.#contractOf(taskId);
     const limit = await this.#attemptLimitMs(taskId, contract.maxMinutes);
+    // Card W11: an attempt admitted because a job of its task ended starts with the wake's note.
+    const wakeNoteFor = (await this.#runner.get(JOB_WAKE_NOTE_KIND, attemptId))?.body as unknown as { note?: string } | undefined;
     const body: DispatchBody = {
       attemptId, taskId, projectId: task.projectId, agentId: pre.agentId, generation: attempt.generation, state: "waiting",
       ...(pre.harness === undefined ? {} : { harness: pre.harness }), route: pre.route.route, role: pre.route.role, request: pre.route.request,
       revisions: await this.#revisions(task.projectId, taskId, contract.version, pre.route),
       hostId: pre.host.hostId, claimedAt: now, ...(limit === undefined ? {} : { expiresAt: new Date(Date.parse(now) + limit).toISOString() }), heartbeats: 0, inFlight: [], parked: [], calls: 0,
+      ...(typeof wakeNoteFor?.note === "string" ? { resumeNote: wakeNoteFor.note } : {}),
     };
     const ref: AggregateRef = { kind: DISPATCH_KIND, id: derivedId("dpa", attemptId) };
     try {
@@ -2150,7 +2172,7 @@ export class DispatcherService {
     const startParts = { task: taskText.length, rules: rules.length, handoff: handed.length, view: view === undefined ? 0 : view.text.length + 2, refs: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: taskText + rules + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}${b.turnRound === undefined ? "" : `:se${b.turnRound}`}`, startParts,
+      content: taskText + rules + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}${b.turnRound === undefined ? "" : `:se${b.turnRound}`}${b.wakeRound === undefined ? "" : `:wk${b.wakeRound}`}`, startParts,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
     };
@@ -2494,6 +2516,9 @@ export class DispatcherService {
     const b = d.body;
     const asked = this.#stopsAsked.get(attemptId);
     if (asked !== undefined || b.stopped !== undefined) return this.#endInner(attemptId, "abandoned", this.#cleanSummary("abandoned", (asked ?? b.stopped)!.reason), { readmit: false });
+    // Card W11: the turn ended while jobs of the task run (or have just ended, their wake still due): the agent was told it is woken when a job ends, so the attempt parks to wait for it instead of going on at once.
+    const parked = await this.#parkForJobs(attemptId, b, early);
+    if (parked !== undefined) return parked;
     const at = this.#runner.now();
     const counted = await this.#stoppedEarlyCount(b.taskId);
     const used = counted !== undefined && counted.body.generation === b.generation ? counted.body.readmits : 0;
@@ -2546,8 +2571,326 @@ export class DispatcherService {
     const ref: AggregateRef = { kind: STOPPED_EARLY_KIND, id: b.taskId };
     const read = await this.#stoppedEarlyCount(b.taskId);
     const same = read !== undefined && read.body.generation === b.generation;
-    const body = { taskId: b.taskId, generation: b.generation, readmits: (same ? read.body.readmits : 0) + 1, attempts: [...(same ? read.body.attempts : []).filter((a) => a !== b.attemptId).slice(-20), b.attemptId] } as unknown as JsonObject;
+    const kept = same ? { ...(read.body.wakes === undefined ? {} : { wakes: read.body.wakes }), ...(read.body.wakeTimes === undefined ? {} : { wakeTimes: read.body.wakeTimes }), ...(read.body.noticeTimes === undefined ? {} : { noticeTimes: read.body.noticeTimes }) } : {};
+    const body = { taskId: b.taskId, generation: b.generation, readmits: (same ? read.body.readmits : 0) + 1, attempts: [...(same ? read.body.attempts : []).filter((a) => a !== b.attemptId).slice(-20), b.attemptId], ...kept } as unknown as JsonObject;
     return read === undefined ? [{ type: "create", ref, body }] : [{ type: "update", ref, expectedRevision: read.revision, body }];
+  }
+
+  // ---- card W11: a job's end wakes its task ------------------------------------------------------------------------------------
+
+  /**
+   * The turn of an attempt ended without work.end while jobs of its task run (or have just ended with their wake still due). The agent was told the task is woken when a job ends, so instead of going on at once as a stop before
+   * the work was done (W03), the attempt parks: its worker is stopped, its run on the route ended and its place given back, its hold, credential, host and the turn's checkpoint kept, with the jobs it waits for. The first job's end
+   * wakes it (`#wakeJobs`). Nothing is counted against W03's readmits here: the wake is counted when it comes. Answers `undefined` when it does not park (no job port, no such job, or no checkpoint to go on from).
+   */
+  async #parkForJobs(attemptId: string, b: DispatchBody, early: EarlyStop): Promise<{ readmitted?: string } | undefined> {
+    const port = this.#deps.jobWakes;
+    if (port === undefined) return undefined;
+    let jobs: readonly string[];
+    try { jobs = await port.waitable(b.taskId); } catch (error) { this.#options.onError?.(error); return undefined; }
+    if (jobs.length === 0) return undefined;
+    const checkpoint = early.checkpoint ?? await this.#checkpoint(attemptId, "the turn ended to wait for a job", "turn-complete").catch(() => undefined);
+    if (checkpoint === undefined) return undefined;
+    await this.#live.get(attemptId)?.handle.stop().catch(() => undefined);
+    await this.#endCall(attemptId, "succeeded", "the turn ended while a job of the task runs; the attempt waits for it");
+    if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-jobwait:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "the turn ended while a job of the task runs; the attempt waits for it to end" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    const turnEnd = this.#takeTurnEnd(attemptId);
+    let parked = false;
+    await this.#update(attemptId, (x) => {
+      if (x.state !== "running") { parked = false; return x; }
+      parked = true;
+      const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
+      return { ...rest, ...turnEnd, ...nudgeTotal(x, turnEnd), state: "parked", pinnedHost: x.hostId, resumeFrom: checkpoint, waitsOnJobs: jobs.slice(0, JOB_WAKE_LIMITS.waitsOn) };
+    });
+    if (parked) return {};
+    // Something else moved the attempt meanwhile: a stop asked in between ends it as stopped; anything else is left as that path left it.
+    const now = await this.#load(attemptId);
+    if (now === undefined || now.body.state === "finished") return {};
+    const stop = this.#stopsAsked.get(attemptId) ?? now.body.stopped;
+    if (stop !== undefined) return this.#endInner(attemptId, "abandoned", this.#cleanSummary("abandoned", stop.reason), { readmit: false });
+    return {};
+  }
+
+  /**
+   * Works the due wakes (card W11), in the order the jobs ended, at most `JOB_WAKE_LIMITS.perTick` a tick. Each is decided once (`#wakeOne`); one that cannot be decided now (the task is paused, its attempt is running or waits for
+   * an approval, its wakes for the hour are used up) stays due and is looked at again next tick. One that fails is reported and does not stop the others. Answers the attempts woken.
+   */
+  async #wakeJobs(failures: { taskId: string; attemptId: string; error: string }[]): Promise<string[]> {
+    const index = await this.#runner.get(JOB_WAKES_INDEX.kind, JOB_WAKES_INDEX.id);
+    const due = (index?.body as unknown as JobWakesIndex | undefined)?.due ?? [];
+    const woken: string[] = [];
+    // The look goes round the list: wakes that must wait (a paused task, a running attempt) stay at the head of the list, and a fixed first slice would never reach the ones behind them (review fix).
+    const start = due.length <= JOB_WAKE_LIMITS.perTick ? 0 : this.#wakeCursor % due.length;
+    this.#wakeCursor = due.length <= JOB_WAKE_LIMITS.perTick ? 0 : start + JOB_WAKE_LIMITS.perTick;
+    for (const wakeId of [...due.slice(start), ...due.slice(0, start)].slice(0, JOB_WAKE_LIMITS.perTick)) {
+      let taskId = "";
+      try {
+        const found = await this.#runner.get(JOB_WAKE_KIND, wakeId);
+        taskId = (found?.body as unknown as JobWakeBody | undefined)?.taskId ?? "";
+        const done = await this.#wakeOne(wakeId, found === undefined ? undefined : { revision: found.revision, body: found.body as unknown as JobWakeBody });
+        if (done !== undefined) woken.push(done);
+      } catch (error) {
+        if (isDomainError(error, "stale_epoch")) throw error;
+        failures.push({ taskId, attemptId: "", error: errorText(error) });
+      }
+    }
+    return woken;
+  }
+
+  /**
+   * Decides one due wake. In order: a task that is gone, done or cancelled, stopped (its own Stop or Suspend, or one above it), no longer assigned to an agent, or reassigned since the job started (another generation) is not
+   * woken; a paused task waits until the pause is lifted. Then the task's attempt: one that runs, or waits for an approval, is not disturbed (the wake waits for its turn to end); one waiting to start is told in its note (no
+   * wake is counted: it was going to run anyway); one parked for its jobs is readmitted, and a task with no live attempt gets a new attempt of the same assignment, never a second one beside a live attempt. A readmit or a new
+   * attempt is a wake, bounded per task per hour and counted with W03's go-ons, so ending a turn to wait for a job cannot run a task for ever; past the total the attempt parked for it ends with W03's blocker. The owner is told
+   * once per ended job (the first time the wake is looked at). The decision is recorded on the wake, and taken off the due list, in the same commit as what it did to the attempt.
+   */
+  async #wakeOne(wakeId: string, found: { revision: number; body: JobWakeBody } | undefined): Promise<string | undefined> {
+    if (found === undefined || (found.body.status !== "due" && found.body.status !== "admitting")) {
+      await this.#wakeCommit(wakeId, undefined, undefined, async () => []);
+      return undefined;
+    }
+    const w = found.body;
+    const task = await this.#deps.projects.getTask(w.taskId);
+    const assignment = await this.#deps.assignments.getAssignment(w.taskId);
+    const origin = w.attemptId === undefined ? undefined : (await this.#load(w.attemptId))?.body;
+    const generation = origin?.generation ?? (w.attemptId === undefined ? undefined : (await this.#deps.assignments.getAttempt(w.attemptId).catch(() => undefined))?.generation);
+    // Counted in the assignment's current generation (W03's record is per generation): a job of an earlier owner that ends must not reset the current owner's counts by writing its own generation (review fix).
+    const countGen = assignment?.generation ?? generation ?? 0;
+    const decision = await this.#wakeDecision(w, task, assignment, generation);
+    const notice = w.phase === "end" && w.notice === undefined ? await this.#tellOwner(w, task, countGen, decision.tell) : undefined;
+    const marked = (status: JobWakeBody["status"], extra: Partial<JobWakeBody>): JobWakeBody => {
+      const { admitting: _a, ...rest } = w; void _a;
+      return { ...(status === "admitting" ? w : rest), ...extra, status, ...(notice === undefined ? {} : { notice }), ...(status === "due" || status === "admitting" ? {} : { decidedAt: this.#runner.now() }) } as JobWakeBody;
+    };
+    const counts = (wake: boolean) => async (): Promise<Change[]> => this.#wakeCountChanges(w.taskId, countGen, { wake, notice: notice?.sent === true });
+    switch (decision.kind) {
+      case "wait": {
+        const seen = decision.seen !== undefined && w.seenBy !== decision.seen ? { seenBy: decision.seen } : undefined;
+        if (notice !== undefined || seen !== undefined) await this.#wakeCommit(wakeId, found.revision, marked(w.status, seen ?? {}), counts(false), false);
+        return undefined;
+      }
+      case "skip": {
+        await this.#wakeCommit(wakeId, found.revision, marked("skipped", { reason: decision.why }), counts(false));
+        await this.#endParkedFor(w, origin, decision.why, decision.usedUp === true).catch((error: unknown) => { this.#options.onError?.(error); });
+        return undefined;
+      }
+      case "join":
+      case "readmit": {
+        const id = decision.attemptId;
+        const note = wakeNote(w);
+        const readmit = decision.kind === "readmit";
+        let ok = false;
+        await this.#update(id, (x) => {
+          if (!ok) return x;
+          if (readmit) { const { waitsOnJobs: _j, ...rest } = x; void _j; return { ...rest, state: "waiting", resumeNote: note, wakeRound: (x.wakeRound ?? 0) + 1 }; }
+          return { ...x, resumeNote: x.resumeNote === undefined ? note : `${x.resumeNote}\n${note}` };
+        }, async (x) => {
+          const fresh = await this.#runner.get(JOB_WAKE_KIND, wakeId);
+          ok = fresh !== undefined && fresh.revision === found.revision && (readmit ? x.state === "parked" && x.waitsOnJobs !== undefined && x.parked.length === 0 : x.state === "waiting");
+          if (!ok) return [];
+          const counted = decision.counted === true || readmit;
+          return [{ type: "update", ref: { kind: JOB_WAKE_KIND, id: wakeId }, expectedRevision: found.revision, body: marked(counted ? "woken" : "joined", { woke: id, reason: readmit ? "the attempt that waited for the job was readmitted" : "the attempt was about to start; its note says the job ended" }) as unknown as JsonObject }, ...await dueRemoved((k, i) => this.#runner.get(k, i), wakeId), ...await counts(counted)()];
+        });
+        return ok ? id : undefined;
+      }
+      case "note": {
+        // An attempt admitted and not yet claimed: its claim reads the note.
+        const existing = await this.#runner.get(JOB_WAKE_NOTE_KIND, decision.attemptId);
+        const before = (existing?.body as unknown as { note?: string } | undefined)?.note;
+        const note = before === undefined ? wakeNote(w) : `${before}\n${wakeNote(w)}`;
+        const ref: AggregateRef = { kind: JOB_WAKE_NOTE_KIND, id: decision.attemptId };
+        const body = { note: note.slice(0, 4000), wakeIds: [wakeId] } as unknown as JsonObject;
+        await this.#wakeCommit(wakeId, found.revision, marked(decision.counted === true ? "woken" : "joined", { woke: decision.attemptId, reason: decision.counted === true ? "a new attempt of the task was admitted for the job's end" : "the attempt was about to start; its note says the job ended" }),
+          async () => [existing === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: existing.revision, body }, ...await counts(decision.counted === true)()]);
+        return decision.attemptId;
+      }
+      case "admit": {
+        const base = w.status === "admitting" ? found : { revision: found.revision + 1, body: marked("admitting", { admitting: { generation: decision.generation, attempts: decision.attempts } }) };
+        if (w.status !== "admitting") {
+          await this.#wakeCommit(wakeId, found.revision, base.body, counts(false), false);
+          // A commit that lost a race is not an error (#wakeCommit leaves it), but nothing is admitted unless the mark that lets a restart find the admitted attempt is on record at the revision counted on (review fix).
+          const marked_ = await this.#runner.get(JOB_WAKE_KIND, wakeId);
+          if (marked_ === undefined || marked_.revision !== base.revision || (marked_.body as unknown as JobWakeBody).status !== "admitting") return undefined;
+        }
+        let id: string;
+        try {
+          id = (await this.#deps.assignments.admitAttempt({ commandId: `dpa-wake:${wakeId}:${decision.attempts}`, actor: DISPATCHER_ACTOR, taskId: w.taskId, expectedRevision: decision.revision, generation: decision.generation, owner: decision.owner, ...(decision.harness === undefined ? {} : { harness: decision.harness }) })).id;
+        } catch (error) {
+          // The assignment moved meanwhile (another attempt, a reassignment): the next tick decides again.
+          if (isDomainError(error, "stale_revision") || isDomainError(error, "command_conflict") || isDomainError(error, "fenced")) return undefined;
+          throw error;
+        }
+        const ref: AggregateRef = { kind: JOB_WAKE_NOTE_KIND, id };
+        const existing = await this.#runner.get(JOB_WAKE_NOTE_KIND, id);
+        const body = { note: wakeNote(w), wakeIds: [wakeId] } as unknown as JsonObject;
+        const { admitting: _a, ...rest } = base.body; void _a;
+        await this.#wakeCommit(wakeId, base.revision, { ...rest, status: "woken", woke: id, reason: "a new attempt of the task was admitted for the job's end", decidedAt: this.#runner.now() },
+          async () => [existing === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: existing.revision, body }, ...await this.#wakeCountChanges(w.taskId, decision.generation, { wake: true, notice: false })]);
+        return id;
+      }
+    }
+  }
+
+  async #wakeDecision(w: JobWakeBody, task: View<TaskBody> | undefined, assignment: Awaited<ReturnType<DispatcherDeps["assignments"]["getAssignment"]>>, generation: number | undefined): Promise<WakeDecision> {
+    const skip = (why: string, usedUp = false): WakeDecision => ({ kind: "skip", why, tell: `The agent was not woken: ${why}.`, ...(usedUp ? { usedUp: true } : {}) });
+    if (task === undefined) return skip("the task no longer exists");
+    if (task.state === "done" || task.state === "cancelled") return skip(`the task is ${task.state === "done" ? "done" : "cancelled"}`);
+    if (await this.#deps.jobWakes?.stopped?.(w.taskId)) return skip("the task is stopped");
+    const held = await this.#deps.heldBy?.(w.taskId);
+    if (held !== undefined) return skip(clip(held, 200));
+    if (assignment === undefined || assignment.state !== "assigned" || assignment.owner?.kind !== "agent") return skip("the task is no longer assigned to an agent");
+    const active = assignment.activeAttemptId;
+    // The attempt that parked for this job is woken by its end, whoever started the job (an earlier owner's attempt, the owner) and however it ended (its own agent's stop included): it ended its turn to wait for it (review fix).
+    const waiter = active === undefined ? undefined : (await this.#load(active))?.body;
+    const waits = waiter !== undefined && waiter.state === "parked" && waiter.parked.length === 0 && waiter.generation === assignment.generation && (waiter.waitsOnJobs ?? []).includes(w.jobId);
+    if (!waits) {
+      if (w.attemptId === undefined || generation === undefined) return skip("no attempt of an agent started the job");
+      if (assignment.generation !== generation) return skip("the task was reassigned after the job started");
+      // A job the task's own agent stopped: it asked for the stop, so it knows; nothing to wake it for.
+      if (w.state === "cancelled" && w.cancelledBy !== undefined && w.cancelledBy === `agent:${assignment.owner.id}`) return skip("the task's own agent stopped the job");
+    }
+    if ((await this.#deps.pauses.guard(w.taskId)).blockedBy.length > 0) return { kind: "wait", tell: "The agent will be woken to read it when the task's pause is lifted." };
+    const room = await this.#wakeRoom(w.taskId, assignment.generation);
+    const admitted = w.status === "admitting" && w.admitting !== undefined && active !== undefined && assignment.attempts > w.admitting.attempts;
+    if (active !== undefined) {
+      const d = (await this.#load(active))?.body;
+      if (d === undefined) return { kind: "note", attemptId: active, ...(admitted ? { counted: true } : {}), tell: admitted ? "The agent was woken to read it." : "The agent will read it when its next run starts." };
+      if (d.state === "running") return admitted ? { kind: "skip", why: "the attempt admitted for it is already running", tell: "The agent was woken to read it." } : { kind: "wait", seen: active, tell: "The agent is at work on the task and can read it now." };
+      if (d.state === "waiting") return { kind: "join", attemptId: active, ...(admitted ? { counted: true } : {}), tell: admitted ? "The agent was woken to read it." : "The agent will read it when its next run starts." };
+      if (d.state === "parked" && (d.waitsOnJobs === undefined || d.parked.length > 0)) return { kind: "wait", tell: "The agent waits for an approval and will be told when it goes on." };
+      if (d.state === "parked") {
+        if (room.skip !== undefined) return skip(room.skip, true);
+        if (room.wait !== undefined) return { kind: "wait", tell: `The agent will be woken to read it later: ${room.wait}.` };
+        return { kind: "readmit", attemptId: active, tell: "The agent was woken to read it." };
+      }
+      return { kind: "wait", tell: "The agent will be told when it next runs." };
+    }
+    // No live attempt. An attempt that ran after the job ended could read its result there (the agent polled it, or the job was short) and has ended since, by its own work.end or otherwise: its end is not a reason to
+    // start another attempt (review fix: otherwise every job that ends while its attempt runs starts a new attempt once the agent ends its work).
+    // A new attempt admitted for this wake has run and ended before the wake was recorded (a crash in between): the wake was made (second review: the admitting mark was only read while that attempt was live).
+    if (w.status === "admitting" && w.admitting !== undefined && assignment.attempts > w.admitting.attempts) return skip("the attempt admitted for it has run and ended");
+    for (const id of [w.seenBy, w.attemptId]) {
+      if (id === undefined) continue;
+      const ran = (await this.#load(id))?.body;
+      if (ran?.state !== "finished" || ran.generation !== assignment.generation) continue;
+      if (id === w.seenBy || (ran.outcome !== undefined && Date.parse(ran.outcome.at) >= Date.parse(w.at))) return skip(`its attempt ${id} ran when the job ended and has ended since (it could read the job's result there)`);
+      // An attempt ended on purpose before the job ended: stopped by the owner (or an emergency stop), or ended by its agent's own work.end (done, partial, blocked or abandoned). The job's end does not start the task again
+      // after that (second review: it did, so a stop or the agent's "done" was undone by a job that ended later); the owner is told of the end and can assign the task again.
+      if (ran.stopped !== undefined) return skip(`its attempt ${id} was stopped (${ran.stopped.by === "emergency" ? "an emergency stop" : "your stop"}) before the job ended, and a job's end does not start a stopped attempt's task again`);
+      if (ran.turnEnd?.endKind === "normal" && ran.outcome?.status !== "stopped-early") return skip(`its agent ended its work (attempt ${id}, with work.end) before the job ended, so no new attempt was started for it`);
+    }
+    // An attempt of the task later than the one that started the job ran after it (and has ended): it could read the job, and how it ended is its own (second review).
+    const startedBy = w.attemptId === undefined ? undefined : await this.#deps.assignments.getAttempt(w.attemptId).catch(() => undefined);
+    if (startedBy !== undefined && startedBy.number < assignment.attempts) return skip("a later attempt of the task ran after the one that started the job, and has ended");
+    // Otherwise a new one of the same assignment, unless the owner has to decide first.
+    for (const type of ["dispatch_blocked", "agent_stopped_early"] as const) {
+      const open = await this.#deps.blockers.openFor(type, { kind: "task", id: w.taskId }).catch(() => undefined);
+      if (open !== undefined) return skip(`the task has an open ${type.replaceAll("_", " ")} blocker (${open.id}) that waits for you, and no attempt starts by itself until it is dealt with`);
+    }
+    if (room.skip !== undefined) return skip(room.skip, true);
+    if (room.wait !== undefined) return { kind: "wait", tell: `The agent will be woken to read it later: ${room.wait}.` };
+    const figures = await this.#figuresOrNone();
+    const contract = await this.#contractOf(w.taskId);
+    const caps = [contract.maxAttempts, figures.maxAttempts].filter((x): x is number => x !== undefined);
+    const allowed = caps.length === 0 ? undefined : Math.min(...caps);
+    if (allowed !== undefined && assignment.attempts >= allowed) return skip(`${assignment.attempts} attempts were made and the task allows ${allowed}`);
+    const origin = w.attemptId === undefined ? undefined : (await this.#load(w.attemptId))?.body;
+    return { kind: "admit", generation: assignment.generation, attempts: assignment.attempts, revision: assignment.revision, owner: assignment.owner as { kind: "agent"; id: string }, ...(origin?.harness === undefined ? {} : { harness: origin.harness }), tell: "The agent was woken to read it." };
+  }
+
+  /** Why the task may not be woken now: `skip` when its go-ons are used up (W03's readmits and the wakes together), `wait` when this hour's wakes are. */
+  async #wakeRoom(taskId: string, generation: number): Promise<{ skip?: string; wait?: string }> {
+    const c = await this.#stoppedEarlyCount(taskId);
+    const same = c !== undefined && c.body.generation === generation;
+    const readmits = same ? c.body.readmits : 0, wakes = same ? c.body.wakes ?? 0 : 0;
+    if (readmits + wakes >= JOB_WAKE_LIMITS.goOns) return { skip: `its wake-ups are used up (${wakes} wake(s) for jobs and ${readmits} go-on(s) after early stops in this assignment, at most ${JOB_WAKE_LIMITS.goOns} in all)` };
+    const since = Date.parse(this.#runner.now()) - 3_600_000;
+    const recent = (same ? c.body.wakeTimes ?? [] : []).filter((t) => Date.parse(t) > since);
+    if (recent.length >= JOB_WAKE_LIMITS.perHour) return { wait: `it was woken ${recent.length} times in the last hour, the most in one hour` };
+    return {};
+  }
+
+  /** W03's record of the task with a wake and/or an owner notice added (in the same commit as the decision). */
+  async #wakeCountChanges(taskId: string, generation: number, add: { wake: boolean; notice: boolean }): Promise<Change[]> {
+    if (!add.wake && !add.notice) return [];
+    const ref: AggregateRef = { kind: STOPPED_EARLY_KIND, id: taskId };
+    const read = await this.#stoppedEarlyCount(taskId);
+    const same = read !== undefined && read.body.generation === generation;
+    const now = this.#runner.now();
+    const since = Date.parse(now) - 3_600_000;
+    const hour = (ts: readonly string[] | undefined): string[] => (ts ?? []).filter((t) => Date.parse(t) > since);
+    const body = {
+      taskId, generation, readmits: same ? read.body.readmits : 0, attempts: same ? read.body.attempts : [],
+      wakes: (same ? read.body.wakes ?? 0 : 0) + (add.wake ? 1 : 0),
+      wakeTimes: [...hour(same ? read.body.wakeTimes : undefined), ...(add.wake ? [now] : [])].slice(-JOB_WAKE_LIMITS.perHour * 2),
+      noticeTimes: [...hour(same ? read.body.noticeTimes : undefined), ...(add.notice ? [now] : [])].slice(-JOB_WAKE_LIMITS.noticesPerHour * 2),
+    } as unknown as JsonObject;
+    return read === undefined ? [{ type: "create", ref, body }] : [{ type: "update", ref, expectedRevision: read.revision, body }];
+  }
+
+  /**
+   * Records the wake's decision: the wake record at `revision` (or nothing for a record that is gone or already decided), off the due list unless `leave` is false, and `more` in the same commit. A wake already changed
+   * meanwhile is left (decided again next tick).
+   */
+  async #wakeCommit(wakeId: string, revision: number | undefined, body: JobWakeBody | undefined, more: () => Promise<Change[]>, leave = true): Promise<void> {
+    const ref: AggregateRef = body === undefined ? JOB_WAKES_INDEX : { kind: JOB_WAKE_KIND, id: wakeId };
+    const digest = createHash("sha256").update(JSON.stringify(body ?? null)).digest("hex").slice(0, 16);
+    await this.#runner.command("job.wake", { commandId: `jwk-dec:${wakeId}:${revision ?? 0}:${digest}`, actor: DISPATCHER_ACTOR }, async () => ({
+      payload: { wakeId, revision: revision ?? 0, status: body?.status ?? null },
+      build: async () => {
+        const changes: Change[] = [];
+        if (body !== undefined && revision !== undefined) changes.push({ type: "update", ref, expectedRevision: revision, body: body as unknown as JsonObject });
+        if (leave) changes.push(...await dueRemoved((k, i) => this.#runner.get(k, i), wakeId));
+        changes.push(...await more());
+        if (changes.length === 0) changes.push({ type: "check", ref: JOB_WAKES_INDEX, expectedRevision: (await this.#runner.get(JOB_WAKES_INDEX.kind, JOB_WAKES_INDEX.id))?.revision ?? 0 });
+        return { ref, creates: false, changes: mergeChanges(changes), detail: { wakeId, status: body?.status ?? "dropped" } };
+      },
+    })).catch((error: unknown) => { if (!isDomainError(error, "stale_revision") && !isDomainError(error, "command_conflict") && !isDomainError(error, "not_found")) throw error; });
+  }
+
+  /**
+   * The owner is told once that a job of a task ended (card W11, part 3): the job's label quoted once (redacted), its state, the task's title and what became of the wake, in plain words, as Needs you when it failed or its outcome is
+   * unknown and as a Notice otherwise. Not told: a job stopped because its task ended or was stopped (the owner's own act, or the task's end), and past `noticesPerHour` for the task. A failure to tell is recorded on the wake.
+   */
+  async #tellOwner(w: JobWakeBody, task: View<TaskBody> | undefined, generation: number, how: string): Promise<{ sent: boolean; why?: string }> {
+    const notify = this.#deps.notifications;
+    if (notify === undefined) return { sent: false, why: "notifications are not available" };
+    if (w.state === "cancelled" && (task === undefined || task.state === "done" || task.state === "cancelled" || await this.#deps.jobWakes?.stopped?.(w.taskId).catch(() => false))) return { sent: false, why: "the job was stopped because its task ended or was stopped" };
+    const c = await this.#stoppedEarlyCount(w.taskId);
+    const since = Date.parse(this.#runner.now()) - 3_600_000;
+    if (c !== undefined && c.body.generation === generation && (c.body.noticeTimes ?? []).filter((t) => Date.parse(t) > since).length >= JOB_WAKE_LIMITS.noticesPerHour) return { sent: false, why: `the owner was already told of ${JOB_WAKE_LIMITS.noticesPerHour} ended jobs of this task in the last hour` };
+    const short = w.state === "completed" ? "completed" : w.state === "failed" ? "failed" : w.state === "cancelled" ? "was cancelled" : "ended, outcome unknown";
+    const label = `Job ${quoted(w.label, 60)} ${short}`.slice(0, 200);
+    // The fixed sentences are kept whole; what became of the wake is shortened to fit the notice (review fix: a long reason cut the end off).
+    const head = `Task ${quoted(task?.title ?? w.taskId, 50)}: the job ${short}.`, tail = " Ask about the job in chat to see its status and output.";
+    const detail = `${head} ${clip(how, Math.max(20, 200 - head.length - tail.length - 1))}${tail}`;
+    try {
+      await notify.emitFromController({ commandId: `jwk-ntf:${w.jobId}`, kind: "maintenance", level: w.state === "failed" || w.state === "outcome_unknown" ? "needs-you" : "notice", ref: { kind: "job", id: w.jobId }, projectId: w.projectId, label, detail: clip(detail, 200) });
+      return { sent: true };
+    } catch (error) {
+      this.#options.onError?.(error);
+      return { sent: false, why: clip(redactText(errorText(error)), 200) };
+    }
+  }
+
+  /**
+   * An attempt that parked for its jobs and will not be woken (card W11): when nothing it could wait for is left, it ends instead of staying parked. When its wake-ups are used up it ends as W03 ends an agent that kept stopping:
+   * `stopped-early`, with the blocker that says so.
+   */
+  async #endParkedFor(w: JobWakeBody, origin: DispatchBody | undefined, why: string, usedUp: boolean): Promise<void> {
+    const assignment = await this.#deps.assignments.getAssignment(w.taskId);
+    const id = assignment?.activeAttemptId ?? origin?.attemptId;
+    if (id === undefined) return;
+    const d = (await this.#load(id))?.body;
+    if (d === undefined || d.state !== "parked" || d.waitsOnJobs === undefined || d.parked.length > 0) return;
+    if (!usedUp && (await this.#deps.jobWakes?.waitable(w.taskId).catch(() => [] as readonly string[]) ?? []).length > 0) return;
+    if (!usedUp) { await this.#end(id, "abandoned", `the job it waited for ended and the task was not woken: ${why}`, { readmit: false }); return; }
+    const run = { endKind: d.turnEnd?.endKind ?? "unknown", at: this.#runner.now(), readmitted: false };
+    const summary = [
+      `The agent ended its turns to wait for its jobs and was woken for them until its wake-ups ran out: ${why}. No further attempt starts by itself.`,
+      `The last job to end: ${quoted(w.label, 80)} (${w.jobId}) ${stateWords(w.state, w.phase)}.`,
+    ].join("\n");
+    await this.#endInner(id, "abandoned", this.#cleanSummary("abandoned", `its job wake-ups are used up: ${why}`), { readmit: false, stoppedEarly: { run, summary: summary.slice(0, 1000) } });
   }
 
   /** What the host says the attempt's checkout holds, as two short lines for the blocker; what it cannot say is said so, never guessed. The plan steps are the agent's words: each is quoted. */
@@ -2771,6 +3114,13 @@ export function relevantNote(check: { readonly delta?: { readonly changed: reado
 
 const errorText = (error: unknown): string => redactText(error instanceof Error ? error.message : "failed").slice(0, 300);
 type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
+/** What becomes of one due job wake (card W11); `tell` is the owner's sentence about it. */
+type WakeDecision =
+  | { readonly kind: "wait"; readonly tell: string; /** The attempt that runs now and can read the job's end itself. */ readonly seen?: string }
+  | { readonly kind: "skip"; readonly why: string; readonly tell: string; readonly usedUp?: true }
+  | { readonly kind: "join" | "readmit"; readonly attemptId: string; readonly counted?: true; readonly tell: string }
+  | { readonly kind: "note"; readonly attemptId: string; readonly counted?: true; readonly tell: string }
+  | { readonly kind: "admit"; readonly generation: number; readonly attempts: number; readonly revision: number; readonly owner: { readonly kind: "agent"; readonly id: string }; readonly harness?: string; readonly tell: string };
 type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: string } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */

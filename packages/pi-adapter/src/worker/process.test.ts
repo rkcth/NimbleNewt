@@ -655,6 +655,7 @@ test("W04: a length stop is continued with the nudge that says so and is not rep
   assert.equal(result.nudges, 1);
   assert.deepEqual(h.continues.map((m) => m.request.args), [{ n: 1, max: 3, endKind: "length" }]);
   assert.ok(seenByModel[0]!.includes(LENGTH_NUDGE_LEAD));
+  assert.match(seenByModel[0]!, /stop deliberating, act/, "card W07: the length stop has its own words");
   h.send({ t: "close" });
   await h.done;
 });

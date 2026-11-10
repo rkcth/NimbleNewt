@@ -23,6 +23,7 @@ import { canonicalJson } from "../storage/json.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService, type JobBody } from "../jobs/jobs.js";
 import type { LocalJobRuns } from "../jobs/runs.js";
+import { JOB_WAKE_RULE } from "../jobs/wakes.js";
 import type { View } from "../domain/model.js";
 import { checkValue, schemaProblems } from "./schema.js";
 
@@ -126,7 +127,7 @@ export interface ToolExecutionDeps {
    * `job.cancel`) from any later attempt of the same task. Absent: the job operations answer as unavailable.
    */
   readonly jobs?: Pick<JobService, "admit" | "get" | "requestCancel">;
-  readonly jobRuns?: Pick<LocalJobRuns, "room" | "start" | "ended">;
+  readonly jobRuns?: Pick<LocalJobRuns, "room" | "start" | "ended"> & Partial<Pick<LocalJobRuns, "runningFor">>;
 }
 
 /** The bound gateway of the attempt the request came through. */
@@ -490,6 +491,10 @@ export class ToolExecutionService {
     // A turn that yields while calls of the attempt wait for an approval is waiting, not stopping early: it ends, and the attempt parks and gives its place back until the decision (W04 review). A nudge would spend model calls on a turn
     // that cannot go on and push the agent to end its work instead of waiting.
     if (c.parked > 0) return refusal("awaiting_approval", `${c.parked} call(s) of this attempt wait for an approval; the turn ends and the attempt parks until the decision`);
+    // Card W11: a turn that yields while a job of its task runs is waiting for the job, as the job-start reply told the agent it may: it ends, the attempt parks, and the job's end wakes the task. A nudge would push the agent to act
+    // instead of waiting.
+    const jobsRunning = this.#deps.jobRuns?.runningFor?.(c.taskId) ?? 0;
+    if (jobsRunning > 0) return refusal("awaiting_job", `${jobsRunning} job(s) of this task are running; the turn ends, and the task is woken when a job ends`);
     return ok({ go: true, n, max, ...(kind === undefined ? {} : { endKind: kind }) });
   }
 
@@ -712,7 +717,7 @@ export class ToolExecutionService {
         && recorded.invocation.argsDigest === createHash("sha256").update(canonicalJson(rawInput), "utf8").digest("hex")
         && (label === undefined || already.label === label) && already.background === background;
       if (!same) return refusal("invalid_command", `callId: ${c.callId.slice(0, 40)} already started job ${jobId} with a different request; use a new call ID`);
-      return ok({ jobId, state: already.state, tool: target.canonical, version: recorded.tool.version });
+      return ok({ jobId, state: already.state, tool: target.canonical, version: recorded.tool.version, whenItEnds: JOB_WAKE_RULE });
     }
     const room = runs.room(c.taskId);
     if (room !== undefined) throw new DomainError("unavailable", room);
@@ -748,7 +753,7 @@ export class ToolExecutionService {
     );
     if (result.state !== "confirmed") return ok({ ...(result as unknown as JsonObject), tool: v.name, version: v.version });
     const job = await jobs.get(c.scoped, jobId);
-    return ok({ jobId, state: job?.state ?? "admitted", tool: v.name, version: v.version, background, note: "Keep the jobId: job-status, job-output and job-cancel take it, also in a later attempt of this task." });
+    return ok({ jobId, state: job?.state ?? "admitted", tool: v.name, version: v.version, background, note: "Keep the jobId: job-status, job-output and job-cancel take it, also in a later attempt of this task.", whenItEnds: JOB_WAKE_RULE });
   }
 
   /** The job, only if it belongs to the attempt's own task: a job of another task is not found, whatever the credential could read elsewhere in the project. */

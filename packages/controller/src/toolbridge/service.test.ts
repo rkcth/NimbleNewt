@@ -652,6 +652,27 @@ for (const backend of backends) {
     assert.deepEqual(good(out["after"]!), { go: true, n: 1, max: 3, endKind: "no-work-end" }, "the refused call ID may be asked again");
   });
 
+  suite("W11: a turn that yields while a job of its task runs is not continued (it ends, and the task is woken when the job ends); once no job of the task runs, it may be", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const running = new Map<string, number>([[taskId, 1]]);
+    const svc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true,
+      jobs: { admit: async () => ({ id: "job-x", replayed: false }), get: async () => undefined, requestCancel: async () => ({ id: "job-x", operation: "stop_tool", replayed: false }) },
+      jobRuns: { room: () => undefined, start: async () => undefined, ended: async () => undefined, runningFor: (t) => running.get(t) ?? 0 } });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const send = (args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op: "turn.continue", callId, args });
+      out["running"] = await send({ n: 1, max: 3, endKind: "no-work-end" }, "nudge:j:1");
+      running.delete(taskId);
+      out["ended"] = await send({ n: 1, max: 3, endKind: "no-work-end" }, "nudge:j:2");
+    });
+    await c.tick();
+    const refusedJob = bad(out["running"]!);
+    assert.equal(refusedJob.code, "awaiting_job");
+    assert.match(refusedJob.message, /1 job\(s\) of this task are running; the turn ends, and the task is woken when a job ends/);
+    assert.deepEqual(good(out["ended"]!), { go: true, n: 1, max: 3, endKind: "no-work-end" });
+  });
+
   suite("a pause stops every write an agent makes through the bridge (desk, task, message, registration) and reads go on", async (c) => {
     const ann = await c.agentFor("ann");
     const { taskId } = await c.task("t", ann);
