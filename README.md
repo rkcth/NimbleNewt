@@ -194,7 +194,7 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 - [ ] **W07** · P36 · Set a length and reasoning budget per route profile _(needs W04, R01)_
 - [ ] **W08** · P37 · Show the owner how each attempt ended _(needs W03, W04, W05, U05)_
 - [ ] **W10** · P37 · Every attempt ends with a report written from running notes, and a second agent questions it _(needs W03, W05)_
-- [ ] **W09** · P38 · Pass the completion gates on the real worker and on the local route before release _(needs W01, W05, W06, W07, W08, W10)_
+- [ ] **W09** · P38 · Pass the completion gates on the real worker and on the Radiance route (the owner's local AI server) before release _(needs W01, W05, W06, W07, W08, W10)_
 
 </details>
 

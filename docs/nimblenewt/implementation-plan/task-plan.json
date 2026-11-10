@@ -2091,7 +2091,7 @@
       "id": "W09",
       "parent": "N03",
       "existing_issue": "AII-253",
-      "title": "Pass the completion gates on the real worker and on the local route before release",
+      "title": "Pass the completion gates on the real worker and on the Radiance route (the owner's local AI server) before release",
       "depends_on": [
         "W01",
         "W05",
@@ -2100,8 +2100,8 @@
         "W08",
         "W10"
       ],
-      "deliverable": "The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on the local route that uses the owner's AI server (Rob, 2026-11-10: every route is local; no cloud or Radiance-through-relay route is needed for this gate). This is a release gate",
-      "acceptance_and_verification": "A real task is shown working end to end on the local route from admission to a verified work.end and an accepted report; bench variants A to D are run on the real worker on that route and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached",
+      "deliverable": "The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on the Radiance route, which is the owner's local AI server and the only route that matters for this gate (Rob, 2026-11-10: Radiance is local; no cloud route is needed), with the model calls going through the controller's model relay (packages/pi-adapter/src/worker/relay-fetch.ts). This is a release gate",
+      "acceptance_and_verification": "A real task is shown working end to end on the Radiance route through the controller's relay, from admission to a verified work.end and an accepted report; bench variants A to D are run on the real worker on that route (the Radiance server) and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

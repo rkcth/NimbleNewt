@@ -5936,6 +5936,6 @@ Before this card a turn's result said only completed, failed or cancelled. Pi Du
 
 ## Owner decisions on completion, 2026-11-10 (Rob, in conversation)
 
-- Every route used for the completion gate is local (the owner's AI server); W09 no longer needs a Radiance or cloud route. W09 now blocks the macOS, Linux and Windows fresh-install qualification cards (X04 to X06).
+- The completion gate runs on the Radiance route, which is the owner's local AI server; no cloud route is used (an earlier line here wrongly said Radiance was dropped). W09 now blocks the macOS, Linux and Windows fresh-install qualification cards (X04 to X06).
 - An agent must always give a report when it ends, coding or not, built from running notes it keeps as it works; a second agent questions a done before it is recorded succeeded (new card W10). ASSUMPTION: the questioning agent can send work back to the same agent within the W03 limit and then raises a CTO blocker; it does not approve work (acceptance stays with the independent review) and does not ask the owner.
 - A standing grant expires only after it goes unused and renews on use (card A07h).
