@@ -419,20 +419,21 @@ export class MaintenanceService {
       for (const g of eff.grants) {
         if (g.grantId === undefined || !fits(g)) continue;
         const guard: Change[] = [];
-        let top: GrantRecordBody | undefined, whole = false;
+        let whole = false;
+        // Every record of a derived grant's chain is judged, not only the grant itself: a derived copy normally carries its parent's terms, but one that does not (an older record) must not shed them.
+        const judgeable = (terms: GrantRecordBody["terms"]): boolean => {
+          const t = terms ?? {};
+          return Object.keys(t).every((k) => k === "window" || k === "delegation") && (t.window === undefined || inWindow(t.window, now));
+        };
         for (let id: string | undefined = g.grantId, depth = 0; id !== undefined && depth <= MAX_DEPTH; depth++) {
           const rec = await this.#runner.get("grant-record", id);
           const body = rec?.body as unknown as GrantRecordBody | undefined;
-          if (rec === undefined || body === undefined || body.state !== "active") break;
-          top ??= body;
+          if (rec === undefined || body === undefined || body.state !== "active" || !judgeable(body.terms)) break;
           guard.push({ type: "check", ref: { kind: "grant-record", id }, expectedRevision: rec.revision });
           if (body.source !== "derived") { whole = true; break; }
           id = body.parentId;
         }
-        if (!whole || top === undefined) continue;
-        const terms = top.terms ?? {};
-        if (Object.keys(terms).some((k) => k !== "window" && k !== "delegation")) continue;
-        if (terms.window !== undefined && !inWindow(terms.window, now)) continue;
+        if (!whole) continue;
         return guard;
       }
       return undefined;
