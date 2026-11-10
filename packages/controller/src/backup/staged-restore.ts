@@ -275,10 +275,10 @@ export interface ApplyOptions {
 }
 
 /** A schema is never swapped under a running controller: one connected to the database refuses the start (the restore stays recorded and is applied by a start when it has gone). */
-async function noOtherController(port: PostgresRestorePort, o: ApplyOptions): Promise<void> {
+async function noOtherController(port: PostgresRestorePort, live: string, o: ApplyOptions): Promise<void> {
   const until = Date.now() + (o.controllersGoneMs ?? 5000);
   for (;;) {
-    const n = await port.controllersConnected();
+    const n = await port.controllersConnected(live);
     if (n === 0) return;
     if (Date.now() >= until) throw new Error(`a restore waits to be swapped in, but another controller is connected to this PostgreSQL database (${n} connection(s)); its schema is not renamed under it. Stop the other controller and start again; nothing was changed.`);
     await new Promise((r) => setTimeout(r, 200));
@@ -383,7 +383,7 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
         print(`A restore of ${pending.name} was tried and could not be applied (${pending.failed.reason}); the data is as it was. Cancel it (backup.restore.cancel) and prepare it again when the cause is fixed.`);
         return undefined;
       }
-      if (live.pg !== undefined) await noOtherController(live.pg.port, options);
+      if (live.pg !== undefined) await noOtherController(live.pg.port, live.pg.schema, options);
       const plan = await planMoves(pending, live);
       if ("missing" in plan) {
         const why = `${plan.missing} is missing, so nothing was moved`;
@@ -432,7 +432,11 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
   } finally { if (options.lock === undefined) await lock.release(); }
 }
 
-export interface RestoreStatus { pending?: PendingRestore; barrier: ReturnType<MaintenanceBarrier["state"]>; /** The marker on disk could not be read or is not authentic: the next start refuses until it is removed. */ markerProblem?: string; /** While a restore waits for the start that swaps it in: how that start happens (card K01i). */ restart?: RestartNotice }
+export interface RestoreStatus { pending?: PendingRestore; barrier: ReturnType<MaintenanceBarrier["state"]>; /** The marker on disk could not be read or is not authentic: the next start refuses until it is removed. */ markerProblem?: string; /** While a restore waits for the start that swaps it in: how that start happens (card K01i). */ restart?: RestartNotice; /** PostgreSQL, when any: the schemas earlier restores kept aside. */ kept?: KeptSchemas }
+
+/** PostgreSQL: the schemas earlier restores kept aside (card K01i, second review). NimbleNewt never drops them, so each restore leaves one more; the owner sees them here and removes the ones no longer needed. */
+export interface KeptSchemas { readonly schemas: readonly string[]; readonly note: string }
+export const KEPT_SCHEMAS_NOTE = "Each restore keeps the database as it was before it in one of these schemas; NimbleNewt never removes them. When you no longer need one, have the database administrator drop it (DROP SCHEMA <name> CASCADE).";
 
 /** What the owner is told about the restart a staged restore needs (card K01i). */
 export interface RestartNotice {
@@ -582,13 +586,25 @@ export class StagedRestore {
 
   /** The state for `backup.restore.status`: what this run prepared, or else what the marker on disk says (a restore that waits for a start, or that a start tried and rolled back). */
   async status(): Promise<RestoreStatus> {
+    const kept = await this.#kept();
+    const k = kept === undefined ? {} : { kept };
     const barrier = this.#o.barrier.state();
-    if (this.#pending !== undefined) return { pending: this.#pending.pending, barrier, restart: this.restartNotice() };
+    if (this.#pending !== undefined) return { pending: this.#pending.pending, barrier, restart: this.restartNotice(), ...k };
     try {
       const found = await readMarker(this.#o.dataDirectory, this.#db, this.#o.piFinal);
       // A marker on disk that this run did not prepare and that has not failed also waits for a start (the restart was not made, or the swap was refused at a start).
-      return { ...(found === undefined ? {} : { pending: found.pending }), barrier, ...(found === undefined || found.pending.failed !== undefined ? {} : { restart: { automatic: false, instruction: this.#o.restart?.instruction ?? DEFAULT_RESTART_INSTRUCTION } }) };
-    } catch (error) { return { barrier, markerProblem: error instanceof Error ? error.message.slice(0, 300) : "the marker cannot be read" }; }
+      return { ...(found === undefined ? {} : { pending: found.pending }), barrier, ...(found === undefined || found.pending.failed !== undefined ? {} : { restart: { automatic: false, instruction: this.#o.restart?.instruction ?? DEFAULT_RESTART_INSTRUCTION } }), ...k };
+    } catch (error) { return { barrier, markerProblem: error instanceof Error ? error.message.slice(0, 300) : "the marker cannot be read", ...k }; }
+  }
+
+  /** The kept schemas, best effort (a server that cannot be asked leaves them out of the status; it never fails it). */
+  async #kept(): Promise<KeptSchemas | undefined> {
+    const pg = this.#o.postgres;
+    if (pg === undefined) return undefined;
+    const port = pg.port ?? postgresRestorePort(pg.url);
+    if (port.keptSchemas === undefined) return undefined;
+    const schemas = await port.keptSchemas(pg.schema).catch(() => undefined);
+    return schemas === undefined || schemas.length === 0 ? undefined : { schemas, note: KEPT_SCHEMAS_NOTE };
   }
 
   async #rmStaged(p: { stagedDb: string; pi: readonly { staged: string }[] }): Promise<string[]> {

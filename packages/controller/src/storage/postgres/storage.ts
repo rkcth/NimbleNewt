@@ -11,6 +11,7 @@ import type {
   OperationResult, Page, StoredOperation, TimerClaim, TimerRecord, Timestamp,
 } from "../types.js";
 import { classify, isConnectionLoss } from "./errors.js";
+import { CONTROLLER_APPLICATION, LIVE_LOCK_CLASS, liveLockKey } from "./restore-swap.js";
 import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
 import { SNAPSHOT_PAGE_MAX, TABLE_SPECS, checkSnapshotRow, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
@@ -32,6 +33,8 @@ export interface PostgresOptions {
   readonly lockTimeoutMs?: number;
   /** How long a single statement may run. Default 30000. */
   readonly statementTimeoutMs?: number;
+  /** How long an idle pooled connection is kept before it is closed. Default 30000. */
+  readonly idleTimeoutMs?: number;
   /** For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it. */
   readonly migrations?: readonly Migration[];
   /** Called before an existing database is upgraded to a newer schema, with a snapshot of it as it is (card K01). A throw stops the upgrade and the open. */
@@ -144,6 +147,10 @@ export class PostgresStorage implements ControllerStorage {
   #createdSchema = false;
   #closed = false;
   #poolError: Error | undefined;
+  /** The connection that holds this schema's live lock (shared) while the storage is open; undefined while it is being taken again after a lost connection. */
+  #liveHold: pg.Client | undefined;
+  #liveRetry: NodeJS.Timeout | undefined;
+  #liveClient: (() => pg.Client) | undefined;
 
   private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
     this.#pool = pool;
@@ -184,28 +191,83 @@ export class PostgresStorage implements ControllerStorage {
       connectTimeoutMs: number("connectTimeoutMs", options.connectTimeoutMs, 5000, 1, 120_000),
       lockTimeoutMs: number("lockTimeoutMs", options.lockTimeoutMs, 5000, 1, 120_000),
       statementTimeoutMs: number("statementTimeoutMs", options.statementTimeoutMs, 30_000, 1, 3_600_000),
+      idleTimeoutMs: number("idleTimeoutMs", options.idleTimeoutMs, 30_000, 1, 3_600_000),
     };
     const pool = new pg.Pool({
       connectionString: withControllerApplication(options.connectionString),
       max: resolved.maxConnections,
       connectionTimeoutMillis: resolved.connectTimeoutMs,
-      idleTimeoutMillis: 30_000,
-      application_name: "nimblenewt-controller",
+      idleTimeoutMillis: resolved.idleTimeoutMs,
+      application_name: CONTROLLER_APPLICATION,
       types,
       // Session settings applied to every connection by the server at startup: our schema, durable commits, bounded waits.
       options: `-c search_path=${schema} -c synchronous_commit=on -c default_transaction_isolation=read\\ committed -c lock_timeout=${resolved.lockTimeoutMs} -c statement_timeout=${resolved.statementTimeoutMs} -c idle_in_transaction_session_timeout=${resolved.statementTimeoutMs}`,
     });
     const store = new PostgresStorage(pool, resolved, { allowUnsupported: options.allowUnsupportedServer === true, minimum: options.minimumServerVersionNum });
+    store.#liveClient = () => new pg.Client({ connectionString: withControllerApplication(options.connectionString), application_name: CONTROLLER_APPLICATION, connectionTimeoutMillis: resolved.connectTimeoutMs, keepAlive: true,
+      options: `-c statement_timeout=${resolved.statementTimeoutMs}` });
     try {
+      // Before anything else: from here until close, a restore is never swapped into (or out of) this schema (second review of card K01i).
+      await store.#holdLive();
       await store.#verifyServer();
       if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade);
       await store.#migrate(options.migrations ?? MIGRATIONS);
       return store;
     } catch (error) {
+      await store.#dropLive();
       await pool.end().catch(() => undefined);
       throw classify(error);
     }
   }
+
+  /**
+   * Takes this schema's live lock SHARED, on a connection of its own that is kept for the life of the storage (card K01i, second review). A restore swap takes the same lock exclusively and is refused while any
+   * storage holds it: unlike a session in `pg_stat_activity` it is there while the pool is idle, whatever role or application name the session has. At open the lock is waited for briefly (a swap holds it for
+   * one short transaction) and the open fails if it stays taken. A connection that is lost loses the lock: it is taken again in the background, every few seconds, until the storage is closed.
+   */
+  async #holdLive(): Promise<void> {
+    const until = Date.now() + Math.max(this.#options.connectTimeoutMs, 10_000);
+    const client = this.#liveClient!();
+    client.on("error", () => undefined);
+    await client.connect();
+    try {
+      for (;;) {
+        if ((await client.query("SELECT pg_try_advisory_lock_shared($1, hashtext($2)) AS got", [LIVE_LOCK_CLASS, liveLockKey(this.#options.schema)])).rows[0]?.got === true) break;
+        if (Date.now() >= until) throw new StorageError("unavailable", `a restore is being swapped into the schema ${this.#options.schema} right now; start again in a moment`);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    } catch (error) { await client.end().catch(() => undefined); throw error; }
+    if (this.#closed) { await client.end().catch(() => undefined); return; }
+    this.#liveHold = client;
+    const lost = (): void => {
+      if (this.#liveHold !== client) return;
+      this.#liveHold = undefined;
+      void client.end().catch(() => undefined);
+      this.#retakeLive();
+    };
+    client.on("error", lost);
+    client.on("end", lost);
+  }
+
+  #retakeLive(): void {
+    if (this.#closed || this.#liveRetry !== undefined) return;
+    this.#liveRetry = setTimeout(() => {
+      this.#liveRetry = undefined;
+      if (this.#closed || this.#liveHold !== undefined) return;
+      this.#holdLive().catch((error: unknown) => { this.#poolError = error instanceof Error ? error : new Error(String(error)); this.#retakeLive(); });
+    }, 3000);
+    this.#liveRetry.unref?.();
+  }
+
+  async #dropLive(): Promise<void> {
+    if (this.#liveRetry !== undefined) { clearTimeout(this.#liveRetry); this.#liveRetry = undefined; }
+    const client = this.#liveHold;
+    this.#liveHold = undefined;
+    if (client !== undefined) await client.end().catch(() => undefined);
+  }
+
+  /** Whether this storage holds its schema's live lock now (false only while a lost connection is being replaced, or once closed). */
+  get holdsLiveLock(): boolean { return this.#liveHold !== undefined; }
 
   /** An existing database whose journal is behind the migrations this version has: the hook is told, with a snapshot, before anything changes. */
   async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade): Promise<void> {
@@ -838,6 +900,7 @@ export class PostgresStorage implements ControllerStorage {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    await this.#dropLive();
     await this.#pool.end();
   }
 

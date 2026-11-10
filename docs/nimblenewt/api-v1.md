@@ -1149,7 +1149,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { pending?, barrier, markerProblem?, restart? } }`; `restart` (while a restore waits for its start) says whether the controller restarts itself and what the owner must do otherwise, with `failed` when an automatic restart failed; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again).
+Result: `{ item: { pending?, barrier, markerProblem?, restart?, kept? } }`; `restart` (while a restore waits for its start) says whether the controller restarts itself and what the owner must do otherwise, with `failed` when an automatic restart failed; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again); `kept` (PostgreSQL, when any) lists the schemas earlier restores kept aside (`<schema>_br_<stamp>`, oldest first) with a note: NimbleNewt never drops them, the owner removes them by hand.
 
 #### `database.transfer.status`
 

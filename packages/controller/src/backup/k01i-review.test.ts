@@ -7,9 +7,10 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "../api/index.js";
 import { SqliteStorage } from "../storage/index.js";
-import { PostgresStorage, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
+import { LIVE_LOCK_CLASS, PostgresStorage, liveLockKey, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { withControllerApplication } from "../storage/postgres/storage.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
+import { terminateLiveLockHolders } from "../storage/postgres/testing/live-lock.js";
 import { BackupService, MaintenanceBarrier, StagedRestore } from "./index.js";
 import { PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
 
@@ -184,7 +185,8 @@ test("the swap's own transaction checks again: a controller that connected after
       await running.currentEpoch();
       assert.equal(await applyPendingRestore(join(r.d, "data"), { postgres: { url: r.url, schema: r.schema, port: lateComer } }, (l) => out.push(l)), undefined);
     } finally { await running.close(); }
-    assert.match(out.join("\n"), /the schema was not swapped: \d+ connection\(s\) of a running controller/);
+    assert.match(out.join("\n"), /the schema was not swapped: a controller has the schema \S+ open/);
+    assert.ok(!out.join("\n").includes("nn-test-password") && !out.join("\n").includes(r.url), "the address is never printed");
     assert.equal(await real.exists(stagedSchemaOf(r.schema, stamp)), true, "not swapped");
     // The migration lock of the live schema held by an open in progress: refused too.
     await assert.rejects(withClient(r.url, async (holder) => {
@@ -192,5 +194,113 @@ test("the swap's own transaction checks again: a controller that connected after
       await real.swap({ live: r.schema, staged: stagedSchemaOf(r.schema, stamp), aside: `${r.schema}_br_${stamp.toLowerCase()}` });
     }), /migration lock is held/);
     assert.equal(await real.exists(stagedSchemaOf(r.schema, stamp)), true, "not swapped");
+  } finally { rmSync(r.d, { recursive: true, force: true }); }
+});
+
+// Second review of card K01i: the application-name count misses a running controller whose pool is idle (pooled connections close after idleTimeoutMs, so it has no session at all), one seen through a pooler
+// that renames sessions, and one of another role under a server that hides other roles' details. Every open storage holds its schema's live lock (shared) on a connection of its own; the swap takes it exclusively.
+
+/** A live, staged and aside schema made by hand, for the port's swap alone. */
+async function names(url: string, tag: string) {
+  const live = `k01ir_${tag}_${process.pid}`;
+  const stamp = "20261031T120000Z";
+  const s = { live, staged: stagedSchemaOf(live, stamp), aside: `${live}_br_${stamp.toLowerCase()}` };
+  await withClient(url, async (c) => { for (const x of [s.live, s.aside, s.staged]) await c.query(`DROP SCHEMA IF EXISTS ${x} CASCADE`); for (const x of [s.live, s.staged]) await c.query(`CREATE SCHEMA ${x}`); });
+  return { s, cleanup: () => withClient(url, async (c) => { for (const x of [s.live, s.aside, s.staged]) await c.query(`DROP SCHEMA IF EXISTS ${x} CASCADE`); }) };
+}
+
+test("a running controller whose pool has gone idle is still seen: the swap is refused while it is open and made once it closes", async () => {
+  const url = (await pg()).url();
+  const { s, cleanup } = await names(url, "idle");
+  try {
+    const running = await PostgresStorage.open({ connectionString: url, schema: s.live, idleTimeoutMs: 20 });
+    try {
+      await running.currentEpoch();
+      // The pool closes its idle connections; only the live lock's own connection stays.
+      const until = Date.now() + 5000;
+      while (running.poolStats().total > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(running.poolStats().total, 0, "the pool is idle and empty");
+      assert.equal(running.holdsLiveLock, true);
+      const port = postgresRestorePort(url);
+      assert.ok((await port.controllersConnected(s.live)) >= 1);
+      await assert.rejects(port.swap(s), new RegExp(`a controller has the schema ${s.live} open`));
+      assert.equal(await port.exists(s.staged), true, "not swapped");
+    } finally { await running.close(); }
+    assert.equal(running.holdsLiveLock, false);
+    await postgresRestorePort(url).swap(s);
+    assert.equal(await postgresRestorePort(url).exists(s.aside), true, "swapped once the controller closed");
+  } finally { await cleanup(); }
+});
+
+test("a controller seen through a pooler that renames its sessions, or as a role whose sessions are not listed, still blocks the swap and the start's wait by its live lock", async () => {
+  const url = (await pg()).url();
+  const { s, cleanup } = await names(url, "lock");
+  try {
+    const port = postgresRestorePort(url);
+    await withClient(url, async (holder) => {
+      // No controller application name at all: only the live lock says a controller has the schema open.
+      await holder.query("SET application_name = 'pgbouncer'");
+      assert.equal((await holder.query("SELECT pg_try_advisory_lock_shared($1, hashtext($2)) AS got", [LIVE_LOCK_CLASS, liveLockKey(s.live)])).rows[0].got, true);
+      assert.equal(await port.controllersConnected(), 0, "the application-name count alone does not see it");
+      assert.equal(await port.controllersConnected(s.live), 1);
+      assert.equal(await port.controllersConnected(`${s.live}x`), 0, "another schema's lock is not this one's");
+      await assert.rejects(port.swap(s), /a controller has the schema/);
+      await assert.rejects(port.unswap(s), /a controller has the schema/);
+    });
+    assert.equal(await port.exists(s.staged), true, "not swapped");
+    await port.swap(s);
+    // A controller holding the staged or the kept name (opened by mistake) is not renamed under either.
+    await withClient(url, async (holder) => {
+      assert.equal((await holder.query("SELECT pg_try_advisory_lock_shared($1, hashtext($2)) AS got", [LIVE_LOCK_CLASS, liveLockKey(s.aside)])).rows[0].got, true);
+      await assert.rejects(port.unswap(s), new RegExp(`a controller has the schema ${s.aside} open`));
+    });
+    await port.unswap(s);
+    assert.equal(await port.exists(s.staged), true, "undone");
+  } finally { await cleanup(); }
+});
+
+test("a controller whose lock connection is lost takes the live lock again by itself", async () => {
+  const url = (await pg()).url();
+  const { s, cleanup } = await names(url, "retake");
+  try {
+    const running = await PostgresStorage.open({ connectionString: url, schema: s.live });
+    try {
+      assert.equal(running.holdsLiveLock, true);
+      assert.equal(await terminateLiveLockHolders(url, s.live), 1);
+      const until = Date.now() + 10_000;
+      while (running.holdsLiveLock && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(running.holdsLiveLock, false, "the loss is noticed");
+      while (!running.holdsLiveLock && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+      assert.equal(running.holdsLiveLock, true, "taken again");
+      await assert.rejects(postgresRestorePort(url).swap(s), /a controller has the schema/);
+    } finally { await running.close(); }
+  } finally { await cleanup(); }
+});
+
+test("the schemas earlier restores kept aside are listed in the restore status with how to remove them; nothing drops them", async () => {
+  const r = await rig();
+  try {
+    let stamp: string;
+    let token: string;
+    let c = await r.open();
+    try {
+      const staged = await stage(c); token = staged.token; const applied = staged.applied;
+      assert.ok(applied.ok, JSON.stringify(applied));
+      const before = (await call(c, token, "backup.restore.status", {})).result.item;
+      assert.equal(before.kept, undefined, "no restore was swapped in yet");
+      stamp = before.pending.stamp;
+    } finally { await c.close(); }
+    c = await r.open();
+    try {
+      const status = (await call(c, token, "backup.restore.status", {})).result.item;
+      const port = postgresRestorePort(r.url);
+      const aside = `${r.schema}_br_${stamp.toLowerCase()}`;
+      assert.deepEqual(await port.keptSchemas!(r.schema), [aside]);
+      assert.deepEqual(await port.keptSchemas!(`${r.schema}x`), [], "another schema's kept ones are not this one's");
+      assert.deepEqual(status.kept.schemas, [aside]);
+      assert.match(status.kept.note, /never removes them/);
+      assert.ok(!JSON.stringify(status).includes("nn-test-password"), "the address (with its password) is never shown");
+      assert.equal(await port.exists(aside), true);
+    } finally { await c.close(); }
   } finally { rmSync(r.d, { recursive: true, force: true }); }
 });
