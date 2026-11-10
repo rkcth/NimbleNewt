@@ -2101,6 +2101,24 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "W11",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Wake the task when a long job finishes, and tell the owner",
+      "depends_on": [
+        "T07b",
+        "W03"
+      ],
+      "deliverable": "Owner decision 2026-11-10 (Rob): an agent that starts a long job and says it will report when the job is done gets no wake-up today. The job runs and the controller records its result (packages/controller/src/jobs/jobs.ts, around line 632), but nothing starts or resumes the agent when it finishes; the agent has to poll job-status or a later attempt has to read it, and nothing tells the owner. This card closes that: (1) when a job that belongs to a task reaches a final state (completed, failed, cancelled, outcome unknown) the controller wakes the task: it readmits the waiting attempt, or admits a new attempt for the same task and assignment (never a second concurrent attempt; a task that is stopped, paused, finished or reassigned is not woken), with a short fixed note that names the job label, its state and where to read the bounded output (job-status, job-output); the wake-up is bounded (one wake per job final state, a bounded number per task per hour, counted with the stopped-early limit of W03 so it cannot be used to run an attempt forever) and durable (a controller restart between the finish and the wake still wakes it once); (2) the job-start reply and the completion rules of the agent's system prompt (W06) say plainly what the agent can rely on: it is woken when the job ends, so it should record its place in its notes and end the turn, or it should poll; an agent never promises a notification the system does not send; (3) the owner gets one plain notification when a long job for a task ends (label quoted once, state, task title; failed or outcome-unknown ones as Needs you, completed ones as Notice), bounded and not repeated; (4) a background job of a paused task still records its result without lifting the pause, and the wake waits until the pause is lifted; (5) the job result text shown to the agent or the owner is bounded, quoted once and redacted",
+      "acceptance_and_verification": "A job started by an attempt that then ends its turn is followed by a new or resumed attempt that is told the job finished and reads its output; a job that fails, is cancelled or is outcome-unknown wakes the task the same way with that state named; no wake for a stopped, paused, finished or reassigned task and the paused one wakes after the pause is lifted; a restart between the job finishing and the wake still gives exactly one wake; repeated final-state records give one wake; wakes are bounded per task per hour and counted with the W03 limit; the owner receives one notification per ended long job in plain words with no fixed phrase needed to ask about it; the job-start reply and the system prompt section state what the agent can rely on; tests on all four storage backends and through the real local worker",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "W09",
       "parent": "N03",
       "existing_issue": "AII-253",
@@ -9788,6 +9806,7 @@
         "C07p",
         "C07q",
         "A07h",
+        "W11",
         "L02b",
         "H08b",
         "U06b",
