@@ -60,3 +60,17 @@ test("the report has a table row per variant and size, each variant's gates and 
   assert.equal(r.pass, false);
   assert.match(renderReport([]).text, /RESULT: no runs/);
 });
+
+test("an interface mismatch is a non-finish that counts in the false-done gate, and the shipped-wording score is shown without gating", async () => {
+  const { renderReport, gatesFor, aggregate } = await import("./lib/stats.mjs");
+  const recs = [
+    { variant: "A", size: "S", taskId: "t", outcome: "interface-mismatch", shipped: { passed: false } },
+    { variant: "A", size: "S", taskId: "t", outcome: "verified-finish", shipped: { passed: false } },
+  ];
+  const g = gatesFor("A", aggregate(recs));
+  assert.ok(g.lines.some((l) => /^false done 1\/2/.test(l)), g.lines.join("\n"));
+  assert.ok(g.lines.some((l) => /^S verified finish 1\/2/.test(l)));
+  const text = renderReport(recs).text;
+  assert.match(text, /matches shipped wording \(informational, not a gate\): 0\/2/);
+  assert.match(text, /interface mismatch .*1 run\(s\)/);
+});

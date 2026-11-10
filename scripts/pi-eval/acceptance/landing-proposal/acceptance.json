@@ -1,0 +1,14 @@
+{
+  "files": {
+    "packages/controller/src/chat/w01-acceptance-landing-proposal.test.ts": "w01-acceptance-landing-proposal.test.ts",
+    "packages/controller/src/api/w01-acceptance-landing-proposal-start.test.ts": "w01-acceptance-landing-proposal-start.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/chat/w01-acceptance-landing-proposal.test.js",
+    "dist/api/w01-acceptance-landing-proposal-start.test.js"
+  ],
+  "allow": {
+    "/\\\\u\\{[0-9a-fA-F]*\\.\\.\\.|\\\\u[0-9a-fA-F]{0,3}\\.\\.\\./": "a doesNotMatch: it demands only that no partial \\u escape precedes the cut's '...'; the prompt says values are escaped and cut between whole characters, and the base's short() cuts with '...'"
+  }
+}

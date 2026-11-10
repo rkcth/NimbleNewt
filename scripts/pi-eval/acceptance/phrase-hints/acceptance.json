@@ -1,0 +1,17 @@
+{
+  "files": {
+    "packages/controller/src/chat/w01-acceptance-phrase-hints.test.ts": "w01-acceptance-phrase-hints.test.ts",
+    "packages/controller/src/api/w01-acceptance-phrase-hints-chat.test.ts": "w01-acceptance-phrase-hints-chat.test.ts",
+    "packages/controller/src/remote/w01-acceptance-phrase-hints-quiet.test.ts": "w01-acceptance-phrase-hints-quiet.test.ts"
+  },
+  "support": [],
+  "testFiles": [
+    "dist/chat/w01-acceptance-phrase-hints.test.js",
+    "dist/api/w01-acceptance-phrase-hints-chat.test.js",
+    "dist/remote/w01-acceptance-phrase-hints-quiet.test.js"
+  ],
+  "allow": {
+    "/ends 2026-12-20\\\\u\\{1b\\}\\[31m T00:00:00\\.000Z/": "the fixture's expiresAt passed through short(): CONTRACT says each date goes through short() once, a control becomes \\u{1b} and a line separator a space; short()'s escaping is in the base source (chat/commands.ts)",
+    "/starts 2026-12-01\\\\u\\{7\\}T00:00:00\\.000Z/": "the fixture's notBefore passed through short() once (CONTRACT); BEL escapes to \\u{7} by short()'s base-source rule"
+  }
+}

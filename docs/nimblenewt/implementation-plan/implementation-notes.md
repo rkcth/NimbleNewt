@@ -6067,6 +6067,59 @@ Before this card a completed turn ended the attempt `succeeded` (`dispatch/dispa
 - Both branches changed the first-call order in `dispatch/dispatcher.ts`; the merge keeps W03's per-round request id (`:se<n>`) and C07i's `startParts`.
 - Two existing tests needed the same fixture fixes the other W03 tests had: `api/start-start-size.test.ts` now has its scripted turn report `endKind: "normal"`, and the `h12bf-composed` compaction fixture answers were shortened again (440 to 400 repeats) because with C07i the first call of the second attempt was estimated at 10,565 tokens against a 10,240 limit (it passed at the C07o and W02 merges). ASSUMPTION: that rise comes from C07i's change to count the order as actually sent; it was not traced to a single cause, so a reviewer of the next first-call card should confirm the estimate is not counting a part twice.
 
+## W01 (bench fix): the first baseline is invalid; acceptance suites, CONTRACT blocks, spec fit, a fixed classifier and a Claude control agent (2026-11-10)
+
+The first baseline (43 of 54 runs, 2026-11-09/10) scored no finish, and an audit of every run found it measured the gap between the prompts and the hidden tests rather than Pi: in 38 of 43 runs a hidden test demanded wording, a field name or a signature the prompt never stated, and 9 `stopped-early` labels were classifier misses. Its data is kept, re-labelled only, in `/srv/code/worktrees-pi/eval-results/baseline-1-invalid/`; no rate may be read from it. `scripts/pi-eval/README.md`, "What changed on 2026-11-10", is the manual.
+
+What is built (branch `w01-bench-fix`):
+
+- **Classifier.** A report with every PLAN.md box ticked, a clean tree and a green last self-test is a done claim whatever its words; "all boxes ticked", "tree clean", "all steps committed" are done words; a closing scoped caveat note ("Remaining risk / not done:") makes it `done-with-caveats`, still a done claim. New outcome **interface-mismatch**: a done claim whose build failed only in the held-back files (a non-finish, not a false done). `rescore.mjs` finds moved runs, reads old runs' mismatch from their setup log, prints a before/after table and never overwrites a backup.
+- **Rescore of the invalid baseline** (43 runs, smoke runs aside):
+
+  | outcome | before | after |
+  |---|---|---|
+  | stopped-early | 9 | 0 |
+  | wrong | 32 | 28 |
+  | interface-mismatch | 0 | 13 |
+  | timeout | 2 | 2 |
+
+- **Task design.** Every task prompt ends with a CONTRACT block naming each exported name, field, signature and message meaning the scored tests use (no solution code). The score is a bench-owned **acceptance suite** per task (`scripts/pi-eval/acceptance/<id>/`) that asserts meaning, not whole sentences, written at fresh `w01-acceptance-*` paths; the shipped test files still run, reported as "matches shipped wording" (informational, no gate). grant-proposals' prompt now gives the solution's own no-limit sentence and the `only in proj-x` form for an unnamed project.
+- **Spec fit** in `--calibrate`: every literal, regex, property name and relative import inside an acceptance assertion must be in the prompt, the base source or the test's fixtures, or carry a reason in `acceptance.json` `allow`.
+- **Leftover processes:** every run's commands carry `PI_EVAL_RUN_DIR`; processes in the checkout, marked, or descended from one are killed after the agent, each suite and the run.
+- **Control runs:** `--agent`, `--label`, `compare.mjs`, and `agents/claude-agent.mjs`, which runs `claude -p --output-format stream-json` in the checkout (prompt on stdin, local tools only, no web tools, no MCP servers) and converts its stream to Pi events. Tested only against a fake CLI (`agents/fake-claude.mjs`); never run against the real CLI.
+- **Final calibration** (`node scripts/pi-eval/run.mjs --calibrate`, bench commit 86572ecc, no agent, default results folder; all nine ok, about 21 minutes):
+
+  | task | size | acceptance at base | at solution | shipped suites at solution | spec fit: unlisted, all reasoned |
+  |---|---|---|---|---|---|
+  | quote-lines | S | 0/15 | 15/15 | 154/154 | 4 of 54 |
+  | flaky-proposal | S | 0/5 | 5/5 | 38/38 | 0 of 102 |
+  | grant-proposals | S | 0/18 | 18/18 | 275/275 | 0 of 202 |
+  | landing-proposal | M | 0/2 (build fails in suite) | 28/28 | 34/34 | 1 of 175 |
+  | c07n | M | 0/16 | 16/16 | 61/74 (13 todo) | 4 of 335 |
+  | phrase-hints | M | 0/15 (build fails in suite) | 19/19 | 376/376 | 2 of 181 |
+  | m03h-1 | L | 0/40 (build fails in suite) | 40/40 | 316/316 | 0 of 510 |
+  | l02e-2 | L | 0/28 (build fails in suite) | 28/28 | 189/189 | 0 of 286 |
+  | c07m | L | 8/24 (build fails in suite) | 66/66 | 357/358 (1 todo) | 2 of 438 |
+
+- **Tests:** `node --test "scripts/pi-eval/*.test.mjs"` 56 of 56; `scripts/plan.test.mjs` 6 of 6; `roadmap:check` and `check:deps` ok.
+
+What is left:
+
+- **The new baseline** of variants A and B over the nine tasks (54 runs, about 20 GPU hours on Radiance), only with Rob's go-ahead and at a quiet time; record its batch, commit, route and report here. That is W01's acceptance.
+- **One Claude control repeat per task** (`node scripts/pi-eval/run.mjs --agent scripts/pi-eval/agents/claude-agent.mjs --label claude-control --repeats 1 --variants A`, then `compare.mjs`); it uses the Claude account's quota and needs Rob's go-ahead; read the first `agent.jsonl` by hand.
+- Spec fit is lexical (it does not see computed strings, output order or types beyond imports), and the bench isolates the checkout, not the machine (detection only, as before). Variants C and D wait for W04.
+
+- ASSUMPTION: the acceptance suites, not the shipped test files, are the score. The shipped files carry wording later review rounds settled on that no prompt states; scoring them measured the prompts.
+- ASSUMPTION: an interface mismatch is a non-finish but not a false done, so it counts against the finish gate and not the 5 % false-done gate.
+- ASSUMPTION: a spec-fit item that comes from the base source's own behaviour (for example short()'s escaping of a control character) is allowed with a written reason rather than restated in the prompt.
+- ASSUMPTION: the Claude control agent gets edits accepted and the local tools only (Bash, Read, Edit, Write, Glob, Grep), no web tools and no MCP servers, to match Pi's offline run as closely as the CLI allows.
+
+## W01 bench fix: merge decisions (2026-11-10, lead)
+
+- ASSUMPTION: an interface-mismatch run (said done; the acceptance files do not type-check against its code) counts in the false-done gate, because the prompt CONTRACT now pins every name and signature. The review advised it; the stats test and README were changed to match.
+- The Claude control agent (`scripts/pi-eval/agents/claude-agent.mjs`) allows Bash without restriction and has only been run against a fake CLI; it must be run by hand first and read before any real use. It is not run by anything.
+- A new 54-run baseline (about 20 GPU hours on Radiance) and a Claude control repeat are NOT started: Rob said no Pi runs without his go-ahead.
+
 ## W04: a turn that yields early is continued in the same turn, at most three times (2026-11-10)
 
 W03 readmits a run that stopped early as a new request in the same conversation. W04 is the layer inside the turn. Pi Durable asks its `onYield` hooks about every final answer, and the first `continue` appends a user message and hands the run to a successor generation of the same submission. NimbleNewt did not install that hook before this card.

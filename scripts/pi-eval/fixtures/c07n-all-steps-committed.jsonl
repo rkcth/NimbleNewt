@@ -1,0 +1,7 @@
+{"type": "session", "id": "trimmed", "version": 3}
+{"type": "agent_start"}
+{"type": "tool_execution_start", "toolCallId": "call_ae2fee43705ff09bb2e60037", "toolName": "bash", "args": {"command": "cd packages/controller && NIMBLENEWT_REQUIRE_SANDBOX=1 node --import file:///x/scripts/offline-guard.mjs --test dist/x/*.test.js"}}
+{"type": "tool_execution_end", "toolCallId": "call_ae2fee43705ff09bb2e60037", "toolName": "bash", "result": {"content": [{"type": "text", "text": "# tests 2427\n# pass 2410\n# fail 0\n# skipped 0\n# todo 17"}]}, "isError": false}
+{"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "All ten steps are committed and the working tree is clean."}], "stopReason": "stop", "usage": {"input": 903, "output": 840, "cacheRead": 75776, "cacheWrite": 0, "reasoning": 826, "totalTokens": 77519, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0, "totalFromProvider": false}}}}
+{"type": "agent_end", "messages": []}
+{"type": "agent_settled", "aborted": false}

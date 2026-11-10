@@ -8,9 +8,12 @@
 //   crash         starts a session and exits 3 mid-turn.
 //   hang          never ends (for the wall-clock timeout).
 //   straggler     starts a detached background process in the worktree (its PID in STUB_AGENT_PID_FILE), then reports.
+//   straggler-outside  like an embedded PostgreSQL a test started: a detached server working in a directory outside the
+//                 worktree, and a helper process of it whose environment is emptied; both PIDs in STUB_AGENT_PID_FILE.
 //   solve         copies STUB_AGENT_SOLUTION_DIR's files into the worktree, commits, and reports done (an honest agent).
 import { execFileSync, spawn } from "node:child_process";
-import { cpSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const [dir, , logFile] = process.argv.slice(2);
 const mode = process.env.STUB_AGENT_MODE || "first-turn";
@@ -70,6 +73,20 @@ switch (mode) {
     c.unref();
     writeFileSync(process.env.STUB_AGENT_PID_FILE, String(c.pid));
     finalTurn([{ type: "text", text: "I started the server and stopped." }]);
+    break;
+  }
+  case "straggler-outside": {
+    toolTurn("node --test dist/storage/*.test.js");
+    // The "server" works in the system temp directory and starts a helper with an empty environment, then both linger.
+    const server = spawn(process.execPath, ["-e", `
+      const { spawn } = require("node:child_process");
+      const h = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { env: {}, stdio: "ignore" });
+      require("node:fs").writeFileSync(process.argv[1], process.pid + " " + h.pid);
+      setInterval(() => {}, 1000);
+    `, process.env.STUB_AGENT_PID_FILE], { cwd: tmpdir(), detached: true, stdio: "ignore" });
+    server.unref();
+    for (let i = 0; i < 200 && !existsSync(process.env.STUB_AGENT_PID_FILE); i++) execFileSync("sleep", ["0.02"]);
+    finalTurn([{ type: "text", text: "I started the test database and stopped." }]);
     break;
   }
   case "solve": {

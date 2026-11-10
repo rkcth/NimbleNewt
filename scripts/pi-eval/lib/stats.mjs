@@ -57,7 +57,8 @@ export function gatesFor(variant, groups) {
     lines.push(`${size} verified finish ${k}/${g.n} = ${pct(k / g.n)} [95% ${pct(w.low)}-${pct(w.high)}] gate >= ${pct(need)}: ${ok ? "ok" : "FAIL"}${ok && w.low < need ? " (interval still reaches below the gate)" : ""}`);
   }
   const n = mine.reduce((a, g) => a + g.n, 0);
-  const wrong = mine.reduce((a, g) => a + g.counts.wrong, 0);
+  // The contract now pins every name and signature, so a said-done run whose acceptance tests do not type-check ignored the contract: it counts toward the false-done gate (Rob's rule: nothing waits on him; lead's decision on the second review's advice).
+  const wrong = mine.reduce((a, g) => a + g.counts.wrong + (g.counts["interface-mismatch"] ?? 0), 0);
   const unclassified = mine.reduce((a, g) => a + g.counts.unclassified, 0) + mine.filter((g) => g.size === "?").reduce((a, g) => a + g.n, 0);
   if (n > 0) {
     const w = wilson(wrong, n);
@@ -90,7 +91,13 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
   for (const v of variants) {
     const r = gatesFor(v, groups);
     allPass &&= r.pass;
-    out.push(`## Variant ${v}`, ...r.lines.map((l) => `- ${l}`), `- ${r.pass ? "PASS" : `FAIL: ${r.failures.join("; ")}`}`, "");
+    // The card's shipped test files, also run on each agent's work: they carry wording later review rounds settled on that
+    // no prompt states, so they are shown for information and never gate.
+    const shipped = records.filter((x) => String(x.variant ?? "?") === v && x.shipped);
+    const info = shipped.length > 0 ? [`- matches shipped wording (informational, not a gate): ${shipped.filter((x) => x.shipped.passed).length}/${shipped.length} run(s) pass the card's shipped test files`] : [];
+    const mism = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
+    if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes, not as false done`);
+    out.push(`## Variant ${v}`, ...r.lines.map((l) => `- ${l}`), ...info, `- ${r.pass ? "PASS" : `FAIL: ${r.failures.join("; ")}`}`, "");
   }
   out.push(variants.length === 0 ? "RESULT: no runs" : `RESULT: ${allPass ? "PASS" : "FAIL"} (${variants.map((v) => `${v} ${gatesFor(v, groups).pass ? "pass" : "fail"}`).join(", ")})`);
   return { text: out.join("\n"), pass: allPass, groups };

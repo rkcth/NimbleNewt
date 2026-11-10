@@ -1,0 +1,9 @@
+{
+  "files": {
+    "packages/controller/src/chat/w01-acceptance-grant-proposals.test.ts": "w01-acceptance-grant-proposals.test.ts",
+    "packages/controller/src/api/w01-acceptance-grant-proposals-chat.test.ts": "w01-acceptance-grant-proposals-chat.test.ts"
+  },
+  "support": [],
+  "testFiles": ["dist/chat/w01-acceptance-grant-proposals.test.js", "dist/api/w01-acceptance-grant-proposals-chat.test.js"],
+  "allow": {}
+}
