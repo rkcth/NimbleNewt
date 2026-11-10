@@ -31,7 +31,7 @@ export interface ProposalBody {
   readonly spanDays?: number;
   /** How the standing grants this same requester, project, class and environment were given before ended, oldest first, at most `HISTORY_KEPT`: how long each was approved for and whether the owner took it back before its end. Kept when the proposal is offered again. */
   readonly history?: readonly { readonly days: number; readonly revoked: boolean }[];
-  /** What the owner's acceptance fixed: the length used and how it was chosen. The grant expires that many days after the acceptance. */
+  /** What the owner's acceptance fixed: the length used and how it was chosen. The grant lapses once it goes that many days unused, and each use renews it (card A07h; before A07h it expired that many days after the acceptance). */
   readonly chosenLength?: { readonly days: number; readonly source: "owner" | "default"; readonly why: string };
   readonly state: "open" | "accepted" | "dismissed";
   readonly createdAt: string;
