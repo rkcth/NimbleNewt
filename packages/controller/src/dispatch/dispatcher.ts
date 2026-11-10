@@ -193,8 +193,11 @@ export interface DispatcherDeps {
   /** The task is on the same route it last ran on: a refusal that an earlier move to another route left behind is closed (card C07f). */
   readonly routeKept?: (kept: { readonly taskId: string; /** The route the task is on (a refusal made for this same route is not stale). */ readonly route: string }) => Promise<void>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
-  /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
-  readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
+  /**
+   * Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here, card L04d): at the end of every turn that left one (`turn-complete`), at a shutdown (`shutdown`) and
+   * whenever the controller asks for one (`manual`: a quiesce, a stop, a recipe change). Awaited before the attempt's next step is written, so a resume that follows can be checked against it; a throw is reported, never the attempt's failure.
+   */
+  readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; boundary: "turn-complete" | "manual" | "shutdown"; checkpoint: JsonObject }) => Promise<unknown>;
   /**
    * Where the agent's native store is, and whether another attempt holds it (card H02: the store has one exclusive owner host). With it the dispatcher starts the agent's attempts on that host only, and an
    * attempt whose store is busy waits for the attempt that holds it; without it only the placement itself refuses.
@@ -557,7 +560,7 @@ export class DispatcherService {
       if (d === undefined || d.body.state !== "running") continue;
       try {
         await this.settle(by, id, { cancel: true }).catch(() => undefined);
-        const checkpoint = await this.#checkpoint(id, "the controller shut down").catch(() => undefined);
+        const checkpoint = await this.#checkpoint(id, "the controller shut down", "shutdown").catch(() => undefined);
         const current = (await this.#load(id))!;
         // The turn is let go before its worker is stopped (as a move does): a turn that ends as soon as its process is closed (the local worker's does) is not this attempt's turn any more, so its
         // `cancelled` or `failed` does not end the attempt that is about to wait for its resume (card C07l).
@@ -1229,10 +1232,14 @@ export class DispatcherService {
     if (resumes.hasContinuation !== undefined) {
       try { if (!(await resumes.hasContinuation(by, taskId))) return undefined; } catch (error) { return `the resume check could not be run: ${errorText(error)}`.slice(0, 500); }
     }
-    const slash = route.indexOf("/");
     const plain = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 80) || "unknown";
-    const model = { provider: plain(slash < 0 ? "route" : route.slice(0, slash)), id: plain(slash < 0 ? route : route.slice(slash + 1)) };
-    const base = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null, model])).slice(4, 16)}`;
+    const modelOf = (r: string): { provider: string; id: string } => { const slash = r.indexOf("/"); return { provider: plain(slash < 0 ? "route" : r.slice(0, slash)), id: plain(slash < 0 ? r : r.slice(slash + 1)) }; };
+    const model = modelOf(route);
+    // The route the checkpoint was taken on is the one the attempt last ran on (its last model call's, else the route it was claimed with). A different route now is a resume after a change of model (card L04d):
+    // the check and the resume record say so and name the model before. The key only grows for that case, so a check of an unchanged route keeps the key it had.
+    const before = b.modelCall?.route ?? b.route;
+    const changed = before !== route ? modelOf(before) : undefined;
+    const base = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null, model, ...(changed === undefined ? [] : [changed])])).slice(4, 16)}`;
     // A check the dispatcher itself cancelled as stale (the route flapped) does not count toward the restart budget; the key list is long enough for a flapping route.
     const keys = Array.from({ length: RESUME_RESTARTS + 1 + MAX_STALE_RESTARTS }, (_, n) => (n === 0 ? base : `${base}-r${n}`));
     try {
@@ -1260,7 +1267,7 @@ export class DispatcherService {
         return `the resume check was cancelled ${counted} times; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
       }
       const key = keys[n]!;
-      let check = await resumes.start(by, { commandId: key, taskId, attemptId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
+      let check = await resumes.start(by, { commandId: key, taskId, attemptId, model, ...(changed === undefined ? { after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" } : { previousModel: changed, after: "model-change" }) });
       if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
       if (check.phase === "ready") {
         // A check that holds changes judged to matter is not committed by the dispatcher: the owner decides (`resume.approve`). The commit itself comes last, just before the start (card L04c).
@@ -2101,6 +2108,8 @@ export class DispatcherService {
       const d = await this.#load(attemptId);
       if (d === undefined || d.body.state !== "running") return;
       try {
+        // A completed turn is a safe boundary (card L04d): the checkpoint it left is captured as the task's continuation before the attempt parks, is readmitted or ends, so the resume that follows is checked against it.
+        if (result.status === "completed" && result.checkpoint !== undefined) await this.#taken({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason: "the turn completed", boundary: "turn-complete", checkpoint: result.checkpoint });
         if (result.usage !== undefined) {
           // A turn's figures that could not be charged are not lost silently: the attempt's record says so (redacted, clipped).
           // A remote turn's result is stored once per placement: keyed by it, a new primary that takes the same result again (the old one charged it and lost the store before ending the attempt) charges nothing more (card H09b).
@@ -2319,7 +2328,7 @@ export class DispatcherService {
     const used = counted !== undefined && counted.body.generation === b.generation ? counted.body.readmits : 0;
     const how = `${early.endKind}${early.visibleChars === undefined ? "" : `, ${early.visibleChars} visible characters`}`;
     let checkpoint = early.checkpoint;
-    if (checkpoint === undefined && used < STOPPED_EARLY_READMITS) checkpoint = await this.#checkpoint(attemptId, "the turn stopped early").catch(() => undefined);
+    if (checkpoint === undefined && used < STOPPED_EARLY_READMITS) checkpoint = await this.#checkpoint(attemptId, "the turn stopped early", "turn-complete").catch(() => undefined);
     if (used < STOPPED_EARLY_READMITS && checkpoint !== undefined) {
       const round = used + 1;
       const live = this.#live.get(attemptId);
@@ -2516,7 +2525,7 @@ export class DispatcherService {
     return changed;
   }
 
-  async #checkpoint(attemptId: string, reason: string): Promise<JsonObject | undefined> {
+  async #checkpoint(attemptId: string, reason: string, boundary: "turn-complete" | "manual" | "shutdown" = "manual"): Promise<JsonObject | undefined> {
     const live = this.#live.get(attemptId);
     const d = await this.#load(attemptId);
     if (live === undefined || d === undefined) return undefined;
@@ -2524,8 +2533,14 @@ export class DispatcherService {
     // Fenced by placement: a checkpoint that comes back after the attempt was moved (or its worker replaced) is the old placement's and is discarded, so it never overwrites the record the new placement continues from.
     const after = await this.#load(attemptId);
     if (this.#live.get(attemptId) !== live || after === undefined || after.body.hostId !== d.body.hostId || after.body.state === "finished") return undefined;
-    await this.#deps.checkpoints?.({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason, checkpoint });
+    await this.#taken({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason, boundary, checkpoint });
     return checkpoint;
+  }
+
+  /** Hands a checkpoint to the checkpoint hook (a continuation capture, card L04d). What the hook could not do is reported, never thrown: the attempt goes on either way. */
+  async #taken(info: { attemptId: string; taskId: string; agentId: string; reason: string; boundary: "turn-complete" | "manual" | "shutdown"; checkpoint: JsonObject }): Promise<void> {
+    if (this.#deps.checkpoints === undefined) return;
+    try { await this.#deps.checkpoints(info); } catch (error) { this.#options.onError?.(error); }
   }
 
   async #usage(attemptId: string, usage: TurnUsage, requestKey?: string): Promise<void> {

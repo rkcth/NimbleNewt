@@ -1,5 +1,7 @@
 import type { PiStateSource } from "../backup/index.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
+import type { ContinuationService } from "../continuation/continuation.js";
+import { continuationRecorder } from "../continuation/host-capture.js";
 import type { ReleaseService } from "../release/release.js";
 import { createHash } from "node:crypto";
 import { framedMcp } from "../dispatch/tools.js";
@@ -109,6 +111,11 @@ export interface DispatchStartOptions {
    * the dispatcher's own default (the task's title, how the attempt ended and whether it holds a checkpoint), which is all a controller with no ledger reader knows.
    */
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
+  /**
+   * Whether every checkpoint a worker host hands the dispatcher (the end of a turn, a shutdown, a stop) is captured as the task's continuation (card L04d). Default on; `false` captures none, and a resume is then checked only
+   * against what a host or the owner captured through `continuation.capture`. A capture is complete only when the host said its checkpoint reads back from its store.
+   */
+  readonly captureContinuations?: boolean;
   /** How the route and harness of a task are chosen. Default: the owner's configured execution profiles and routing table (R03). */
   readonly route?: RouteResolver;
   /** Time between ticks. Default 5 seconds. */
@@ -269,6 +276,8 @@ export interface ComposeInput {
    * generation and runtime of the attempts it cut, and every tick carries out what the controls leave due (an expired drain becomes a cutover; a cancellation a crash left is done again).
    */
   readonly routes?: { readonly cutover: CutoverService; readonly fallback: FallbackService };
+  /** Where the checkpoints workers hand the dispatcher are captured as continuations (card L04d); absent: none are. */
+  readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
   /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
   /**
@@ -659,6 +668,18 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         }, { ...ro, ...i.quietHosts.options });
       }
     }
+    // Every checkpoint a worker host hands the dispatcher becomes the task's continuation (card L04d), captured as the dispatcher: the lineage from the task's compactions (C07q), the budget from accounting, and the
+    // previous continuation's identity, artifacts and decisions carried on. Complete only when the host said the checkpoint reads back from its store.
+    const continuations = i.continuations;
+    const capture = continuations === undefined || i.options.captureContinuations === false ? undefined : continuationRecorder({
+      continuations, principal,
+      sources: {
+        compaction: async (taskId) => await context.latestCompaction(principal, taskId),
+        budget: async (taskId) => { const r = await budgets.accounting(principal, taskId); return r === undefined ? undefined : { spent: r.spent.costMicros, remaining: r.available.costMicros, unit: `${r.currency} micros` }; },
+        previous: async (taskId) => await continuations.latest(principal, taskId),
+      },
+      ...(i.onError === undefined ? {} : { onError: i.onError }),
+    });
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
@@ -674,6 +695,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
       ...(i.options.handoffFacts === undefined ? {} : { handoffFacts: i.options.handoffFacts }),
+      ...(capture === undefined ? {} : { checkpoints: capture }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...((i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning) === undefined ? {} : { safeLongRunning: (i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning)! }), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
