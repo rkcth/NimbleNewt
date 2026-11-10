@@ -106,6 +106,12 @@ export interface StagedRestoreOptions {
   readonly unlock?: (method: UnlockMethod) => Promise<BackupKey>;
   readonly deletions?: () => Promise<readonly LedgerEntry[]>;
   readonly onStaged?: (pending: PendingRestore) => void;
+  /**
+   * How the controller gets restarted once a restore is staged (card K01i). `automatic`: the host's own restart (it closes this controller and starts it again), called `delayMs` after the restore is staged, so the owner's
+   * reply goes out first; a failure is shown in the status with the instruction. `instruction`: what the owner must do on this host (default: a generic "stop the controller and start it again"). Without `automatic` the
+   * owner restarts it by hand and every reply says how.
+   */
+  readonly restart?: { readonly automatic?: () => void | Promise<void>; readonly instruction?: string; /** How long after the restore is staged the automatic restart is called, so the owner's reply is sent first (default 1000 ms). */ readonly delayMs?: number };
   readonly now?: () => Date;
   /** How long an approval token is accepted, in minutes: the owner's setting (`restoreConfirmMinutes`); null: no expiry; absent: 30. */
   readonly confirmMinutes?: () => Promise<number | null | undefined>;
@@ -422,7 +428,18 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
   } finally { if (options.lock === undefined) await lock.release(); }
 }
 
-export interface RestoreStatus { pending?: PendingRestore; barrier: ReturnType<MaintenanceBarrier["state"]>; /** The marker on disk could not be read or is not authentic: the next start refuses until it is removed. */ markerProblem?: string }
+export interface RestoreStatus { pending?: PendingRestore; barrier: ReturnType<MaintenanceBarrier["state"]>; /** The marker on disk could not be read or is not authentic: the next start refuses until it is removed. */ markerProblem?: string; /** While a restore waits for the start that swaps it in: how that start happens (card K01i). */ restart?: RestartNotice }
+
+/** What the owner is told about the restart a staged restore needs (card K01i). */
+export interface RestartNotice {
+  /** True when the host restarts the controller itself (it was asked to); false: the owner must. */
+  readonly automatic: boolean;
+  /** What happens, or what to do, in plain words. */
+  readonly instruction: string;
+  /** The automatic restart was asked for and failed: the owner restarts it by hand. */
+  readonly failed?: string;
+}
+export const DEFAULT_RESTART_INSTRUCTION = "Restart NimbleNewt: stop the controller and start it again the way it is normally started (its service, or the command that starts it). Until then every command except the restore's status and cancel is refused; the start swaps the restored data in.";
 
 export class StagedRestore {
   readonly #o: StagedRestoreOptions;
@@ -432,6 +449,8 @@ export class StagedRestore {
   readonly #previewed = new Map<string, number | undefined>();
   readonly #sessionKey = randomBytes(32);
   readonly #used = new Set<string>();
+  #restartFailed: string | undefined;
+  #restartTimer: ReturnType<typeof setTimeout> | undefined;
   constructor(options: StagedRestoreOptions) {
     if ((options.sqlitePath === undefined) === (options.postgres === undefined)) throw new Error("a staged restore needs exactly one live database: sqlitePath or postgres");
     this.#o = options;
@@ -527,10 +546,11 @@ export class StagedRestore {
         "1. The backup is checked against its manifest (and opened, if encrypted).",
         this.#o.postgres === undefined ? "2. It is restored into a new database and new conversation folders beside the live ones; the live ones are not touched." : "2. It is restored into a new schema of the same PostgreSQL database and new conversation folders beside the live ones; the live ones are not touched.",
         "3. No agent work may be running. The installation stops accepting commands and a snapshot of the current state is taken (kind pre-restore, kept unless you set how many to keep).",
+        this.#o.restart?.automatic === undefined ? `4. You restart the controller: ${this.#o.restart?.instruction ?? DEFAULT_RESTART_INSTRUCTION}` : "4. The controller restarts itself (this host restarts it automatically once the restore is prepared).",
         this.#o.postgres === undefined
-          ? "4. The controller must be restarted by you; on that start the old database and conversation folders are moved aside (.before-restore-<time>) and the restored ones take their place. If a move fails, the ones already made are undone and you are told."
-          : `4. The controller must be restarted by you, with no other controller connected to the database; on that start the conversation folders are moved aside (.before-restore-<time>), the live schema is renamed to ${this.#o.postgres.schema}_br_<time> and the restored schema takes its name, in one transaction. If a step fails, the ones already made are undone and you are told.`,
-        "5. Actions that were only intended when the backup was taken come back as uncertain and are never run again; undelivered messages are sent again.",
+          ? "5. On that start the old database and conversation folders are moved aside (.before-restore-<time>) and the restored ones take their place. If a move fails, the ones already made are undone and you are told."
+          : `5. On that start (no other controller may be connected to the database) the conversation folders are moved aside (.before-restore-<time>), the live schema is renamed to ${this.#o.postgres.schema}_br_<time> and the restored schema takes its name, in one transaction. If a step fails, the ones already made are undone and you are told.`,
+        "6. Actions that were only intended when the backup was taken come back as uncertain and are never run again; undelivered messages are sent again.",
       ],
       warnings,
     };
@@ -547,13 +567,23 @@ export class StagedRestore {
 
   get pending(): PendingRestore | undefined { return this.#pending?.pending; }
 
+  /** How the restart a staged restore waits for happens (the host's automatic restart, or the owner's by hand), and whether an automatic one failed. */
+  restartNotice(): RestartNotice {
+    const r = this.#o.restart;
+    const manual = r?.instruction ?? DEFAULT_RESTART_INSTRUCTION;
+    if (r?.automatic === undefined) return { automatic: false, instruction: manual };
+    if (this.#restartFailed !== undefined) return { automatic: false, instruction: manual, failed: this.#restartFailed };
+    return { automatic: true, instruction: "The controller restarts itself now to swap the restored data in; it is unavailable for a moment. If it does not come back, start it the way it is normally started." };
+  }
+
   /** The state for `backup.restore.status`: what this run prepared, or else what the marker on disk says (a restore that waits for a start, or that a start tried and rolled back). */
   async status(): Promise<RestoreStatus> {
     const barrier = this.#o.barrier.state();
-    if (this.#pending !== undefined) return { pending: this.#pending.pending, barrier };
+    if (this.#pending !== undefined) return { pending: this.#pending.pending, barrier, restart: this.restartNotice() };
     try {
       const found = await readMarker(this.#o.dataDirectory, this.#db, this.#o.piFinal);
-      return { ...(found === undefined ? {} : { pending: found.pending }), barrier };
+      // A marker on disk that this run did not prepare and that has not failed also waits for a start (the restart was not made, or the swap was refused at a start).
+      return { ...(found === undefined ? {} : { pending: found.pending }), barrier, ...(found === undefined || found.pending.failed !== undefined ? {} : { restart: { automatic: false, instruction: this.#o.restart?.instruction ?? DEFAULT_RESTART_INSTRUCTION } }) };
     } catch (error) { return { barrier, markerProblem: error instanceof Error ? error.message.slice(0, 300) : "the marker cannot be read" }; }
   }
 
@@ -580,7 +610,7 @@ export class StagedRestore {
   }
 
   /** Stages the restore and raises the barrier; needs the token the preview gave (the owner approved exactly that). */
-  async apply(name: unknown, confirm: unknown, method?: UnlockMethod): Promise<{ plan: RestorePlan; pending: PendingRestore; result: RestoreResult; safetyCopy: string; changesDiscarded?: number }> {
+  async apply(name: unknown, confirm: unknown, method?: UnlockMethod): Promise<{ plan: RestorePlan; pending: PendingRestore; result: RestoreResult; safetyCopy: string; changesDiscarded?: number; restart: RestartNotice }> {
     if (this.#busy || this.#pending !== undefined) throw new DomainError("unavailable", "a restore is already being prepared or waits for the restart");
     // The swap at the next start needs this controller to be the one that holds the data directory: if another controller holds it, a restore prepared here would be swapped in under it.
     if (this.#o.lock !== undefined) await this.#o.lock.require();
@@ -654,8 +684,12 @@ export class StagedRestore {
         await writeFile(markerPath, `${JSON.stringify(pending, null, 2)}\n`, { flag: "wx", mode: 0o600 });
         this.#pending = { pending, release };
         try { this.#o.onStaged?.(pending); } catch { /* the host's notice failing does not undo a staged restore */ }
+        this.#restartFailed = undefined;
+        const automatic = this.#o.restart?.automatic;
+        // A moment after the reply (the API records the command's outcome first): the host closes this controller and starts it again. A failure is kept for the status, and the owner restarts by hand.
+        if (automatic !== undefined) this.#restartTimer = setTimeout(() => { this.#restartTimer = undefined; void (async () => { try { await automatic(); } catch (error) { this.#restartFailed = (error instanceof Error ? error.message : String(error)).slice(0, 300); } })(); }, this.#o.restart?.delayMs ?? 1000);
         const plan: RestorePlan = { token: String(confirm), ...(await this.#plan(path, manifest, false)), ...(result.effectsMarkedUncertain === undefined ? {} : { effectsToMarkUncertain: result.effectsMarkedUncertain }), deliveriesToResend: result.deliveriesToResend };
-        return { plan, pending, result, safetyCopy: basename(safety.path), ...(lastSeq === undefined || backupSeq === undefined ? {} : { changesDiscarded: Math.max(0, lastSeq - backupSeq) }) };
+        return { plan, pending, result, safetyCopy: basename(safety.path), ...(lastSeq === undefined || backupSeq === undefined ? {} : { changesDiscarded: Math.max(0, lastSeq - backupSeq) }), restart: this.restartNotice() };
       } catch (error) {
         // A failure after the marker was written withdraws it too: the staged copies it names are removed below.
         if (markerPath !== undefined && this.#pending !== undefined) { await rm(markerPath, { force: true }).catch(() => undefined); this.#pending = undefined; }
@@ -673,6 +707,8 @@ export class StagedRestore {
    * rolled back, and puts back what a half-done swap had moved (the journal). The live data is as it was.
    */
   async cancel(): Promise<{ cancelled: boolean; leftovers?: string[] }> {
+    // A restart not yet made is not made for a withdrawn restore.
+    if (this.#restartTimer !== undefined) { clearTimeout(this.#restartTimer); this.#restartTimer = undefined; }
     const mem = this.#pending;
     const data = await canon(this.#o.dataDirectory);
     // A journal that cannot be read or checked is not a swap that is over: say so and keep it (the next start refuses it too), instead of reporting the restore cancelled.
