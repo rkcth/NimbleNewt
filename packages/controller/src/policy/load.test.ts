@@ -4,7 +4,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ReviewService } from "../review/index.js";
-import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
+import { GrantService, PrincipalService, idleEnd, type Grant, type Principal } from "../security/index.js";
 import { ApprovalLoadService, GRANT_LENGTHS, LOAD_LIMITS, chooseStandingLength, PolicyService, ProfileSuggestionService } from "./index.js";
 
 after(stopServer);
@@ -98,7 +98,9 @@ for (const backend of backends) {
     assert.match(p.defaultLength!.why, /spread over about 3 days, so 7 days covers the same pattern/);
     // Choosing the default: the grant runs that long and carries the reason.
     const a = await accept(c, p);
-    assert.deepEqual([a.days, a.grant.expiresAt], [7, new Date(a.at + 7 * DAY).toISOString()]);
+    assert.deepEqual([a.days, idleEnd(a.grant)], [7, new Date(a.at + 7 * DAY).toISOString()]);
+    // Card A07h: the length chosen is the idle window of the grant, not an end date; each use renews it.
+    assert.deepEqual([a.grant.idleDays, a.grant.expiresAt], [7, undefined]);
     assert.match(a.why, /7 days covers/);
     assert.match(a.grant.basis, /7 days: the approvals were spread over about 3 days/);
     assert.equal((await c.load.proposals(c.owner, "accepted"))[0]!.chosenLength!.source, "default");
@@ -109,7 +111,7 @@ for (const backend of backends) {
     const p1 = await proposal(c, 0);
     assert.deepEqual([p1.defaultLength!.days, p1.defaultLength!.why], [30, "there is nothing to go on yet, so the usual 30 days"], "all at one moment: the 30-day fallback");
     const stated = await accept(c, p1, { statedDays: 2 });
-    assert.deepEqual([stated.days, stated.grant.expiresAt], [2, new Date(stated.at + 2 * DAY).toISOString()]);
+    assert.deepEqual([stated.days, idleEnd(stated.grant)], [2, new Date(stated.at + 2 * DAY).toISOString()]);
     assert.match(stated.why, /you asked for 2 days/);
     assert.equal((await c.load.proposals(c.owner, "accepted")).find((x) => x.id === p1.id)!.chosenLength!.source, "owner", "the owner's words are recorded as the owner's");
     // Another class: a stated length longer than the longest option is cut to it and says so.
@@ -126,7 +128,7 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 14, oneOff: true } as never));
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 1.5 } as never));
     const exact = await accept(c, p4, { days: 14 });
-    assert.deepEqual([exact.days, exact.grant.expiresAt], [14, new Date(exact.at + 14 * DAY).toISOString()]);
+    assert.deepEqual([exact.days, idleEnd(exact.grant)], [14, new Date(exact.at + 14 * DAY).toISOString()]);
     assert.equal((await c.load.proposals(c.owner, "accepted")).find((x) => x.id === p4.id)!.chosenLength!.source, "owner");
     // Retrying the same acceptance makes the same grant for the same length.
     const again = await c.load.accept(c.owner, { commandId: "same-ac", proposalId: p1.id, expectedRevision: p1.revision, statedDays: 2 } as never).catch((e: unknown) => e);
@@ -160,7 +162,7 @@ for (const backend of backends) {
     assert.equal(fresh.suggestion.days, 30);
     const a = await accept(c, fresh);
     assert.deepEqual([a.days, a.why], [30, "the usual length"]);
-    assert.equal(a.grant.expiresAt, new Date(a.at + 30 * DAY).toISOString());
+    assert.equal(idleEnd(a.grant), new Date(a.at + 30 * DAY).toISOString());
   });
 
   suite("a grant that ran its full term and was revoked afterwards counts as having run its full term, not as taken back (card A07d)", async (c) => {
@@ -221,7 +223,7 @@ for (const backend of backends) {
     const done = await c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: stuck.revision, days: 14 } as never);
     assert.equal(done.days, 7);
     const g = (await c.grants.getGrant(done.grantId))!;
-    assert.equal(g.expiresAt, new Date(now + 7 * DAY).toISOString());
+    assert.equal(idleEnd(g), new Date(now + 7 * DAY).toISOString());
     assert.equal((await c.load.proposals(c.owner, "accepted"))[0]!.grantId, done.grantId);
     // Done now: a further accept is refused.
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: stuck.revision + 1, days: 14 } as never), (e) => assert.match(e.message, /is accepted/));
@@ -281,7 +283,7 @@ for (const backend of backends) {
     const { grantId } = await c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p!.id, expectedRevision: p!.revision });
     const grant = (await c.grants.getGrant(grantId))!;
     assert.deepEqual([grant.grantee, grant.action, grant.project, grant.source, grant.terms], ["agent:ann", "approve.class.commit", c.a, "standing", { environments: ["development"] }]);
-    assert.equal(grant.expiresAt, new Date(now + 30 * 86_400_000).toISOString());
+    assert.equal(idleEnd(grant), new Date(now + 30 * 86_400_000).toISOString());
     assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-commit" })).via, "grant");
     assert.equal((await c.policy.evaluate({ principalId: "agent:ben", projectId: c.a, tool: "git-commit" })).mode, "owner", "only for the requester of the run");
     assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-commit", environment: "staging" })).mode, "owner", "only for the run's environment");
@@ -384,7 +386,7 @@ for (const backend of backends) {
     minutes(120);
     assert.deepEqual(await c.load.accept(c.owner, accept), first, "a repeat is answered with the recorded result");
     assert.equal((await c.load.proposals(c.owner, "accepted"))[0]!.grantId, first.grantId);
-    assert.equal((await c.grants.getGrant(first.grantId))!.expiresAt, new Date(Date.parse("2026-10-21T09:00:00.000Z") + 30 * 86_400_000).toISOString(), "30 days from the acceptance");
+    assert.equal(idleEnd((await c.grants.getGrant(first.grantId))!), new Date(Date.parse("2026-10-21T09:00:00.000Z") + 30 * 86_400_000).toISOString(), "30 days from the acceptance");
     const after = (await c.load.proposals(c.owner, "accepted"))[0]!.revision;
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p!.id, expectedRevision: after }));
     // A failure between marking accepted and making the grant: simulate by marking accepted only, then retrying the same command.
