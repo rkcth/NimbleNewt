@@ -514,7 +514,7 @@ for (const backend of backends) {
       }, { clock: r.w.clock.now, limits: { orderMs: 60_000, callMs: 60_000 } });
       const ctl = new AbortController();
       const run = svc.run(plain(r), [], undefined, { signal: ctl.signal });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      for (let i = 0; i < 400 && !(seen.order !== undefined); i++) await new Promise((resolve) => setTimeout(resolve, 25)); // the state, not a fixed time: a loaded PostgreSQL takes longer than 100 ms to get there
       assert.ok(seen.order !== undefined && !seen.order.aborted, "the order got a signal");
       assert.equal((await svc.get("att-1"))?.lease !== undefined, true);
       ctl.abort();
@@ -528,11 +528,12 @@ for (const backend of backends) {
       try {
         const wait = ScratchCleanupService.withEpoch(w.w.storage, w.w.epoch, { mode: async () => "after-handoff", order: async () => ({ removed: true, leftovers: [] }), workerStopped: (_a, signal) => { seen.stop = signal; return new Promise<boolean>(() => undefined); }, report: async () => undefined }, { clock: w.w.clock.now, limits: { callMs: 60_000 } });
         const pending = wait.run(plain(w), [], undefined, { workerStopped: false });
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        for (let i = 0; i < 400 && !(seen.stop !== undefined); i++) await new Promise((resolve) => setTimeout(resolve, 25)); // the state, not a fixed time: a loaded PostgreSQL takes longer than 100 ms to get there
         assert.ok(seen.stop !== undefined && !seen.stop.aborted);
+        const first = seen.stop;
         w.w.clock.advance(SCRATCH_LIMITS.recheckMs + 1000);
         const sweep = wait.recover();
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        for (let i = 0; i < 40 && seen.stop === first; i++) await new Promise((resolve) => setTimeout(resolve, 25)); // give the sweep a moment to reach its own call (as before; it may not make one)
         await wait.close();
         await sweep.catch(() => undefined);
         assert.ok(seen.stop.aborted, "close() told the in-flight call to stop");
@@ -550,7 +551,8 @@ for (const backend of backends) {
       const slow = new Promise<ScratchReport>((resolve) => { release = resolve; });
       const svc = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => (++n === 1 ? slow : Promise.resolve({ removed: false, leftovers: [], detail: "refused by the host" })), report: async () => undefined }, { clock: r.w.clock.now, limits: { orderMs: 60_000 } });
       const first = svc.run(plain(r), []);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      for (let i = 0; i < 400 && !(n === 1); i++) await new Promise((resolve) => setTimeout(resolve, 25)); // the state, not a fixed time: a loaded PostgreSQL takes longer than 100 ms to get there
+      assert.equal(n, 1, "the first run sent its order");
       r.w.clock.advance(SCRATCH_LIMITS.leaseMs + 1000);
       const second = await svc.run(plain(r), []);
       assert.equal(second.state, "kept", "the other run closed it as kept");
