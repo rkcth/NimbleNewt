@@ -37,6 +37,8 @@ import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
+import type { EnvironmentService } from "../environments/index.js";
+import type { MaintenanceService } from "../maintenance/index.js";
 import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
@@ -243,6 +245,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
   retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down, and each route's reply limit and reasoning cap; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
+  environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
+  maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
@@ -310,6 +314,8 @@ export type StatusRequest =
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
   | { readonly kind: "capacity" }
+  | { readonly kind: "environment"; readonly agent: string }
+  | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
@@ -336,6 +342,9 @@ export interface StatusDeps {
     readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number; /** The endpoint kind the controller's own configuration names for the route (it names the request fields); absent when the controller has none. */ readonly kind?: string }[]>;
   };
   /** The live jobs (card T07b). Absent: the view is not offered. */
+  /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
+  readonly environments?: Pick<EnvironmentService, "get">;
+  readonly maintenance?: Pick<MaintenanceService, "list" | "get">;
   readonly jobs?: Pick<JobService, "live"> & Partial<Pick<JobService, "recentlyEnded">>;
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
@@ -622,6 +631,8 @@ export class StatusService {
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
+      case "environment": { onlyKnown(request, ["kind", "agent"]); return this.environmentLines(by, request.agent); }
+      case "maintenance": { onlyKnown(request, ["kind", "maintenanceId", "agent", "status", "limit"]); return this.maintenanceLines(by, request); }
       case "jobs": { onlyKnown(request, ["kind", "limit"]); return this.jobLines(by, request.limit); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
@@ -793,6 +804,46 @@ export class StatusService {
       ...shownSources.map((s) => line(`${shown(s.id, 64)} (${shown(s.type, 30)}${s.defined ? ", defined by you" : ", built in or from the host"}${s.critical ? ", cannot be turned off" : ""}): ${s.enabled ? "on" : "off"}${s.watches === undefined ? "" : `; ${shown(s.watches, 250)}`}.`, c)),
       ...(got.sources.length > shownSources.length ? [line(`${got.sources.length - shownSources.length} more are not shown.`, c)] : []),
     ] };
+  }
+
+  /** One agent's environment, for the owner: the active revision, a newer one that waits, and why each was made (card A09: what an approved change did, what a rolled-back one left). */
+  async environmentLines(by: Principal, agent: unknown): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner" || this.#deps.environments === undefined) return undefined;
+    if (typeof agent !== "string" || !/^agent:[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(agent)) return invalid("agent", "must be an agent, such as agent:agt-...");
+    const env = await this.#deps.environments.get(by, agent);
+    const c = cite("environment", agent);
+    if (env === undefined) return { observedAt: this.#runner.now(), lines: [line(`${agent} has no environment yet.`, c)] };
+    const lines: Line[] = [];
+    const a = env.active;
+    if (a === undefined) lines.push(line(`${agent} has ${env.latest} environment revision${env.latest === 1 ? "" : "s"} and none is active.`, c));
+    else {
+      const packages = a.manifest.packages.map((p) => `${p.name} ${p.version}`).join(", ") || "none";
+      lines.push(line(`${agent}'s environment is at revision ${a.revision} of ${env.latest} (${a.digest.slice(0, 19)}...), made by ${a.createdBy} at ${a.createdAt}.`, cite("environment-revision", `${agent}|${a.revision}`)));
+      lines.push(line(`Base ${a.manifest.base.name} ${a.manifest.base.version}; own packages: ${packages}; ${a.manifest.skills.length} skill${a.manifest.skills.length === 1 ? "" : "s"}; limits ${a.manifest.limits.cpus} cpus, ${a.manifest.limits.memoryMb} MB memory, ${a.manifest.limits.diskMb} MB disk, ${a.manifest.limits.processes} processes.`, c));
+      lines.push(line(`Why revision ${a.revision} exists: ${a.reason}${a.rollbackOf === undefined ? "" : ` (it restores revision ${a.rollbackOf})`}.`, cite("environment-revision", `${agent}|${a.revision}`)));
+    }
+    if (env.latest > (a?.revision ?? 0)) {
+      const waiting = (await this.#deps.environments.get(by, agent, env.latest))?.revision;
+      if (waiting !== undefined) lines.push(line(`Revision ${waiting.revision} is staged and not active: ${waiting.reason}. It is activated only when the change that made it passes its trial and validation.`, cite("environment-revision", `${agent}|${waiting.revision}`)));
+    }
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** The agents' environment change requests, newest page first as the service lists them: what was asked, the state, and why one waits. Owner only. */
+  async maintenanceLines(by: Principal, q: { maintenanceId?: string; agent?: string; status?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const svc = this.#deps.maintenance;
+    if (by.kind !== "owner" || svc === undefined) return undefined;
+    const items = q.maintenanceId !== undefined ? [await svc.get(by, q.maintenanceId)] : (await svc.list(by, { ...(q.status === undefined ? {} : { status: q.status }), ...(q.agent === undefined ? {} : { agentId: q.agent }), limit: q.limit ?? 20 })).items;
+    if (items.length === 0) return { observedAt: this.#runner.now(), lines: [line("No environment change requests match.", cite("maintenance", "all"))] };
+    const lines = items.map((m) => {
+      const spec = (m["spec"] ?? {}) as Record<string, unknown>;
+      const what = typeof spec["name"] === "string" ? `${String(m["kind"])} ${spec["name"]}${typeof spec["version"] === "string" ? ` ${spec["version"]}` : ""}` : String(spec["site"] ?? spec["mountPath"] ?? spec["setting"] ?? m["kind"]);
+      const failure = m["failure"] as { reason?: string } | undefined;
+      const effect = m["effect"] as { environmentRevision?: number } | undefined;
+      const tail = m["status"] === "failed" && failure?.reason !== undefined ? ` - ${failure.reason}` : m["pendingReason"] !== undefined ? ` - waiting: ${String(m["pendingReason"])}` : m["status"] === "applied" && effect?.environmentRevision !== undefined ? ` - now revision ${effect.environmentRevision}` : "";
+      return line(`${String(m["id"])}: ${String(m["agentId"])} asked for ${what}; ${String(m["status"])}${tail}`.slice(0, 400), cite("maintenance", String(m["id"]), typeof m["revision"] === "number" ? m["revision"] : undefined));
+    });
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /**

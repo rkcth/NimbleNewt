@@ -51,6 +51,14 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const ACTION = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
 const CAV = /^cav-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
+/** The controller's own identity for carrying out an approved maintenance request (card A09): it may stage, activate and roll back a revision. The approval is judged by the maintenance service before it acts; nothing a caller sends can produce this principal. */
+export const MAINTENANCE_SERVICE = "service:maintenance";
+/**
+ * The principal the controller's environment applier acts as. It is recognised by identity (this very object), never by its ID: the owner can enrol a service principal named `maintenance` (it would read as
+ * `service:maintenance`), and such an enrolled credential must gain no right over environments. It carries `agent.manage` only so it may suspend and resume an agent.
+ */
+export const MAINTENANCE_PRINCIPAL: Principal = Object.freeze({ id: MAINTENANCE_SERVICE, kind: "service", name: "maintenance", grants: Object.freeze([Object.freeze({ action: "agent.manage", project: "*" })]), restrictions: Object.freeze([]), asOf: "2026-11-11T00:00:00.000Z" }) as unknown as Principal;
+const mayManage = (by: Principal): boolean => by.kind === "owner" || by === MAINTENANCE_PRINCIPAL;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (v: string): string => createHash("sha256").update(v).digest("hex");
 
@@ -126,14 +134,14 @@ export class EnvironmentService {
     onlyKnown(command, ["commandId", "agentId", "manifest", "reason", "expectedRevision"]);
     const agentId = typeof command.agentId === "string" && AGENT.test(command.agentId) ? command.agentId : invalid("agentId", "is not an agent principal");
     const own = by.id === agentId && allows(by, "environment.manage", undefined);
-    if (by.kind !== "owner" && !own) throw new DomainError("forbidden", `${by.id} may not change ${agentId}'s environment`);
+    if (!mayManage(by) && !own) throw new DomainError("forbidden", `${by.id} may not change ${agentId}'s environment`);
     const reason = redactText(text(command.reason, "reason", { min: 1, max: ENV_LIMITS.reason }));
     const manifest = checkEnvironmentManifest(command.manifest, this.#capacity);
     // Every skill in the library must exist, be unrevoked and be one the person making the change may use: an agent cannot list another agent's personal skill.
     for (const skill of manifest.skills) if (!(await this.#skillUsable(by, skill))) throw new DomainError("forbidden", `${skill} is not a catalog version you may put in this library (it does not exist, was revoked, or is not yours to use)`);
     const expected = command.expectedRevision ?? 0;
     return this.#store(by, command.commandId, agentId, expected, manifest, reason, undefined, async (prev) => {
-      if (by.kind === "owner") return;
+      if (mayManage(by)) return;
       if (prev === undefined) throw new DomainError("forbidden", "an agent changes an environment the owner has made, never creates one");
       for (const key of Object.keys(manifest) as (keyof EnvironmentManifest)[]) if (!(AGENT_FIELDS as readonly string[]).includes(key) && !eq(manifest[key], prev.manifest[key])) throw new DomainError("forbidden", `${by.id} may change only its packages and skills; ${key} is the owner's`);
     });
@@ -141,7 +149,7 @@ export class EnvironmentService {
 
   /** Makes a prior revision current again as a new revision (the history is kept) and activates it if its protected extensions still verify. Owner only. */
   async rollback(owner: Principal, command: NoActor & { agentId: string; toRevision: number; reason: string; observed: Readonly<Record<string, string>>; expectedRevision: number }): Promise<{ revision: number; activated: boolean; problem?: string }> {
-    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner rolls an environment back`);
+    if (!mayManage(owner)) throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner rolls an environment back`);
     onlyKnown(command, ["commandId", "agentId", "toRevision", "reason", "observed", "expectedRevision"]);
     const agentId = typeof command.agentId === "string" && AGENT.test(command.agentId) ? command.agentId : invalid("agentId", "is not an agent principal");
     const to = checkRevision(command.toRevision);
@@ -165,7 +173,7 @@ export class EnvironmentService {
    * disk (`observed`). Any mismatch or missing extension stops the activation, changes nothing, and says which. The previous revision stays active.
    */
   async activate(by: Principal, command: NoActor & { agentId: string; revision: number; observed: Readonly<Record<string, string>> }): Promise<void> {
-    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the owner; only the owner activates an environment revision`);
+    if (!mayManage(by)) throw new DomainError("forbidden", `${by.id} is not the owner; only the owner activates an environment revision`);
     onlyKnown(command, ["commandId", "agentId", "revision", "observed"]);
     const agentId = typeof command.agentId === "string" && AGENT.test(command.agentId) ? command.agentId : invalid("agentId", "is not an agent principal");
     const n = checkRevision(command.revision);
@@ -232,7 +240,7 @@ export class EnvironmentService {
 
   /** An agent's environment: its active revision (and the latest), for the agent itself or the owner. */
   async get(by: Principal, agentId: string, revision?: number): Promise<{ active?: RevisionBody; latest: number; revision?: RevisionBody } | undefined> {
-    if (typeof agentId !== "string" || !AGENT.test(agentId) || !(by.kind === "owner" || by.id === agentId)) return undefined;
+    if (typeof agentId !== "string" || !AGENT.test(agentId) || !(mayManage(by) || by.id === agentId)) return undefined;
     const env = (await this.#runner.get("environment", derivedId("env", agentId)))?.body as unknown as EnvironmentBody | undefined;
     if (env === undefined) return undefined;
     const fetch = async (n: number) => { const r = await this.#runner.get("environment-revision", derivedId("evr", `${agentId}|${n}`)); return r === undefined ? undefined : (r.body as unknown as RevisionBody); };

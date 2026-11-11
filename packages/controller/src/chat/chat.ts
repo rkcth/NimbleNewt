@@ -501,6 +501,22 @@ export class ChatService {
           request["taskId"] = matches[0]!.id;
           delete request["taskTitle"];
         }
+        // An agent's environment, or its change requests, asked for by the agent's name in the owner's words: the name is looked up in the active agents (exact, then loose); unclear asks.
+        if (request["kind"] === "environment" || request["kind"] === "maintenance") {
+          const agentName = request["agentName"];
+          delete request["agentName"];
+          if (agentName !== undefined && typeof agentName !== "string") { push({ i, kind: "refused", code: "invalid_command", message: "agentName must be the agent's name as the owner said it" }); continue; }
+          if (request["agent"] === undefined && typeof agentName === "string" && agentName.trim() !== "") {
+            const agents = await this.#listAll(token, "agent.list", { state: "active" });
+            const wanted = agentName.trim().toLowerCase();
+            const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
+            const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
+            if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called ${quotedText(agentName.trim(), 80)}` }); continue; }
+            if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) }); continue; }
+            request["agent"] = String(found[0]!["principalId"]);
+          }
+          if (request["kind"] === "environment" && request["agent"] === undefined) { push({ i, kind: "asked", question: "Which agent's environment do you want to see?", options: [] }); continue; }
+        }
         // A stand-up's briefs asked for by the stand-up's and the agent's names in the owner's words: the stand-up is the one whose title fits (else the next one coming up, else the latest), the agent the one named. Unclear asks.
         if (request["kind"] === "standup_briefs") {
           const topic = request["meetingTopic"];
