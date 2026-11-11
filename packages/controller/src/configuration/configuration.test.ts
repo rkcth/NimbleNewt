@@ -9,6 +9,7 @@ import { RoutingService } from "../routing/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { landingPolicyFrom } from "../api/landing-policy.js";
 import { ConfigurationService, type LayerKind, type SettingDefinition } from "./index.js";
+import type { ControllerStorage, OperationInput } from "../storage/types.js";
 
 after(stopServer);
 
@@ -20,6 +21,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 };
 
 interface Ctx {
+  storage: ControllerStorage; epoch: number;
   config: ConfigurationService; routing: RoutingService; owner: Principal; grants: GrantService; assignments: AssignmentService; projects: ProjectService;
   later: (settings: readonly SettingDefinition[]) => ConfigurationService;
   team: string; agentA: string; agentB: string; task: string; project: string;
@@ -46,6 +48,7 @@ async function open(backend: Backend, body: (c: Ctx) => Promise<void>): Promise<
     const as = async (id: string) => principals.authenticate((await principals.issueCredential(owner, `agent:${id}`)).token);
     await body({
       later: (settings) => ConfigurationService.withEpoch(world.storage, projects.epoch, { ...options, routing, settings }),
+      storage: world.storage, epoch: projects.epoch,
       config, routing, owner, grants, assignments, projects, team, agentA, agentB, task, project,
       writer: await plain("writer", [{ action: "config.write", project: "*" }]), routingWriter: await plain("rw", [{ action: "routing.write", project: "*" }]),
       broad: await plain("broad", [{ action: "*", project: "*" }]), nobody: await plain("nobody", []), agentPrincipal: await as(agentA), otherAgentPrincipal: await as(agentB),
@@ -483,6 +486,47 @@ for (const backend of backends) {
     assert.equal((await value(c, "time.maxMinutes", { taskId: c.task }))!.value, 30);
     // The draft is still there, still out of force, after all of it.
     assert.deepEqual((await c.config.layer(c.owner, "installation"))!.draft, draft);
+  });
+
+  // Clean-context review of the one-write change: what the change keeps and refuses beyond the first suite.
+  suite("change: a lock in the layer stays (a later change does not unlock it); a value locked above is refused; a layer of something that does not exist is not_found and writes nothing", async (c) => {
+    await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 100 }, { lock: ["time.maxMinutes"] });
+    const before = (await c.config.layer(c.owner, "installation"))!;
+    await c.config.change(c.owner, { commandId: cid("ch"), layer: "installation", expectedRevision: before.revision, set: { "time.maxMinutes": 90 } });
+    const layer = (await c.config.layer(c.owner, "installation"))!;
+    assert.deepEqual(layer.applied["time.maxMinutes"], { value: 90, locked: true }, "the owner's lock is kept by a change of the value");
+    assert.deepEqual(layer.history.at(-1)!.unlocked, []);
+    assert.equal((await value(c, "time.maxMinutes", { agentId: c.agentA }))!.lockedBy?.layer, "installation");
+    await refuses("invalid_command", () => c.config.change(c.writer, { commandId: cid("ch"), layer: "agent", scopeId: c.agentA, set: { "time.maxMinutes": 30 } }), (e) => assert.match(e.message, /locked by the installation layer/));
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: cid("ch"), layer: "task", scopeId: c.task, set: { "time.maxMinutes": 30 } }), (e) => assert.match(e.message, /locked by the installation layer/));
+    assert.equal(await c.config.layer(c.owner, "agent", c.agentA), undefined);
+    await refuses("not_found", () => c.config.change(c.owner, { commandId: cid("ch"), layer: "team", scopeId: "team-aaaaaaaaaaaaaaaaaaaa", set: { "workClass.pcFloor": 1 } }));
+    await refuses("not_found", () => c.config.change(c.owner, { commandId: cid("ch"), layer: "agent", scopeId: "agt-aaaaaaaaaaaaaaaaaaaa", expectedRevision: 0, set: { "workClass.pcFloor": 1 } }));
+    assert.equal(await c.config.layer(c.owner, "team", "team-aaaaaaaaaaaaaaaaaaaa"), undefined);
+    assert.equal(await c.config.layer(c.owner, "agent", "agt-aaaaaaaaaaaaaaaaaaaa"), undefined);
+  });
+
+  suite("change: a lock above that lands while a change below is being written makes the change below stale; it never goes into force under the lock", async (c) => {
+    // The storage the agent-layer change commits through runs the owner's installation lock first, between the change's read of the layers above and its own write.
+    let race: (() => Promise<void>) | undefined;
+    const racing = new Proxy(c.storage, { get(target, prop, receiver) {
+      if (prop === "applyOperation") return async (input: OperationInput) => { const go = race; race = undefined; if (go !== undefined && input.audit[0]?.type === "config.change") await go(); return target.applyOperation(input); };
+      const v = Reflect.get(target, prop, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } });
+    const below = ConfigurationService.withEpoch(racing, c.epoch, { ...options, routing: c.routing });
+    await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 100 });
+    race = async () => { await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 100 }, { lock: ["time.maxMinutes"] }); };
+    await refuses("stale_revision", () => below.change(c.owner, { commandId: cid("ch"), layer: "agent", scopeId: c.agentA, expectedRevision: 0, set: { "time.maxMinutes": 40 } }));
+    assert.equal(race, undefined, "the lock ran in between");
+    assert.equal(await c.config.layer(c.owner, "agent", c.agentA), undefined);
+    const got = (await value(c, "time.maxMinutes", { agentId: c.agentA }))!;
+    assert.deepEqual([got.value, got.source.layer, got.lockedBy?.layer], [100, "installation", "installation"]);
+    // Two changes creating the same layer at once: one goes in, the other is told the layer moved (not that its command ID was used by something else).
+    const both = await Promise.allSettled([1, 2].map((v) => c.config.change(c.owner, { commandId: cid("ch"), layer: "team", scopeId: c.team, expectedRevision: 0, set: { "workClass.pcFloor": v } })));
+    assert.equal(both.filter((r) => r.status === "fulfilled").length, 1);
+    const lost = both.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.ok(lost.reason instanceof DomainError && lost.reason.code === "stale_revision", String(lost.reason));
+    assert.equal((await c.config.history(c.owner, "team", c.team))!.length, 1);
   });
 }
 

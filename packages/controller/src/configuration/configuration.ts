@@ -311,7 +311,12 @@ export class ConfigurationService {
         const next: LayerBody = { ...rest, applied, history: [...body.history, entry].slice(-CONFIG_LIMITS.history) };
         const ref: AggregateRef = { kind: "config-layer", id };
         const changes: Change[] = [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }, ...this.#guards(chain, id)];
-        return { ref, creates: current === undefined, changes, detail: { layer, scopeId, changed: changed.length + removed.length } };
+        // A layer this change creates that loses to another write (the same layer created, or a layer above changed, at the same moment) is stale, not a reused command ID.
+        const contention = async (): Promise<DomainError> => {
+          const now = await this.#runner.get("config-layer", id);
+          return new DomainError("stale_revision", `${id} or a layer above it changed while this change was being made${now === undefined ? "" : `; ${id} is now at revision ${now.revision}`}`, ...(now === undefined ? [] : [{ currentRevision: now.revision }]));
+        };
+        return { ref, creates: current === undefined, changes, ...(current === undefined ? { contention } : {}), detail: { layer, scopeId, changed: changed.length + removed.length } };
       },
     }));
     if (r.replayed) {
