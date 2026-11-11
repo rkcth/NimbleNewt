@@ -2521,6 +2521,8 @@ export class DispatcherService {
       if (this.#live.get(attemptId)?.handle !== handle) return;
       const d = await this.#load(attemptId);
       if (d === undefined || d.body.state !== "running") return;
+      // The ending this turn holds: only it is let go of at the end (a later turn of the attempt, started elsewhere after a move, holds its own).
+      let mine: NonNullable<DispatchBody["turnEnd"]> | undefined;
       try {
         // A completed turn is a safe boundary (card L04d): the checkpoint it left is captured as the task's continuation before the attempt parks, is readmitted or ends, so the resume that follows is checked against it.
         if (result.status === "completed" && result.checkpoint !== undefined) await this.#taken({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason: "the turn completed", boundary: "turn-complete", checkpoint: result.checkpoint });
@@ -2541,9 +2543,13 @@ export class DispatcherService {
         // The turn's ending is held before the host is asked (up to 10 s): a stop that ends the attempt meanwhile records it; the plan joins it only while it is still held.
         const held: NonNullable<DispatchBody["turnEnd"]> = { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }) };
         this.#turnEnds.set(attemptId, held);
+        mine = held;
         const progress = result.status === "completed" ? await this.#progressOf(d.body, true) : undefined;
+        // Second review: while the host was asked, the attempt may have been ended (a stop, the lease, the agent's own ending, which recorded the held ending), or moved to another host (relocate) and even started
+        // there. The old turn's result is then not the attempt's any more: it must not end, readmit or park the attempt the move left waiting (or its new run). Looked at again before anything is written.
+        if (progress !== undefined && (this.#live.get(attemptId)?.handle !== handle || (await this.#load(attemptId))?.body.state !== "running")) return;
         const plan = progress?.count;
-        if (plan !== undefined && this.#turnEnds.get(attemptId) === held) this.#turnEnds.set(attemptId, { ...held, plan });
+        if (plan !== undefined && this.#turnEnds.get(attemptId) === held) { mine = { ...held, plan }; this.#turnEnds.set(attemptId, mine); }
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
@@ -2558,7 +2564,7 @@ export class DispatcherService {
       } catch (error) {
         // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
         if (isDomainError(error, "stale_epoch")) return;
-      } finally { this.#turnEnds.delete(attemptId); }
+      } finally { if (mine === undefined || this.#turnEnds.get(attemptId) === mine) this.#turnEnds.delete(attemptId); }
     })();
     const turn: Promise<void> = done.finally(() => { if (this.#live.get(attemptId)?.turn === turn) this.#live.delete(attemptId); });
     return turn;

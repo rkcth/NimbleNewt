@@ -91,3 +91,19 @@ test("the lines are bounded however long the record's text is", () => {
   assert.ok(wideHead.length <= ATTEMPT_ENDINGS_LIMITS.head, String(wideHead.length));
   assert.match(wideHead, /its ending says \(quoted\): "(\\u202e)+\.\.\."\.$/, wideHead);
 });
+
+test("names full of characters that are shown escaped never push the line's cut into the quoted ending summary: the quotation stays whole and closed (card W08, second review)", () => {
+  const odd = ["\"", "\\", "\n", "\u202e", "\u200b", "\u{1f600}", "\ud800", "\udc00", "\u0085", "\u001b", "a"];
+  let seed = 7;
+  const pick = (n: number): string => Array.from({ length: n }, () => { seed = (seed * 1103515245 + 12345) % 2147483648; return odd[seed % odd.length]!; }).join("");
+  for (let i = 0; i < 300; i++) {
+    const d = base({ attemptId: `att-${pick(80)}`, agentId: `agent:${pick(100)}`, route: pick(120), role: pick(60), outcome: { status: (["succeeded", "failed", "stopped-early", "abandoned"] as const)[i % 4]!, summary: pick(600), at: "2026-11-10T10:05:00.000Z" } });
+    const [head, detail] = attemptEndingLines(d, 21);
+    assert.ok(head.length <= ATTEMPT_ENDINGS_LIMITS.head && detail.length <= ATTEMPT_ENDINGS_LIMITS.detail);
+    const m = /; its ending says \(quoted\): (".*")\.$/.exec(head);
+    assert.ok(m, head);
+    assert.equal(typeof JSON.parse(m[1]!), "string", "the quotation is closed and well formed");
+    // eslint-disable-next-line no-control-regex
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202e\u200b]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(head + detail), head);
+  }
+});

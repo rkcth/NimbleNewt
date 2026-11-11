@@ -105,3 +105,29 @@ test("an owner's stop that comes while the host is asked for the plan after a tu
     assert.equal(d.turnEnd?.endKind, "no-work-end", "the turn that ended before the stop is on the record");
   } finally { await store.close(); }
 });
+
+test("a turn whose attempt was moved to another host while the host was asked for the plan changes nothing: the moved attempt is not ended by the old turn's result (card W08, second review)", async () => {
+  const store = await backends[0]!.open();
+  try {
+    const w = await buildWorld(store.storage);
+    const ann = await w.agent("ann", workGrants(w.project, []));
+    w.worker.script = async (): Promise<WorkerTurnResult> => ({ status: "completed", text: "Done.", endKind: "normal", visibleChars: 5, checkpoint: { turn: 1 } });
+    let asked!: () => void;
+    const askedP = new Promise<void>((r) => { asked = r; });
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    w.worker.progress = async () => { asked(); await held; return { plan: { done: ["a"], open: [] } }; };
+    const { attemptId } = await w.task("Fix the parser", ann);
+    await w.heartbeatHost();
+    await w.dispatcher.tick();
+    await askedP;
+    await w.dispatcher.relocate(w.owner, attemptId!, { hostId: "host:elsewhere", checkpoint: { turn: 1 }, note: "moved while the plan was asked" });
+    release();
+    // The moved attempt's old turn is no longer in the live list, so idle() does not wait for it: give its result time to come back.
+    for (let i = 0; i < 20; i++) { await new Promise((r) => setTimeout(r, 25)); await w.dispatcher.idle(); }
+    const d = (await w.dispatcher.get(w.owner, attemptId!))!;
+    assert.equal(d.state, "waiting", "the moved attempt waits for its new host; the old turn's result did not end it");
+    assert.equal(d.pinnedHost, "host:elsewhere");
+    assert.equal(d.outcome, undefined);
+  } finally { await store.close(); }
+});

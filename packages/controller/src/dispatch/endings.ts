@@ -30,7 +30,15 @@ export type EndingBlocker = keyof typeof ENDING_BLOCKER_WORDS;
 export const ATTEMPT_ENDINGS_LIMITS = { attempts: 6, head: 500, detail: 900 } as const;
 
 const planWords = (p: PlanCount | undefined): string => (p === undefined ? "not known (no checkbox plan was reported when a turn ended)" : `${p.done} of ${p.total} step(s) checked`);
-const clip = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max - 3)}...`);
+/** Cut to `max` with `...`; never inside a surrogate pair (a name shown as it is may hold one). */
+const clip = (text: string, max: number): string => {
+  if (text.length <= max) return text;
+  let end = max - 3;
+  if (/[\ud800-\udbff]/.test(text.charAt(end - 1))) end--;
+  return `${text.slice(0, end)}...`;
+};
+/** The least room the ending summary's quotation is given in the head line: its quotes, a few characters and the cut mark. */
+const QUOTE_MIN = 20;
 
 /** The blocker this attempt left, read from its record: an early stop with its go-ons used up, a done whose checks were used up, or a report a second agent kept finding unsupported. */
 export function endingBlocker(d: DispatchBody): EndingBlocker | undefined {
@@ -61,10 +69,11 @@ function howItEnded(d: DispatchBody): string {
 /** The two lines of one attempt. `n` numbers it among the task's attempts on record, oldest first. */
 export function attemptEndingLines(d: DispatchBody, n: number): [string, string] {
   const started = d.startedAt === undefined ? `claimed ${d.claimedAt}, not started` : `started ${d.startedAt}`;
-  const bare = `Attempt ${n} (${shown(d.attemptId, 60)}), agent ${shown(d.agentId.replace(/^agent:/, ""), 60)} on route ${shown(d.route, 80)} as ${shown(d.role, 40)}: ${started}; it ${howItEnded(d)}`;
-  // The ending summary is quoted in the room the line has left, so the quotation is always closed (a cut of the whole line could end it inside an escape or the quote).
   const says = "; its ending says (quoted): ";
-  const head = d.state !== "finished" || d.outcome === undefined ? `${bare}.` : `${bare}${says}${quoted(d.outcome.summary, Math.max(20, Math.min(200, ATTEMPT_ENDINGS_LIMITS.head - bare.length - says.length - 1)))}.`;
+  // The ending summary is quoted in the room the line has left, so the quotation is always closed (a cut of the whole line could end it inside an escape or the quote). The rest of the line is cut first when it would leave
+  // the quotation less than its least room (second review: names full of escaped characters filled the line, and the line's own cut then fell inside the quotation).
+  const bare = clip(`Attempt ${n} (${shown(d.attemptId, 60)}), agent ${shown(d.agentId.replace(/^agent:/, ""), 60)} on route ${shown(d.route, 80)} as ${shown(d.role, 40)}: ${started}; it ${howItEnded(d)}`, ATTEMPT_ENDINGS_LIMITS.head - says.length - QUOTE_MIN - 3);
+  const head = d.state !== "finished" || d.outcome === undefined ? `${bare}.` : `${bare}${says}${quoted(d.outcome.summary, Math.min(200, ATTEMPT_ENDINGS_LIMITS.head - bare.length - says.length - 3))}.`;
   const parts: string[] = [];
   const last = d.turnEnd;
   const lastPlan = last?.plan ?? d.stoppedEarly?.at(-1)?.plan;
