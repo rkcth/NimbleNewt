@@ -2059,7 +2059,25 @@ export class ChatService {
         alt["basedOn"] = await this.#decisionBase(token, String((alt["source"] as { turnId?: unknown } | undefined)?.turnId ?? ""), alt, typeof alt["basedOn"] === "number" ? alt["basedOn"] : undefined, fresh.value as number);
         args["alternative"] = alt;
       }
-      const response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
+      if (step.op === "standup.answer-question" && typeof args["questionId"] === "string") {
+        // The revision in the shown proposal is the one read when it was drawn up. Announcing the question (marking it told) moves its revision without changing a word of it, so the owner's agreement is applied
+        // to the revision the question has now, as long as it is still open: the words the owner saw are the same. An answered question is never answered again; the same words are the step already done.
+        const cur = await this.#runner.get("owner-question", args["questionId"]);
+        const qb = cur?.body as unknown as { state?: string; answer?: string } | undefined;
+        if (cur !== undefined && qb?.state === "open") args["expectedRevision"] = cur.revision;
+        else if (cur !== undefined && qb?.state === "answered") {
+          if (qb.answer === args["answer"]) { results.push({ op: step.op, id: args["questionId"], shown: ["The stand-up's question was already answered with these words."], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true }); continue; }
+          return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } };
+        }
+      }
+      let response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
+      // The question's revision can move once more between the look and the send (the delivery loop marking it told): look again, a few times.
+      for (let again = 0; again < 3 && !response.ok && response.error.code === "stale_revision" && step.op === "standup.answer-question" && typeof args["questionId"] === "string"; again++) {
+        const cur = await this.#runner.get("owner-question", args["questionId"]);
+        if ((cur?.body as unknown as { state?: string } | undefined)?.state !== "open") break;
+        args["expectedRevision"] = cur!.revision;
+        response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
+      }
       if (!response.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } };
       results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
     }

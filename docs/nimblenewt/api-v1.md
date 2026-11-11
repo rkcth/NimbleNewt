@@ -6039,7 +6039,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `agenda.settle`
 
-Moves an agenda item along after the meeting: `discussed`, `resolved` (with the meeting's words as `outcomeNote`), `deferred` (with a `reason` and a `nextStep`) or `queued` again. A meeting that needs something from the owner sets `ownerQuestion`: it becomes a question of its own that the owner is told about and answers in chat, and the answer is shown on the next agenda. The item's owner or someone with `meeting.manage` does it; only the owner, or a host or service with `meeting.manage`, may set `ownerQuestion` (never an agent or a task credential: an agent asks the owner through an inquiry).
+Moves an agenda item along after the meeting: `discussed`, `resolved` (with the meeting's words as `outcomeNote`), `deferred` (with a `reason` and a `nextStep`) or `queued` again. A meeting that needs something from the owner sets `ownerQuestion`: it becomes a question of its own that the owner is told about and answers in chat, and the answer is shown on the next agenda. The item's owner or someone with `meeting.manage` does it (a task credential only for the topics its own agent owns, whatever grant it carries); only the owner, or a host or service with `meeting.manage`, may set `ownerQuestion` (never an agent or a task credential: an agent asks the owner through an inquiry).
 
 Arguments:
 

@@ -1089,4 +1089,35 @@ for (const backend of backends) {
     assert.deepEqual(closed, [id]);
   });
 
+  suite("a task credential settles only the topics its agent owns, whatever management grant it carries (card M03h follow-up 3)", async (c) => {
+    at("2026-10-20T09:00:00.000Z");
+    const scope = { projectId: c.a, taskId: "task-aaaaaaaaaaaaaaaaaaaa" };
+    const theirs = await c.meetings.addAgendaItem(c.dev, { ...item({ topic: "Dev's topic" }), projectId: c.a });
+    const mgrTask = { ...c.mgr, taskScope: scope } as Principal;
+    // The manager's own credential may settle it; the same manager's task credential may not.
+    await refuses("forbidden", () => c.meetings.setAgendaState(mgrTask, { commandId: cid("st"), itemId: theirs.id, expectedRevision: 1, to: "resolved", outcomeNote: "Settled by a task." }));
+    assert.equal((await c.meetings.agendaItem(c.owner, theirs.id))!.state, "queued");
+    // The owner of the topic settles it with a task credential, and a manager still settles with its own.
+    await c.meetings.setAgendaState({ ...c.dev, taskScope: scope } as Principal, { commandId: cid("st"), itemId: theirs.id, expectedRevision: 1, to: "resolved", outcomeNote: "Done." });
+    const other = await c.meetings.addAgendaItem(c.dev, { ...item({ topic: "Another" }), projectId: c.a });
+    await c.meetings.setAgendaState(c.mgr, { commandId: cid("st"), itemId: other.id, expectedRevision: 1, to: "resolved", outcomeNote: "Manager settles." });
+  });
+
+  suite("the agenda says in plain words that a full set of open questions blocks new ones (card M03h follow-up 4)", async (c) => {
+    at("2026-10-20T09:00:00.000Z");
+    const ask = async (i: number): Promise<void> => {
+      const m = await c.meetings.addAgendaItem(c.owner, { ...item({ topic: `Topic ${i}` }), projectId: c.a });
+      await c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: m.id, expectedRevision: 1, to: "resolved", ownerQuestion: `Question ${i}?` });
+    };
+    for (let i = 0; i < 9; i++) await ask(i);
+    const occ = await c.occurrenceAt("2026-10-21T08:00:00.000Z");
+    assert.equal(((await c.standups.agenda(c.owner, occ))!.notes ?? []).some((n) => /most a project holds/.test(n)), false, "nine open questions leave room");
+    await ask(9);
+    const full = (await c.standups.agenda(c.owner, occ))!;
+    assert.ok((full.notes ?? []).some((n) => /10 questions to the owner are open.*most a project holds.*cannot ask another/.test(n)), JSON.stringify(full.notes));
+    const first = (await c.standups.ownerQuestions(c.owner, c.a)).open[0]!;
+    await c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: first.id, expectedRevision: first.revision, answer: "Yes" });
+    assert.equal(((await c.standups.agenda(c.owner, occ))!.notes ?? []).some((n) => /most a project holds/.test(n)), false, "answering one makes room again");
+  });
+
 }

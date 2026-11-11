@@ -1443,6 +1443,10 @@ for (const backend of backends) {
     const m = await adopt(c, rec, c.asA, { agendaItemId: item });
     const m2 = await motionOf(c, rec, c.asA, { agendaItemId: item });
     await c.records.table(c.owner, { commandId: cid("t"), motionId: m2, reason: "needs a benchmark" });
+    // A manager's task credential is refused before anything moves (its grant does not reach other agents' topics in agenda.settle either).
+    await refuses("forbidden", () => c.records.returnOutcomes({ ...c.mgr, taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: c.project } } as never, { recordId: rec }), (e) => assert.match(e.message, /return that meeting's outcomes/));
+    assert.equal((await c.meetings.agendaItem(c.owner, item!))!.state === "resolved", false, "nothing was settled by the refused call");
+    assert.equal((await motionBody(c, m)).outcomeReturned, undefined, "and no motion was marked returned");
     const first = await c.records.returnOutcomes(c.owner, { recordId: rec });
     assert.deepEqual(first.returned, [m, m2]);
     const itemNow = (await c.meetings.agendaItem(c.owner, item!))!;

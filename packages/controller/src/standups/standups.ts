@@ -639,6 +639,8 @@ export class StandupService {
     const notes = waiting === undefined || waiting === 0 ? [] : [`${waiting} outcome${waiting === 1 ? "" : "s"} of earlier topics ${waiting === 1 ? "has" : "have"} not yet been told to the conversation${waiting === 1 ? "" : "s"} they came from.`];
     // What earlier meetings asked the owner, and what the owner answered, is on the next agenda (card M03h).
     const asked = this.#mayReadRecords(viewer, occ.projectId) ? await this.#meetings.ownerQuestions(viewer, occ.projectId).catch(() => undefined) : undefined;
+    // The cap on open questions is otherwise only a refusal to whoever settled a topic; the owner is told here that the meeting cannot ask more until some are answered.
+    if (asked !== undefined && asked.open.length >= MEETING_LIMITS.ownerQuestionsOpen) notes.push(`${asked.open.length} questions to the owner are open, which is the most a project holds: a meeting cannot ask another until some are answered.`);
     const askedLines = asked === undefined || (asked.open.length === 0 && asked.answered.length === 0) ? undefined : {
       open: asked.open.map((q) => ownerQuestionLine(q, false)),
       answered: asked.answered.slice(0, STANDUP_LIMITS.ownerAnswers).map((q) => ownerQuestionLine(q, true)),
