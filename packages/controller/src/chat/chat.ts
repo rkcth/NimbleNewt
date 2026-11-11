@@ -1990,7 +1990,7 @@ export class ChatService {
           return { i: item.i, status: "answered", observedAt: this.#runner.now(), lines: [line(`${result.assigned.length} assigned, ${result.skipped.length} left`), ...result.assigned.map((a) => line(`${a.taskId} to ${a.owner}: ${a.reason}`, [{ kind: "task", id: a.taskId }]))] };
         }
         case "configure": {
-          const made = await service.configure(owner, { commandId, principalId: item.principalId!, routes: item.routes!, ...(item.expectedRevision === undefined ? {} : { expectedRevision: item.expectedRevision }) });
+          const made = await service.configure(owner, { commandId, principalId: item.principalId!, ...(item.routes === undefined ? {} : { routes: item.routes }), ...(item.expectedRevision === undefined ? {} : { expectedRevision: item.expectedRevision }) });
           return { i: item.i, status: "applied", op: "coordinator.configure", commandId, id: made.id, revision: made.revision };
         }
         case "start": case "pause": case "stop": {

@@ -79,7 +79,7 @@ import { ReportInterrogator, WorkEndService, checkpointVerdict, dispatcherEnding
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
-import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
+import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute } from "../routing/index.js";
 import { landingPolicyFrom } from "./landing-policy.js";
 import { SecurityDetectors } from "../notifications/security-detect.js";
 import { checkLocalWorkerLimits } from "./worker-limits.js";
@@ -276,7 +276,7 @@ export interface StartOptions {
    */
   readonly chat?: {
     readonly interpreter: ChatInterpreter;
-    readonly coordinator?: { readonly model: CoordinatorModel; /** The coordinator agent's credential, held by the controller. */ readonly token: () => Promise<string | undefined>; /** Where its routes come from at each question (the routing table, via `chatRoutes`); absent: the routes stored with it. */ readonly routes?: () => Promise<readonly string[]> | readonly string[] };
+    readonly coordinator?: { readonly model: CoordinatorModel; /** The coordinator agent's credential, held by the controller. */ readonly token: () => Promise<string | undefined>; /** Where its routes come from at each question (the routing table, via `chatRoutes`); absent: the routes stored with it. */ readonly routes?: () => Promise<readonly string[]> | readonly string[]; /** The routes for a hosted coordinator whose agent has a `defaultProfile` (card U03d); absent: the routing table's own for that profile (local, unpaid), via `chatRoutes`. */ readonly profileRoutes?: (profile: string) => Promise<readonly string[]> | readonly string[] };
   };
 }
 
@@ -1057,6 +1057,17 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           principal: async () => { const t = await c.token(); if (t === undefined) throw new DomainError("unavailable", "the coordinator has no credential"); return principals.authenticate(t); },
           // A coordinator that is an agent record is paused, stopped and started through the same pause gates and Stop as any agent (card U03c).
           lifecycle: agentLifecycle({ agents, pauses, stops }),
+          // A hosted coordinator's routes follow its agent's profile unless the owner stated routes, and its model calls are usage of that agent (card U03d): recorded, never refused.
+          profileRoutes: c.profileRoutes ?? ((profile) => chatRoutes(routing, { role: "coordinator", profile })()),
+          // Routes the owner states are judged against the routing table like the role's own (local data, no paid route, not disabled or excluded, a configured route), each alone, as dispatch judges a route; no table: none.
+          eligibleRoutes: async (stated) => {
+            const table = await routing.get();
+            if (table === undefined) return [];
+            const picked = selectRoute({ ...table, profiles: { ...table.profiles, "coordinator-stated": [...stated] } }, { role: "coordinator", profile: "coordinator-stated", contextTokens: 8000, needs: [], data: "local-only", paidAuthorized: false });
+            return picked.candidates.filter((x) => x.eligible).map((x) => x.route);
+          },
+          attribute: async (by, agentPrincipal, use) => { await budgets.charge(by, { commandId: `coord-use-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 120), activity: "model-call", sharedOverheadRule: "the coordinator's own model calls (hosted agent)", agentId: agentPrincipal, computeMs: use.computeMs, ...(use.projectId === undefined ? {} : { projectId: use.projectId }) }); },
+          ...(options.onInternalError === undefined ? {} : { onAttributionFailure: options.onInternalError }),
         });
       }
     }

@@ -10,7 +10,9 @@ test("the coordinator is set up by the agent's name in the owner's words, or by 
   assert.equal(ok.agentName, "Ada");
   assert.equal(ok.principalId, undefined);
   assert.equal((checkIntents(co({ action: "configure", principalId: "agent:coordinator", routes: ["r"] }))[0] as { principalId?: string }).principalId, "agent:coordinator");
-  for (const bad of [{ action: "configure", routes: ["r"] }, { action: "configure", agentName: "Ada", principalId: "agent:c", routes: ["r"] }, { action: "configure", agentName: "Ada" }, { action: "start", agentName: "Ada" }, { action: "answer", question: "q", agentName: "Ada" }]) {
+  // Routes are optional in the words: a hosted coordinator uses its agent's profile (card U03d); the service refuses a coordinator that is not an agent record and names none.
+  assert.equal((checkIntents(co({ action: "configure", agentName: "Ada" }))[0] as { routes?: unknown }).routes, undefined);
+  for (const bad of [{ action: "configure", routes: ["r"] }, { action: "configure", agentName: "Ada", principalId: "agent:c", routes: ["r"] }, { action: "start", agentName: "Ada" }, { action: "answer", question: "q", agentName: "Ada" }]) {
     assert.throws(() => checkIntents(co(bad)), DomainError, JSON.stringify(bad));
   }
 });
@@ -22,4 +24,18 @@ test("the model is told how the owner reaches the coordinator in free words, inc
   assert.match(system, /"kind":"coordinator"/);
   assert.match(system, /agentName/);
   assert.match(system, /start, pause or stop/);
+});
+
+test("the state-API commands for the coordinator have a free-word equivalent the model is told about: set up (routes optional), start, pause, stop, and taking it off its agent (U03d c)", async () => {
+  const { OPERATIONS } = await import("../api/index.js");
+  const names = OPERATIONS.filter((o) => o.name.startsWith("coordinator.")).map((o) => o.name).sort();
+  assert.deepEqual(names, ["coordinator.configure", "coordinator.get", "coordinator.state"]);
+  assert.equal(OPERATIONS.find((o) => o.name === "coordinator.configure")!.kind, "command");
+  let system = "";
+  const interpreter = new ModelInterpreter({ complete: async (_route, request) => { system = request.system; return "[{\"kind\":\"none\",\"reason\":\"x\"}]"; } }, () => ["r"]);
+  await interpreter.interpret({ text: "hello", quoted: [], focus: {}, proposals: [] });
+  for (const action of ["configure", "start", "pause", "stop"]) assert.ok(system.includes(action), action);
+  assert.match(system, /routes are up to four model route names[^.]*given only when the owner names them/);
+  assert.match(system, /routing profile/);
+  assert.match(system, /taking it off its agent/);
 });

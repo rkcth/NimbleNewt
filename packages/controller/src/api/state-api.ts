@@ -159,7 +159,7 @@ export interface StateApiDeps {
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   /** The coordinator, looked up when asked. */
-  readonly coordinator?: () => Pick<CoordinatorService, "get"> | undefined;
+  readonly coordinator?: () => Pick<CoordinatorService, "get" | "configure" | "setState"> | undefined;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
