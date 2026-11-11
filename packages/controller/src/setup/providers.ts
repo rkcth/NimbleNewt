@@ -45,7 +45,8 @@ function checkEndpoint(value: unknown, field: string): string {
   let url: URL;
   try { url = new URL(raw); } catch { return invalid(field, "must be an address such as http://127.0.0.1:8000/v1"); }
   if (url.protocol !== "http:" && url.protocol !== "https:") return invalid(field, "must start with http:// or https://");
-  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return invalid(field, "must not carry a user name, password or query; a key belongs in the secret store, named by credentialName");
+  // `?` or `#` with nothing after it still leaves search and hash empty, so the raw text is checked too; a key in the path (some servers take one there) is caught by the redactor.
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || /[?#@]/.test(raw) || redactText(raw) !== raw) return invalid(field, "must not carry a user name, password, query or key; a key belongs in the secret store, named by credentialName");
   return raw.replace(/\/+$/, "");
 }
 
@@ -122,8 +123,18 @@ export class SetupProviderService {
           const table = checkTable({ providers, routes, profiles, roles });
           const stored = (await this.#runner.get(TOPOLOGY_REF.kind, TOPOLOGY_REF.id))?.body as unknown as Topology | undefined;
           const topology = stored === undefined ? EMPTY_TOPOLOGY : checkTopology({ targets: stored.targets, aliases: stored.aliases, services: stored.services }, table);
-          // Each provider is its own server and account for the fallback rule, as an unmapped route is.
-          try { assertLists(table, topology, this.#rules ?? {}); } catch (error) {
+          // For the fallback rule a route the topology does not map runs on its provider's recorded model server (host and port), so two provider names for one server are not two servers;
+          // each provider stays its own account, as an unmapped route is. Only the check sees this; the stored topology is not changed.
+          const serverOf = new Map<string, string>(specs.map((s) => [s.name, new URL(s.endpoint).host.toLowerCase()]));
+          for (const n of Object.keys(providers)) {
+            if (serverOf.has(n)) continue;
+            const rec = (await this.#runner.get(PROVIDER_ENDPOINT_KIND, n))?.body as unknown as ProviderEndpointBody | undefined;
+            try { if (rec !== undefined) serverOf.set(n, new URL(rec.endpoint).host.toLowerCase()); } catch { /* an unreadable record leaves the provider its own server */ }
+          }
+          const targets: Record<string, { endpoint: string; account: string }> = Object.create(null) as Record<string, { endpoint: string; account: string }>;
+          for (const route of Object.keys(routes)) { const p = route.slice(0, route.indexOf("/")); const server = serverOf.get(p); if (server !== undefined && !Object.hasOwn(topology.targets, route)) targets[route] = { endpoint: `server:${server}`, account: p }; }
+          const judged: Topology = { ...topology, targets: Object.assign(targets, topology.targets) };
+          try { assertLists(table, judged, this.#rules ?? {}); } catch (error) {
             if (error instanceof DomainError && error.code === "invalid_command" && /fallback lists/.test(error.message)) throw new DomainError("invalid_command", `the team needs a backup so that losing one model server does not stop it: give at least two routes on two different servers (for example your local model and one free or cheap cloud route) in one step. (${error.message})`, { field: "providers" });
             throw error;
           }

@@ -44,9 +44,18 @@ const dataDirOf = (flags, env) => resolve(flags.data ?? env.NIMBLENEWT_DATA ?? j
 const configPathOf = (flags, env) => (flags.config === undefined ? join(dataDirOf(flags, env), "nimblenewt.config.json") : resolve(flags.config));
 
 /** The starter configuration: SQLite in the data directory, strong isolation, strict approvals, remote exposure off, the providers given (none otherwise). */
+/** A model server's address as the configuration may hold it: no user name, password, query or fragment, where a key would be written into the file in the clear. The value is never echoed. */
+function plainAddress(url, flag) {
+  let u;
+  try { u = new URL(url); } catch { throw new Error(`--${flag} must be an address such as http://127.0.0.1:8000/v1`); }
+  if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "" || /[?#@]/.test(url)) throw new Error(`--${flag} must be a plain http:// or https:// address with no user name, password, query or fragment: a key there would be written into the configuration file. Name the key's secret instead (--model-key-secret NAME or --backup-key-secret NAME) and put the key in with: secret set NAME`);
+  return url;
+}
+
 export function starterConfig(dataDir, flags) {
   const providers = {};
   const add = (name, endpoint, model, keySecret, paid) => {
+    plainAddress(endpoint, name === "primary" ? "model-endpoint" : "backup-endpoint");
     providers[name] = { adapter: "openai-compatible", endpoint, ...(keySecret === undefined ? {} : { credential: { secret: keySecret } }), enabled: true, paid, models: [model] };
   };
   if (flags["model-endpoint"] !== undefined) {

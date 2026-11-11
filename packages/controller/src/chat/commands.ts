@@ -538,8 +538,12 @@ export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation
 /** A defined event source (card H13f): its kind is a fixed choice, its name one the assistant may choose (or the one it names), and a single time is worked out from the owner's words (like a hand-off's return time); the definition is always shown first. What it looks at (`path`) or asks (`url`) must still be the owner's own words. */
 export const EVENT_SOURCE_EXEMPT: ReadonlySet<string> = new Set(["type", "sourceId", "at"]);
 
-/** Fixed choices of the guided setup that the owner need not spell out in these words: where a provider runs (`local` or `cloud`) and which forge hosts a repository (`github`, `gitlab`, `self-hosted`, `none`). Every other text (names, addresses, models) must be the owner's own. */
-export const SETUP_EXEMPT: ReadonlySet<string> = new Set(["location", "host"]);
+/**
+ * Fixed choices of the guided setup that the owner need not spell out in these words: where a provider runs (`local` or `cloud`, routing.provider.add) and which forge hosts a repository
+ * (`github`, `gitlab`, `self-hosted`, `none`, project.create and project.update). Every other text (names, addresses, models) must be the owner's own. The exemption goes by key name at any
+ * depth, so each operation exempts only its own choice: `location` on a project is a repository's folder or address, which must be the owner's words.
+ */
+export const SETUP_EXEMPT: Readonly<Record<string, ReadonlySet<string>>> = { "routing.provider.add": new Set(["location"]), "project.create": new Set(["host"]), "project.update": new Set(["host"]) };
 
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set(), alsoExempt: ReadonlySet<string> = new Set()): string | undefined {
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();

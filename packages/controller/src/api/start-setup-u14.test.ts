@@ -122,7 +122,11 @@ test("routing.provider.add registers two providers in one step with their addres
     const bad = async (spec: Record<string, unknown>, why: RegExp) => { const r = await w.call("routing.provider.add", { providers: [{ ...two()[1], ...spec }] }, `bad-${JSON.stringify(spec)}`); assert.equal(r.ok, false, JSON.stringify(spec)); assert.match(r.error!.message, why); assert.doesNotMatch(r.error!.message, /sk-abcdefghijklmnop/); };
     await bad({ credentialName: "sk-abcdefghijklmnopqrstuvwx" }, /NAME of a secret/);
     await bad({ credentialName: "has space" }, /NAME of a secret/);
-    await bad({ endpoint: "https://user:pw@free.example.invalid/v1" }, /must not carry a user name, password or query/);
+    await bad({ endpoint: "https://user:pw@free.example.invalid/v1" }, /must not carry a user name, password, query or key/);
+    // A key in the path, and a bare `?` or `#` (which leave the parsed query and fragment empty), are refused too.
+    await bad({ endpoint: "https://free.example.invalid/v1/sk-abcdefghijklmnopqrstuvwxyz123456" }, /must not carry/);
+    await bad({ endpoint: "https://free.example.invalid/v1?" }, /must not carry/);
+    await bad({ endpoint: "https://free.example.invalid/v1#" }, /must not carry/);
     await bad({ endpoint: "https://free.example.invalid/v1?key=abc" }, /must not carry/);
     await bad({ endpoint: "ftp://x" }, /http:\/\/ or https:\/\//);
     await bad({ apiKey: "x" }, /not a provider field/);
@@ -182,6 +186,47 @@ test("through the chat alone an owner on a clean installation reads the setup wa
     assert.match(after, /A model provider and route: done/);
     assert.match(after, /Version control host and CI of each project: done/);
     assert.match(after, /Next to ask: Which machine runs the agents/);
+  } finally { await w.done(); }
+});
+
+test("two provider names on one model server are not two servers: the fallback rule judges the recorded addresses, including those of providers already in the table (card U14)", async () => {
+  const w = await world();
+  try {
+    // Both names point at the same server (host and port); losing it would lose the whole list.
+    const same = await w.call("routing.provider.add", { providers: [two()[0], { name: "again", location: "local", endpoint: "http://127.0.0.1:8002/v2", models: ["small-local"], contextTokens: 8192 }] }, "s1");
+    assert.equal(same.ok, false, JSON.stringify(same));
+    assert.match(same.error!.message, /needs a backup.*two different servers/);
+    assert.equal(await w.c.services.routing.get(), undefined, "nothing was changed");
+    // Upper and lower case name one server.
+    const cased = await w.call("routing.provider.add", { providers: [two()[0], { ...two()[1], endpoint: "https://FREE.example.invalid/v1" }, { name: "dup", location: "cloud", paid: false, endpoint: "https://free.example.invalid/other", models: ["x"], contextTokens: 8192 }] }, "s2");
+    assert.ok(cased.ok, JSON.stringify(cased));
+    // Three routes on two servers are fine. Moving the local provider onto the cloud server would put every entry on one server: refused, judged with the recorded addresses of the
+    // providers the step does not name.
+    const rev = (await w.c.storage.getAggregate({ kind: "routing-table", id: "routing" }))!.revision;
+    const ontoOne = await w.call("routing.provider.add", { providers: [{ ...two()[0], location: "cloud", endpoint: "https://free.example.invalid/v9" }], expectedRevision: rev }, "s3");
+    assert.equal(ontoOne.ok, false, JSON.stringify(ontoOne));
+    assert.match(ontoOne.error!.message, /two different servers/);
+  } finally { await w.done(); }
+});
+
+test("in chat a repository's folder or address must be the owner's own words: the fixed choices exempt on provider editing (location) and on projects (host) do not exempt a repository location the model made up (card U14)", async () => {
+  const script: Record<string, unknown[]> = {};
+  const w = await world(script);
+  const say = (text: string) => w.c.chat!.submit(w.boot.token, { messageId: `m-${Math.random().toString(36).slice(2)}`, text });
+  const intent = (kind: string, rest: Record<string, unknown>, evidence: string) => ({ kind, ...rest, evidence, basis: "owner" });
+  try {
+    const words = "Make a project called Lab for my code, it has no remote";
+    script[words] = [intent("command", { op: "project.create", args: { name: "Lab", goal: "Lab", repositories: [{ id: "lab", location: "/srv/invented/lab" }], versionControl: { host: "none" }, integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" } } }, "Make a project called Lab")];
+    const turn = await say(words);
+    const o = turn.outcomes[0] as unknown as { status: string; message?: string };
+    assert.notEqual(o.status, "proposed", JSON.stringify(turn));
+    assert.notEqual(o.status, "applied", JSON.stringify(turn));
+    assert.match(JSON.stringify(turn), /not in your message/);
+    // The same project with the folder the owner named, and the forge given as a fixed choice, is drawn up.
+    const said = "Make a project called Lab with the repository /srv/lab, it has no remote";
+    script[said] = [intent("command", { op: "project.create", args: { name: "Lab", goal: "Lab", repositories: [{ id: "lab", location: "/srv/lab" }], versionControl: { host: "none" }, integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" } } }, "Make a project called Lab")];
+    const ok = await say(said);
+    assert.equal((ok.outcomes[0] as unknown as { status: string }).status, "proposed", JSON.stringify(ok));
   } finally { await w.done(); }
 });
 

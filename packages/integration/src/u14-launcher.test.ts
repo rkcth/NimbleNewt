@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig, protectedFileStore } from "@nimblenewt/config";
-import { OWNER_SECRET, launch, runTerminalChat, setupGreeting, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
+import { launch, ownerSecretName, runTerminalChat, setupGreeting, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
 
 // Card U14: the launcher starts the controller from a configuration, makes the owner once (credential in the secret store, not in a file), and the owner's chat reaches the model providers
 // the configuration (or the chat) recorded. The model here is a scripted OpenAI-compatible endpoint behind an injected fetch; nothing leaves the machine.
@@ -52,7 +52,7 @@ test("a first start makes the owner once with the credential in the secret store
   try {
     const a = await launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start });
     assert.equal(a.ownerCreated, true);
-    const token = secrets.values.get(OWNER_SECRET);
+    const token = secrets.values.get(ownerSecretName(dir));
     assert.ok(token !== undefined && token.length > 20, "the credential is in the secret store");
     assert.equal(a.ownerToken, token);
     assert.match(a.notes.join("\n"), /secret store, not in a file/);
@@ -92,11 +92,52 @@ test("a secret store that cannot keep the credential stops the first start befor
     assert.equal(ok.ownerCreated, true);
     await ok.close();
     // The credential is gone from the store: plain refusal, and the controller was closed (the next start can take the data directory).
-    secrets.values.delete(OWNER_SECRET);
-    await assert.rejects(launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start }), /has an owner, but the secret store has no credential named "nimblenewt-owner-token"/);
-    secrets.values.set(OWNER_SECRET, "wrong-token");
-    await assert.rejects(launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start }), /not the owner's current credential/);
+    // A start that finds a live holder of the data directory lock goes on without it and says so (card F04i), so "released" is checked by that notice: every start below must find the lock free.
+    const printed: string[] = [];
+    const print = (line: string): void => { printed.push(line); };
+    const tokenBefore = secrets.values.get(ownerSecretName(dir))!;
+    secrets.values.delete(ownerSecretName(dir));
+    await assert.rejects(launch({ config: configFor(dir), secrets, argv: [], env: {}, print, start }), /has an owner, but the secret store has no credential named "nimblenewt-owner-token-[0-9a-f]{16}"/);
+    secrets.values.set(ownerSecretName(dir), "wrong-token");
+    await assert.rejects(launch({ config: configFor(dir), secrets, argv: [], env: {}, print, start }), /not the owner's current credential/);
+    secrets.values.set(ownerSecretName(dir), tokenBefore);
+    const again = await launch({ config: configFor(dir), secrets, argv: [], env: {}, print, start });
+    assert.equal(again.ownerCreated, false, "no second owner");
+    await again.close();
+    assert.ok(!printed.some((l) => /WITHOUT the data directory lock/.test(l)), `a refused start left the lock held: ${printed.join(" | ")}`);
   } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the owner's token is in the secret store before the owner exists: a store that fails on the real write leaves no owner and the next start makes one; two installations sharing one store (the Secret Service, the Keychain) keep their own owners (card U14)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-u14-launch-"));
+  const other = mkdtempSync(join(tmpdir(), "nn-u14-launch-"));
+  try {
+    // The store keeps small test values but fails the first time it is given the owner's token (a lock, a full disk, a killed process): no owner may exist afterwards, or the token would be lost for good.
+    const secrets = memorySecrets();
+    let failed = false;
+    const flaky: LauncherSecrets = { resolve: secrets.resolve, set: async (n, v) => { if (!failed && v.startsWith("owner:")) { failed = true; throw new Error("the store went away"); } await secrets.set(n, v); } };
+    await assert.rejects(launch({ config: configFor(dir), secrets: flaky, argv: [], env: {}, print: () => undefined, start }), /cannot keep the owner's credential, so no owner was made.*went away/);
+    const a = await launch({ config: configFor(dir), secrets: flaky, argv: [], env: {}, print: () => undefined, start });
+    assert.equal(a.ownerCreated, true, "no owner was left behind without its token");
+    const tokenA = a.ownerToken;
+    await a.close();
+    // A token left in the store by a start that stopped before the owner was made is replaced, not trusted.
+    secrets.values.set(ownerSecretName(other), "owner:owner.left-over-from-an-unfinished-start");
+    const b = await launch({ config: configFor(other), secrets, argv: [], env: {}, print: () => undefined, start });
+    assert.equal(b.ownerCreated, true);
+    assert.notEqual(b.ownerToken, tokenA);
+    assert.equal(secrets.values.get(ownerSecretName(other)), b.ownerToken);
+    await b.close();
+    // Each installation still opens with its own owner.
+    const a2 = await launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start });
+    assert.equal(a2.ownerCreated, false);
+    assert.equal(a2.ownerToken, tokenA);
+    await a2.close();
+    const b2 = await launch({ config: configFor(other), secrets, argv: [], env: {}, print: () => undefined, start });
+    assert.equal(b2.ownerCreated, false);
+    await b2.close();
+    assert.notEqual(ownerSecretName(dir), ownerSecretName(other));
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); rmSync(other, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("PostgreSQL named by a secret that is not in the store is refused in plain words before anything starts; a configuration with one model server only is held back with the reason (card U14)", async () => {

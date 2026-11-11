@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
@@ -7,6 +8,8 @@ import { chatRoutes } from "../chat/routed-model.js";
 import { DomainError } from "../domain/errors.js";
 import type { ModelEndpoint } from "../dispatch/relay.js";
 import { RoutingService } from "../routing/service.js";
+import { makeToken, newSecret } from "../security/credentials.js";
+import { principalIdOf } from "../security/principals.js";
 
 /**
  * The launcher (card U14): starts the controller from a configuration document, makes the owner once, and keeps the owner's credential in the operating system's secret store, never in a file the
@@ -34,8 +37,14 @@ export interface LauncherConfig {
   readonly models: { readonly providers: Readonly<Record<string, LauncherProvider>> };
 }
 
-/** The name the owner's credential is kept under in the secret store. */
+/** The start of the name the owner's credential is kept under in the secret store; see ownerSecretName. */
 export const OWNER_SECRET = "nimblenewt-owner-token";
+/**
+ * The name of the owner's credential in the secret store for the installation in `dataDir` (an absolute path). The Linux Secret Service and the macOS Keychain are one store per user account, shared by
+ * every installation of that account, so a fixed name would let a second installation's first start overwrite the first one's credential (which cannot be derived again). The name carries a digest of
+ * the data directory, so each installation has its own.
+ */
+export const ownerSecretName = (dataDir: string): string => `${OWNER_SECRET}-${createHash("sha256").update(resolve(dataDir)).digest("hex").slice(0, 16)}`;
 /** The context window assumed for a provider the configuration document names, which carries none; the owner changes it by chat (routing.provider.add replaces the provider). */
 export const DEFAULT_CONTEXT_TOKENS = 32_768;
 
@@ -119,7 +128,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   });
   live = controller;
   try {
-    const { token, created } = await ensureOwner(controller, secrets);
+    const { token, created } = await ensureOwner(controller, secrets, ownerSecretName(dataDir));
     if (created) notes.push("You are now the owner of this installation. Your credential is in this computer's secret store, not in a file.");
     const owner = await controller.services.principals.authenticate(token);
     const have = await controller.storage.getAggregate({ kind: "routing-table", id: "routing" });
@@ -137,24 +146,27 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   } catch (error) { await controller.close().catch(() => undefined); throw error; }
 }
 
-/** The owner exists once. The first start makes the owner and puts the token in the secret store before anything else uses it; a later start reads it back. */
-export async function ensureOwner(controller: Controller, secrets: LauncherSecrets): Promise<{ token: string; created: boolean }> {
+/**
+ * The owner exists once. The first start makes the owner's token, keeps it in the secret store and reads it back, and only then makes the owner with it: a store that cannot keep it stops the start
+ * before any owner exists, and a crash at any point leaves either no owner (the next start begins again and replaces the unused token) or an owner whose token is already kept. A later start reads it back.
+ */
+export async function ensureOwner(controller: Controller, secrets: LauncherSecrets, secretName: string = OWNER_SECRET): Promise<{ token: string; created: boolean }> {
   const existing = await controller.storage.getAggregate({ kind: "installation", id: "installation" });
   if (existing === undefined) {
-    // Prove the store can keep a secret before the owner is made: a credential that cannot be kept would be lost for good (the token is shown only once, to this process).
-    const probe = `${OWNER_SECRET}-probe`;
-    try { await secrets.set(probe, "probe"); if ((await secrets.resolve(probe)) !== "probe") throw new Error("the value read back differs"); await secrets.remove?.(probe); } catch (error) {
+    const secret = newSecret();
+    const token = makeToken(principalIdOf("owner", OWNER_NAME), secret);
+    try { await secrets.set(secretName, token); if ((await secrets.resolve(secretName)) !== token) throw new Error("the value read back differs"); } catch (error) {
       throw new Error(`the secret store cannot keep the owner's credential, so no owner was made: ${String((error as Error)?.message ?? error).slice(0, 200)}`);
     }
-    const issued = await controller.services.principals.bootstrapOwner({ name: "owner" });
-    await secrets.set(OWNER_SECRET, issued.token);
+    const issued = await controller.services.principals.bootstrapOwner({ name: OWNER_NAME, secret });
     return { token: issued.token, created: true };
   }
-  const token = await secrets.resolve(OWNER_SECRET);
-  if (token === undefined) throw new Error(`this installation has an owner, but the secret store has no credential named "${OWNER_SECRET}" for it. The credential is shown once and cannot be derived again: restore it from where it was kept, or restore the installation's backup.`);
-  try { await controller.services.principals.authenticate(token); } catch { throw new Error(`the credential "${OWNER_SECRET}" in the secret store is not the owner's current credential; restore the right one`); }
+  const token = await secrets.resolve(secretName);
+  if (token === undefined) throw new Error(`this installation has an owner, but the secret store has no credential named "${secretName}" for it (the name follows the data directory; a moved data directory looks for a new name). The credential is shown once and cannot be derived again: put it back under that name (nimblenewt secret set ${secretName}), or restore the installation's backup.`);
+  try { await controller.services.principals.authenticate(token); } catch { throw new Error(`the credential "${secretName}" in the secret store is not the owner's current credential; restore the right one`); }
   return { token, created: false };
 }
 
+const OWNER_NAME = "owner";
 
 export const launcherDir = (file: string): string => dirname(resolve(file));

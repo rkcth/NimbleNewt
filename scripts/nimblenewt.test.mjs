@@ -47,3 +47,16 @@ test("a model address without a model name, and a database choice, are handled i
   const pg = starterConfig("/x", { "postgres-secret": "db-address" });
   assert.deepEqual(pg.controller.storage, { kind: "postgres", url: { secret: "db-address" }, maxConnections: 10 });
 });
+
+test("init refuses a model address that carries a key (a query-string token, a fragment, a user name or password) before anything is written, and never echoes it (card U14 review)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-u14-cli-"));
+  try {
+    for (const [flag, url] of [["backup-endpoint", "https://free.example.invalid/v1?api_key=SEKRET123"], ["backup-endpoint", "https://free.example.invalid/v1#SEKRET123"], ["model-endpoint", "http://me:SEKRET123@127.0.0.1:8002/v1"], ["backup-endpoint", "https://free.example.invalid/v1?"]]) {
+      const c = capture();
+      const args = ["init", "--data", dir, "--model-endpoint", "http://127.0.0.1:8002/v1", "--model", "m", "--backup-model", "n", `--${flag}`, url];
+      await assert.rejects(main(args, c.io), (e) => { assert.match(e.message, new RegExp(`--${flag} must be a plain http`)); assert.doesNotMatch(e.message, /SEKRET/); return true; });
+      assert.doesNotMatch(c.text, /SEKRET/);
+      assert.equal(existsSync(join(dir, "nimblenewt.config.json")), false, `${url}: nothing is written`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

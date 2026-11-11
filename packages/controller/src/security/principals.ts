@@ -117,10 +117,13 @@ export class PrincipalService {
    * Creates the installation's one owner and its first credential. Allowed once: afterwards it is refused, whatever name is given. The token is returned
    * to the caller of this method (the installer) and nowhere else.
    */
-  async bootstrapOwner(input: { name: string; commandId?: string }): Promise<IssuedCredential> {
+  async bootstrapOwner(input: { name: string; commandId?: string; secret?: string }): Promise<IssuedCredential> {
     const name = nameOf(input.name);
     const id = principalIdOf("owner", name);
-    const secret = newSecret();
+    // The installer may make the secret itself (card U14: the launcher keeps the token in the secret store BEFORE the owner exists, so no crash can leave an owner whose token is lost).
+    // Only a secret of the shape newSecret() makes (32 random bytes, base64url) is taken.
+    if (input.secret !== undefined && (typeof input.secret !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(input.secret))) throw new DomainError("invalid_command", "secret: must be a fresh secret as newSecret() makes it", { field: "secret" });
+    const secret = input.secret ?? newSecret();
     const body: PrincipalBody = { kind: "owner", name, state: "active", grants: [], credential: await hashSecret(secret, this.#clockNow()), createdBy: "bootstrap" };
     const installation: AggregateRef = { kind: "installation", id: "installation" };
     const principal: AggregateRef = { kind: "principal", id };
