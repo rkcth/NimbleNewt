@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "concern" | "responsibility";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -114,6 +114,12 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Whether the controller may remove an ended attempt's scratch workspace is a data-keeping decision: shown first in every profile (owner decision 2026-10-30; default after-handoff).
   "cleanup.settings.change": { verb: "Change whether an ended attempt's scratch workspace is removed", mode: "propose" },
   // Whether a reconnected worker takes its attempt up again by itself, and the owner's decision on one that waits, are authority over running work: shown first in every profile (card H09b, provisional).
+  // Standing-rule proposals and the profile question (cards A07b, A07c; U08). Making a standing grant, or moving the installation to the derived profile, widens what runs without asking: shown first in every profile; nothing is accepted from an interpreter's words alone.
+  // Turning a proposal down, and having the controller look for repeated approvals, only keep the owner's choice and change no right, so they apply at once. The reason is the owner's own words.
+  "approval.proposal.accept": { verb: "Accept a standing-rule proposal (an expiring approval grant for what you kept approving: days 1, 7, 30 or 90, or statedDays / oneOff from your words), or answer it by moving to the derived profile (switchProfile permanent or trial)", mode: "propose", revision: "standing-proposal" },
+  "approval.proposal.dismiss": { verb: "Turn a standing-rule proposal down", mode: "apply", revision: "standing-proposal" },
+  "approval.proposals.check": { verb: "Look now for approvals you keep repeating and open a standing-rule proposal for each", mode: "apply" },
+  "approval.suggestion.answer": { verb: "Answer the question whether to move to the derived profile (switch, trial, not-now, or after a trial keep, extend or revert)", mode: "propose", revision: "profile-suggestion" },
   "reconnect.settings.set": { verb: "Change whether reconnected workers take their attempts up again by themselves", mode: "propose" },
   "reconnect.reaccept": { verb: "Decide on a reconnected worker's attempt", mode: "propose" },
   // Proving a backup unlock method still works reads a secret file on the host and changes nothing but the record of the proof; it carries no secret in the chat (card K01b).
@@ -474,7 +480,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest", "concernId"]);
+const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest", "concernId", "proposalId", "profileAnswer", "switchProfile"]);
 
 /**
  * `generation.stream.change` names the switches it turns on or off (`enable`, `disable`) from a fixed list the service checks (card L05d): the owner says what they want in their own words ("stop checking that a tool call is the one the model wrote"),

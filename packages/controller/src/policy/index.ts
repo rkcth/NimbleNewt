@@ -6,3 +6,4 @@ export { PolicyService, type RolesOf, type AgentPolicyContext, type EffectivePol
 export { ApprovalLoadService, GRANT_LENGTHS, chooseStandingLength, LOAD_LIMITS, type CounterBody, type LoadFigures, type ProposalBody } from "./load.js";
 export { ProfileSuggestionService, SUGGESTION_EVERY, TRIAL_DAYS, type Suggestion, type SuggestionAnswer, type SuggestionBody, type SuggestionKind } from "./suggestion.js";
 export { describePolicyContext } from "./describe.js";
+export type { ApprovalsFacade } from "./facade.js";

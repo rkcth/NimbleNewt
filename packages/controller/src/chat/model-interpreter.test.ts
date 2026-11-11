@@ -66,6 +66,19 @@ test("the model is told what the revocation and policy questions are about: revo
   assert.match(system, /catalog_policy\(\) - what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting/);
 });
 
+test("the model is told how the owner sees and answers what they are asked to approve: the approval_load view, the standing-rule proposals and the derived-profile question, with the arguments each operation takes (card U08)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  assert.match(system, /approval_load\(days\) - the approval load \(owner only\)/);
+  assert.match(system, /approval\.proposal\.accept\([^)]*proposalId[^)]*statedDays[^)]*switchProfile[^)]*\) - Accept a standing-rule proposal/);
+  assert.match(system, /approval\.proposal\.dismiss\([^)]*reason[^)]*\)/);
+  assert.match(system, /approval\.suggestion\.answer\([^)]*profileAnswer[^)]*\)/);
+  assert.match(system, /approval\.proposals\.check\(/);
+  assert.match(system, /how many approvals am I handling/);
+  assert.match(system, /switch \(derived for good\), trial \(seven days\), not-now/);
+});
+
 test("the model is told how to answer a held meeting decision by chat: the operation with its arguments, no ID, and the owner's own words for an alternative (card M02h)", async () => {
   let system = "";
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
