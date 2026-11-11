@@ -39,6 +39,12 @@ export interface HostWorkspaceCall {
   /** The agent the task is assigned to, when the controller says (named as the author of what is carried into the shared workspace). */
   readonly assignee?: string;
 }
+export interface HostSecurityEvent {
+  readonly kind: "protected-path-touched" | "sandbox-escape-attempt";
+  /** Up to 200 characters, the same for the same event. Built from the operation, the task and a digest of the refusal; no path text and no secret. */
+  readonly key: string;
+  readonly projectId: string;
+}
 export type HostJson = null | boolean | number | string | readonly HostJson[] | { readonly [key: string]: HostJson };
 export type HostWorkspaceOutcome = { readonly ok: true; readonly summary: string; readonly detail?: { readonly [key: string]: HostJson } } | { readonly ok: false; readonly reason: string };
 
@@ -84,6 +90,12 @@ export interface WorkspaceHostOptions {
   readonly landing?: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicy | undefined> | LandingPolicy | undefined;
   /** Test seams: called at fixed points of a landing. */
   readonly hooks?: { readonly afterCleanCheck?: () => Promise<void>; readonly afterWrite?: () => Promise<void> };
+  /**
+   * The worker-side hook for security events (card U11d): called, without waiting, when a request meets a sign that an agent's checkout tried to reach Git's own data (`protected-path-touched`) or was swapped or turned
+   * into a link while a request read it (`sandbox-escape-attempt`). The key is the same for the same event, so a repeat is one event. It never carries a path's content or a credential. A throw or a rejection is
+   * dropped: reporting must not change what the request answers.
+   */
+  readonly security?: (event: HostSecurityEvent) => void | Promise<void>;
   readonly attemptsQuiet?: (attemptIds: readonly string[], call: { readonly taskId: string; readonly projectId: string }) => Promise<boolean> | boolean;
 }
 
@@ -128,6 +140,16 @@ export class WorkspaceHost {
     // The key is the shared tree itself, not one spelling of its path: a link, a different case or a trailing slash must not give a second lock.
     const sharedKey = await realpath(where.shared).catch(() => where.shared);
     return this.#serial(where.checkout, operation === "integration" || operation === "landing" ? () => this.#serial(`shared:${sharedKey}`, work) : work);
+  }
+
+  /** Tells the hook of a refusal that is a security sign (see `security`). Everything else is an ordinary refusal and is not reported. */
+  #flag(call: HostWorkspaceCall, error: unknown): void {
+    const sink = this.#options.security;
+    if (sink === undefined || !(error instanceof WorkspaceError)) return;
+    const kind = error.code === "protected_path" ? "protected-path-touched" : error.code === "link_refused" && error.tamper === true ? "sandbox-escape-attempt" : undefined;
+    if (kind === undefined) return;
+    const digest = createHash("sha256").update(`${kind}|${call.operation}|${call.taskId}|${error.message}`).digest("hex").slice(0, 24);
+    try { void Promise.resolve(sink({ kind, key: `ws:${call.operation}:${digest}`, projectId: call.projectId })).catch(() => undefined); } catch { /* reporting never changes the answer */ }
   }
 
   /** Why the request must not start now (its deadline passed, or an attempt it names is running), or `undefined`. Nothing is written to the journal for a request refused here, so it is not counted as begun. */
@@ -214,6 +236,7 @@ export class WorkspaceHost {
     await this.#options.hooks?.afterCleanCheck?.();
     let plan;
     try { plan = await git.landingPlan({ gitDir: where.gitDir }); } catch (error) {
+      this.#flag(call, error);
       if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
       throw error;
     }
@@ -238,6 +261,7 @@ export class WorkspaceHost {
         },
       }));
     } catch (error) {
+      this.#flag(call, error);
       if (error instanceof WorkspaceError && (error.code === "stale" || error.code === "unavailable")) return no(`${cut(error.message)}; nothing was landed`);
       // A put-back that failed in part: the shared tree is in a mixed state, which is told exactly (never "nothing was landed"), and the owner is pointed at it by a blocker.
       if (error instanceof WorkspaceError && error.code === "partial" && error.detail !== undefined) {
@@ -282,6 +306,7 @@ export class WorkspaceHost {
         return { ok: true, summary: `the checkout is already at ${target.slice(0, 12)}`, detail: { changed: false, base: target } };
       }
       try { await git.refresh({ shared: where.shared, commit: target, gitDir: where.gitDir, checkout: where.checkout }); } catch (error) {
+        this.#flag(call, error);
         if (error instanceof WorkspaceError && error.code === "stale") return no(cut(error.message));
         throw error;
       }
@@ -294,12 +319,13 @@ export class WorkspaceHost {
       // What would be carried is checked before anything is written: a change that touches Git's data, a link or too many files is refused whole.
       let planned;
       try { planned = await git.changes({ gitDir: where.gitDir, checkout: where.checkout }); } catch (error) {
+        this.#flag(call, error);
         if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
         throw error;
       }
       if (planned.length === 0) return { ok: true, summary: "the checkout holds no change from its base; nothing to integrate", detail: { written: 0, kept: 0, skipped: 0, changed: false } };
       // The same exclusive hold as a landing takes: an integration and a landing never write the shared tree at the same moment (in this process or another using the same bridge state).
-      const results = await bridge.exclusive("landing", () => git.integrate({ gitDir: where.gitDir, checkout: where.checkout, bridge, author, reason: call.reason }));
+      const results = await bridge.exclusive("landing", () => git.integrate({ gitDir: where.gitDir, checkout: where.checkout, bridge, author, reason: call.reason })).catch((error: unknown) => { this.#flag(call, error); throw error; });
       const written = results.filter((r) => r.result.status === "written").length;
       const kept = results.flatMap((r) => (r.result.status === "rejected" ? [{ path: r.path.slice(0, 200), pendingId: r.result.pendingId }] : []));
       const skipped = results.filter((r) => r.result.status === "skipped").length;
