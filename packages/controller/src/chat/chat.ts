@@ -142,15 +142,26 @@ export const FOLLOW_UP_PROJECTS = 5;
 /** The latest follow-ups of a turn the listing shows. */
 export const FOLLOW_UP_SHOWN = 3;
 
+/** What the channel a message came by can do. A channel that keeps what it shows (the web page's outbox) says `secrets: false`. */
+export interface ChatChannel { readonly secrets?: boolean }
+/** Operations whose result carries a secret shown once (card U14b). */
+export const SECRET_OPS: ReadonlySet<string> = new Set(["credential.issue"]);
+const NO_SECRET_CHANNEL = "this channel keeps what it shows, so it cannot show a credential once; issue it in the terminal chat (or through the API)";
+
+/** A secret an operation made for the owner (card U14b: a credential). It is handed to the caller of the turn once, in memory, and is in no record: not the turn, the proposal, an outcome or a log. */
+export interface RevealedSecret { readonly label: string; readonly value: string }
+
 export interface TurnResult {
   readonly turnId: string;
   readonly replayed: boolean;
   readonly outcomes: readonly Outcome[];
   /** The owner-facing answer, one plain line each. */
   readonly reply: readonly string[];
+  /** Secrets this turn made (a new credential), shown once to the owner. Never stored: a turn sent again (`replayed`) does not have them. */
+  readonly secrets?: readonly RevealedSecret[];
 }
 
-export interface ApplyResult { readonly proposalId: string; readonly applied: boolean; readonly replayed: boolean; readonly results: readonly ChatStepResult[]; readonly failure?: { readonly step: number; readonly code: string; readonly message: string } }
+export interface ApplyResult { readonly proposalId: string; readonly applied: boolean; readonly replayed: boolean; readonly results: readonly ChatStepResult[]; readonly secrets?: readonly RevealedSecret[]; readonly failure?: { readonly step: number; readonly code: string; readonly message: string } }
 
 export interface ChatDeps {
   readonly principals: PrincipalService;
@@ -215,6 +226,10 @@ const sentenceWith = (text: string, value: string): string | undefined => text.s
 export class ChatService {
   readonly #runner: CommandRunner;
   readonly #deps: ChatDeps;
+  /** Secrets made while a turn runs, by turn, until the turn's caller takes them. Memory only. */
+  readonly #revealed = new Map<string, RevealedSecret[]>();
+  /** Turns from a channel that cannot show a secret once (the web page keeps what it receives): an operation that makes one is refused in them. */
+  readonly #noSecrets = new Set<string>();
 
   private constructor(runner: CommandRunner, deps: ChatDeps) {
     this.#runner = runner;
@@ -228,7 +243,7 @@ export class ChatService {
   // ---- the message -----------------------------------------------------------------------------------------------------------
 
   /** Handles one message from the owner. `messageId` is the owner's idempotency key for the message: sending it again returns the first turn. */
-  async submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }): Promise<TurnResult> {
+  async submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: ChatChannel = {}): Promise<TurnResult> {
     const owner = await this.#owner(token);
     const tok = token as string;
     onlyKnown(message, ["messageId", "text", "quoted"]);
@@ -242,6 +257,7 @@ export class ChatService {
     // Quoted material is untrusted and may well hold secrets: they are cut out before anything sees it.
     const safeQuoted = quoted.map((q) => redactForModel(q));
     const turnId = `turn-${hash(owner.id, messageId)}`;
+    if (options.secrets === false) this.#noSecrets.add(turnId);
 
     let turn = await this.#turn(turnId);
     let replayed = turn !== undefined;
@@ -276,15 +292,19 @@ export class ChatService {
       }
     }
     if (turn === undefined) throw new DomainError("unavailable", "the turn could not be recorded");
-    const finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn);
+    let finished: TurnBody;
+    try { finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn); } catch (error) { this.#revealed.delete(turnId); throw error; } finally { this.#noSecrets.delete(turnId); }
+    const secrets = this.#revealed.get(turnId);
+    this.#revealed.delete(turnId);
     const reply = replyOf(finished.outcomes ?? []);
+    if (secrets !== undefined) reply.push(`${secrets.length === 1 ? "A credential was made" : "Credentials were made"}. ${secrets.length === 1 ? "It is" : "They are"} shown once, below, and kept nowhere: copy ${secrets.length === 1 ? "it" : "them"} now into the secret store of the agent or host. If ${secrets.length === 1 ? "it is" : "they are"} lost, ask for a new one.`);
     let count = 0;
     let needing = 0;
     try { needing = (await this.#deps.needing?.(owner)) ?? 0; } catch { /* the reply is still given */ }
     try { count = needing > 0 ? 0 : (await this.#deps.waiting?.(owner)) ?? 0; } catch { /* the reply is still given */ }
     if (needing > 0) reply.push(`${needing >= 50 ? "50 or more" : needing} ${needing === 1 ? "thing needs" : "things need"} your decision. Ask what needs you to see ${needing === 1 ? "it" : "them"}.`);
     if (count > 0) reply.push(`${count >= 50 ? "50 or more" : count} ${count === 1 ? "question from an agent is" : "questions from agents are"} waiting for your answer. Ask what is waiting to see ${count === 1 ? "it" : "them"}.`);
-    return { turnId, replayed, outcomes: finished.outcomes ?? [], reply };
+    return { turnId, replayed, outcomes: finished.outcomes ?? [], reply, ...(secrets === undefined ? {} : { secrets }) };
   }
 
   /** A turn as recorded (the owner only): what was planned and what came of each part, with the command IDs that link it to the audit trail. */
@@ -327,10 +347,10 @@ export class ChatService {
    * The explicit request that applies a proposal: its steps are sent to the state API in order, each under its fixed command ID and the credential it names. A proposal that was applied is
    * answered with its recorded results (`replayed`); one whose step is refused stays open, with the steps that did apply recorded by the API, and applying it again carries on.
    */
-  async applyProposal(token: unknown, request: { commandId: string; proposalId: string }): Promise<ApplyResult> {
+  async applyProposal(token: unknown, request: { commandId: string; proposalId: string }, options: ChatChannel = {}): Promise<ApplyResult> {
     const owner = await this.#owner(token);
     onlyKnown(request, ["commandId", "proposalId"]);
-    return this.#apply(owner, token as string, request.proposalId, request.commandId, undefined);
+    return this.#apply(owner, token as string, request.proposalId, request.commandId, undefined, options.secrets !== false);
   }
 
   async discardProposal(token: unknown, request: { commandId: string; proposalId: string }): Promise<{ proposalId: string; replayed: boolean }> {
@@ -1953,6 +1973,7 @@ export class ChatService {
           if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
           args = { ...args, basedOn: await this.#decisionBase(token, sourceTurn, args, item.planBase, fresh.value as number) };
         }
+        if (SECRET_OPS.has(item.op) && this.#noSecrets.has(turnId)) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "unavailable", message: NO_SECRET_CHANNEL };
         const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args });
         if (!response.ok && response.error.code === "command_conflict" && item.op === "decision.record") {
           // The same turn was sent twice at once and the other copy recorded this step between the look and the send: it is done.
@@ -1961,6 +1982,7 @@ export class ChatService {
           if (recorded !== undefined && src?.turnId === (typeof item.args["sourceTurnId"] === "string" ? item.args["sourceTurnId"] : turnId)) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on ${quotedText(String(recorded["topic"] ?? "the gate"), 80)}.`], accepted: true, completed: true } as never;
         }
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
+        this.#reveal(turnId, secretOf(response.result));
         return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
       }
       case "propose": {
@@ -1999,7 +2021,8 @@ export class ChatService {
           } catch (error) { return refusal(item.i, error); }
         }
         try {
-          const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId);
+          const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId, !this.#noSecrets.has(turnId));
+          for (const secret of result.secrets ?? []) this.#reveal(turnId, secret);
           return result.applied ? { i: item.i, status: "applied", proposalId: item.proposalId, results: result.results, accepted: true, completed: result.results.every((r) => r.completed) } : { i: item.i, status: "refused", proposalId: item.proposalId, code: result.failure?.code ?? "invalid_command", message: result.failure?.message ?? "not applied", results: result.results };
         } catch (error) { return refusal(item.i, error); }
       }
@@ -2068,7 +2091,7 @@ export class ChatService {
     }));
   }
 
-  async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined): Promise<ApplyResult> {
+  async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined, allowSecrets = true): Promise<ApplyResult> {
     let found = PROPOSAL_ID.test(proposalId) ? await this.#runner.get("chat-proposal", proposalId) : undefined;
     let body = found?.body as unknown as ChatProposalBody | undefined;
     if (found === undefined || body === undefined || body.ownerId !== owner.id) throw new DomainError("not_found", "no such proposal");
@@ -2091,10 +2114,15 @@ export class ChatService {
     }
     const coordinatorToken = body.steps.some((s) => s.as === "coordinator") ? await this.#deps.coordinatorToken?.() : undefined;
     const results: ChatStepResult[] = [];
+    const secrets: RevealedSecret[] = [];
+    const withSecrets = <T extends object>(r: T): T => (secrets.length === 0 ? r : { ...r, secrets });
+    // A channel that keeps what it shows is refused before any step is sent, so a proposal that would make a credential is never half applied from it.
+    const secretStep = allowSecrets ? -1 : body.steps.findIndex((s) => SECRET_OPS.has(s.op));
+    if (secretStep >= 0) return { proposalId, applied: false, replayed: false, results, failure: { step: secretStep, code: "unavailable", message: NO_SECRET_CHANNEL } };
     for (const [index, step] of body.steps.entries()) {
       const args = substitute(step.args, results);
       const using = step.as === "coordinator" ? coordinatorToken : token;
-      if (using === undefined) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } };
+      if (using === undefined) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } });
       if (step.op === "decision.record" && step.as === undefined) {
         // A decision step is based on the version of its topic when it was shown, but decisions of the same message applied before it do not count as the topic having moved. A step already recorded (this apply run again) is answered from the record.
         const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, step.commandId)) });
@@ -2103,14 +2131,14 @@ export class ChatService {
           continue;
         }
         const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
-        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        if (!fresh.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } });
         args["basedOn"] = await this.#decisionBase(token, typeof args["sourceTurnId"] === "string" ? args["sourceTurnId"] : "", args, typeof args["basedOn"] === "number" ? args["basedOn"] : undefined, fresh.value as number);
       }
       if (step.op === "meeting.record.owner-respond" && isObject(args["alternative"])) {
         // The owner's alternative is based on the version of its topic when it is recorded, as a decision step is, and decisions of this very message do not count as the topic having moved.
         const alt = { ...(args["alternative"] as Record<string, unknown>) };
         const fresh = await this.#revisionFor(token, "decision", alt, undefined, new Map());
-        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        if (!fresh.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } });
         alt["basedOn"] = await this.#decisionBase(token, String((alt["source"] as { turnId?: unknown } | undefined)?.turnId ?? ""), alt, typeof alt["basedOn"] === "number" ? alt["basedOn"] : undefined, fresh.value as number);
         args["alternative"] = alt;
       }
@@ -2122,7 +2150,7 @@ export class ChatService {
         if (cur !== undefined && qb?.state === "open") args["expectedRevision"] = cur.revision;
         else if (cur !== undefined && qb?.state === "answered") {
           if (qb.answer === args["answer"]) { results.push({ op: step.op, id: args["questionId"], shown: ["The stand-up's question was already answered with these words."], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true }); continue; }
-          return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } };
+          return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } });
         }
       }
       let response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
@@ -2133,7 +2161,9 @@ export class ChatService {
         args["expectedRevision"] = cur!.revision;
         response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
       }
-      if (!response.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } };
+      if (!response.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } });
+      const made = secretOf(response.result);
+      if (made !== undefined) secrets.push(made);
       results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
     }
     try {
@@ -2156,9 +2186,17 @@ export class ChatService {
       found = await this.#runner.get("chat-proposal", proposalId);
       body = found?.body as unknown as ChatProposalBody | undefined;
       if (body?.status !== "applied") throw error;
-      return { proposalId, applied: true, replayed: true, results: body.results ?? [] };
+      // Another copy recorded the proposal as applied first; a credential this copy made is still handed over (it is in no record, so this is its only showing).
+      return withSecrets({ proposalId, applied: true, replayed: true, results: body.results ?? [] });
     }
-    return { proposalId, applied: true, replayed: false, results };
+    return withSecrets({ proposalId, applied: true, replayed: false, results });
+  }
+
+  /** Keeps a secret an operation made, for the caller of this turn to take once. */
+  #reveal(turnId: string, secret: RevealedSecret | undefined): void {
+    if (secret === undefined) return;
+    const held = this.#revealed.get(turnId);
+    if (held === undefined) this.#revealed.set(turnId, [secret]); else held.push(secret);
   }
 
   async #discard(owner: Principal, proposalId: string, commandId: string, fromTurn: string | undefined): Promise<{ proposalId: string; replayed: boolean }> {
@@ -2295,6 +2333,14 @@ function recordOf(step: ChatStep): string | undefined {
     case "catalog.policy.change": return "catalog-policy";
     default: return undefined;
   }
+}
+
+/** The secret an operation's result carries for the owner (`secret: { label, value }`), if it has one. It is taken out here, so nothing that keeps the result keeps it. */
+function secretOf(result: JsonObject): RevealedSecret | undefined {
+  const s = result["secret"];
+  if (s === null || typeof s !== "object" || Array.isArray(s)) return undefined;
+  const { label, value } = s as { label?: unknown; value?: unknown };
+  return typeof label === "string" && typeof value === "string" && value !== "" ? { label: label.slice(0, 120), value } : undefined;
 }
 
 /** The plain lines an API result asks to be shown to the owner (a captured agenda topic), if it has any. */

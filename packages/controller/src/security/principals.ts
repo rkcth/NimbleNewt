@@ -4,7 +4,7 @@ import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
 import { mayHold } from "./access.js";
 import { effectiveOf } from "./grants.js";
-import { credentialIdOf, hashSecret, makeToken, newSecret, parseToken, verifySecret, type StoredCredential } from "./credentials.js";
+import { credentialIdOf, hashSecret, makeToken, newSecret, parseToken, scopedCommandId, verifySecret, type StoredCredential } from "./credentials.js";
 
 /**
  * `service` is a trusted controller service such as the recovery service (card A10): it holds only `recovery.*` actions, cannot be addressed in a conversation and cannot use the conversation API.
@@ -190,6 +190,66 @@ export class PrincipalService {
     const credential = await hashSecret(secret, this.#clockNow());
     await this.#update(owner, "principal.credential", { commandId: `credential:${randomId()}`, principalId, expectedRevision: current.revision }, (body) => ({ ...body, credential }), {});
     return { principalId, token: makeToken(principalId, secret) };
+  }
+
+  /**
+   * Issues a credential to an agent or a host for the owner's operation `credential.issue` (card U14b), and returns its token, once. Unlike `issueCredential` this is one recorded command: the same command ID
+   * again is a replay, and a replay cannot return the token (only its hash was stored, and the secret generated for the repeat would match nothing), so it is refused in plain words rather than handing back a token that
+   * does not work. A host that is not enrolled yet is enrolled first (`enrollHost`, no grants); an agent must already exist (`agent.create` makes its principal). Replaces any earlier credential, which stops working at once.
+   * The token is never written anywhere: not in the record, the command's detail, or an error.
+   */
+  async issueCredentialOnce(owner: Principal, command: NoActor & { principalId: string; enrollHost?: boolean }): Promise<IssuedCredential & { credentialId: string; enrolled: boolean }> {
+    requireOwner(owner);
+    onlyKnown(command, ["commandId", "principalId", "enrollHost"]);
+    const principalId = typeof command.principalId === "string" && /^(agent|host):[a-z0-9][a-z0-9-]{0,39}$/.test(command.principalId) ? command.principalId : invalid("principalId", "must be an agent or a host principal such as agent:agt-... or host:laptop");
+    const kind = principalId.startsWith("host:") ? "host" as const : "agent" as const;
+    let enrolled = false;
+    let current = await this.#runner.get("principal", principalId);
+    if (current === undefined) {
+      if (kind !== "host" || command.enrollHost !== true) throw new DomainError("not_found", `${principalId} does not exist${kind === "agent" ? "; create the agent first" : ""}`);
+      await this.enroll(owner, { commandId: `${command.commandId}.enroll`, kind: "host", name: principalId.slice("host:".length), grants: [] });
+      enrolled = true;
+      current = await this.#runner.get("principal", principalId);
+      if (current === undefined) throw new DomainError("unavailable", "the host could not be enrolled");
+    }
+    const before = current.body as unknown as PrincipalBody;
+    if (before.kind !== kind || before.state !== "active") throw new DomainError("not_found", `${principalId} is not an active ${kind}`);
+    const secret = newSecret();
+    const credential = await hashSecret(secret, this.#clockNow());
+    const ref: AggregateRef = { kind: "principal", id: principalId };
+    const result = await this.#runner.command("principal.credential", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { principalId },
+      build: async () => {
+        const now = await this.#runner.get("principal", principalId);
+        if (now === undefined) throw new DomainError("not_found", `principal ${principalId} does not exist`);
+        const next: PrincipalBody = { ...(now.body as unknown as PrincipalBody), credential };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: now.revision, body: next as unknown as JsonObject }], detail: { principalId, credentialId: credentialIdOf(credential) } };
+      },
+    }));
+    if (result.replayed) throw new DomainError("command_conflict", "that request already issued a credential, and a credential is shown only once; ask for a new one with a new request");
+    return { principalId, token: makeToken(principalId, secret), credentialId: credentialIdOf(credential), enrolled };
+  }
+
+  /** Takes an agent's or a host's credential away (owner only): the principal stays, and nothing authenticates as it until a new credential is issued. Safe to repeat. */
+  async revokeCredential(owner: Principal, command: NoActor & { principalId: string; reason?: string }): Promise<{ revoked: boolean }> {
+    requireOwner(owner);
+    onlyKnown(command, ["commandId", "principalId", "reason"]);
+    const principalId = typeof command.principalId === "string" && /^(agent|host):[a-z0-9][a-z0-9-]{0,39}$/.test(command.principalId) ? command.principalId : invalid("principalId", "must be an agent or a host principal such as agent:agt-... or host:laptop");
+    const reason = command.reason === undefined ? undefined : (typeof command.reason === "string" && command.reason.length <= 300 ? command.reason : invalid("reason", "must be text of at most 300 characters"));
+    const ref: AggregateRef = { kind: "principal", id: principalId };
+    let revoked = false;
+    await this.#runner.command("principal.credential.revoke", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { principalId, reason: reason ?? null },
+      build: async () => {
+        const now = await this.#runner.get("principal", principalId);
+        if (now === undefined) throw new DomainError("not_found", `principal ${principalId} does not exist`);
+        const body = now.body as unknown as PrincipalBody;
+        revoked = body.credential !== undefined;
+        const { credential: _gone, ...rest } = body;
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: now.revision, body: rest as unknown as JsonObject }], detail: { principalId, ...(reason === undefined ? {} : { reason }) } };
+      },
+    }));
+    return { revoked };
   }
 
   /**

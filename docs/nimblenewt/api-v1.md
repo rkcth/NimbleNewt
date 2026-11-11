@@ -1296,6 +1296,16 @@ Arguments:
 
 Result: `{ item: { items, next? } }`.
 
+#### `host.local.get`
+
+Owner only (card U14b): whether NimbleNewt starts a worker host on this computer so that agents can run here. Off until the owner turns it on. It is read when NimbleNewt starts.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, enabled, default, takesEffect } }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -4351,6 +4361,51 @@ Arguments:
 - `reason`: why, in the owner's words
 
 Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `credential.issue`
+
+Owner only (card U14b): issues a credential to an agent or a host and shows it ONCE, in `secret.value`. Only its hash is stored; it is never logged, kept in a chat record or repeated, so a lost one is replaced by issuing again (the earlier credential stops working at once). `kind` is `agent` (`agentId`: an agent made with `agent.create`) or `host` (`name`: the host's name, enrolled with no rights if it is new). Repeating the same `commandId` is refused: it cannot show the credential again. The credential carries only the rights the owner gave that principal (`grant.create`); issuing one gives none. Put it where the agent or host reads it (its secret store), not in a chat or a file others can read.
+
+Arguments:
+
+- `kind`: `agent` or `host`
+- `agentId` (optional): for an agent: the agent's ID (`agent.list`)
+- `name` (optional): for a host: its name, 1 to 40 lower-case letters, digits or hyphens
+- `commandId`: required
+
+Result: `{ id, kind, credentialId, enrolled, secret: { label, value } }`: `id` is the principal (`agent:<id>` or `host:<name>`), `credentialId` the public identifier of this credential, `secret.value` the credential, shown once.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `credential.revoke`
+
+Owner only (card U14b): takes an agent's or a host's credential away. The agent or host stays, keeps its rights and its history, and nothing can authenticate as it until `credential.issue` gives it a new credential. It stops counting at the next request. To take back a right, use `grant.revoke`.
+
+Arguments:
+
+- `kind`: `agent` or `host`
+- `agentId` (optional): for an agent: the agent's ID
+- `name` (optional): for a host: its name
+- `reason` (optional): why, in the owner's words
+- `commandId`: required
+
+Result: `{ id, revoked }`: `revoked` is false when it had no credential.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `host.local.set`
+
+Owner only (card U14b): turns on or off the worker host that NimbleNewt starts on this computer (`enabled`). On: the next start of NimbleNewt enrolls the host, announces it and lets agents run on it in a sandbox, using only the model providers already set up (it loads or switches no model). Off (the default): tasks stay assigned and wait for a host. It counts from the next start.
+
+Arguments:
+
+- `enabled`: true or false
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision, enabled, takesEffect }`.
 
 Completion: finished when accepted (`completed: true`).
 

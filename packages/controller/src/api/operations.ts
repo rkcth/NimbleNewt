@@ -82,9 +82,9 @@ import type { CatalogPolicyService } from "../catalog/policy.js";
 import type { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
-import type { Principal } from "../security/principals.js";
+import type { Principal, PrincipalService } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
-import type { SetupProviderService, SetupReadinessService } from "../setup/index.js";
+import type { LocalHostSettingService, SetupProviderService, SetupReadinessService } from "../setup/index.js";
 import type { JsonObject } from "../storage/types.js";
 
 export interface Context {
@@ -145,6 +145,10 @@ export interface Context {
   readonly setup?: Pick<SetupReadinessService, "check">;
   /** Absent when the controller runs without guided provider editing (card U14). */
   readonly setupProviders?: Pick<SetupProviderService, "add">;
+  /** Credentials for agents and hosts by operation, and revoking one (card U14b). */
+  readonly credentialAdmin?: Pick<PrincipalService, "issueCredentialOnce" | "revokeCredential">;
+  /** Whether the launcher starts a worker host on this machine (card U14b). */
+  readonly localHost?: Pick<LocalHostSettingService, "get" | "set">;
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly recoveryLadder?: Pick<RecoveryLadderService, "get" | "set">;
   readonly recoveryStep?: Pick<StallService, "recover"> & Partial<Pick<StallService, "get" | "list" | "decide">>;
@@ -432,6 +436,8 @@ const incidentsOf = (c: Context): NonNullable<Context["incidents"]> => c.inciden
 const coverageOf = (c: Context): NonNullable<Context["coverage"]> => c.coverage ?? unavailable("coverage");
 const retentionOf = (c: Context): NonNullable<Context["retention"]> => c.retention ?? unavailable("retention");
 const retentionSettingsOf = (c: Context): NonNullable<Context["retentionSettings"]> => c.retentionSettings ?? unavailable("retention settings");
+const credentialAdminOf = (c: Context): NonNullable<Context["credentialAdmin"]> => c.credentialAdmin ?? unavailable("issuing credentials");
+const localHostOf = (c: Context): NonNullable<Context["localHost"]> => c.localHost ?? unavailable("the local host setting");
 const coverageSettingsOf = (c: Context): NonNullable<Context["coverageSettings"]> => c.coverageSettings ?? unavailable("coverage settings");
 const checksOf = (c: Context): NonNullable<Context["responsibilityChecks"]> => c.responsibilityChecks ?? unavailable("responsibility checks");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
@@ -1138,6 +1144,36 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["threadId", "seq"]); return asJson(await (c.policyForward ?? unavailable("forwarding owner messages (chat is not configured)")).forward(c.principal, { commandId: need(id), threadId: str(a, "threadId"), seq: Number(a["seq"]) })); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "credential.issue", kind: "command", summary: "Owner only (card U14b): issues a credential to an agent or a host and shows it ONCE, in `secret.value`. Only its hash is stored; it is never logged, kept in a chat record or repeated, so a lost one is replaced by issuing again (the earlier credential stops working at once). `kind` is `agent` (`agentId`: an agent made with `agent.create`) or `host` (`name`: the host's name, enrolled with no rights if it is new). Repeating the same `commandId` is refused: it cannot show the credential again. The credential carries only the rights the owner gave that principal (`grant.create`); issuing one gives none. Put it where the agent or host reads it (its secret store), not in a chat or a file others can read.", args: { kind: "`agent` or `host`", "agentId?": "for an agent: the agent's ID (`agent.list`)", "name?": "for a host: its name, 1 to 40 lower-case letters, digits or hyphens", commandId: "required" }, result: "`{ id, kind, credentialId, enrolled, secret: { label, value } }`: `id` is the principal (`agent:<id>` or `host:<name>`), `credentialId` the public identifier of this credential, `secret.value` the credential, shown once.", completion: { kind: "completed" },
+    run: async (c, a, id) => {
+      only(a, ["kind", "agentId", "name"]);
+      notFromTask(c, "issue credentials");
+      const kind = a["kind"];
+      if (kind !== "agent" && kind !== "host") invalid("args.kind", "must be agent or host");
+      if (kind === "agent" && (a["name"] !== undefined || typeof a["agentId"] !== "string")) invalid("args.agentId", "an agent credential needs agentId (and no name)");
+      if (kind === "host" && (a["agentId"] !== undefined || typeof a["name"] !== "string")) invalid("args.name", "a host credential needs name (and no agentId)");
+      // host:local is the worker host NimbleNewt starts on this computer; it gets a fresh credential, held in memory, at each start. A credential issued for it would cut the running host off and let another machine pose as this one.
+      if (kind === "host" && String(a["name"]).replace(/^host:/, "") === "local") invalid("args.name", "local is the worker host NimbleNewt starts on this computer and gives a credential itself at each start; turn it on or off with host.local.set, or name the other host differently");
+      const principalId = kind === "agent" ? (String(a["agentId"]).startsWith("agent:") ? String(a["agentId"]) : `agent:${String(a["agentId"])}`) : `host:${String(a["name"])}`;
+      const issued = await credentialAdminOf(c).issueCredentialOnce(c.principal, { commandId: need(id), principalId, enrollHost: kind === "host" });
+      return asJson({ id: issued.principalId, kind, credentialId: issued.credentialId, enrolled: issued.enrolled, secret: { label: `Credential for ${issued.principalId}`, value: issued.token } });
+    } },
+  { name: "credential.revoke", kind: "command", summary: "Owner only (card U14b): takes an agent's or a host's credential away. The agent or host stays, keeps its rights and its history, and nothing can authenticate as it until `credential.issue` gives it a new credential. It stops counting at the next request. To take back a right, use `grant.revoke`.", args: { kind: "`agent` or `host`", "agentId?": "for an agent: the agent's ID", "name?": "for a host: its name", "reason?": "why, in the owner's words", commandId: "required" }, result: "`{ id, revoked }`: `revoked` is false when it had no credential.", completion: { kind: "completed" },
+    run: async (c, a, id) => {
+      only(a, ["kind", "agentId", "name", "reason"]);
+      notFromTask(c, "revoke credentials");
+      const kind = a["kind"];
+      if (kind !== "agent" && kind !== "host") invalid("args.kind", "must be agent or host");
+      if (kind === "agent" && (a["name"] !== undefined || typeof a["agentId"] !== "string")) invalid("args.agentId", "an agent credential needs agentId (and no name)");
+      if (kind === "host" && (a["agentId"] !== undefined || typeof a["name"] !== "string")) invalid("args.name", "a host credential needs name (and no agentId)");
+      const principalId = kind === "agent" ? (String(a["agentId"]).startsWith("agent:") ? String(a["agentId"]) : `agent:${String(a["agentId"])}`) : `host:${String(a["name"])}`;
+      const done = await credentialAdminOf(c).revokeCredential(c.principal, { commandId: need(id), principalId, ...(a["reason"] === undefined ? {} : { reason: a["reason"] as string }) });
+      return asJson({ id: principalId, revoked: done.revoked });
+    } },
+  { name: "host.local.get", kind: "query", summary: "Owner only (card U14b): whether NimbleNewt starts a worker host on this computer so that agents can run here. Off until the owner turns it on. It is read when NimbleNewt starts.", args: {}, result: "`{ item: { revision, enabled, default, takesEffect } }`.",
+    run: async (c, a) => { only(a, []); return asJson({ item: await localHostOf(c).get(c.principal) }); } },
+  { name: "host.local.set", kind: "command", summary: "Owner only (card U14b): turns on or off the worker host that NimbleNewt starts on this computer (`enabled`). On: the next start of NimbleNewt enrolls the host, announces it and lets agents run on it in a sandbox, using only the model providers already set up (it loads or switches no model). Off (the default): tasks stay assigned and wait for a host. It counts from the next start.", args: { enabled: "true or false", "expectedRevision?": "the revision you read", commandId: "required" }, result: "`{ revision, enabled, takesEffect }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["enabled", "expectedRevision"]); notFromTask(c, "change the local host"); return asJson(await localHostOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["idleSeconds"]); await eventsOf(c).configureIdle(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.cancel", kind: "command", summary: "Cancels an event subscription (its subscriber or the owner). Its events stay in the stream.", args: { subscriptionId: "the subscription's ID" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
