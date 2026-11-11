@@ -41,6 +41,10 @@ export interface BackupPort {
   preview(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
   prune(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
 }
+/** What one class of scope (project or agent) holds against its quota (card K06d). */
+export interface QuotaClassUsage { readonly quota: number; readonly scopes: number; readonly totalBytes: number; readonly top: readonly { readonly id: string; readonly used: number }[] }
+export type QuotaUsage = { readonly project?: QuotaClassUsage; readonly agent?: QuotaClassUsage };
+const RUNS_LISTED = 5;
 export interface IncidentPort {
   archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number>;
   purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number>;
@@ -165,13 +169,18 @@ export class RetentionService {
     const values = await this.#deps.settings.effective();
     const space = this.#deps.dataDirectory === undefined ? undefined : await diskSpace(this.#deps.dataDirectory);
     const warnings: string[] = [];
-    const { quotas, partial } = await this.#quotaLevels(values);
+    const { quotas, partial, usage } = await this.#quotaLevels(values);
     for (const q of quotas) warnings.push(`${q.scope} ${q.id} is at ${q.percent}% of its storage quota`);
     const reserve = this.#deps.reserve;
     if (reserve !== undefined && reserve.released) warnings.push("the reserve for shutdown and recovery records is in use: only those records are written until room is made");
     else if (reserve !== undefined && reserve.short) warnings.push("the disk has too little room to set the reserve aside");
     if (space !== undefined && space.totalBytes > 0 && space.freeBytes * 10 < space.totalBytes) warnings.push(`the data disk has ${Math.floor((space.freeBytes * 100) / space.totalBytes)}% free`);
     const deletions = (await this.#recent("retention-deletion", 20)).map((a) => ({ id: a.id, ...(a.body as object) }));
+    // The last runs of the rules (card K06d): when, by whom, how many records and backups each removed. Counts and IDs only.
+    const runs = (await this.#recent("retention-run", RUNS_LISTED)).map((a) => { const b = a.body as { at?: unknown; by?: unknown; auto?: unknown; removedCount?: unknown; backupsDeleted?: unknown; incidentsArchived?: unknown; incidentsPurged?: unknown }; return { id: a.id, at: typeof b.at === "string" ? b.at : a.createdAt, by: typeof b.by === "string" ? b.by : "", auto: b.auto === true, removed: typeof b.removedCount === "number" ? b.removedCount : 0, backupsDeleted: Array.isArray(b.backupsDeleted) ? b.backupsDeleted.length : 0, incidentsArchived: typeof b.incidentsArchived === "number" ? b.incidentsArchived : 0, incidentsPurged: typeof b.incidentsPurged === "number" ? b.incidentsPurged : 0 }; });
+    const backupList = this.#deps.backups === undefined ? undefined : await this.#deps.backups.list();
+    // The newest backup by its time (ties by name), whether it can be trusted, and how many cannot.
+    const newest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1))[0];
     // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
     const growth: Record<string, number | string> = {};
     for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
@@ -180,15 +189,18 @@ export class RetentionService {
       growth: growth as unknown as JsonObject,
       disk: { ...(space === undefined ? {} : { freeBytes: space.freeBytes, totalBytes: space.totalBytes }), reserve: { wantedBytes: reserve?.wanted ?? 0, inUse: reserve?.released ?? false, short: reserve?.short ?? false, ...(reserve?.releasedAt === undefined ? {} : { usedAt: reserve.releasedAt }) } },
       quotas: quotas as unknown as JsonObject[], quotaUsagePartial: partial, warnings,
-      backups: this.#deps.backups === undefined ? { configured: false } : { configured: true, count: (await this.#deps.backups.list()).length, counts: { daily: values.backupDaily, weekly: values.backupWeekly } },
+      quotaLimits: { projectBytes: values.quotaProjectBytes, agentBytes: values.quotaAgentBytes, warnPercent: values.quotaWarnPercent },
+      quotaUsage: usage as unknown as JsonObject,
+      backups: backupList === undefined ? { configured: false } : { configured: true, count: backupList.length, untrusted: backupList.filter((b) => !b.trusted).length, ...(newest === undefined ? {} : { latest: { name: newest.manifest.name, at: newest.at, trusted: newest.trusted } }), counts: { daily: values.backupDaily, weekly: values.backupWeekly } },
       deletions: deletions as unknown as JsonObject[],
+      runs: runs as unknown as JsonObject[],
     } as unknown as JsonObject;
   }
 
   /** The scopes at or over the warning level of a quota that is set. Nothing is counted while no quota is set. */
-  async #quotaLevels(values: RetentionValues): Promise<{ quotas: { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[]; partial: boolean }> {
+  async #quotaLevels(values: RetentionValues): Promise<{ quotas: { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[]; partial: boolean; usage: QuotaUsage }> {
     const quotas: { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[] = [];
-    if (this.#deps.meter === undefined || (values.quotaProjectBytes === null && values.quotaAgentBytes === null)) return { quotas, partial: false };
+    if (this.#deps.meter === undefined || (values.quotaProjectBytes === null && values.quotaAgentBytes === null)) return { quotas, partial: false, usage: {} };
     const usage = await this.#deps.meter.usage();
     const add = (scope: string, map: ReadonlyMap<string, number>, quota: number | null): void => {
       if (quota === null) return;
@@ -198,7 +210,15 @@ export class RetentionService {
       }
     };
     add("project", usage.byProject, values.quotaProjectBytes); add("agent", usage.byAgent, values.quotaAgentBytes);
-    return { quotas, partial: usage.partial };
+    // What each class holds against its quota (bounded: the count, the total and the three biggest), so the owner sees the room left and not only the scopes near the limit.
+    const summary = (map: ReadonlyMap<string, number>, quota: number | null): QuotaClassUsage | undefined => {
+      if (quota === null) return undefined;
+      let total = 0; for (const n of map.values()) total += n;
+      const top = [...map].sort((a, b) => (b[1] === a[1] ? (a[0] < b[0] ? -1 : 1) : b[1] - a[1])).slice(0, 3).map(([id, used]) => ({ id, used }));
+      return { quota, scopes: map.size, totalBytes: total, top };
+    };
+    const project = summary(usage.byProject, values.quotaProjectBytes); const agent = summary(usage.byAgent, values.quotaAgentBytes);
+    return { quotas, partial: usage.partial, usage: { ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }) } };
   }
 
   async #recent(kind: string, n: number): Promise<Aggregate[]> {

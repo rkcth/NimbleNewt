@@ -69,6 +69,7 @@ interface Reply { readonly status: number; readonly body?: unknown; readonly raw
  *
  * Routes (all JSON unless noted; `Idempotency-Key` on those that change state, so a retry applies once; every request after `connect` names the session and the negotiated protocol version):
  * `POST /worker/connect`, `POST /worker/session/heartbeat`, `POST /worker/session/reconcile`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|effect|report|usage|heartbeat|acknowledge|complete}`,
+ * `POST /worker/attempts/{id}/processes` (a worker reports the processes it holds for an attempt, and that it cleaned them up, card L02e),
  * `POST /worker/session/security` (a host reports a security event it detected as itself, card U11d),
  * `GET /worker/session/workspace` and `POST /worker/session/workspace/{request}` (the workspace requests for this host and its answer to one, card H12m),
  * `PUT /worker/attempts/{id}/checkpoint`, `GET /worker/attempts/{id}/control`, `GET /worker/attempts/{id}/artifacts`, `GET /worker/attempts/{id}/artifacts/{artifact}/file` (bytes), `POST /worker/attempts/{id}/artifacts`.
@@ -278,9 +279,9 @@ export class WorkerTransport {
     const placementOf = (body: Record<string, unknown>): unknown => body["placement"];
     if (parts.length === 4 && c !== "checkpoint" && c !== "control" && c !== "artifacts") {
       allowed("POST");
-      const body = await this.#body(req, c === "tool" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.toolBytes) : undefined);
+      const body = await this.#body(req, c === "tool" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.toolBytes) : c === "processes" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.processBytes) : undefined);
       const p = placementOf(body);
-      this.#only(body, { tool: ["placement", "token", "request"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
+      this.#only(body, { tool: ["placement", "token", "request"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], processes: ["placement", "seq", "final", "processes"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "tool": this.#key(req); return { status: 200, body: await svc.toolBridge(host, session, attempt, p, body["token"], body["request"]) };
@@ -295,6 +296,7 @@ export class WorkerTransport {
         case "stream-start": return { status: 200, body: await svc.streamStart(host, session, attempt, p, body["call"] as never, this.#key(req)) };
         case "stream-events": return { status: 200, body: await svc.streamEvents(host, session, attempt, p, body["streamId"], body["n"], body["events"]) };
         case "stream-end": await svc.streamEnd(host, session, attempt, p, body["streamId"], { ok: body["ok"] }); return { status: 204 };
+        case "processes": return { status: 200, body: await svc.reportProcesses(host, session, attempt, p, { seq: body["seq"], final: body["final"], processes: body["processes"] }) };
         case "refuse": await svc.refuseOrder(host, session, attempt, p, { digest: body["digest"], reasons: body["reasons"] }); return { status: 204 };
         default: throw new HttpError(404, "not_found", "no such route");
       }

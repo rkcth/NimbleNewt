@@ -4,7 +4,10 @@ import type { JsonObject } from "../storage/types.js";
 import type { RemoteAttempt, RemoteWorkerClient } from "./client.js";
 import { WorkerRequestError } from "./client.js";
 import type { WorkerAbilities } from "./contract.js";
-import type { Offer, SequencedControl, ToolBridgeAnswer, ToolBridgeRequest } from "./protocol.js";
+import { REMOTE_LIMITS, type Offer, type ProcessReport, type SequencedControl, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
+
+/** The processes of one attempt as this machine's sandbox lists them, the entries a report to the controller carries (card L02e). */
+type Held = ProcessReport["processes"];
 
 export interface RemoteOfferRunnerOptions {
   /** The worker's session with the controller (connected by the host's poller). */
@@ -13,7 +16,7 @@ export interface RemoteOfferRunnerOptions {
    * What starts an order in this machine's sandbox: a host that runs the agent's process confined (the worker package's launcher and Pi, behind `LocalWorker`). The model relay it is built with takes this runner's `tap(attemptId)` as the
    * `stream` of each attempt's relay, so every model call the process makes is recorded by the controller through the protocol (card L05d).
    */
-  readonly host: Pick<WorkerHost, "start">;
+  readonly host: Pick<WorkerHost, "start"> & Partial<Pick<WorkerHost, "localWork">>;
   /** What the worker enforces itself, for the dispatch contract's confirmation. */
   readonly abilities: WorkerAbilities;
   /** The time put on the confirmation (default now). */
@@ -95,6 +98,7 @@ export class RemoteOfferRunner {
     this.#live.set(order.attemptId, { attempt });
     let handle: WorkerHandle | undefined;
     const trouble = (what: string, error: unknown): void => { try { this.#o.onTrouble?.(order.attemptId, what, error); } catch { /* ignored */ } };
+    const reporter = this.#reporter(attempt, order.attemptId, trouble);
     try {
       await attempt.accept();
       const honored = await attempt.honorContract(order, this.#o.abilities, this.#o.now?.() ?? new Date().toISOString());
@@ -106,7 +110,7 @@ export class RemoteOfferRunner {
       const running = handle;
       const entry = this.#live.get(order.attemptId); if (entry !== undefined) entry.handle = running;
       let over = false;
-      const control = this.#follow(attempt, order, running, () => over, trouble);
+      const control = this.#follow(attempt, order, running, () => over, trouble, reporter);
       let result: WorkerTurnResult;
       try { result = await running.run(attempt); } catch (error) {
         if (error instanceof WorkerRequestError && error.fenced) throw error;
@@ -122,12 +126,55 @@ export class RemoteOfferRunner {
       return "failed";
     } finally {
       this.#live.delete(order.attemptId);
-      if (handle !== undefined) await handle.stop().catch((error) => trouble("stop", error));
+      if (handle !== undefined) {
+        await handle.stop().catch((error) => trouble("stop", error));
+        // The worker's last word on the attempt (card L02e): the sandbox was stopped and looked at again; what it still lists (normally nothing) is what is left. Never throws: a report that cannot be made leaves the earlier one standing, unconfirmed.
+        await reporter.final();
+      }
     }
   }
 
+  /**
+   * The worker's report of the processes it holds for an attempt (card L02e): the host's own look at its sandboxes (`localWork`), sent to the controller when it differs from what was sent last, and once more, marked final, after the sandbox was
+   * stopped. A host that cannot look reports nothing (the controller then reads a live placement as unknown, as it always did). The sequence rises with every report; a report the controller already has a newer one for is ignored there.
+   */
+  #reporter(attempt: RemoteAttempt, attemptId: string, trouble: (what: string, error: unknown) => void): { change(): Promise<void>; final(): Promise<void> } {
+    const look = this.#o.host.localWork?.bind(this.#o.host);
+    let seq = 0;
+    let sent: string | undefined;
+    const held = async (): Promise<Held | undefined> => {
+      if (look === undefined) return undefined;
+      const found = await look([attemptId]);
+      const own = found.processes.filter((p) => p.attemptId === undefined || p.attemptId === attemptId);
+      const items = own.slice(0, REMOTE_LIMITS.processes).map((p) => ({ ref: String(p.ref).slice(0, REMOTE_LIMITS.processRef * 4), kind: p.kind, state: p.state }));
+      // More than a report holds: the rest is said as one more entry, never dropped silently.
+      if (own.length > REMOTE_LIMITS.processes) items[REMOTE_LIMITS.processes - 1] = { ref: `${own.length - REMOTE_LIMITS.processes + 1} more processes are not listed`, kind: "process", state: "unknown" };
+      return items;
+    };
+    return {
+      change: async () => {
+        try {
+          const items = await held();
+          if (items === undefined) return;
+          const key = JSON.stringify(items);
+          if (key === sent) return;
+          await attempt.reportProcesses({ seq: seq + 1, final: false, processes: items });
+          seq += 1; sent = key;
+        } catch (error) { if (error instanceof WorkerRequestError && error.fenced) throw error; trouble("process report", error); }
+      },
+      final: async () => {
+        try {
+          const items = await held();
+          if (items === undefined) return;
+          await attempt.reportProcesses({ seq: seq + 1, final: true, processes: items });
+          seq += 1;
+        } catch (error) { trouble("final process report", error); }
+      },
+    };
+  }
+
   /** Reads the controller's control messages while the turn runs and acts on them in order. Ends when the turn is over. */
-  async #follow(attempt: RemoteAttempt, order: WorkOrder, handle: WorkerHandle, over: () => boolean, trouble: (what: string, error: unknown) => void): Promise<void> {
+  async #follow(attempt: RemoteAttempt, order: WorkOrder, handle: WorkerHandle, over: () => boolean, trouble: (what: string, error: unknown) => void, reporter: { change(): Promise<void> }): Promise<void> {
     let after = 0;
     let checkpoints = 0;
     // A restart that changes what the sandbox reaches or the limits it runs under is confirmed to the controller again before the new sandbox starts (card H12a).
@@ -151,6 +198,7 @@ export class RemoteOfferRunner {
           continue;
         }
       }
+      try { await reporter.change(); } catch (error) { if (error instanceof WorkerRequestError && error.fenced) { await handle.stop().catch(() => undefined); return; } trouble("process report", error); }
       for (const m of messages) {
         after = Math.max(after, m.seq);
         try {

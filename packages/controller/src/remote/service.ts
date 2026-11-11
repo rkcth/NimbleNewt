@@ -101,6 +101,8 @@ export interface PlacementBody {
   readonly checkpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
   readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[]; /** The confirmation is kept but the owner's launch record is still to be written (a retry of the confirmation writes it). */ readonly recordPending?: true }; /** When the contract was last cleared for a new confirmation (a restart with a changed recipe): heartbeats are accepted for a bounded window from then. */ readonly reconfirmSince?: string; readonly refused?: readonly string[] };
+  /** The latest report of the worker on the processes it holds for this placement (card L02e). Belongs to the placement it names and to no other: a new placement (a move, a restart, a re-offer) starts without one. */
+  readonly processReport?: { readonly placement: number; readonly seq: number; readonly at: string; readonly final: boolean; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -675,7 +677,7 @@ export class RemoteWorkerService {
         if (b.generation !== order.generation) throw new DomainError("fenced", `the placement of attempt ${attemptId} belongs to generation ${b.generation}`, { field: "order" });
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
-        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, ...rest } = b; void _s; void _a; void _r; void _c;
+        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, processReport: _p, ...rest } = b; void _s; void _a; void _r; void _c; void _p;
         next = { ...rest, ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
@@ -1447,6 +1449,42 @@ export class RemoteWorkerService {
     return this.#deps.dispatch.gateway(b.attemptId).heartbeat();
   }
 
+  /**
+   * The worker reports the processes it holds for its placement (card L02e): what its sandbox lists for the attempt (running, asked to stop and not stopped, or unknown), and with `final` that it has stopped the sandbox and looked again. Stop reads it
+   * (`RemoteWorkerHost.localWork`). The same fences as every message about the attempt: the host's session, the host that holds the placement and its number (an older holder or placement is `fenced`), the worker session that accepted it. Unlike
+   * a tool call it is taken after the attempt ended or expired too, since a worker's last word is exactly "I stopped it": only a placement that was never accepted, or that moved on, is refused. `seq` must rise: an older report changes nothing
+   * (`kept: false`), the same report again is the same answer, another report under a sequence already used is `payload_changed`, and nothing follows a final report of a placement. Entries are checked one by one and their references redacted and cut.
+   */
+  async reportProcesses(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, report: { readonly seq: unknown; readonly final: unknown; readonly processes: unknown }): Promise<{ readonly kept: boolean }> {
+    const session = await this.#session(host, sessionId);
+    const id = attemptIdOf(attemptId);
+    const found = (await this.#runner.get(PLACEMENT_KIND, id))?.body as unknown as PlacementBody | undefined;
+    this.#holds(host, found, placement);
+    if (found.sessionId === undefined) throw new DomainError("fenced", `attempt ${id} was never accepted by this worker`);
+    if (found.sessionId !== session.sessionId) throw new DomainError("fenced", "the attempt was taken up in another session; accept it again", { field: "session" });
+    if (!["accepted", "completed", "ended"].includes(found.state)) throw new DomainError("fenced", `the placement of attempt ${id} is ${found.state}`);
+    const checked = checkProcessReport(report);
+    const sameAs = (x: NonNullable<PlacementBody["processReport"]>): boolean => canonicalJson({ final: x.final, processes: x.processes } as unknown as JsonObject) === canonicalJson({ final: checked.final, processes: checked.processes } as unknown as JsonObject);
+    const decide = (x: PlacementBody): "keep" | "same" | "old" | "final" => {
+      const had = x.processReport;
+      if (had === undefined || had.placement !== x.placement) return "keep";
+      if (checked.seq === had.seq) { if (!sameAs(had)) throw new DomainError("payload_changed", `report ${checked.seq} of attempt ${id} was already given with other figures`, { field: "seq" }); return "same"; }
+      if (checked.seq < had.seq) return "old";
+      return had.final ? "final" : "keep";
+    };
+    const first = decide(found);
+    if (first !== "keep") return { kept: first === "same" };
+    let verdict: "keep" | "same" | "old" | "final" = "keep";
+    await this.#changePlacement(id, async (current) => {
+      const x = current?.body;
+      if (x === undefined || x.hostId !== host.id || x.placement !== found.placement || x.sessionId !== found.sessionId) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
+      verdict = decide(x);
+      if (verdict !== "keep") return undefined;
+      return { next: { ...x, processReport: { placement: x.placement, seq: checked.seq, at: this.#runner.now(), final: checked.final, processes: checked.processes } } };
+    }, "processes", { actor: host.id });
+    return { kept: verdict === "keep" || verdict === "same" };
+  }
+
   async acknowledgeDecisions(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<void> {
     await (await this.#gateway(host, sessionId, attemptId, placement)).acknowledgeDecisions();
   }
@@ -1755,7 +1793,7 @@ export class RemoteWorkerService {
       const storeBody = store?.body as unknown as StoreBody | undefined;
       if (storeBody !== undefined && storeBody.ownerHostId !== x.hostId) throw new DomainError("invalid_transition", `the native Pi store of ${x.agentId} belongs to ${storeBody.ownerHostId}, not to the host the attempt runs on`);
       const at = this.#runner.now();
-      const { sessionId: _s, acceptedAt: _a, result: _r, ...rest } = x; void _s; void _a; void _r;
+      const { sessionId: _s, acceptedAt: _a, result: _r, processReport: _p, ...rest } = x; void _s; void _a; void _r; void _p;
       const next: PlacementBody = {
         ...rest, hostId: to, placement: x.placement + 1, state: "relocating", relocations: x.relocations + 1, control: [], lastRelocation: { commandId, at },
         history: pushHistory(x.history, { hostId: x.hostId, placement: x.placement, at, reason: `relocated: ${reason}`, commandId }),
@@ -1908,6 +1946,28 @@ function checkControl(value: unknown): ControlMessage {
     }
     default: return invalid("kind", "must be tell, restart, checkpoint or stop");
   }
+}
+
+/** A process report as the worker sent it, checked field by field: nothing is kept that was not asked for (card L02e). */
+function checkProcessReport(raw: { readonly seq: unknown; readonly final: unknown; readonly processes: unknown }): { seq: number; final: boolean; processes: { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" }[] } {
+  if (typeof raw.seq !== "number" || !Number.isSafeInteger(raw.seq) || raw.seq < 1) return invalid("seq", "must be a whole number from 1");
+  if (typeof raw.final !== "boolean") return invalid("final", "must be true or false");
+  const list = raw.processes;
+  if (!Array.isArray(list) || list.length > REMOTE_LIMITS.processes) return invalid("processes", `must be a list of at most ${REMOTE_LIMITS.processes} entries`);
+  const seen = new Set<string>();
+  const processes = list.map((entry, i) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return invalid(`processes[${i}]`, "must be an object");
+    const e = entry as Record<string, unknown>;
+    onlyKnown(e, ["ref", "kind", "state"]);
+    if (typeof e["ref"] !== "string" || e["ref"].length === 0 || e["ref"].length > REMOTE_LIMITS.processRef * 4) return invalid(`processes[${i}].ref`, `must be text of at most ${REMOTE_LIMITS.processRef * 4} characters`);
+    if (e["kind"] !== "process" && e["kind"] !== "child") return invalid(`processes[${i}].kind`, "must be process or child");
+    if (e["state"] !== "running" && e["state"] !== "uncooperative" && e["state"] !== "unknown") return invalid(`processes[${i}].state`, "must be running, uncooperative or unknown");
+    // A command line can hold a secret: it is redacted before it is cut, and an entry that is the same after that is one entry.
+    const ref = redactText(e["ref"]).replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, REMOTE_LIMITS.processRef);
+    const key = `${e["kind"]}|${ref}`;
+    return seen.has(key) ? undefined : (seen.add(key), { ref, kind: e["kind"], state: e["state"] });
+  }).filter((x): x is { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" } => x !== undefined);
+  return { seq: raw.seq, final: raw.final, processes };
 }
 
 function checkEnforcement(value: unknown): ContractEnforcement[] {

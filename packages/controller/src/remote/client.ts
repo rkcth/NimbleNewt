@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
-import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
+import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type ProcessReport, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
 
 /** One stream-events message carries at most this many events and about this many bytes of JSON (the controller refuses more; its body limit is 1 MB). */
 const STREAM_MESSAGE_EVENTS = 400;
@@ -267,6 +267,8 @@ export class RemoteAttempt implements ToolGateway {
     return { until: answer.until, ...(leaseMs === undefined ? {} : { leaseMs }) };
   }
   async acknowledgeDecisions(): Promise<void> { await this.#post("acknowledge", {}); }
+  /** Tells the controller what this worker holds for the attempt (card L02e); `final` when the sandbox was stopped and looked at again. `kept: false`: the controller already has a newer report (or a final one) and ignored this. */
+  async reportProcesses(report: ProcessReport): Promise<{ readonly kept: boolean }> { return await this.#post("processes", { seq: report.seq, final: report.final, processes: report.processes as unknown as Json }) as { kept: boolean }; }
 
   /**
    * The recorder of this worker's own model calls (card L05c), for the worker's `ModelRelay` (`stream:`). Each call begins a generation on the controller under the task's current context revision and this attempt's fence; the decoded events

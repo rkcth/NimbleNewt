@@ -61,6 +61,8 @@ export interface StopIntentBody {
   readonly deadlineAt: string;
   readonly spendBudget?: number;
   readonly spent: number;
+  /** What earlier cleanup budget windows of this request counted (card L02e): a `wait` on a blocked preparation starts a new window with `spent` 0 and adds the old figure here, so the request's whole total is not lost. Absent: no window was started again (or the record is older than this field, which did not keep it). */
+  readonly spentBefore?: number;
   readonly backupUsed: boolean;
   readonly prepared?: { readonly at: string; readonly checkpointId: string };
   /** Set when the request was made as a Stop after a finished Suspend and went on from that Suspend's checkpoint instead of preparing: the ID of the Suspend. Written once, at creation (the capped history cannot say it reliably). */
@@ -83,6 +85,8 @@ export interface StopIntentBody {
   readonly history: readonly { readonly phase: StopPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
+/** A sum of cleanup figures that stays a safe whole number: a figure that would pass it is held at the largest one (the hosts' figures are cut far below, so this only guards a damaged record). */
+export const addCapped = (a: number, b: number): number => { const x = Number.isSafeInteger(a) && a > 0 ? a : 0; const y = Number.isSafeInteger(b) && b > 0 ? b : 0; return Math.min(Number.MAX_SAFE_INTEGER, x + y); };
 export const STOP_LIMITS = { reason: 500, deadlineMs: { default: 60_000, max: 3_600_000 }, inventory: 100, history: 60, advances: 8 } as const;
 const KIND = "stop-intent";
 const ACTIVE = "stop-active";
@@ -248,7 +252,7 @@ export class StopService {
     if (command.choice === "wait") {
       const extend = command.extendMs ?? STOP_LIMITS.deadlineMs.default;
       if (!Number.isSafeInteger(extend) || extend < 1 || extend > STOP_LIMITS.deadlineMs.max) invalid("extendMs", `must be a whole number from 1 to ${STOP_LIMITS.deadlineMs.max}`);
-      await this.#update(String(command.intentId), (b) => ({ ...b, phase: b.blocked?.resume ?? "preparing", blocked: undefined, deadlineAt: new Date(Date.parse(at) + extend).toISOString(), ...((b.blocked?.resume ?? "preparing") === "preparing" ? { spent: 0 } : {}), history: this.#push(b, b.blocked?.resume ?? "preparing", by.id, `waiting ${extend} ms more`) }), ["blocked"]);
+      await this.#update(String(command.intentId), (b) => ({ ...b, phase: b.blocked?.resume ?? "preparing", blocked: undefined, deadlineAt: new Date(Date.parse(at) + extend).toISOString(), ...((b.blocked?.resume ?? "preparing") === "preparing" ? { spent: 0, spentBefore: addCapped(b.spentBefore ?? 0, b.spent) } : {}), history: this.#push(b, b.blocked?.resume ?? "preparing", by.id, `waiting ${extend} ms more`) }), ["blocked"]);
       return { phase: body.blocked?.resume ?? "preparing" };
     }
     await this.#observe(by, body.scope, String(command.intentId), "recovery-required", "restart from an earlier boundary chosen; the scope is not suspended");
@@ -411,7 +415,7 @@ export class StopService {
    * for any scope above it, or the asker may control none of them. `spent` is the figure of the request's current cleanup budget window (a `wait` on a blocked preparation starts a new one, not one after a failed ending; a pass
    * that went stale is not in it), not the full cost.
    */
-  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; /** The request was made for this wider scope, which covers the one asked about (card L02e); every figure here is that scope's, not only the asked scope's. */ through?: { kind: string; id: string }; /** When that request was asked for. */ requestedAt?: string; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
+  async cleanupSpend(viewer: Principal, scope: PauseScope): Promise<{ intentId: string; mode: StopMode; phase: StopPhase; spent: number; /** What every cleanup budget window of the request counted, this one and the ones a `wait` started over (card L02e); never less than `spent`. */ cumulativeSpent: number; spendBudget?: number; unpaid: boolean; /** Unpaid only because the request's outcome still carries the "not charged" mark: this request has no charge of its own left (no pending note, no figure above what was charged: another request paid what it waited on, or the sweep has yet to look), and the next sweep clears the mark once what it waited on is paid (false when no sweep will: see `markKept`, and when the scan was cut: see `scanCut`). */ markOnly: boolean; /** Unpaid only because of the mark, on a record an older build wrote (no `ended`) that no open entry lists: nothing says where its figure went, so no sweep clears this mark; it is left for the owner. */ markKept: boolean; /** The open index is longer than the view reads (`RETRY_PAGES` x 100 entries) and no charge of this request's own was found in the part read: whether one is left on an attempt the request's record does not list is not known. */ scanCut: boolean; /** A Force Stop that took over a Suspend or Stop in whatever phase it had reached: `spent` and `spendBudget` are that request's own. */ forcedAfterPreparation: boolean; /** The ending of execution has run (terminate was called and its cost charged). */ endingRan: boolean; /** A Stop made after a finished Suspend, which went on from its checkpoint instead of preparing (its `spent` is 0 because no preparation ran). */ reusedCheckpoint: boolean; /** The request was made for this wider scope, which covers the one asked about (card L02e); every figure here is that scope's, not only the asked scope's. */ through?: { kind: string; id: string }; /** When that request was asked for. */ requestedAt?: string; attempts: { attemptId: string; costMicros: number; computeMs: number; pending: boolean }[] } | undefined> {
     // Whoever may not control the scope (or names one that does not exist) is refused, never told "nothing happened"; the status view reads that as missing.
     await this.#pauses.authorizeControl(viewer, scope);
     const ownId = await this.#activeId(scope);
@@ -459,7 +463,7 @@ export class StopService {
     // Only a request this build marked (`ended`) or one an open entry lists has its mark cleared by a sweep (see `sweep`); an older record's mark on no entry is kept for good.
     const scanCut = !complete;
     const markKept = marked && !ownPending && !scanCut && found.ended !== true && !listed;
-    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, requestedAt: found.requestedAt, ...(through === undefined ? {} : { through }), ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
+    return { intentId: id, mode: found.mode, phase: found.phase, spent: found.spent, cumulativeSpent: addCapped(found.spentBefore ?? 0, found.spent), requestedAt: found.requestedAt, ...(through === undefined ? {} : { through }), ...(found.spendBudget === undefined ? {} : { spendBudget: found.spendBudget }), unpaid: marked || ownPending, markOnly: marked && !ownPending && !scanCut && !markKept, markKept, scanCut, forcedAfterPreparation, reusedCheckpoint: found.reusedFrom !== undefined, endingRan, attempts };
   }
 
   /**
