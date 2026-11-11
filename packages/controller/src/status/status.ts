@@ -10,6 +10,7 @@ import { TASK_STATES, onlyKnown, projectId as checkProjectId, taskId as checkTas
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { WaitBody, WaitService } from "../domain/waits.js";
 import type { HandlingBody, WatchService } from "../events/handling.js";
+import type { WebBrowser, WebSettings } from "../web/index.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
@@ -248,6 +249,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
+  web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
@@ -317,6 +319,7 @@ export type StatusRequest =
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
@@ -346,6 +349,8 @@ export interface StatusDeps {
     /** Each configured route's length and reasoning budget (card W07), from the routing table. Absent: the view says nothing about budgets. */
     readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number; /** The endpoint kind the controller's own configuration names for the route (it names the request fields); absent when the controller has none. */ readonly kind?: string }[]>;
   };
+  /** The web chat listener's settings and signed-in browsers (card U07b). Absent, or no listener running: the view is not offered. */
+  readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
   /** The live jobs (card T07b). Absent: the view is not offered. */
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
   readonly environments?: Pick<EnvironmentService, "get">;
@@ -637,6 +642,7 @@ export class StatusService {
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
+      case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
@@ -812,7 +818,21 @@ export class StatusService {
     ];
   }
 
-  /** The retention values in force and which of them the owner set. Owner only. */
+  /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */
+  webAccessLines(by: Principal): { readonly observedAt: string; readonly lines: readonly Line[] } | undefined {
+    const w = by.kind === "owner" ? this.#deps.webAccess?.() : undefined;
+    if (w === undefined) return undefined;
+    const c = cite("web-chat", "listener");
+    const st = w.settings();
+    const browsers = w.browsers(by.id);
+    const proxy = st.trustedProxy.enabled ? `trusted proxy: ${st.trustedProxy.addresses.map((a) => shown(a, 45)).join(", ")} (client address from ${shown(st.trustedProxy.header, 20)})` : "no trusted proxy (every client is the connection's own address)";
+    return { observedAt: this.#runner.now(), lines: [
+      line(`The web chat listens on ${shown(st.host, 45)}:${st.port}, reachable from ${st.network === "loopback" ? "this machine only" : "your private network"}; ${st.tls ? "with its own TLS" : st.behindTlsProxy ? "behind a TLS proxy" : "plain HTTP"}; ${proxy}.`, c),
+      line(`Sign-in limits: ${st.limits.failedLoginsPerAddressPerMinute} failures a minute per client address and ${st.limits.failedLoginsGlobalPerMinute} in all; a session ends after ${Math.round(st.session.idleMs / 3600_000)} h idle or ${Math.round(st.session.maxMs / 86_400_000)} days.`, c),
+      ...(browsers.length === 0 ? [line("No browser is signed in.", c)] : [line(`${browsers.length} browser(s) signed in:`, c), ...browsers.slice(0, 20).map((b) => line(`${shown(b.label, 60)}: signed in ${b.createdAt}, last used ${b.lastSeen}`, c))]),
+    ] };
+  }
+
   /** Which event sources are watched (card H13f): each source the controller has, its kind, whether it is on, and for one the owner defined what it watches. Owner only. */
   async eventSourceLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.eventSources === undefined || by.kind !== "owner") return undefined;
@@ -1052,6 +1072,7 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
+  /** The retention values in force and which of them the owner set. Owner only. */
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
     let got;

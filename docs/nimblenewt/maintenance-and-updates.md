@@ -16,6 +16,23 @@ Protect the updater, artifact verification, health-check policy, and release aut
 
 Implement launcher/service and filesystem operations for macOS, Linux, and Windows. A durable active-release record must resolve to either the previous release or the candidate after interruption, never an installation assembled from parts of both. Verify the actual platform behavior rather than assuming one shell command or symlink swap works everywhere.
 
+### The release launcher program (built as a program and a library, card K02a; not yet a service)
+
+`scripts/nimblenewt-launcher.mjs --root RELEASE_ROOT [--entry controller.js] [--switcher pointer|symlink] [-- controller arguments]` runs the controller of the release the pointer names, as a child process with `NIMBLENEWT_RUNNING_RELEASE=<release id>` in its environment. It is separate from the release-update tooling that stages releases; it is not part of any release. It reads only the pointer, the release directory and `launcher-state.json`; it never opens the database, so it runs when the database cannot. Its decisions are the existing ones (`Launcher.prepare()`, `watch()`); the supervisor library (`packages/controller/src/release/supervisor.ts`) adds the process handling:
+
+- A start the controller never confirms inside the startup window is stopped (SIGTERM to the child's process group, SIGKILL after `--grace-seconds`, default 10) and the launcher falls back to the last known good. The last known good is never quarantined.
+- One launcher per release root: it holds a lock the operating system frees when it ends, and the controller inherits it (POSIX), so a launcher killed outright whose controller runs on does not let a second launcher start a second controller (the second exits 5 until that controller is gone).
+- Signals go to the controller's process group only, and only while that group still has a member (a group ID cannot be reused while it has one). What a controller that crashed left running in its group (a database it started, say) is stopped before the next start.
+- The controller's exit code: 0 after its start was confirmed is a stop on purpose (the launcher exits 0 and starts nothing); 0 before that is a failed start; 75 asks for a restart; anything else is a crash.
+- A controller that exits otherwise is started again through the same decision (an unconfirmed start is judged failed there). Restarts slow down: the n-th short run in a row waits `initial * 2^(n-1)` ms up to a maximum; a run of `--stable-seconds` (default 60) resets the count; after `--give-up-after` (default 20) short runs in a row the launcher writes an Urgent notice for the owner (told at the next start that can deliver it) and exits 4.
+- Stopping the launcher before the controller confirmed its start records the start as interrupted, not failed: it runs again with a full window next time (a reboot during a first, slow start does not block the installation). A launcher that loses power or is killed outright cannot record this, and its unconfirmed start is judged failed at the next launch, as before.
+- The window is measured on a clock that does not jump, so a wall clock set while a release starts neither fails a healthy start nor stretches the window.
+- Exit codes: 0 stopped (SIGTERM, SIGINT or SIGHUP, repeated signals included; or the controller stopped on purpose), 1 usage or unexpected error, 2 blocked (nothing safe to run; the owner decides), 3 no release is active, 4 crash loop, 5 the release root is held by another launcher or by a controller a killed launcher left running. A service manager should not restart it on 0 or 2.
+- Known gap: a last known good that hangs without exiting is not detected (its start counts as confirmed, so the watchdog has nothing to judge); that needs a heartbeat from the controller.
+- Logs (stderr) name release IDs, process IDs, exit codes, signals and the launcher's own reasons; never the environment or the controller's output.
+
+Not built: service-manager units (launchd, systemd, Windows service), running it on macOS and Windows (the process-group stop is POSIX; Windows uses `taskkill /T /F` on the child's tree, then `child.kill()`, and the controller does not inherit the lock there), and the updater program.
+
 ## Maintenance sequence
 
 1. **Prepare:** acquire and verify the exact authorized release before the window. Candidate building, if used by a development deployment, has already happened in a separate pipeline. Test migrations and recovery using isolated copies and fake services without production credentials. Check space for release artifacts and consistent state backups.
