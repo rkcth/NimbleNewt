@@ -2,5 +2,5 @@ export { BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, r
 export {
   ATTENTION_KINDS, STATUS_LIMITS, StatusService,
   type Attention, type AttentionItem, type AttentionKind, type BlockerView, type StatusChange, type Changes, type Delivered, type DeliveredArtifact, type EffectUse, type FailedEventDetail, type FailedEvents, type Noticeboard, type Overview, type OverviewRow, type Pending,
-  STATUS_KINDS, type StandupBriefView, type StandupSummaryView, type StatusDeps, type StatusOptions, type StatusRequest, type TaskStatus, type ToolUse, type ToolsUsed,
+  STATUS_KINDS, type AgentRowView, type CoordinatorRowView, type StandupBriefView, type StandupSummaryView, type StatusDeps, type StatusOptions, type StatusRequest, type TaskStatus, type ToolUse, type ToolsUsed,
 } from "./status.js";

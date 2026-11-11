@@ -113,6 +113,8 @@ export interface PrepNotice {
   readonly coversFrom: string;
   /** Built by the controller from the typed record, never from model text. */
   readonly message: string;
+  /** The task the agent is working on now (in progress first, then ready or blocked), read from the records, when it has one: the notice is filed against it. Absent: the agent holds no task, so there is nothing for the notice to interrupt. */
+  readonly taskId?: string;
 }
 /** Delivers the advance notice (a message to the agent, a note in its inbox). Called only for agents that may be reached; must be idempotent by `key`. It must not start, resume or wake anything. */
 export interface PreparationSink { notify(notice: PrepNotice): Promise<void> }
@@ -511,6 +513,7 @@ export class StandupService {
       const prepFound = await this.#runner.get("standup-prep", id);
       const prep = prepFound?.body as unknown as PrepBody | undefined;
 
+      const facts = await this.#facts(occurrence.projectId, coversFrom, nowIso);
       // The advance notice: only to agents that can be reached now; a live meeting that has not ended; once each.
       const notified: Record<string, string> = { ...(prep?.notified ?? {}) };
       const withheld: string[] = [];
@@ -521,8 +524,10 @@ export class StandupService {
         const reachable = availability === "available" || (p.status === "owner-invited" && availability === "paused");
         if (!reachable) { withheld.push(p.id); continue; }
         if (!live || notified[p.id] !== undefined || this.#options.notices === undefined) continue;
+        const own = facts.tasks.filter((t) => t.owner === p.id && (t.body.state === "in_progress" || t.body.state === "ready" || t.body.state === "blocked"));
+        const taskId = (own.find((t) => t.body.state === "in_progress") ?? own[0])?.id;
         await this.#options.notices.notify({
-          key: `${id}:${p.id}:prepare`, occurrenceId: id, projectId: occurrence.projectId, agent: p.id, startsAt: occurrence.startsAt, coversFrom,
+          key: `${id}:${p.id}:prepare`, occurrenceId: id, projectId: occurrence.projectId, agent: p.id, startsAt: occurrence.startsAt, coversFrom, ...(taskId === undefined ? {} : { taskId }),
           message: `Stand-up at ${occurrence.startsAt}. Reach a safe boundary and save your position before then. Your brief is put together from the records of your work; you do not need to write it, and your assignment stays as it is.`,
         });
         notified[p.id] = nowIso;
@@ -530,7 +535,6 @@ export class StandupService {
       }
 
       // The briefs, from records.
-      const facts = await this.#facts(occurrence.projectId, coversFrom, nowIso);
       const briefs: { agent: string; briefId: string; change: "created" | "updated" | "unchanged" }[] = [];
       const briefed = new Map<string, { revision: number; agents: Set<string> }>();
       for (const p of occurrence.participants) { const made = await this.#brief(by, id, occurrence, p.id, coversFrom, nowIso, facts); briefs.push({ agent: made.agent, briefId: made.briefId, change: made.change }); for (const [item, revision] of made.briefed) { const e = briefed.get(item) ?? { revision, agents: new Set<string>() }; e.agents.add(p.id); briefed.set(item, e); } }

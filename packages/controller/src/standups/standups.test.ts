@@ -200,6 +200,29 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.standups.update(c.eve, { commandId: cid("u"), scheduleId, expectedRevision: rev2 + 1, title: "Renamed" }));
   });
 
+  suite("the advance notice names the task the agent works on now (in progress first, then ready or blocked) and none for an agent that holds no live task; a finished task is never named (card M03h)", async (c) => {
+    await c.task("Finished long ago", c.agentB, "done");
+    const ready = await c.task("Next job", c.agentB, "ready");
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    await c.standups.prepare(c.host, occ);
+    const first = Object.fromEntries(c.notices.map((n) => [n.agent, n.taskId]));
+    assert.equal(first[c.pB], ready, "a ready task is the one named when nothing is in progress");
+    assert.equal(first[c.pA], undefined, "an agent with no task has none named");
+    assert.equal(first[c.pC], undefined);
+    // A second preparation names nothing new for B even once it has a task in progress: it was told once, on the task it held then.
+    await c.task("Current job", c.agentB, "in_progress");
+    await c.standups.prepare(c.host, occ);
+    assert.equal(c.notices.filter((n) => n.agent === c.pB).length, 1);
+  });
+
+  suite("when an agent holds a ready and an in-progress task, the notice is filed against the one in progress (card M03h)", async (c) => {
+    await c.task("Next job", c.agentB, "ready");
+    const live = await c.task("Current job", c.agentB, "in_progress");
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    await c.standups.prepare(c.host, occ);
+    assert.equal(c.notices.find((n) => n.agent === c.pB)!.taskId, live);
+  });
+
   suite("the stand-up keeps its wall-clock time across the autumn change, and after downtime there is one catch-up report with briefs and no notices", async (c) => {
     at("2026-10-23T08:00:00.000Z");
     const { scheduleId } = await c.schedule({ time: "09:00", windowFrom: "08:00", windowTo: "10:00" });
