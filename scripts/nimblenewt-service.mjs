@@ -22,8 +22,9 @@ const HELP = `NimbleNewt service unit printer (prints only; installs nothing)
   --environment-file PATH Absolute path of a KEY=value file with the controller's secrets and settings. Only the path goes into the unit.
   --log-dir DIR        Absolute directory for <name>.log (linux: otherwise the journal; macOS: otherwise discarded; Windows: not used).
   --name NAME          Service name (default nimblenewt).
-  --windows-user USER  Windows: the account the task is for (default: whoever registers it).
-  --protect-system M   Linux: full (default) or strict (with --read-write-path DIR, repeatable).
+  --windows-user USER  Windows, required: the account (DOMAIN\\user, as 'whoami' prints it there) whose logon starts the task.
+  --protect-system M   Linux, opt-in: full or strict (with --read-write-path DIR, repeatable). Off by default: it stops the
+                       controller's bubblewrap sandbox where unprivileged user namespaces are restricted (Ubuntu 23.10+).
   --unit-only          Print only the unit file text.
   Arguments after -- are passed to the controller. Do not put secrets there; they are refused.
 Exit codes: 0 printed, 1 refused (the reason is on stderr).
@@ -42,7 +43,7 @@ function parse(argv) {
     let k = a.slice(2);
     let v;
     const eq = k.indexOf("=");
-    if (eq >= 0) { v = k.slice(eq + 1); k = k.slice(0, eq); }
+    if (eq >= 0) { v = k.slice(eq + 1); k = k.slice(0, eq); if (k === "unit-only" || k === "help") throw new Error(`--${k} takes no value`); }
     else if (k === "unit-only" || k === "help") v = true;
     else { v = own[i + 1]; i++; if (v === undefined) throw new Error(`--${k} needs a value`); }
     if (repeatable.has(k)) (flags[k] ??= []).push(v);

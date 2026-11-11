@@ -36,7 +36,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       let k = a.slice(2);
       let v;
       const eq = k.indexOf("=");
-      if (eq >= 0) { v = k.slice(eq + 1); k = k.slice(0, eq); }
+      if (eq >= 0) { v = k.slice(eq + 1); k = k.slice(0, eq); if (["announce", "switch", "help"].includes(k)) throw new Error(`--${k} takes no value`); }
       else if (["announce", "switch", "help"].includes(k)) v = true;
       else { v = argv[i + 1]; i++; if (v === undefined) throw new Error(`--${k} needs a value`); }
       if (!["root", "source", "digest", "announce", "switch", "switcher", "help"].includes(k)) throw new Error(`unknown option --${k}`);
@@ -57,6 +57,9 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     if (flags.announce === true) {
       const r = await announceRelease({ root, release: staged, ...(flags.switcher === undefined ? {} : { switcher: flags.switcher }), switchPointer: flags.switch === true });
       io.stdout.write(`announced ${staged.id} to the launcher${r.switched ? "; the pointer now names it (the launcher follows at its next start)" : "; the pointer is unchanged"}\n`);
+      // The controller's activation record was not changed (this program never opens the database): release.status reports the pointer as diverged, and an interrupted release.activate from that state is
+      // left unresolved for the owner. Said every time, on stderr, so it is not missed.
+      if (r.switched) err(`warning: the controller's activation record still names its previous current release; release.status will show the pointer as diverged until the controller activates a release itself. Prefer release.stage / release.activate while the controller runs.`);
     }
     return 0;
   } catch (error) {

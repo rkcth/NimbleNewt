@@ -43,6 +43,8 @@ test("stage installs the release; --announce and --switch tell the launcher and 
     const c = await run(["stage", "--root", f.root, "--source", f.source, "--digest", f.digest, "--announce", "--switch"]);
     assert.equal(c.code, 0, c.err);
     assert.equal(JSON.parse(readFileSync(join(f.root, "current.json"), "utf8")).release, ID);
+    assert.match(c.err, /warning: .*diverged/, "moving the pointer outside the controller is said every time");
+    assert.ok(!/warning/.test(b.err), "no warning without --switch");
   } finally { f.done(); }
 });
 
@@ -58,6 +60,9 @@ test("refusals exit 1 with the reason and change nothing (K02 updater program)",
       [["stage", "--root", f.root, "--source", f.source, "--digest", f.digest, "--switch"], /--switch needs --announce/],
       [["stage", "--root", f.root, "--source", f.source, "--digest", f.digest, "--switcher", "hardlink"], /pointer or symlink/],
       [["stage", "--root", f.root, "--bogus", "x"], /unknown option/],
+      // A boolean flag with a value would otherwise be read as "not given" and silently skip the announcement.
+      [["stage", "--root", f.root, "--source", f.source, "--digest", f.digest, "--announce=yes"], /--announce takes no value/],
+      [["stage", "--root", f.root, "--source", f.source, "--digest", f.digest, "--announce", "--switch=false"], /--switch takes no value/],
       [["install"], /Usage|stage/i],
     ]) {
       const r = await run(argv);

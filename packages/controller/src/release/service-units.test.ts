@@ -51,13 +51,42 @@ test("hardening and identity: the units run as the installing user, never name r
     assert.ok(!/^User=|<key>UserName<\/key>|<UserId>(SYSTEM|root)|HighestAvailable|sudo systemctl|sudo launchctl/im.test(all), "no root or elevated identity");
   }
   const linux = generateServiceUnit(POSIX).content;
-  for (const line of ["NoNewPrivileges=true", "PrivateTmp=true", "ProtectSystem=full", "RestrictSUIDSGID=true", "LockPersonality=true", "UMask=0077"]) assert.ok(linux.split("\n").includes(line), line);
+  for (const line of ["NoNewPrivileges=true", "RestrictSUIDSGID=true", "LockPersonality=true", "UMask=0077"]) assert.ok(linux.split("\n").includes(line), line);
   assert.ok(generateServiceUnit(WIN).content.includes("<RunLevel>LeastPrivilege</RunLevel>"));
-  assert.ok(!generateServiceUnit({ platform: "win32", node: WIN.node, launcher: WIN.launcher, root: WIN.root }).content.includes("<UserId>"));
+  // A logon trigger without a user fires for every user and needs an administrator: the user is required, and names both the trigger and the principal.
+  assert.throws(() => generateServiceUnit({ platform: "win32", node: WIN.node, launcher: WIN.launcher, root: WIN.root }), /windowsUser.*required/);
+  assert.match(generateServiceUnit(WIN).content, /<LogonTrigger>[^]*<UserId>ANNPC\\ann<\/UserId>[^]*<\/LogonTrigger>[^]*<Principal id="Author">\s*<UserId>ANNPC\\ann<\/UserId>/);
   // The environment is only referenced.
   assert.match(linux, /^EnvironmentFile=\/home\/ann\/\.config\/nimblenewt\/nimblenewt\.env$/m);
   assert.ok(generateServiceUnit({ ...POSIX, platform: "darwin" }).content.includes("<string>--env-file=/home/ann/.config/nimblenewt/nimblenewt.env</string>"));
   assert.ok(generateServiceUnit(WIN).content.includes("--env-file=C:\\Users\\ann\\nimblenewt.env"));
+});
+
+test("the default systemd unit sets no option that namespaces the service or blocks the sandbox: a user unit with PrivateTmp or ProtectSystem cannot start bubblewrap where user namespaces are restricted (K02 service units review)", () => {
+  // Measured on Ubuntu (kernel.apparmor_restrict_unprivileged_userns=1) with systemd-run --user: the bubblewrap health probe is healthy with the options below absent and fails with PrivateTmp or ProtectSystem.
+  const BREAKS = /^(PrivateTmp|ProtectSystem|ProtectHome|PrivateUsers|PrivateDevices|PrivateNetwork|PrivateMounts|PrivateIPC|ProtectKernel\w*|ProtectControlGroups|ProtectProc|ProcSubset|ProtectHostname|ProtectClock|ReadOnlyPaths|InaccessiblePaths|ReadWritePaths|TemporaryFileSystem|BindPaths|BindReadOnlyPaths|RootDirectory|RootImage|RestrictNamespaces|SystemCallFilter|MemoryDenyWriteExecute|RestrictAddressFamilies|DynamicUser)=/m;
+  const { envFile: _e, logDir: _l, ...bare } = POSIX; void _e; void _l;
+  for (const spec of [POSIX, bare]) {
+    const u = generateServiceUnit(spec);
+    assert.ok(!BREAKS.test(u.content), `default unit sets ${BREAKS.exec(u.content)?.[0]}`);
+    assert.match(u.notes.join("\n"), /No PrivateTmp, ProtectSystem/);
+  }
+  // ProtectSystem stays an explicit opt-in, with a warning to check the sandbox.
+  const full = generateServiceUnit({ ...POSIX, protectSystem: "full" });
+  assert.match(full.content, /^ProtectSystem=full$/m);
+  assert.ok(!/^PrivateTmp=/m.test(full.content));
+  assert.match(full.notes.join("\n"), /WARNING: ProtectSystem=full/);
+});
+
+test("a percent sign in a path that systemd reads unquoted is doubled, so it is not taken for a specifier (K02 service units review)", () => {
+  const u = generateServiceUnit({ ...POSIX, envFile: "/home/ann/50%h/nn.env", logDir: "/home/ann/logs%n", root: "/home/ann/r%%t", protectSystem: "strict", readWritePaths: ["/home/ann/d%i"] }).content;
+  assert.match(u, /^EnvironmentFile=\/home\/ann\/50%%h\/nn\.env$/m);
+  assert.match(u, /^StandardOutput=append:\/home\/ann\/logs%%n\/nimblenewt\.log$/m);
+  assert.match(u, /^StandardError=append:\/home\/ann\/logs%%n\/nimblenewt\.log$/m);
+  assert.match(u, /^ReadWritePaths="\/home\/ann\/r%%%%t" "\/home\/ann\/logs%%n" "\/home\/ann\/d%%i"$/m);
+  assert.match(u, /"--root" "\/home\/ann\/r%%%%t"/);
+  // No other single % is left anywhere in the unit (a specifier would be expanded by systemd).
+  for (const line of u.split("\n").filter((l) => !l.startsWith("#"))) assert.ok(!/(^|[^%])%([^%]|$)/.test(line.replaceAll("%%", "")), line);
 });
 
 test("secrets and Node's own flags are refused as controller arguments (K02 service units)", () => {
@@ -202,6 +231,16 @@ test("exit-code contract: the restart policy matches the launcher's and controll
 test("the launcher program's header comment and the documented exit codes agree with the table (K02 service units)", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "..", "..", "..", "scripts", "nimblenewt-launcher.mjs"), "utf8");
   for (const [code, word] of [[0, "stopped"], [2, "blocked"], [3, "no release"], [4, "gave up after a crash loop"], [5, "another launcher"]] as const) assert.ok(new RegExp(`${code} ${word}`).test(src), `launcher header names exit ${code} (${word})`);
+  // The header's advice to a service manager is the table's (it once said "may restart it on 1, 4 and 5").
+  const flat = src.split("\n").filter((l) => l.startsWith("//")).map((l) => l.replace(/^\/\/ ?/, "")).join(" ");
+  const no = SERVICE_RESTART.noRestart;
+  assert.ok(flat.includes(`should not restart the launcher on ${no.slice(0, -1).join(", ")} or ${no.at(-1)}`), "header: the codes not restarted");
+  const yes = SERVICE_RESTART.restart;
+  assert.ok(flat.includes(`may restart it on ${yes.slice(0, -1).join(", ")} and ${yes.at(-1)}`), "header: the codes restarted");
+  for (const doc of ["maintenance-and-updates.md"]) {
+    const text = readFileSync(join(import.meta.dirname, "..", "..", "..", "..", "docs", "nimblenewt", doc), "utf8");
+    assert.ok(text.includes("should not restart it on 0, 2, 3 or 4") && text.includes("may restart it on 1 and 5"), `${doc} states the same policy`);
+  }
 });
 
 test("the install steps never run anything themselves: they are text, the unit file is written by a heredoc the owner runs (K02 service units)", () => {

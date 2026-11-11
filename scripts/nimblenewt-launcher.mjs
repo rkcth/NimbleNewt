@@ -7,7 +7,8 @@
 //
 // Exit codes: 0 stopped (SIGTERM, SIGINT or SIGHUP to the launcher, or the controller exited 0 after its start was confirmed: a stop on purpose), 1 usage or unexpected error, 2 blocked (nothing safe to run;
 // see the log and release.status, the owner decides), 3 no release is active, 4 gave up after a crash loop (the owner's notice is written), 5 another launcher, or a controller a killed launcher left running, holds
-// this release root. A service manager should not restart the launcher on 0 or 2 (nothing changes until the owner acts) and may restart it on 1, 4 and 5 after its own delay.
+// this release root. A service manager should not restart the launcher on 0, 2, 3 or 4 (nothing changes until the owner acts; a crash loop was already slowed down and the owner told) and may restart it on 1
+// and 5 after its own delay (the service units of release/service-units.ts follow this; launchd and Task Scheduler cannot tell codes apart and retry any failure within their bounds).
 // The controller's side: exit 0 = stop on purpose (only after its start was confirmed; before, it is a failed start), exit 75 = restart me, anything else = a crash.
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";

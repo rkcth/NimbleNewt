@@ -59,9 +59,13 @@ export interface ServiceSpec {
   readonly envFile?: string;
   /** Absolute directory for the log file `<name>.log` (stdout and stderr). Without it launchd discards output and systemd uses the journal; Task Scheduler has no log. */
   readonly logDir?: string;
-  /** Windows only: `DOMAIN\user` or `user` the task is registered for; default the user who registers it. */
+  /** Windows only, and required there: `DOMAIN\user` or `user` the task is registered for and whose logon starts it (`whoami` on that machine). A logon trigger without a user fires at EVERY user's logon and needs an administrator to register. */
   readonly windowsUser?: string;
-  /** systemd: `full` (default; /usr, /boot and /etc read-only) or `strict` (the whole file system read-only except the root, the log directory and `readWritePaths`). */
+  /**
+   * systemd, OPT-IN: `full` (/usr, /boot and /etc read-only) or `strict` (the whole file system read-only except the root, the log directory and `readWritePaths`). Off by default: in a USER unit any
+   * file-system namespacing (this, `PrivateTmp`, `ProtectHome`, ...) makes systemd put the service in its own user namespace, and where the system restricts unprivileged user namespaces (Ubuntu 23.10 and later:
+   * AppArmor's `unprivileged_userns` profile) nothing inside it may create another one, so bubblewrap and with it the controller's sandbox cannot start. Measured on Ubuntu with systemd-run --user.
+   */
   readonly protectSystem?: ProtectSystem;
   /** systemd `strict` only: further directories the controller writes (its data directory, for example). */
   readonly readWritePaths?: readonly string[];
@@ -186,7 +190,7 @@ interface Checked {
   readonly envFile?: string;
   readonly logDir?: string;
   readonly windowsUser?: string;
-  readonly protectSystem: ProtectSystem;
+  readonly protectSystem?: ProtectSystem;
   readonly readWritePaths: readonly string[];
 }
 
@@ -210,6 +214,7 @@ export function checkServiceSpec(spec: ServiceSpec): Checked {
   if (spec.protectSystem !== undefined && p !== "linux") bad("protectSystem", "systemd only");
   if (spec.protectSystem !== undefined && spec.protectSystem !== "full" && spec.protectSystem !== "strict") bad("protectSystem", "must be full or strict");
   if (spec.windowsUser !== undefined && p !== "win32") bad("windowsUser", "Windows only");
+  if (p === "win32" && spec.windowsUser === undefined) bad("windowsUser", "is required on Windows (DOMAIN\\user, as 'whoami' prints it on that machine): a logon trigger without a user fires at every user's logon and needs an administrator to register");
   const windowsUser = spec.windowsUser === undefined ? undefined : text("windowsUser", spec.windowsUser);
   if (windowsUser !== undefined && (!WIN_USER.test(windowsUser) || /^(system|administrator|root|localsystem|nt authority\\.*|builtin\\.*)$/i.test(windowsUser))) bad("windowsUser", "must be an ordinary account name (DOMAIN\\user or user); SYSTEM and administrator accounts are refused");
   const linux = p === "linux";
@@ -228,7 +233,7 @@ export function checkServiceSpec(spec: ServiceSpec): Checked {
     ...(spec.envFile === undefined ? {} : { envFile: path("envFile", spec.envFile) }),
     ...(spec.logDir === undefined ? {} : { logDir: path("logDir", spec.logDir) }),
     ...(windowsUser === undefined ? {} : { windowsUser }),
-    protectSystem: spec.protectSystem ?? "full",
+    ...(spec.protectSystem === undefined ? {} : { protectSystem: spec.protectSystem }),
     readWritePaths: rw.map((v, i) => plainPath(p, `readWritePaths[${i}]`, v)),
   };
 }
@@ -270,10 +275,11 @@ function systemdUnit(c: Checked): ServiceUnit {
     "KillSignal=SIGTERM",
     `TimeoutStopSec=${SERVICE_RESTART.stopTimeoutSeconds}`,
     ...(log === undefined ? [] : [`StandardOutput=append:${pct(log)}`, `StandardError=append:${pct(log)}`]),
+    // Only hardening that needs no namespace: PrivateTmp, ProtectSystem, ProtectHome and the like would put a user service in a restricted user namespace where bubblewrap cannot start (see `ServiceSpec.protectSystem`).
+    // RestrictNamespaces, SystemCallFilter and MemoryDenyWriteExecute are left out on purpose: the sandbox creates namespaces and Node's JIT writes executable memory.
     "UMask=0077",
     "NoNewPrivileges=true",
-    "PrivateTmp=true",
-    `ProtectSystem=${c.protectSystem}`,
+    ...(c.protectSystem === undefined ? [] : [`ProtectSystem=${c.protectSystem}`]),
     ...(strict ? [`ReadWritePaths=${writable.map((w) => `"${pct(w)}"`).join(" ")}`] : []),
     "RestrictSUIDSGID=true",
     "RestrictRealtime=true",
@@ -306,8 +312,8 @@ function systemdUnit(c: Checked): ServiceUnit {
     uninstall: [`systemctl --user disable --now ${fileName}`, `rm ${target}`, "systemctl --user daemon-reload"],
     notes: [
       `Exit codes: ${SERVICE_RESTART.noRestart.join(", ")} are never restarted (0 stopped on purpose, 2 blocked, 3 no release, 4 crash loop: nothing changes until you act; restart by hand with 'systemctl --user restart ${fileName}'). 1 and 5 are restarted after ${SERVICE_RESTART.delaySeconds} s, at most ${SERVICE_RESTART.startLimitBurst} starts in ${SERVICE_RESTART.startLimitIntervalSeconds} s.`,
-      "Hardening: NoNewPrivileges, PrivateTmp (the controller and its workers see a private /tmp), ProtectSystem, RestrictSUIDSGID, RestrictRealtime, LockPersonality, UMask 0077.",
-      ...(strict ? [] : ["ProtectSystem=full keeps /usr, /boot and /etc read-only and leaves your home and data directories writable; use protectSystem 'strict' with the controller's data directories as read-write paths for more."]),
+      `Hardening: NoNewPrivileges, RestrictSUIDSGID, RestrictRealtime, LockPersonality, UMask 0077${c.protectSystem === undefined ? "" : `, ProtectSystem=${c.protectSystem}`}. No PrivateTmp, ProtectSystem or other file-system namespacing by default: in a user unit they put the service in a user namespace, and where unprivileged user namespaces are restricted (Ubuntu 23.10 and later) bubblewrap, and so the controller's sandbox, cannot start inside it.`,
+      ...(c.protectSystem === undefined ? [] : [`WARNING: ProtectSystem=${c.protectSystem} was asked for. Check that the controller's sandbox still starts under the unit (its startup check or status); on Ubuntu 23.10 and later it will not, and you should remove the option.`]),
       ...(log === undefined ? ["Output goes to the journal: journalctl --user -u " + fileName] : [`Output is appended to ${log}; rotate it yourself (logrotate or similar), nothing here does.`]),
     ],
   };

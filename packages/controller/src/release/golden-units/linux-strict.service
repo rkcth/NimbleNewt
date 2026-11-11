@@ -18,7 +18,6 @@ StandardOutput=append:/home/ann/.local/state/nimblenewt/nimblenewt.log
 StandardError=append:/home/ann/.local/state/nimblenewt/nimblenewt.log
 UMask=0077
 NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths="/home/ann/nimblenewt/releases-root" "/home/ann/.local/state/nimblenewt" "/home/ann/.nimblenewt"
 RestrictSUIDSGID=true
