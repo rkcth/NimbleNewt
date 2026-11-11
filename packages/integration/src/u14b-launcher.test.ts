@@ -183,3 +183,36 @@ test("in the terminal chat a host's credential is asked for in words, shown firs
     for (const f of filesUnder(dir)) assert.ok(!readFileSync(f).includes(Buffer.from(key)), `${f} must not hold the credential`);
   } finally { clean(dir); }
 });
+
+// Review of card U14b: a builder that throws, or a host that cannot join once the controller is up (the owner disabled host:local), is told and never leaves the owner without a controller.
+test("a host builder that throws, and a built host whose attach throws, are told in plain words and the controller still starts and answers (U14b review)", async () => {
+  const dir = dirOf();
+  const secrets = memorySecrets();
+  const closed: string[] = [];
+  try {
+    const first = await launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start });
+    assert.equal((await first.controller.api.handle(first.ownerToken, { v: 1, op: "host.local.set", commandId: "on", args: { enabled: true } } as never) as { ok: boolean }).ok, true);
+    await first.close();
+
+    const throwing: LocalHostBuilder = async () => { throw new Error("the worker package could not be loaded (test)"); };
+    const a = await launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start, localHost: throwing });
+    assert.match(a.notes.join("\n"), /was not started: building it failed: the worker package could not be loaded \(test\)/);
+    assert.equal((await a.controller.api.handle(a.ownerToken, { v: 1, op: "project.list", args: {} } as never) as { ok: boolean }).ok, true);
+    await a.close();
+
+    let attached = 0;
+    const refusing: LocalHostBuilder = async () => ({
+      start: { dispatch: { manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => undefined, build: () => ({ hostId: "host:local" }) as never } } as never },
+      attach: async () => { attached++; throw new Error("host:local is not an active host (test)"); },
+      close: async () => { closed.push("plan.close"); },
+    });
+    const b = await launch({ config: configFor(dir), secrets, argv: [], env: {}, print: () => undefined, start, localHost: refusing });
+    const said = b.notes.join("\n");
+    assert.equal(b.controller.dispatch !== undefined, true, said);
+    assert.equal(attached, 1);
+    assert.match(said, /could not join, so tasks wait for a host: host:local is not an active host \(test\)/);
+    assert.equal((await b.controller.api.handle(b.ownerToken, { v: 1, op: "project.list", args: {} } as never) as { ok: boolean }).ok, true);
+    await b.close();
+    assert.ok(closed.includes("plan.close"), "what the builder made is freed");
+  } finally { clean(dir); }
+});

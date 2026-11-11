@@ -50,7 +50,12 @@ export function localHostBuilder(setup) {
       await launcher.stop().catch(() => undefined);
       return { problem: `the tool runner could not be made: ${String(error?.message ?? error).slice(0, 200)}` };
     }
-    const git = await worker.GitBridge.create({ scratch: join(base, "git") });
+    let git;
+    try { git = await worker.GitBridge.create({ scratch: join(base, "git") }); } catch (error) {
+      await scripts.stop().catch(() => undefined);
+      await launcher.stop().catch(() => undefined);
+      return { problem: `the git bridge could not be made: ${String(error?.message ?? error).slice(0, 200)}` };
+    }
 
     // The shared repository of a project is the folder of its first repository that is a local folder (the project's records say where). Read when an attempt's workspace is made and before each workspace request.
     const shared = new Map();

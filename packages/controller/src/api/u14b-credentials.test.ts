@@ -178,3 +178,55 @@ test("the local worker host is off until the owner turns it on, only the owner c
     assert.equal((await w.call("host.local.get", {}, undefined, token)).error!.code, "forbidden");
   } finally { await w.done(); }
 });
+
+// Review of card U14b: host:local is the worker host the launcher starts and gives a credential at each start, so the operation never issues one for it (another machine could pose as this one, and the running host would be cut off).
+test("credential.issue refuses the reserved local host's name, in either spelling, and leaves the running host's credential working; revoking it stays possible (U14b review)", async () => {
+  const w = await world();
+  try {
+    const owner = await w.c.services.principals.authenticate(w.boot.token);
+    const running = await w.c.services.principals.issueCredentialOnce(owner, { commandId: "launcher-local", principalId: "host:local", enrollHost: true });
+    for (const name of ["local", "host:local"]) {
+      const refused = await w.call("credential.issue", { kind: "host", name }, `cl-${name}`);
+      assert.equal(refused.ok, false, name);
+      assert.equal(refused.error!.code, "invalid_command");
+      assert.match(refused.error!.message, /host\.local\.set/);
+    }
+    assert.equal((await w.c.services.principals.authenticate(running.token)).id, "host:local", "the running host still authenticates");
+    assert.equal((await w.call("credential.issue", { kind: "host", name: "localhost" }, "cl-other")).ok, true, "only the exact name is reserved");
+    assert.equal((await w.call("credential.revoke", { kind: "host", name: "local" }, "cl-revoke")).result.revoked, true);
+  } finally { await w.done(); }
+});
+
+// Review of card U14b: the web page's channel is refused before any step of a proposal that would make a credential runs, so nothing is half made from it.
+test("from the web page's channel a proposal with a credential step is refused before its earlier steps are sent; the terminal then applies all of it (U14b review)", async () => {
+  const intent = (rest: Record<string, unknown>, evidence: string) => ({ ...rest, evidence, basis: "owner" });
+  const script: Record<string, unknown[]> = {
+    "Turn on the local host and give the laptop a credential": [
+      intent({ kind: "command", op: "host.local.set", args: { enabled: true } }, "Turn on the local host"),
+      intent({ kind: "command", op: "credential.issue", args: { kind: "host", name: "laptop" } }, "give the laptop a credential"),
+    ],
+  };
+  const w = await world(script);
+  try {
+    const chat = w.c.chat!;
+    const turn = await chat.submit(w.boot.token, { messageId: "m1", text: "Turn on the local host and give the laptop a credential" });
+    const proposals = (turn.outcomes as unknown as { status: string; proposalId?: string }[]).filter((o) => o.status === "proposed");
+    const withCredential = [];
+    for (const p of proposals) {
+      const read = await w.c.storage.getAggregate({ kind: "chat-proposal", id: p.proposalId! });
+      const steps = (read!.body as unknown as { steps: { op: string }[] }).steps.map((s) => s.op);
+      if (steps.includes("credential.issue")) withCredential.push({ id: p.proposalId!, steps });
+    }
+    assert.equal(withCredential.length, 1, JSON.stringify(turn.outcomes));
+    const target = withCredential[0]!;
+    const web = await chat.applyProposal(w.boot.token, { commandId: "web-apply", proposalId: target.id }, { secrets: false });
+    assert.equal(web.applied, false);
+    assert.match(web.failure!.message, /cannot show a credential once/);
+    assert.deepEqual(web.results, [], "no step was sent");
+    if (target.steps.includes("host.local.set")) assert.equal(await w.c.services.localHost.enabled(), false, "the earlier step was not applied");
+    assert.equal(await w.c.services.principals.get("host:laptop"), undefined);
+    const terminal = await chat.applyProposal(w.boot.token, { commandId: "term-apply", proposalId: target.id });
+    assert.equal(terminal.applied, true, JSON.stringify(terminal));
+    assert.equal(terminal.secrets?.length, 1);
+  } finally { await w.done(); }
+});

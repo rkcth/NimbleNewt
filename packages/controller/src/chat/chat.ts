@@ -2061,10 +2061,13 @@ export class ChatService {
     const results: ChatStepResult[] = [];
     const secrets: RevealedSecret[] = [];
     const withSecrets = <T extends object>(r: T): T => (secrets.length === 0 ? r : { ...r, secrets });
+    // A channel that keeps what it shows is refused before any step is sent, so a proposal that would make a credential is never half applied from it.
+    const secretStep = allowSecrets ? -1 : body.steps.findIndex((s) => SECRET_OPS.has(s.op));
+    if (secretStep >= 0) return { proposalId, applied: false, replayed: false, results, failure: { step: secretStep, code: "unavailable", message: NO_SECRET_CHANNEL } };
     for (const [index, step] of body.steps.entries()) {
       const args = substitute(step.args, results);
       const using = step.as === "coordinator" ? coordinatorToken : token;
-      if (using === undefined) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } };
+      if (using === undefined) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } });
       if (step.op === "decision.record" && step.as === undefined) {
         // A decision step is based on the version of its topic when it was shown, but decisions of the same message applied before it do not count as the topic having moved. A step already recorded (this apply run again) is answered from the record.
         const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, step.commandId)) });
@@ -2073,18 +2076,17 @@ export class ChatService {
           continue;
         }
         const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
-        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        if (!fresh.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } });
         args["basedOn"] = await this.#decisionBase(token, typeof args["sourceTurnId"] === "string" ? args["sourceTurnId"] : "", args, typeof args["basedOn"] === "number" ? args["basedOn"] : undefined, fresh.value as number);
       }
       if (step.op === "meeting.record.owner-respond" && isObject(args["alternative"])) {
         // The owner's alternative is based on the version of its topic when it is recorded, as a decision step is, and decisions of this very message do not count as the topic having moved.
         const alt = { ...(args["alternative"] as Record<string, unknown>) };
         const fresh = await this.#revisionFor(token, "decision", alt, undefined, new Map());
-        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        if (!fresh.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } });
         alt["basedOn"] = await this.#decisionBase(token, String((alt["source"] as { turnId?: unknown } | undefined)?.turnId ?? ""), alt, typeof alt["basedOn"] === "number" ? alt["basedOn"] : undefined, fresh.value as number);
         args["alternative"] = alt;
       }
-      if (!allowSecrets && SECRET_OPS.has(step.op)) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: NO_SECRET_CHANNEL } };
       if (step.op === "standup.answer-question" && typeof args["questionId"] === "string") {
         // The revision in the shown proposal is the one read when it was drawn up. Announcing the question (marking it told) moves its revision without changing a word of it, so the owner's agreement is applied
         // to the revision the question has now, as long as it is still open: the words the owner saw are the same. An answered question is never answered again; the same words are the step already done.
@@ -2093,7 +2095,7 @@ export class ChatService {
         if (cur !== undefined && qb?.state === "open") args["expectedRevision"] = cur.revision;
         else if (cur !== undefined && qb?.state === "answered") {
           if (qb.answer === args["answer"]) { results.push({ op: step.op, id: args["questionId"], shown: ["The stand-up's question was already answered with these words."], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true }); continue; }
-          return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } };
+          return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } });
         }
       }
       let response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
@@ -2129,7 +2131,8 @@ export class ChatService {
       found = await this.#runner.get("chat-proposal", proposalId);
       body = found?.body as unknown as ChatProposalBody | undefined;
       if (body?.status !== "applied") throw error;
-      return { proposalId, applied: true, replayed: true, results: body.results ?? [] };
+      // Another copy recorded the proposal as applied first; a credential this copy made is still handed over (it is in no record, so this is its only showing).
+      return withSecrets({ proposalId, applied: true, replayed: true, results: body.results ?? [] });
     }
     return withSecrets({ proposalId, applied: true, replayed: false, results });
   }

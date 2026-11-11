@@ -181,7 +181,9 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     if (await controller.services.localHost.enabled()) {
       if (options.localHost === undefined) notes.push("You turned on the worker host for this computer, but this start has no way to build one, so tasks wait for a host.");
       else {
-        const made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) });
+        // A builder that throws (a package that cannot be loaded, a folder that cannot be made) is a reason the host was not started, never a reason the owner has no controller.
+        let made: LocalHostPlan | { readonly problem: string };
+        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${String((error as Error)?.message ?? error).slice(0, 300)}` }; }
         if ("problem" in made) notes.push(`You turned on the worker host for this computer, but it was not started: ${made.problem}`);
         else {
           await controller.close();
@@ -222,7 +224,10 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
         notes.push(`The model providers in the configuration were not registered yet: ${error instanceof DomainError ? error.message : "a registration problem"}`);
       }
     } else if (have === undefined) notes.push("No model provider is set up yet. The chat needs one: name a model server in the configuration (models.providers) or start with `init --model-endpoint ...`.");
-    if (hostPlan !== undefined) notes.push(...await hostPlan.attach(controller, owner));
+    if (hostPlan !== undefined) {
+      // Attaching can be refused (the owner disabled host:local, the records are busy): the controller keeps running and the owner is told; the host's sandbox is freed when the controller closes.
+      try { notes.push(...await hostPlan.attach(controller, owner)); } catch (error) { notes.push(`You turned on the worker host for this computer, but it could not join, so tasks wait for a host: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+    }
     await refresh();
     return { controller, ownerToken: token, ownerCreated: created, notes, close: async () => { try { await controller.close(); } finally { await hostPlan?.close().catch(() => undefined); } } };
   } catch (error) { await controller.close().catch(() => undefined); await hostPlan?.close().catch(() => undefined); throw error; }

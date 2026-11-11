@@ -1130,6 +1130,8 @@ export const OPERATIONS: readonly Operation[] = [
       if (kind !== "agent" && kind !== "host") invalid("args.kind", "must be agent or host");
       if (kind === "agent" && (a["name"] !== undefined || typeof a["agentId"] !== "string")) invalid("args.agentId", "an agent credential needs agentId (and no name)");
       if (kind === "host" && (a["agentId"] !== undefined || typeof a["name"] !== "string")) invalid("args.name", "a host credential needs name (and no agentId)");
+      // host:local is the worker host NimbleNewt starts on this computer; it gets a fresh credential, held in memory, at each start. A credential issued for it would cut the running host off and let another machine pose as this one.
+      if (kind === "host" && String(a["name"]).replace(/^host:/, "") === "local") invalid("args.name", "local is the worker host NimbleNewt starts on this computer and gives a credential itself at each start; turn it on or off with host.local.set, or name the other host differently");
       const principalId = kind === "agent" ? (String(a["agentId"]).startsWith("agent:") ? String(a["agentId"]) : `agent:${String(a["agentId"])}`) : `host:${String(a["name"])}`;
       const issued = await credentialAdminOf(c).issueCredentialOnce(c.principal, { commandId: need(id), principalId, enrollHost: kind === "host" });
       return asJson({ id: issued.principalId, kind, credentialId: issued.credentialId, enrolled: issued.enrolled, secret: { label: `Credential for ${issued.principalId}`, value: issued.token } });
