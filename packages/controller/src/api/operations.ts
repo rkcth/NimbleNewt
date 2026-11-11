@@ -190,7 +190,7 @@ export interface Context {
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent">;
   readonly watchControl?: {
@@ -980,6 +980,15 @@ export const OPERATIONS: readonly Operation[] = [
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) invalid("args.limit", "must be 1 to 50");
       const svc = c.records ?? unavailable("meeting records");
       return asJson({ item: await svc.ownerPending(c.principal, limit) } as object);
+    } },
+  { name: "meeting.owner-controls", kind: "query", summary: "What the owner can act on in meetings (card M02h): the motions still open in meetings that are open (each with its state and version, for opening or closing a vote or tabling it), and the adopted decisions with agreed changes not yet carried out although nothing waits for the owner's answer (for carrying them out again); owner only (not a task-scoped credential). `truncated: true` means more exist than were read.", args: { "limit?": "1 to 50, default 50" }, result: "`{ item: { meetings: [{ id, projectId, title, chair?, motions: [{ id, number, text, topic?, state, version }] }], unfinished: [{ id, projectId, text, topic?, left, applying }], truncated } }`.",
+    run: async (c, a) => {
+      only(a, ["limit"]);
+      if (c.principal.kind !== "owner" || c.principal.taskScope !== undefined) throw new DomainError("forbidden", "only the owner reads what they can act on in meetings");
+      const limit = optNum(a, "limit") ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) invalid("args.limit", "must be 1 to 50");
+      const svc = c.records ?? unavailable("meeting records");
+      return asJson({ item: await svc.ownerControls(c.principal, limit) } as object);
     } },
   recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
   attendOp("admission", "query", "Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).", "admission", ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"], "`{ item }`."),

@@ -1206,6 +1206,50 @@ export class MeetingRecordService {
     return { items, truncated: (await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
   }
 
+  /**
+   * What the owner can act on by chat (card M02h): the motions still open in the meetings that are open (to open or close a vote, or table), and the adopted decisions whose agreed changes are not all carried out
+   * although the owner no longer has to answer (to carry them out again). Owner only (not a task-scoped credential); text is cut so a line can show it. `truncated` says more exist than were read.
+   */
+  async ownerControls(by: Principal, limit = 50): Promise<{ meetings: { id: string; projectId: string; title: string; chair?: string; motions: { id: string; number: number; text: string; topic?: string; state: MotionState; version: number }[] }[]; unfinished: { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[]; truncated: boolean }> {
+    const none = { meetings: [], unfinished: [], truncated: false };
+    if (by.kind !== "owner" || by.taskScope !== undefined) return none;
+    const meetings: { id: string; projectId: string; title: string; chair?: string; motions: { id: string; number: number; text: string; topic?: string; state: MotionState; version: number }[] }[] = [];
+    let truncated = false;
+    const indexes = await this.#runner.list(OPEN_KIND, { limit: 100 });
+    if (indexes.length === 100) truncated = true;
+    read: for (const index of indexes) {
+      for (const recordId of (index.body as unknown as OpenIndexBody).ids) {
+        const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
+        if (rec === undefined || rec.state !== "open") continue;
+        if (meetings.length >= limit) { truncated = true; break read; }
+        const motions: { id: string; number: number; text: string; topic?: string; state: MotionState; version: number }[] = [];
+        for (const motionId of rec.motions) {
+          const m = known<MotionBody>(await this.#runner.get("meeting-motion", motionId));
+          if (m === undefined || FINAL_MOTION_STATES.includes(m.state)) continue;
+          motions.push({ id: motionId, number: m.number, text: m.text.slice(0, 300), ...(m.topic === undefined ? {} : { topic: m.topic }), state: m.state, version: m.version });
+        }
+        meetings.push({ id: recordId, projectId: rec.projectId, title: rec.title.slice(0, 120), ...(rec.chair === undefined ? {} : { chair: rec.chair }), motions });
+      }
+    }
+    const unfinished: { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[] = [];
+    let after: string | undefined;
+    scan: for (let pages = 0; pages < 10; pages++) {
+      const page = await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const a of page) {
+        after = a.id;
+        const d = a.body as unknown as DecisionRecordBody;
+        // A decision that still waits for the owner is answered, not carried out. One the owner declined can still hold a change that had started (it stays applying until applied again).
+        if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") continue;
+        const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
+        if (left === 0) continue;
+        if (unfinished.length >= limit) { truncated = true; break scan; }
+        unfinished.push({ id: a.id, projectId: d.projectId, text: d.text.slice(0, 300), ...(d.topic === undefined ? {} : { topic: d.topic }), left, applying: d.changes.filter((c) => c.state === "applying").length });
+      }
+      if (page.length < 100) return { meetings, unfinished, truncated };
+    }
+    return { meetings, unfinished, truncated: truncated || (await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
+  }
+
   /** Tells the observer of every change that has reached a final state; each is told again on a repeat of the apply, which the observer's stable command IDs make harmless. */
   async #announceChanges(decisionId: string): Promise<void> {
     if (this.#options.onChange === undefined) return;
