@@ -42,6 +42,13 @@ export function checkRemoteConfig(config) {
     if (entry === null || typeof entry !== "object" || typeof entry.url !== "string") problems.push(`routes.${route.slice(0, 40)}.url: must be the endpoint's address`);
     else if (entry.keyEnv !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(String(entry.keyEnv))) problems.push(`routes.${route.slice(0, 40)}.keyEnv: must be the NAME of an environment variable`);
   }
+  if (config.landing !== undefined) {
+    if (config.landing === null || typeof config.landing !== "object" || Array.isArray(config.landing)) problems.push("landing: must map project IDs to the branch their work is landed on");
+    else for (const [projectId, branch] of Object.entries(config.landing)) {
+      if (typeof branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(branch) || branch.includes("..")) problems.push(`landing.${projectId.slice(0, 40)}: must be a branch name`);
+      else if (config.projects === null || typeof config.projects !== "object" || !Object.hasOwn(config.projects, projectId)) problems.push(`landing.${projectId.slice(0, 40)}: names a project with no shared repository in projects`);
+    }
+  }
   return problems;
 }
 
@@ -52,6 +59,7 @@ export function checkRemoteConfig(config) {
  *   base                     the folder this host owns for checkouts, attempt homes and scratch (never inside the controller's data)
  *   protectedPaths?          folders on this machine that no sandbox mount may reach (its credential files)
  *   projects?                { projectId: absolute folder of the shared repository } for projects whose checkout lives on this machine
+ *   landing?                 { projectId: branch } the branch finished work of a project is landed on here (with the commit permit required); a project not named is never landed on this host
  *   routes                   { "provider/model": { url, keyEnv?, contextTokens?, maxTokens? } }
  *   poller?                  { waitMs, heartbeatMs, spreadMs, minGapMs, baseBackoffMs, maxBackoffMs } to change how often the host asks (defaults are the poller's)
  *   log?                     (line) => void; told one plain line per notable event (no secret)
@@ -85,7 +93,10 @@ export async function startRemoteWorker(setup, config) {
   const security = (event) => { void client.reportSecurity(event).catch((error) => log(`a security report could not be sent (${describe(error)})`)); };
   const shared = new Map(Object.entries(config.projects ?? {}).filter(([, folder]) => isFolder(folder)));
   let local;
-  const workspaces = new worker.LocalWorkspaces({ root: join(base, "work"), git, shared: (projectId) => shared.get(projectId), busy: () => local?.busyAttempts() ?? [], landing: () => ({ branch: "main", requirePermit: false }), security });
+  // The landing policy (card H12t): the branch named for the project in this host's configuration (`landing`), with the commit permit required and the default protected paths kept. A project with no branch named
+  // here is not landed on this host (refused, never guessed). The owner's chat settings live in the controller and do not reach a remote host yet (the request does not carry them).
+  const landingBranches = new Map(Object.entries(config.landing ?? {}).filter(([projectId, branch]) => shared.has(projectId) && typeof branch === "string" && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(branch) && !branch.includes("..")));
+  const workspaces = new worker.LocalWorkspaces({ root: join(base, "work"), git, shared: (projectId) => shared.get(projectId), busy: () => local?.busyAttempts() ?? [], landing: ({ projectId }) => (landingBranches.has(projectId) ? { branch: landingBranches.get(projectId), requirePermit: true, protectDefaults: true } : undefined), security });
   const relay = new controller.ModelRelay({ ...(config.fetch === undefined ? {} : { fetch: config.fetch }), endpoint: (route) => endpointOf(config, route) });
   let runner;
   const attempts = new Map();
@@ -128,7 +139,7 @@ export async function startRemoteWorker(setup, config) {
     capabilities: () => capabilitiesOf(piAdapter),
   });
   runner = new controller.RemoteOfferRunner({ client, host: local, abilities, onTrouble: (attemptId, what, error) => log(`attempt ${attemptId}: ${what} did not go through (${describe(error)})`) });
-  const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
+  const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
 
   const abort = new AbortController();
   const poller = new controller.HostPoller({

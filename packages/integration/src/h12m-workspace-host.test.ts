@@ -241,7 +241,7 @@ test("remote host: the same requests cross the authenticated transport to a work
     const dropped = new Set<string>();
     let answerCalls = 0;
     const flaky = { answerWorkspace: async (requestId: string, outcome: Parameters<typeof client.answerWorkspace>[1]) => { answerCalls++; if (!dropped.has(requestId)) { dropped.add(requestId); throw new Error("the connection broke"); } await client.answerWorkspace(requestId, outcome); } };
-    const responder = new WorkspaceResponder({ client: flaky, port: m.port });
+    const responder = new WorkspaceResponder({ client: flaky, port: m.port, busy: () => [] });
 
     let n = 0;
     const agent = `agt-${"a".repeat(20)}`;

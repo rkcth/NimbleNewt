@@ -84,7 +84,7 @@ export interface WorkspaceHostOptions {
    * answers false or throws, the request is refused and left unstarted. A host that has attempts must give it.
    */
   /**
-   * The landing policy of a task (today one policy for the installation, task layers can only tighten; a project layer is card H12t), from this host's settings (chat-settable: `workspace.landing.branch`, `workspace.landing.requirePermit`, `workspace.landing.protectedPaths`). Without it, or without a `branch`, a landing is
+   * The landing policy of a task (the installation's settings, task layers can only tighten; a project's own landing branch, `project.branches.set`, replaces the installation's branch, card H12t), from this host's settings (chat-settable: `workspace.landing.branch`, `workspace.landing.requirePermit`, `workspace.landing.protectedPaths`). Without it, or without a `branch`, a landing is
    * refused: the landing branch is named, never guessed from what the shared tree happens to be on. `requirePermit` defaults to true.
    */
   readonly landing?: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicy | undefined> | LandingPolicy | undefined;

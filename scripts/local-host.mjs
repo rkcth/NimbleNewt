@@ -106,7 +106,18 @@ export function localHostBuilder(setup) {
       }
     };
     let local;
-    const workspaces = new worker.LocalWorkspaces({ root: join(base, "work"), git, shared: (projectId) => shared.get(projectId), busy: () => local?.busyAttempts() ?? [], landing: () => ({ branch: "main", requirePermit: false }) });
+    // The controller's parts the workspace port needs (card H12t), given when the controller builds the host (`build(services)` below): until then a landing has no policy and is refused, and nothing is reported.
+    let composed;
+    const workspaces = new worker.LocalWorkspaces({
+      root: join(base, "work"), git, shared: (projectId) => shared.get(projectId),
+      // The attempts with a call or model call in flight on this host (before the host is built none can run here). A request is never carried out under one; a busy check that throws refuses it.
+      busy: () => (local === undefined ? [] : local.busyAttempts()),
+      // The owner's landing policy for the task (card H12s), read fresh at each landing: the project's own landing branch (`project.branches.set`), else `workspace.landing.branch`; the permit is required unless the owner said
+      // otherwise. A policy that cannot be read is no policy: the landing is refused.
+      landing: (call) => (composed === undefined ? undefined : composed.landingPolicy(call)),
+      // The worker-side security hook (card U11d), reported to the owner's Urgent watch.
+      security: (event) => { composed?.reportSecurity(event); },
+    });
     let heartbeat;
     let closed = false;
     const close = async () => {
@@ -132,6 +143,7 @@ export function localHostBuilder(setup) {
           window: () => undefined,
           close,
           build: (services) => {
+            composed = services;
             const parts = worker.localWorkerParts({
               launcher, app: worker.appFromRepository(setup.root, { root: nodeRoot, executable: "bin/node" }), protectedPaths: [dataDir],
               workspace: async (order) => {
@@ -162,12 +174,15 @@ export function localHostBuilder(setup) {
               heldForReview: (order) => ctx.controller().dispatch.dispatcher.heldForReview(order.attemptId),
               ...worker.ownerPolicyOptions(services),
             });
+            const verifyDone = worker.doneVerifier({ workspaces, checks: parts.checks });
             local = new controller.LocalWorker({
               hostId: LOCAL_HOST_ID, resources: ATTEMPT_RESOURCES, version: "launcher", guards: services.guards, ownerPolicy: parts.ownerPolicy,
               schedule: (beat) => { const timer = setInterval(() => { void beat(); }, 1000); timer.unref?.(); return () => clearInterval(timer); },
               sandbox: parts.sandbox, runtimes: { open: (order, call, from) => parts.runtimes.open(order, call, from) },
               workspace: { run: async (call) => { await refreshShared(); return workspaces.port.run(call); } },
               progress: (scope) => workspaces.progress(scope),
+              // The check of a done (card W05): the state of the checkout this port made, and the contract's checks run in the attempt's sandbox. Without it a done of a task whose contract names evidence or checks is never verified.
+              verify: async (attemptId, scope, request) => { await refreshShared(); return verifyDone(attemptId, scope, request); },
               capabilities: () => ({ os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", harnesses: [{ name: "pi", version: piAdapter.PINNED_PI_DURABLE_VERSION }], isolation: ["bubblewrap"], tools: [], workspaces: [] }),
             });
             return local;

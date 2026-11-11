@@ -18,12 +18,20 @@ export interface LandingPolicySource {
 
 export const LANDING_SETTING_KEYS = { branch: "workspace.landing.branch", requirePermit: "workspace.landing.requirePermit", protectedPaths: "workspace.landing.protectedPaths", protectDefaults: "workspace.landing.protectDefaults" } as const;
 
-export function landingPolicyFrom(source: LandingPolicySource): (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicyFigures> {
+/**
+ * The project's own landing branch (card H12t): the branch the owner named for the project with `project.branches.set` / `.change` (`landing`), or `undefined` when none is named. Configuration has no project layer, so this
+ * owner-only project record is what lets two projects land on different branches; it wins over the installation's `workspace.landing.branch` (which is then the branch of every project that names none). A failure to read it
+ * throws, like the settings, and the landing is refused.
+ */
+export type ProjectLandingSource = (projectId: string) => Promise<string | undefined>;
+
+export function landingPolicyFrom(source: LandingPolicySource, projectLanding?: ProjectLandingSource): (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicyFigures> {
   const keys = Object.values(LANDING_SETTING_KEYS);
   return async (call) => {
     // One combination of the layers per landing, so the four values come from the same revisions.
     const v = (await source.taskValues(keys, call.taskId)) ?? (await source.installationValues(keys));
-    const branch = v[LANDING_SETTING_KEYS.branch], permit = v[LANDING_SETTING_KEYS.requirePermit], paths = v[LANDING_SETTING_KEYS.protectedPaths], defaults = v[LANDING_SETTING_KEYS.protectDefaults];
+    const own = projectLanding === undefined ? undefined : await projectLanding(call.projectId);
+    const branch = own ?? v[LANDING_SETTING_KEYS.branch], permit = v[LANDING_SETTING_KEYS.requirePermit], paths = v[LANDING_SETTING_KEYS.protectedPaths], defaults = v[LANDING_SETTING_KEYS.protectDefaults];
     return {
       ...(typeof branch === "string" ? { branch } : {}),
       // Unset or anything but an explicit false: the permit is required (the setting's own default).

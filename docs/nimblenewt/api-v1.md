@@ -2362,7 +2362,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `project.branches.set`
 
-The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.
+The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). A landing of the project's work goes to that branch instead of the installation's `workspace.landing.branch`. The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.
 
 Arguments:
 

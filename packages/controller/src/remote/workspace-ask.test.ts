@@ -21,7 +21,7 @@ for (const backend of backends) {
   suite("a workspace request reaches the remote host over the transport and the host's typed answer comes back: done with a detail, and a refusal with its reason (card H12m)", async (c) => {
     const r1 = await c.host("r1");
     const seen: WorkspaceCall[] = [];
-    const responder = new WorkspaceResponder({ client: r1.client, port: { run: async (x) => { seen.push(x); return x.operation === "quarantine" ? { ok: false, reason: "the checkout of that task is not on this host" } : { ok: true, summary: "the checkout moved", detail: { changed: true, base: "abc" } }; } } });
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [], port: { run: async (x) => { seen.push(x); return x.operation === "quarantine" ? { ok: false, reason: "the checkout of that task is not on this host" } : { ok: true, summary: "the checkout moved", detail: { changed: true, base: "abc" } }; } } });
     const ask = (x: WorkspaceCall) => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", x, { waitMs: 5000 });
     const first = call({ assignee: "agent:ann", quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] });
     const pending = ask(first);
@@ -124,7 +124,7 @@ for (const backend of backends) {
     const started: string[] = [];
     let release!: () => void;
     const gate = new Promise<void>((ok) => { release = ok; });
-    const responder = new WorkspaceResponder({ client: r1.client, port: { run: async (x) => { started.push(x.requestId); if (x.requestId === a.requestId) await gate; return { ok: true, summary: "done" }; } } });
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [], port: { run: async (x) => { started.push(x.requestId); if (x.requestId === a.requestId) await gate; return { ok: true, summary: "done" }; } } });
     const askA = c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", a, { waitMs: 5000 });
     const askB = c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", b, { waitMs: 1500 });
     const outcomeB = askB.then(() => "answered", (e: Error) => e.message);
@@ -149,7 +149,7 @@ for (const backend of backends) {
     const r1 = await c.host("r1");
     const ran: string[] = [];
     let now = 1_000;
-    const responder = new WorkspaceResponder({ client: r1.client, now: () => now, port: { run: async (x) => { ran.push(x.requestId); now += 10_000; return { ok: true, summary: "ok" }; } } });
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [], now: () => now, port: { run: async (x) => { ran.push(x.requestId); now += 10_000; return { ok: true, summary: "ok" }; } } });
     const first = call(); const second = call();
     responder.handle([{ ...first, quietAttempts: [] }, { ...second, quietAttempts: [], expiresAt: new Date(0).toISOString() }]);
     await responder.idle();
@@ -158,7 +158,7 @@ for (const backend of backends) {
 
   suite("a host whose port threw answers `failed` (the work may be half done) and the remote host handle throws it, as a local host's throw, so it is never recorded as a clean refusal; `failed` is only true on a refusal (independent check of H12m)", async (c) => {
     const r1 = await c.host("r1");
-    const responder = new WorkspaceResponder({ client: r1.client, port: { run: async () => { throw new Error("the disk filled half way"); } } });
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [], port: { run: async () => { throw new Error("the disk filled half way"); } } });
     const handle = new RemoteWorkerHost("host:r1", c.remote, c.dispatcherPrincipal, { resources: { cpus: 1, memoryMb: 1 }, requirements: () => ({}) as never, workspaceWaitMs: 5000 });
     const x = call({ operation: "quarantine" });
     const outcome = handle.workspace.run(x).then((a) => a, (e: Error) => e);
@@ -181,5 +181,32 @@ for (const backend of backends) {
     await wireRefuses("invalid_command", () => r1.client.answerWorkspace(z.requestId, { ok: false, reason: "x", failed: false } as never), 400);
     await r1.client.answerWorkspace(z.requestId, { ok: false, reason: "no" });
     await pending;
+  });
+
+  suite("a responder needs the host's busy check: without one it is refused at start; a request whose attempts to be quiet include a busy one, or whose busy check throws, is refused and never reaches the port; a quiet one runs (card H12t)", async (c) => {
+    const r1 = await c.host("r1");
+    const port = { run: async () => ({ ok: true as const, summary: "ran" }) };
+    assert.throws(() => new WorkspaceResponder({ client: r1.client, port } as never), /needs the host's busy check/);
+    assert.throws(() => new WorkspaceResponder({ client: r1.client, port, busy: [] } as never), /needs the host's busy check/);
+    const ran: string[] = [];
+    let busy: readonly string[] | Error = ["att-bbbbbbbbbbbbbbbbbbbb"];
+    const responder = new WorkspaceResponder({ client: r1.client, busy: async () => { if (busy instanceof Error) throw busy; return busy; }, port: { run: async (x) => { ran.push(x.requestId); return { ok: true, summary: "ran" }; } } });
+    const ask = async (x: WorkspaceCall) => {
+      const pending = c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", x, { waitMs: 5000 });
+      for (let i = 0; i < 100 && !(await r1.client.workspaceRequests()).some((r) => r.requestId === x.requestId); i++) await new Promise((ok) => setTimeout(ok, 10));
+      responder.handle(await r1.client.workspaceRequests());
+      await responder.idle();
+      return pending;
+    };
+    const held = call({ quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa", "att-bbbbbbbbbbbbbbbbbbbb"] });
+    assert.deepEqual(await ask(held), { ok: false, reason: "an attempt of the task still has a call in flight on this host (att-bbbbbbbbbbbbbbbbbbbb), so the request was not carried out; ask again when it is quiet" });
+    busy = new Error("the host cannot say");
+    const unknown = call({ quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] });
+    assert.deepEqual(await ask(unknown), { ok: false, reason: "this host could not say which attempts have a call in flight, so the request was not carried out" });
+    assert.deepEqual(ran, [], "neither reached the port");
+    busy = ["att-bbbbbbbbbbbbbbbbbbbb"];
+    const quiet = call({ quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] });
+    assert.deepEqual(await ask(quiet), { ok: true, summary: "ran" }, "a busy attempt of another request does not hold this one");
+    assert.deepEqual(ran, [quiet.requestId]);
   });
 }

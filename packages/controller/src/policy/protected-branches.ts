@@ -14,7 +14,7 @@ export const DEFAULT_PROTECTED = ["main", "master"] as const;
 export interface BranchSettingsBody {
   /** Branch names, or a prefix ending in `/*` (`release/*`), that a push or merge may not change without the owner's decision. */
   readonly protected: readonly string[];
-  /** The branch finished work is integrated onto (card P08); informational here. */
+  /** The branch finished work is integrated onto (card P08). A workspace host lands this project's work on it (card H12t: it is the landing policy's branch for the project, over the installation's `workspace.landing.branch`). */
   readonly landing?: string;
   readonly updatedBy: string;
   readonly updatedAt: string;
@@ -67,6 +67,15 @@ export class ProtectedBranchService {
   async isProtected(projectId: string, branch: string | undefined): Promise<boolean> {
     if (branch === undefined || !NAME.test(branch) || branch.includes("..")) return true;
     return isProtectedBy(await this.#list(projectId), branch);
+  }
+
+  /**
+   * The controller's own question, for a landing (card H12t): the branch the owner named for this project's finished work, or `undefined` when none is named. Only the owner sets it (`set`, `change`); a name that does not read
+   * as a branch name now (an older record) is `undefined`, so the landing falls back to the installation's branch or is refused, never sent to a guessed branch.
+   */
+  async landingOf(projectId: string): Promise<string | undefined> {
+    const landing = ((await this.#runner.get(KIND, this.#id(projectId)))?.body as unknown as BranchSettingsBody | undefined)?.landing;
+    return typeof landing === "string" && NAME.test(landing) && !landing.includes("..") ? landing : undefined;
   }
 
   async get(by: Principal, projectId: string): Promise<{ revision: number; protected: readonly string[]; landing?: string; isDefault: boolean }> {
