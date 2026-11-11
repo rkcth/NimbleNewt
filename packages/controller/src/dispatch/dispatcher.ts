@@ -281,7 +281,7 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly computeReserveMs?: number;
   /** After this many ticks in a row in which an attempt pinned to a host could not start because that host was unavailable, a blocker names the owner (who can move it). Default 5. */
   readonly pinnedStaleTicks?: number;
-  /** Card H07b: how many hosts may refuse an attempt at its start (a refusal made before anything was given to the host) before the attempt fails with every reason. Each is tried once. Default 3. */
+  /** Card H07b: how many hosts may refuse an attempt at its start (a refusal made before anything was given to the host) before the attempt fails with every reason. Each is tried once. Default 3, at most `DISPATCH_LIMITS.startRefusals` (8, what the record keeps). An attempt pinned to one host (a move, or its native store) fails on its first refusal. */
   readonly startTries?: number;
   /** How long the end hook (the agent's ending) may take before the attempt ends with the dispatcher's own outcome and the hook's delay is reported through `onError`. Default 30 seconds. */
   readonly endHookMs?: number;
@@ -2040,7 +2040,8 @@ export class DispatcherService {
     if (pinned !== undefined && candidates.length === 0) return { kind: "none", reason: `${pinned} is not a worker host of this dispatcher, and the attempt may run only there`, blocked: false };
     const choice = await chooseHost(candidates, async (worker): Promise<HostVerdict> => {
       // A host that already refused this attempt at its start is not chosen again for it (card H07b): its refusal was its answer, and asking again would only offer it the same attempt once more.
-      const earlier = tried.find((t) => t.hostId === worker.hostId);
+      // A pinned attempt is the exception: the owner (a move) or its native store chose that one host, so it is asked again, and a refusal there fails the attempt rather than leaving it to wait for a host never asked.
+      const earlier = pinned === undefined ? tried.find((t) => t.hostId === worker.hostId) : undefined;
       if (earlier !== undefined) return { kind: "refuse", reason: `${worker.hostId} refused this attempt at its start (${earlier.reason}) and is not tried again for it`, lasting: true };
       const status = await this.#deps.hosts.status(this.#deps.principal, worker.hostId);
       if (status === undefined) return { kind: "refuse", reason: `${worker.hostId} is not an enrolled host`, lasting: false };
@@ -2545,12 +2546,18 @@ export class DispatcherService {
     const fresh = (await this.#load(b.attemptId))?.body;
     const reason = clipText(error.reasons.join("; ") || "no reason given", DISPATCH_LIMITS.hostReason);
     const tried = [...(fresh?.startRefusals ?? []).filter((r) => r.hostId !== host.hostId), { hostId: host.hostId, reason, lasting: error.lasting, at: now }].slice(-DISPATCH_LIMITS.startRefusals);
-    const max = Math.max(1, this.#options.startTries ?? 3);
-    const left = b.pinnedHost === undefined ? this.#deps.workers.filter((w) => !tried.some((t) => t.hostId === w.hostId)) : [];
+    // At most as many as the record keeps: past that the oldest refusal would drop off, its host could be chosen again and the bound would never be reached (H07b review).
+    const asked = this.#options.startTries;
+    const max = asked === undefined || !Number.isFinite(asked) ? 3 : Math.min(DISPATCH_LIMITS.startRefusals, Math.max(1, Math.floor(asked)));
+    // Pinned to this host by a move, or by its agent's native store (which no other host can open): it runs nowhere else, so the refusal fails it, as before (H07b review).
+    let store: Awaited<ReturnType<NonNullable<DispatcherDeps["storeOwner"]>>>;
+    try { store = await this.#deps.storeOwner?.(b.agentId, b.attemptId); } catch (e) { this.#options.onError?.(e); store = undefined; }
+    const pinned = b.pinnedHost ?? store?.hostId;
+    const left = pinned === undefined ? this.#deps.workers.filter((w) => !tried.some((t) => t.hostId === w.hostId)) : [];
     const all = tried.map((t) => `${t.hostId}: ${t.reason}`).join("; ");
     if (fresh === undefined || fresh.state !== "running" || fresh.hostId !== host.hostId || left.length === 0 || tried.length >= max) {
       if (fresh !== undefined) await this.#update(b.attemptId, (x) => ({ ...x, startRefusals: tried }));
-      const why = tried.length <= 1 ? error.message : left.length === 0 ? `every worker host refused it (${all})` : `${tried.length} hosts refused it, the most that are tried (${all})`;
+      const why = tried.length <= 1 || pinned !== undefined ? error.message : left.length === 0 ? `every worker host refused it (${all})` : `${tried.length} hosts refused it, the most that are tried (${all})`;
       return { kind: "fail", why: why.slice(0, 600) };
     }
     // Undo the start: the fields the start wrote go back to what they were, and the hosts that refused it are kept.
