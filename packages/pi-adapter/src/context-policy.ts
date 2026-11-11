@@ -7,6 +7,8 @@ type Settings = NonNullable<Parameters<typeof Harness.open>[1]["settings"]>;
 /** What Pi asks the controller's summariser. `key` is the same after a restart (the conversation and the first entry kept), so the controller can recognise a compaction it has already done. */
 export interface CompactionRequest {
   readonly key: string;
+  /** The first entry the summary keeps verbatim (card W12: what the model still sees after the summary starts there). */
+  readonly firstKept?: number;
   readonly reason: "manual" | "threshold" | "overflow";
   /** The conversation being replaced by the summary, as plain text. */
   readonly text: string;
@@ -81,7 +83,7 @@ export function applyContextPolicy(policy: AdapterContextPolicy | undefined, set
         if (stored !== undefined) return decode(stored);
         let timer: NodeJS.Timeout | undefined;
         const stop = new AbortController();
-        const request: CompactionRequest = { signal: stop.signal, key: `${String(api.conversationId)}:${String(c.firstKept)}`, reason: c.reason, text: textOf(c.messages), messageCount: c.messages.length, ...(c.instructions === undefined ? {} : { instructions: c.instructions }) };
+        const request: CompactionRequest = { signal: stop.signal, key: `${String(api.conversationId)}:${String(c.firstKept)}`, firstKept: Number(c.firstKept), reason: c.reason, text: textOf(c.messages), messageCount: c.messages.length, ...(c.instructions === undefined ? {} : { instructions: c.instructions }) };
         let decision: CompactionDecision | undefined;
         try {
           decision = await Promise.race([

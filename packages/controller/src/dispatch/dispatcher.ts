@@ -14,7 +14,8 @@ import type { ProjectService } from "../domain/service.js";
 import type { AdmissionService } from "../admission/index.js";
 import { BudgetClosedError, reservationIdFor, type BudgetService } from "../budgets/index.js";
 import type { DecisionGuard } from "../decisions/index.js";
-import type { EnvironmentService } from "../environments/index.js";
+import { effectiveLaunchLimits, type EnvironmentService } from "../environments/index.js";
+import type { LocalWorkerLimits } from "../api/worker-limits.js";
 import type { GenerationService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import type { HostService } from "../hosts/index.js";
@@ -22,6 +23,7 @@ import type { PauseGuard } from "../lifecycle/index.js";
 import type { HandoffPhase } from "../lifecycle/index.js";
 import type { McpService } from "../mcp/index.js";
 import type { ContextEnforcementService } from "../context/index.js";
+import { composeAnchor, type AnchorBlock } from "../context/anchor.js";
 import { cutNote, type HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
@@ -39,7 +41,7 @@ import { quoted } from "../status/explain.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
+import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type LaunchLimitsRecord, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
@@ -177,7 +179,12 @@ export interface DispatcherDeps {
   readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
   /** Whether the approved manifest of this exact tool version says a call may be run again after a restart (T06: the catalogue answers, as the agent; the worker never says). Without it no catalogue tool is replay-safe. */
   readonly replaySafe?: (tool: ToolIdentity, agent: Principal, attemptId: string, callId: string) => Promise<boolean>;
-  readonly environments?: Pick<EnvironmentService, "pin">;
+  readonly environments?: Pick<EnvironmentService, "pin" | "resume">;
+  /**
+   * The installation's limits for an agent launched now (card A08d): the owner's setting over the start-up configuration, read at each launch. Cut against the figures of the agent's environment manifest, the smaller wins. It may throw
+   * (the setting is unreadable): the attempt is then refused, never started without the limits. Absent: only the environment's figures apply.
+   */
+  readonly launchDefaults?: () => Promise<LocalWorkerLimits | undefined>;
   readonly meetings?: Pick<AttendanceService, "admission" | "revalidation">;
   /**
    * Puts a step in the task's activity record (card C09d): the model route and harness an attempt started under and every tool call's outcome, each with a reference to the record that holds the detail.
@@ -196,6 +203,14 @@ export interface DispatcherDeps {
    * in the first prompt of the attempt that follows, when that attempt's agent is the one the task was handed to. Without it the call says nothing about the package.
    */
   readonly handedIn?: (taskId: string) => Promise<{ id: string; phase: HandoffPhase; to: { kind: string; id: string } } | undefined>;
+  /**
+   * The goal anchor (card W12). `plan` answers, for the attempt about to start, how many characters the block may take (the owner's cap and the route's share of its window) or `undefined` when the owner turned the anchor
+   * off or the route has no room for it; it must answer the same for the same facts. `rules` reads the owner's decisions for the task, as the controller. Neither may stop an attempt: a failure leaves the anchor out and is reported.
+   */
+  readonly anchor?: {
+    readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number } | { readonly leftOut: "no-window" | "no-room" } | undefined>;
+    readonly rules?: (c: { readonly taskId: string; readonly projectId: string }) => Promise<{ readonly version: number; readonly total: number; readonly items: readonly { readonly id: string; readonly text: string }[] } | undefined>;
+  };
   /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
   readonly toolWindow?: (route: string) => number | undefined;
   /**
@@ -1914,7 +1929,7 @@ export class DispatcherService {
           // Whatever was remembered for this attempt (a "kept" from an earlier tick on the old route) is no longer true: a refusal or an error below must not leave it standing.
           this.#routeOk.delete(attemptId);
           let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length + (await this.#earlierReport({ taskId, attemptId })).length }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous, taskChars: (await this.#contentOf(taskId)).length, noteChars: (await this.#handedInNote({ taskId, attemptId, agentId })).length + (await this.#earlierReport({ taskId, attemptId })).length + (await this.#anchorReserve({ taskId, projectId: task.projectId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }) })) }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
           if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
           this.#remember(attemptId, cacheKey);
         }
@@ -2390,12 +2405,14 @@ export class DispatcherService {
     // same decision; facts that changed since the check give the view as it is now). A refusal or an error now starts nothing: the place is given back and the next pass checks the move again (and blocks on a refusal).
     // What the task was handed with, read now: it goes in the first prompt, and its size goes with the request for the route view, which has to leave room for it (card C07g).
     const handed = (await this.#handedInNote(b)) + (await this.#earlierReport(b));
+    // Card W12: the goal anchor, written from the records now; it goes at the top of the first prompt, so the room it may take (the same figure the claim-time check reserved, so the same facts give the same decision) is counted with what the task was handed with when the route view is cut.
+    const anchor = await this.#anchorFor(b, handed);
     let view: { readonly text: string; readonly measured: boolean } | undefined;
     if (this.#deps.routeChange !== undefined) {
       const previous = ((await this.#runner.get(PLACED_KIND, b.taskId))?.body as unknown as { route?: string } | undefined)?.route;
       if (previous !== undefined && previous !== b.route) {
         let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length, noteChars: handed.length }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
+        try { moved = await this.#deps.routeChange({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }), previousRoute: previous, taskChars: (await this.#contentOf(b.taskId)).length, noteChars: handed.length + (anchor?.maxChars ?? 0) }); } catch (error) { this.#options.onError?.(error); this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (!moved.ok) { this.#routeOk.delete(b.attemptId); return { kind: "waiting" }; }
         if (moved.view !== undefined && moved.view.text !== "") view = moved.view;
       }
@@ -2427,16 +2444,25 @@ export class DispatcherService {
     const credential = await this.#deps.credentials.issueForAttempt(this.#deps.principal, { commandId: `dpa-cred:${b.attemptId}`, attemptId: b.attemptId, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }) });
     const credentialId = credential.token.slice(0, credential.token.lastIndexOf("."));
     const environment = await this.#pin(b);
-    await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? {} : { environment }) } }));
+    // The limits of this launch (card A08d): the pinned environment's figures cut by the installation's. A figure that cannot be read or is not valid refuses the attempt, never lets it run with a guessed limit.
+    let launch: LaunchLimitsRecord | undefined;
+    let limitRefusal: string | undefined;
+    try { launch = await this.#launchLimits(b, environment); } catch (error) { limitRefusal = `the limits of this launch could not be worked out (${errorText(error)}), so nothing was started`.slice(0, 400); }
+    await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? {} : { environment }) }, ...(launch === undefined ? {} : { launchLimits: launch }) }));
+    if (limitRefusal !== undefined) {
+      await this.#end(b.attemptId, "failed", `the worker did not start: ${limitRefusal}`, { readmit: false });
+      return { kind: "skipped", check: "host", reason: `the worker did not start: ${limitRefusal}` };
+    }
     // The recipe the attempt holds now: a resumed, moved or restarted attempt keeps the narrowed (or widened) recipe its record names, never the defaults.
     const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     // Card C07i: what the first prompt is made of goes with the order, so the starting-size watch can name the largest contributors; the records the hand-off paragraph names are where their originals are kept.
     const taskText = await this.#contentOf(b.taskId);
     const rules = (await this.#policyNote(b)) + (await this.#doneNote(b));
-    const startParts = { task: taskText.length, rules: rules.length, handoff: handed.length, view: view === undefined ? 0 : view.text.length + 2, refs: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])] };
+    // The anchor is the controller's own text about the task, so it is counted with the rules in the starting-size watch.
+    const startParts = { task: taskText.length, rules: rules.length + (anchor === undefined ? 0 : anchor.block.text.length + 2), handoff: handed.length, view: view === undefined ? 0 : view.text.length + 2, refs: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: taskText + rules + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}${b.turnRound === undefined ? "" : `:se${b.turnRound}`}${b.wakeRound === undefined ? "" : `:wk${b.wakeRound}`}`, startParts,
+      content: (anchor === undefined ? "" : `${anchor.block.text}\n\n`) + taskText + rules + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}${b.turnRound === undefined ? "" : `:se${b.turnRound}`}${b.wakeRound === undefined ? "" : `:wk${b.wakeRound}`}`, startParts,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
     };
@@ -2444,7 +2470,8 @@ export class DispatcherService {
     const taskContract = await this.#contractOf(b.taskId);
     const held = (await this.#load(b.attemptId))?.body.reserving;
     const budget = { ...(taskContract.maxMinutes === undefined ? {} : { maxMinutes: taskContract.maxMinutes }), ...(taskContract.maxAttempts === undefined ? {} : { maxAttempts: taskContract.maxAttempts }), ...(taskContract.maxCost === undefined ? {} : { maxCost: taskContract.maxCost }), ...(held === undefined ? {} : { held: { ...(held.costMicros === undefined ? {} : { costMicros: held.costMicros }), ...(held.computeMs === undefined ? {} : { computeMs: held.computeMs }) } }) };
-    const sealed = sealContract(order, { taskContractVersion: taskContract.version, permissions: taskContract.permissions, ...(Object.keys(budget).length === 0 ? {} : { budget }), bestEffort: false });
+    const sealed = sealContract(order, { taskContractVersion: taskContract.version, permissions: taskContract.permissions, ...(Object.keys(budget).length === 0 ? {} : { budget }), ...(launch === undefined || Object.keys(launch.limits).length === 0 ? {} : { limits: launch.limits }), bestEffort: false, ...(anchor === undefined ? {} : { anchorDigest: anchor.block.digest }) });
+    if (anchor !== undefined) await this.#recordAnchor(b.attemptId, anchor);
     let handle: WorkerHandle;
     try { handle = await host.start(sealed); } catch (error) {
       const why = error instanceof Error ? error.message.slice(0, 200) : "failed";
@@ -2479,6 +2506,64 @@ export class DispatcherService {
     const turn = this.#run(b.attemptId, handle);
     this.#live.set(b.attemptId, { handle, host, turn });
     return { kind: "started" };
+  }
+
+  /** How many characters the anchor may take on this route (card W12), 0 when it is off or does not fit; asked when the room for a route change is judged. Never throws. */
+  async #anchorReserve(c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }): Promise<number> {
+    if (this.#deps.anchor === undefined) return 0;
+    try { const p = await this.#deps.anchor.plan(c); return p !== undefined && "maxChars" in p ? p.maxChars : 0; } catch (error) { this.#options.onError?.(error); return 0; }
+  }
+
+  /**
+   * The goal anchor for an attempt that starts now (card W12), composed from the controller's own records: the task's title and detail, the task contract as a done is checked against it (W05: the attempt's own agent's later
+   * change to it does not count), the attempt's running notes, the owner's rules for the task and the hand-off references the first prompt names. Nothing the agent can write reaches it except as quoted, cleaned, bounded data. A
+   * record that cannot be read is left out (and reported); the attempt always starts.
+   */
+  async #anchorFor(b: DispatchBody, handed: string): Promise<{ readonly block: AnchorBlock; readonly maxChars: number } | undefined> {
+    const dep = this.#deps.anchor;
+    if (dep === undefined) return undefined;
+    try {
+      const plan = await dep.plan({ taskId: b.taskId, projectId: b.projectId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }) });
+      if (plan === undefined) return undefined;
+      // The owner has it on but this start goes without it: said on the attempt's record (W12 review), never silently.
+      if (!("maxChars" in plan)) { await this.#anchorLeftOut(b.attemptId, plan.leftOut); return undefined; }
+      const task = await this.#deps.projects.getTask(b.taskId);
+      if (task === undefined) return undefined;
+      const contract = await this.#doneContract(b).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
+      const rules = dep.rules === undefined ? undefined : await dep.rules({ taskId: b.taskId, projectId: b.projectId }).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
+      const notes = (await this.#load(b.attemptId))?.body.notes ?? b.notes ?? [];
+      const block = composeAnchor({
+        taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, title: task.title, ...(task.description === "" ? {} : { description: task.description }),
+        ...(contract?.expectedResult === undefined ? {} : { expectedResult: contract.expectedResult }), ...(contract?.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: contract.acceptanceCriteria }),
+        ...(contract === undefined ? {} : { contract: { version: contract.version, requiredEvidence: contract.requiredEvidence, checks: contract.checks.map((x) => x.name) } }),
+        notes: notes.map((n) => ({ kind: n.kind, text: n.text })), ...(rules === undefined ? {} : { rules }),
+        handoffIds: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])], archiveDigests: [...new Set(handed.match(/sha256:[0-9a-f]{64}/g) ?? [])],
+      }, plan.maxChars);
+      if (block === undefined) { await this.#anchorLeftOut(b.attemptId, "no-room", plan.maxChars); return undefined; }
+      return { block, maxChars: plan.maxChars };
+    } catch (error) { this.#options.onError?.(error); return undefined; }
+  }
+
+  /** Keeps what the agent was shown on the attempt's record (card W12): the digest, size and sources. The same block again (a restart of the same attempt over unchanged records) adds nothing. */
+  async #recordAnchor(attemptId: string, anchor: { readonly block: AnchorBlock; readonly maxChars: number }): Promise<void> {
+    const at = this.#runner.now();
+    const { block } = anchor;
+    await this.#update(attemptId, (x) => {
+      const { anchorLeftOut: _gone, ...rest } = x;
+      if (x.anchors?.at(-1)?.digest === block.digest) return x.anchorLeftOut === undefined ? x : rest;
+      const entry: AnchorRecord = { at, digest: block.digest, chars: block.chars, maxChars: anchor.maxChars, truncated: block.truncated, sources: block.sources.slice(0, 12).map((s) => ({ kind: s.kind, id: s.id, ...(s.version === undefined ? {} : { version: s.version }) })) };
+      return { ...rest, anchors: [...(rest.anchors ?? []).slice(-(ANCHOR_RECORD_KEEP - 1)), entry] };
+    });
+  }
+
+  /** Says on the attempt's record that this start went without the anchor and why (W12 review). The same reason again writes nothing. Never throws. */
+  async #anchorLeftOut(attemptId: string, reason: "no-window" | "no-room", maxChars?: number): Promise<void> {
+    try {
+      const same = (x: DispatchBody | undefined): boolean => x?.anchorLeftOut?.reason === reason && x.anchorLeftOut.maxChars === maxChars;
+      if (same((await this.#load(attemptId))?.body)) return;
+      const at = this.#runner.now();
+      await this.#update(attemptId, (x) => (same(x) ? x : { ...x, anchorLeftOut: { at, reason, ...(maxChars === undefined ? {} : { maxChars }) } }));
+    } catch (error) { this.#options.onError?.(error); }
   }
 
   /** The rules that bind the agent in the project, read now (card U04d): an owner's edit is in the next attempt's context. Not being able to read them never stops the attempt. */
@@ -2541,6 +2626,37 @@ export class DispatcherService {
       .sort((x, y) => (x.openedAt === y.openedAt ? (x.id < y.id ? -1 : x.id > y.id ? 1 : 0) : x.openedAt < y.openedAt ? -1 : 1))
       .map((b) => ({ id: b.id, type: b.type, summary: b.summary, resolver: b.resolver }));
   }
+
+  /**
+   * The effective limits of an attempt (card A08d): the manifest of the environment revision it is pinned to (read by the pin, so a restart of the attempt gets the same figures), cut by the installation's limits, the smaller of each
+   * figure. An agent with no environment gets the installation's figures; a manifest made before `wallTimeMs` existed has no time limit of its own, so the installation's applies. `undefined` when there is nothing to say.
+   */
+  async #launchLimits(b: DispatchBody, environment: number | undefined): Promise<LaunchLimitsRecord | undefined> {
+    const installation = this.#deps.launchDefaults === undefined ? undefined : await this.#deps.launchDefaults();
+    let manifest: unknown;
+    if (environment !== undefined && this.#deps.environments !== undefined) {
+      const agent = await this.#deps.credentials.principalOf(this.#deps.principal, b.attemptId);
+      manifest = (await this.#deps.environments.resume(agent, b.attemptId)).manifest.limits;
+    }
+    const effective = effectiveLaunchLimits({ environment: manifest, installation });
+    if (environment === undefined && Object.keys(effective.limits).length === 0) return undefined;
+    return { limits: { ...effective.limits }, sources: { ...effective.sources }, ...(effective.capped.length === 0 ? {} : { capped: effective.capped.map((c) => ({ ...c })) }), ...(environment === undefined ? {} : { environmentRevision: environment }), at: this.#runner.now() };
+  }
+
+  /**
+   * The host's report of a launch (card A08d): whether the process started or was refused, whether best effort was on, and how far each limit was enforced (full, partial, none). It is put on the attempt's record beside the figures the
+   * dispatcher gave, so the owner sees what the agent really ran under. Bounded; best effort for the caller (a record that cannot be written must not stop a launch the host has made).
+   */
+  async noteLaunch(report: { readonly attemptId: string; readonly outcome: "started" | "refused"; readonly requested?: LocalWorkerLimits; readonly bestEffort: boolean; readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[]; readonly reason?: string }): Promise<void> {
+    const d = await this.#load(report.attemptId);
+    if (d === undefined) return;
+    const enforcement = report.enforcement.slice(0, 12).map((e) => ({ limit: clipText(String(e.limit), 30), value: Number.isSafeInteger(e.value) ? e.value : 0, enforced: e.enforced === "full" || e.enforced === "partial" ? e.enforced : "none" as const, ...(e.by === undefined ? {} : { by: clipText(String(e.by), 120) }), detail: clipText(String(e.detail), 300) }));
+    const at = this.#runner.now();
+    await this.#update(report.attemptId, (x) => ({ ...x, launchLimits: { limits: x.launchLimits?.limits ?? { ...(report.requested ?? {}) }, sources: x.launchLimits?.sources ?? {}, ...(x.launchLimits?.capped === undefined ? {} : { capped: x.launchLimits.capped }), ...(x.launchLimits?.environmentRevision === undefined ? {} : { environmentRevision: x.launchLimits.environmentRevision }), outcome: report.outcome === "refused" ? "refused" : "started", bestEffort: report.bestEffort === true, enforcement, ...(report.reason === undefined ? {} : { reason: clipText(report.reason, 500) }), at } }));
+  }
+
+  /** The limits an attempt's launch was given and whose they are (card A08d), for the launch record the owner reads. `undefined` when the attempt is unknown or had none. */
+  async launchLimitsOf(attemptId: string): Promise<LaunchLimitsRecord | undefined> { return (await this.#load(attemptId))?.body.launchLimits; }
 
   async #pin(b: DispatchBody): Promise<number | undefined> {
     if (this.#deps.environments === undefined) return undefined;

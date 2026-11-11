@@ -382,3 +382,17 @@ test("turnBoundaries: the framing entry of an aborted input extends the boundary
   assert.deepEqual(turnBoundaries([...abortedRound, entry(4, "nimblenewt.aborted-input", {})]), [3, 4]);
   assert.deepEqual(turnBoundaries([entry(1, "pi.user", { role: "user" }), entry(2, "nimblenewt.aborted-input", {})]), [], "nothing was answered, so there is no boundary");
 });
+
+test("W12 review: requestUse says whether a request ID is unused, used with this payload, or used with another, without submitting anything", async () => {
+  const { adapter, faux } = await open([]);
+  const root = adapter.root();
+  assert.equal(await root.requestUse(input("ru-1", "first request")), "unused");
+  faux.setResponses([fauxAssistantMessage("answer")]);
+  await (await root.submit(input("ru-1", "first request"))).result();
+  const entries = (await root.transcript()).length;
+  assert.equal(await root.requestUse(input("ru-1", "first request")), "same");
+  assert.equal(await root.requestUse(input("ru-1", "other request")), "different");
+  assert.equal(await root.requestUse(input("ru-2", "first request")), "unused", "judged by the ID, not the text");
+  assert.equal((await root.transcript()).length, entries, "nothing was submitted");
+  await assert.rejects(root.submit(input("ru-1", "other request")), RequestIdConflictError, "what requestUse calls different, submit refuses");
+});

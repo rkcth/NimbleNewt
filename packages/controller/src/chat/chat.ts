@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -143,7 +143,14 @@ export const FOLLOW_UP_PROJECTS = 5;
 export const FOLLOW_UP_SHOWN = 3;
 
 /** What the channel a message came by can do. A channel that keeps what it shows (the web page's outbox) says `secrets: false`. */
-export interface ChatChannel { readonly secrets?: boolean }
+export interface ChatChannel {
+  readonly secrets?: boolean;
+  /**
+   * What the message means, already decided by code that built the message (the web page's buttons, card U08b): checked like an interpreter's answer, and planned, shown and applied exactly as if the
+   * assistant had read the words. The words are still the owner's evidence, so a proposal-first command is still shown first. Only in-process callers can set it; no API operation passes it.
+   */
+  readonly fixedIntents?: readonly unknown[];
+}
 /** Operations whose result carries a secret shown once (card U14b). */
 export const SECRET_OPS: ReadonlySet<string> = new Set(["credential.issue"]);
 const NO_SECRET_CHANNEL = "this channel keeps what it shows, so it cannot show a credential once; issue it in the terminal chat (or through the API)";
@@ -279,10 +286,11 @@ export class ChatService {
       const focus = await this.#focus(tok, context.focusProjectId);
       // A message that is a typed command (`/nimblenewt.grant-list`) is not read by the assistant: it is the command, as the owner typed it.
       const typed = split.text.trim();
-      const isCommand = quoted.length === 0 && parseInvocation(typed) !== undefined;
+      const fixed = options.fixedIntents === undefined ? undefined : checkIntents([...options.fixedIntents]);
+      const isCommand = fixed === undefined && quoted.length === 0 && parseInvocation(typed) !== undefined;
       // A short form of a routing order is expanded and shown, not run (card U06b): the exact line it stands for is what runs.
-      const short = isCommand || quoted.length > 0 ? undefined : expandShorthand(typed);
-      const interpreted = isCommand || short !== undefined ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
+      const short = fixed !== undefined || isCommand || quoted.length > 0 ? undefined : expandShorthand(typed);
+      const interpreted = fixed !== undefined ? { intents: fixed } : isCommand || short !== undefined ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
       if ("unavailable" in interpreted) return { turnId, replayed: false, outcomes: [], reply: ["The assistant that reads free-form messages is unavailable right now. Nothing was done; the commands of the API and the proposals you already have work as usual."] };
       const planned = short !== undefined
         ? { items: [{ i: 0, kind: "refused", code: "needs_confirmation", message: "typed" in short ? `That short form stands for this order. It has not run; send the line as it is to run it:\n${short.typed}` : short.error } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
@@ -636,7 +644,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started; the chat will not pick a time that could cancel work early. How long may it go on?" }); continue; }

@@ -7,6 +7,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { CatalogService } from "../catalog/index.js";
 import { DeskService } from "../context/index.js";
+import { canonicalJson } from "../storage/json.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { EnvironmentService, checkEnvironmentManifest, type HostCapacity } from "./index.js";
 
@@ -207,5 +208,32 @@ for (const backend of backends) {
     assert.throws(() => checkEnvironmentManifest(manifest({ limits: { cpus: 2, memoryMb: 1, diskMb: 1, processes: 1 } }), tiny), DomainError);
     assert.throws(() => EnvironmentService.withEpoch(undefined as never, 1, { reservedDigest: async () => undefined, skillUsable: async () => true, capacity: { ...tiny, reserveFraction: 1 } }), RangeError);
     assert.throws(() => EnvironmentService.withEpoch(undefined as never, 1, { reservedDigest: async () => undefined, skillUsable: async () => true, capacity: { ...tiny, reserveFraction: -0.1 } }), RangeError);
+  });
+
+  suite("a manifest's wall time is optional (card A08d): one made without it is stored as it always was, one with it keeps it, it is checked, and only the owner sets it", async (c) => {
+    const old = await c.env.change(c.owner, { commandId: cid("c"), agentId: "agent:ann", manifest: manifest({ capabilities: ["desk.read", "desk.write"] }), reason: "made before wall time" });
+    const rev1 = (await c.env.get(c.owner, "agent:ann", old.revision))!.revision!;
+    assert.equal(Object.hasOwn(rev1.manifest.limits, "wallTimeMs"), false, "nothing is added to a manifest that states none");
+    assert.equal(rev1.digest, `sha256:${createHash("sha256").update(canonicalJson(manifest({ capabilities: ["desk.read", "desk.write"] }) as never)).digest("hex")}`, "its digest is the one it always had");
+    await c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 1, observed });
+    const timed = manifest({ limits: { cpus: 2, memoryMb: 2048, diskMb: 10_000, processes: 200, wallTimeMs: 1_800_000 } });
+    await c.env.change(c.owner, { commandId: cid("c"), agentId: "agent:ann", manifest: timed, reason: "with wall time", expectedRevision: 1 });
+    await c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 2, observed });
+    const att = await c.attempt("ann");
+    await c.env.pin(c.owner, { commandId: cid("p"), attemptId: att, agentId: "agent:ann", kind: "attempt" });
+    assert.equal((await c.env.resume(c.owner, att)).manifest.limits.wallTimeMs, 1_800_000, "the pinned revision keeps it");
+    // The agent changes its packages, never the wall time.
+    await refuses("forbidden", () => c.env.change(c.ann, { commandId: cid("c"), agentId: "agent:ann", manifest: { ...timed, limits: { ...timed.limits, wallTimeMs: 3_600_000 } }, reason: "longer", expectedRevision: 2 }), (e) => assert.match(e.message, /limits is the owner's/));
+    await refuses("forbidden", () => c.env.change(c.ann, { commandId: cid("c"), agentId: "agent:ann", manifest: { ...timed, limits: { cpus: 2, memoryMb: 2048, diskMb: 10_000, processes: 200 } }, reason: "no limit", expectedRevision: 2 }), (e) => assert.match(e.message, /limits is the owner's/));
+  });
+
+  suite("a manifest's wall time and limit names are checked on entry: whole milliseconds from 1000 to a week; no unknown limit, no NaN", async () => {
+    for (const wallTimeMs of [0, 999, 604_800_001, 1.5, -5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "60000", null, [], {}, true]) {
+      assert.throws(() => checkEnvironmentManifest(manifest({ limits: { cpus: 1, memoryMb: 1, diskMb: 1, processes: 1, wallTimeMs } })), (e: unknown) => e instanceof DomainError && /manifest\.limits\.wallTimeMs/.test(e.message), String(wallTimeMs));
+    }
+    for (const wallTimeMs of [1000, 60_000, 604_800_000]) assert.equal(checkEnvironmentManifest(manifest({ limits: { cpus: 1, memoryMb: 1, diskMb: 1, processes: 1, wallTimeMs } })).limits.wallTimeMs, wallTimeMs);
+    assert.throws(() => checkEnvironmentManifest(manifest({ limits: { cpus: 1, memoryMb: 1, diskMb: 1, processes: 1, gpus: 1 } })), DomainError);
+    assert.throws(() => checkEnvironmentManifest(manifest({ limits: [] })), DomainError);
+    for (const key of ["cpus", "memoryMb", "diskMb", "processes"] as const) for (const v of [Number.NaN, 0, 1.5, Infinity, "3"]) assert.throws(() => checkEnvironmentManifest(manifest({ limits: { cpus: 1, memoryMb: 1, diskMb: 1, processes: 1, [key]: v } })), DomainError, `${key} ${String(v)}`);
   });
 }
