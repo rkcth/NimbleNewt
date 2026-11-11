@@ -1,6 +1,6 @@
 import type { BlockerService } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
-import { derivedId } from "../domain/ids.js";
+import { derivedId, operationIdOf } from "../domain/ids.js";
 import { onlyKnown, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
@@ -976,8 +976,16 @@ export class ContextEnforcementService {
     const ref: AggregateRef = { kind: "ctx-note-archive", id: derivedId("ctx", `${taskId}\0note\0${command.digest}`) };
     if ((await this.#runner.get(ref.kind, ref.id)) !== undefined) return { id: ref.id, digest: command.digest, replayed: true };
     const body: NoteArchiveBody = { taskId, projectId, ...(attemptId === undefined ? {} : { attemptId }), what, digest: command.digest, text: whole, writtenBy: principal.id };
+    // The archive is not there. If its command is already recorded, the archive was written and then removed (retention, card K06c): the first command ID would be answered as "done" and write nothing, leaving a marker that names no text,
+    // so a write after a removal takes the next unused command ID. The storage continues the removed revision, so the removal of the earlier record is never mistaken for this one.
+    const base = ref.id.slice(4);
+    let commandId = `ctx-not-${base}`;
+    for (let n = 1; await this.#runner.storage.getOperation(operationIdOf(commandId)) !== undefined; n += 1) {
+      if (n > 100) throw new DomainError("unavailable", "this note's archive has been written and removed too often to write it again");
+      commandId = `ctx-not-${base}-${n}`;
+    }
     try {
-      await this.#runner.command("context.note-archive", { commandId: `ctx-not-${ref.id.slice(4)}`, actor: principal.id }, async () => ({
+      await this.#runner.command("context.note-archive", { commandId, actor: principal.id }, async () => ({
         payload: { taskId, attemptId: attemptId ?? null, digest: command.digest, what },
         build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { chars: whole.length } }),
       }));
