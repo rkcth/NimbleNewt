@@ -202,7 +202,7 @@ Run `ask("setup.readiness")` again. Every required item should be `done` and `re
 | Notification levels, Needs you view | U11b | the inbox |
 | Landing gated on required checks for the exact tree | P09 | checks recorded only |
 | Windows sandbox launcher | A03b | Linux and macOS only |
-| Service-manager units for the release launcher (`scripts/nimblenewt-launcher.mjs` is built, see [maintenance-and-updates](maintenance-and-updates.md)), and the updater program | K02a follow-up | run the launcher yourself |
+| Installing and enabling the release launcher as a service on a real macOS, Linux or Windows machine (the unit text and install steps are printed by `scripts/nimblenewt-service.mjs`, and `scripts/nimblenewt-updater.mjs` stages and announces a release; see [maintenance-and-updates](maintenance-and-updates.md)); exit-code-aware restarts on macOS and Windows; the full maintenance sequence | K02 follow-up | run the printed steps yourself |
 | Real-hardware QA of the whole path | D04 | run it yourself and report |
 
 ## How this guide is kept true
