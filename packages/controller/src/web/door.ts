@@ -21,6 +21,8 @@ export interface WebChatBackend {
   submit(token: string, message: { messageId: string; text: string }, options?: CallOptions): Promise<TurnResult>;
   applyProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<ApplyResult>;
   discardProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<{ proposalId: string; replayed: boolean }>;
+  /** A button on the page (card U08b): the words it stands for and the intents they mean, run through the same chat turn as a typed message (shown first, applied only when the owner says so). */
+  decide(token: string, message: { messageId: string; text: string; intents: readonly unknown[] }, options?: CallOptions): Promise<TurnResult>;
   /** The state API's read operations only; the door sends nothing but the fixed view queries below. */
   query(token: string, op: string, args: Record<string, unknown>): Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }>;
 }
@@ -92,11 +94,34 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
   "needs-you": [{ key: "needsYou", op: "status.ask", args: { request: { kind: "needs_you", limit: 20 } } }],
   blockers: [{ key: "needsYou", op: "status.ask", args: { request: { kind: "needs_you", limit: 20 } } }, { key: "attention", op: "status.attention", args: { limit: 20 } }],
   cost: [{ key: "usage", op: "budget.usage", args: {} }, { key: "pending", op: "budget.pending", args: {} }],
+  // The approval load, the standing-rule proposals still open and the derived-profile question (cards A07b, A07c, U08): all owner only.
+  approvals: [{ key: "load", op: "approval.load", args: { days: 7 } }, { key: "proposals", op: "approval.proposals", args: { state: "open" } }, { key: "suggestion", op: "approval.suggestion", args: {} }],
+  // Which model routes there are, with their reply limits and where each value comes from, what is switched off, and how difficulty maps to a way of running (cards R01, R06, U08b).
+  models: [{ key: "routes", op: "routing.budgets", args: {} }, { key: "controls", op: "routing.controls", args: {} }, { key: "state", op: "status.ask", args: { request: { kind: "model_routes" } } }, { key: "difficulty", op: "difficulty.profiles", args: {} }],
   recovery: [{ key: "attention", op: "status.attention", args: { limit: 20 } }, { key: "jobs", op: "status.ask", args: { request: { kind: "jobs", limit: 20 } } }, { key: "reconnect", op: "status.ask", args: { request: { kind: "reconnect", limit: 20 } } }],
 };
 export const WEB_VIEWS: readonly string[] = Object.keys(VIEWS);
 
 const MESSAGE_ID = /^[A-Za-z0-9._-]{1,100}$/;
+const PROPOSAL_ID = /^[A-Za-z0-9_-]{1,80}$/;
+
+/**
+ * What an Accept or Dismiss button on the approvals page stands for (card U08b): the sentence it says in the owner's name and the one intent that sentence means. The chat then does what it does for the
+ * same words typed: Accept is shown first (what would be granted, and for how long) and applied only on Apply; Dismiss turns the proposal down at once. The length is one of the lengths a proposal offers,
+ * and the reason is a fixed phrase, so the page can say nothing else in the owner's name.
+ */
+export function approvalIntent(proposalId: string, action: "accept" | "dismiss", body: Record<string, unknown>): { text: string; intent: Record<string, unknown> } {
+  const known = action === "accept" ? ["days"] : [];
+  for (const k of Object.keys(body)) if (!known.includes(k)) throw new HttpError(400, "invalid_command", `${k} is not accepted here`);
+  if (action === "dismiss") {
+    const text = `Dismiss standing-rule proposal ${proposalId}. Reason: turned down from the web page`;
+    return { text, intent: { kind: "command", op: "approval.proposal.dismiss", args: { proposalId, reason: "turned down from the web page" }, evidence: text, basis: "owner" } };
+  }
+  const days = body["days"];
+  if (days !== undefined && days !== 1 && days !== 7 && days !== 30 && days !== 90) throw new HttpError(400, "invalid_command", "days must be 1, 7, 30 or 90");
+  const text = `Accept standing-rule proposal ${proposalId}${days === undefined ? " for the suggested length" : ` for ${days} ${days === 1 ? "day" : "days"}`}`;
+  return { text, intent: { kind: "command", op: "approval.proposal.accept", args: { proposalId, ...(days === undefined ? {} : { days }) }, evidence: text, basis: "owner" } };
+}
 const SECURITY_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "cross-origin-opener-policy": "same-origin", "cross-origin-resource-policy": "same-origin",
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
@@ -270,6 +295,19 @@ export class WebChatDoor {
       const options = { stillAllowed: this.#stillLive(session) };
       const result = c === "apply" ? await this.#o.backend.applyProposal(session.token, { commandId, proposalId: b }, options) : await this.#o.backend.discardProposal(session.token, { commandId, proposalId: b }, options);
       return this.#reply(res, 200, result);
+    }
+    if (a === "approvals" && b !== undefined && (c === "accept" || c === "dismiss") && parts.length === 3) {
+      allowed("POST");
+      const commandId = req.headers["idempotency-key"];
+      if (typeof commandId !== "string" || !MESSAGE_ID.test(commandId)) throw new HttpError(400, "idempotency_key_required", "a decision needs an Idempotency-Key header (1 to 100 letters, digits, dots, dashes or underscores), so a retry runs once");
+      if (!PROPOSAL_ID.test(b)) throw new HttpError(400, "invalid_command", "that is not a proposal ID");
+      const body = await this.#body(req);
+      const { text, intent } = approvalIntent(b, c, body);
+      const key = `${who.id}\u0000${commandId}`;
+      let run = this.#inflight.get(key);
+      if (run === undefined) { run = this.#o.backend.decide(session.token, { messageId: commandId, text, intents: [intent] }, { stillAllowed: this.#stillLive(session) }).finally(() => { this.#inflight.delete(key); }); this.#inflight.set(key, run); }
+      const turn = await run;
+      return this.#reply(res, turn.replayed ? 200 : 201, { turnId: turn.turnId, replayed: turn.replayed, text, reply: turn.reply, outcomes: turn.outcomes });
     }
     if (a === "views" && b !== undefined && c === undefined) {
       allowed("GET");

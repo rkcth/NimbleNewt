@@ -93,6 +93,7 @@ export const APP_JS = String.raw`(function (root) {
 
     function sendItem(item) {
       if (item.kind === 'message') return call('POST', '/web/chat', { messageId: item.id, text: item.text });
+      if (item.kind === 'approval') return call('POST', '/web/approvals/' + encodeURIComponent(item.proposalId) + '/' + item.action, item.days === undefined ? {} : { days: item.days }, { 'idempotency-key': item.id });
       return call('POST', '/web/proposals/' + encodeURIComponent(item.proposalId) + '/' + item.decision, {}, { 'idempotency-key': item.id });
     }
 
@@ -114,6 +115,16 @@ export const APP_JS = String.raw`(function (root) {
       },
       decide: function (proposalId, decision) {
         var item = outbox.add({ id: (deps.newId || function () { return randomId(root.crypto); })(), kind: 'proposal', proposalId: proposalId, decision: decision, at: (deps.now || Date.now)(), state: 'pending' });
+        emit();
+        client.flush();
+        return item;
+      },
+      /**
+       * A button on the approvals page (card U08b): Accept (with a length) or Dismiss of a standing-rule proposal. It is one outbox item with its own id, sent under that id as the Idempotency-Key, and the
+       * controller runs it as the chat turn for the same words: Accept comes back as a proposal to confirm, Dismiss is done. 'label' is only what the page shows until the answer comes.
+       */
+      approval: function (proposalId, action, days, label) {
+        var item = outbox.add({ id: (deps.newId || function () { return randomId(root.crypto); })(), kind: 'approval', proposalId: proposalId, action: action, days: days, text: label, at: (deps.now || Date.now)(), state: 'pending' });
         emit();
         client.flush();
         return item;
@@ -185,7 +196,7 @@ export const APP_JS = String.raw`(function (root) {
   var $ = function (id) { return doc.getElementById(id); };
   var client = createClient({ fetch: root.fetch.bind(root), outbox: createOutbox(root.localStorage) });
   var tab = 'chat';
-  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery' };
+  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery' };
 
   function el(tag, cls, text) { var e = doc.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -206,8 +217,8 @@ export const APP_JS = String.raw`(function (root) {
     var stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
     clear(list);
     client.outbox.items().forEach(function (item) {
-      if (item.kind === 'message') {
-        list.appendChild(el('div', 'msg me', item.text));
+      if (item.kind === 'message' || item.kind === 'approval') {
+        list.appendChild(el('div', 'msg me', item.kind === 'approval' && item.result && typeof item.result.text === 'string' ? item.result.text : item.text));
         var meta = el('div', 'meta', item.state === 'done' ? '' : item.state === 'failed' ? 'Not sent: ' + (item.error || 'refused') : item.state === 'sending' ? 'Sending...' : 'Waiting to send');
         if (meta.textContent) list.appendChild(meta);
         if (item.state === 'done' && item.result) {
@@ -243,6 +254,166 @@ export const APP_JS = String.raw`(function (root) {
     list.appendChild(card);
   }
 
+
+  // ---- the settings pages (card U08b): read only, drawn field by field --------------------------------------------------------------
+  // Every field is named here, so a field the controller adds later (a key, a credential name) is not drawn by accident, and every value is text: the strings in these records come from agents
+  // and from the owner's own settings, and are never markup. A secret is not on any of these records and has no field here: secrets are written in the secret store on the machine, never read back.
+  var uid = 0;
+  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); return t.length > n ? t.slice(0, n - 3) + '...' : t; }
+  function isNum(v) { return typeof v === 'number' && isFinite(v); }
+  function obj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null; }
+  function list(v, max) { return Array.isArray(v) ? v.slice(0, max || 200) : []; }
+  /** A titled region: a section named by its heading, so a screen reader can jump between them. */
+  function region(box, title) {
+    var sec = el('section', 'card');
+    var h = el('h3', 'card-title', title); h.id = 'nn-h' + (++uid);
+    sec.setAttribute('aria-labelledby', h.id);
+    sec.appendChild(h);
+    box.appendChild(sec);
+    return sec;
+  }
+  function note(parent, text) { parent.appendChild(el('p', 'meta', text)); }
+  /** A table with a caption, column headers and the first cell of each row as its row header. */
+  function table(parent, caption, heads, rows) {
+    var wrap = el('div', 'tablewrap');
+    var t = el('table', 'grid');
+    t.appendChild(el('caption', 'sr', caption));
+    var tr = el('tr');
+    heads.forEach(function (h) { var th = el('th', null, h); th.setAttribute('scope', 'col'); tr.appendChild(th); });
+    var head = el('thead'); head.appendChild(tr); t.appendChild(head);
+    var body = el('tbody');
+    rows.forEach(function (row) {
+      var r = el('tr');
+      row.forEach(function (cell, i) { var c = el(i === 0 ? 'th' : 'td', null, clip(cell, 300)); if (i === 0) c.setAttribute('scope', 'row'); r.appendChild(c); });
+      body.appendChild(r);
+    });
+    t.appendChild(body); wrap.appendChild(t); parent.appendChild(wrap);
+  }
+  /** What a part says when its read failed: the controller's own plain words, as text. */
+  function failed(box, title, part) {
+    var e = part && obj(part.error);
+    if (!e) return false;
+    var sec = region(box, title);
+    sec.appendChild(el('p', 'error', 'Could not load: ' + clip(e.message || e.code, 300)));
+    return true;
+  }
+  function minutes(m) { return !isNum(m) ? '-' : m < 90 ? Math.round(m) + ' min' : m < 2880 ? Math.round(m / 60) + ' h' : Math.round(m / 1440) + ' days'; }
+  function itemOf(part) { var o = obj(part); return o && obj(o.item) ? o.item : o; }
+
+  function approvalButton(row, label, aria, primary, run) {
+    var b = el('button', 'btn' + (primary ? ' primary' : ''), label); b.type = 'button'; b.setAttribute('aria-label', aria);
+    b.addEventListener('click', run);
+    row.appendChild(b);
+  }
+
+  function pageApprovals(box, parts) {
+    box.appendChild(el('h2', null, 'Approvals'));
+    note(box, 'What you are being asked, and the standing rules that could ask less of you. Accept shows you what would be granted and waits for your Apply; nothing here changes anything by itself. You can also say any of it in the chat.');
+    var load = itemOf(parts.load);
+    if (!failed(box, 'Approval load', parts.load) && load) {
+      var sec = region(box, 'Approval load, last ' + (isNum(load.days) ? load.days : '?') + ' days');
+      var by = obj(load.decidedBy) || {};
+      sec.appendChild(el('div', 'card-line', 'You decided ' + (isNum(load.ownerDecisions) ? load.ownerDecisions : 0) + ' times; agents decided ' + (isNum(load.agentDecisions) ? load.agentDecisions : 0) + ' times. Average wait for you: ' + minutes(load.averageOwnerWaitMinutes) + '.'));
+      table(sec, 'How actions were decided', ['Decided by', 'Actions'], [['A rule', by.rule], ['A standing grant', by.grant], ['An agent review', by.agentReview], ['You', by.owner], ['Denied', by.denied]].map(function (r) { return [r[0], isNum(r[1]) ? String(r[1]) : '0']; }));
+      var days = list(load.perDay, 90);
+      if (days.length) table(sec, 'Decisions per day', ['Day', 'By you', 'By agents'], days.map(function (d) { d = obj(d) || {}; return [clip(d.day, 40), isNum(d.ownerDecisions) ? String(d.ownerDecisions) : '0', isNum(d.agentDecisions) ? String(d.agentDecisions) : '0']; }));
+      var waiting = list(load.pending, 200);
+      var count = isNum(load.pendingCount) ? load.pendingCount : waiting.length;
+      var w = region(box, 'Asks still waiting (' + count + ')');
+      if (!waiting.length) note(w, 'Nothing is waiting for a decision.');
+      else {
+        table(w, 'Asks still waiting, longest first', ['Agent', 'Wants to use', 'Project', 'Waiting on', 'Waiting'], waiting.map(function (p) { p = obj(p) || {}; return [clip(p.requester, 120), clip(p.tool, 120), clip(p.projectId, 120), clip(p.waitingOn, 120), minutes(p.waitingMinutes)]; }));
+        if (count > waiting.length) note(w, 'Showing the first ' + waiting.length + ' of ' + count + '.');
+      }
+    }
+    if (!failed(box, 'Standing-rule proposals', parts.proposals)) {
+      var items = list(obj(parts.proposals) && parts.proposals.items, 50).map(obj).filter(function (p) { return p && p.state === 'open' && typeof p.id === 'string'; });
+      var psec = region(box, 'Standing-rule proposals (' + items.length + ' open)');
+      if (!items.length) note(psec, 'No proposal is waiting. One is offered when you approve the same kind of action for the same agent in the same project three times.');
+      items.forEach(function (p) {
+        var card = el('div', 'card');
+        var who = clip(p.requester, 120) + ' in project ' + clip(p.projectId, 120) + ' (' + clip(p.environment, 40) + ')';
+        card.appendChild(el('h4', 'card-title', clip(p.cls, 120) + ' for ' + who));
+        card.appendChild(el('div', 'card-line', 'You approved this ' + (isNum(p.count) ? p.count : '?') + ' times. Accepting would let it stand without asking, for a limited time, in this project and environment only.'));
+        var dl = obj(p.defaultLength), sg = obj(p.suggestion);
+        var suggested = dl && isNum(dl.days) ? dl.days : sg && isNum(sg.days) ? sg.days : null;
+        if (suggested !== null) card.appendChild(el('div', 'card-line', 'Suggested length: ' + suggested + ' days' + (dl && dl.why ? ' - ' + clip(dl.why, 300) : '')));
+        list(p.covered, 5).forEach(function (c) { c = obj(c) || {}; card.appendChild(el('div', 'meta', 'Approved: ' + clip(c.tool, 120) + (c.at ? ' at ' + clip(c.at, 40) : ''))); });
+        var row = el('div', 'row');
+        var offered = list(p.lengthOptions, 8).filter(function (d) { return d === 1 || d === 7 || d === 30 || d === 90; });
+        if (!offered.length && suggested !== null && (suggested === 1 || suggested === 7 || suggested === 30 || suggested === 90)) offered = [suggested];
+        offered.forEach(function (d) {
+          var lbl = 'Accept for ' + d + (d === 1 ? ' day' : ' days') + (d === suggested ? ' (suggested)' : '');
+          approvalButton(row, lbl, lbl + ': ' + clip(p.cls, 60) + ' for ' + clip(p.requester, 60), d === suggested, function () { client.approval(p.id, 'accept', d, 'Accept standing-rule proposal for ' + clip(p.requester, 60) + ' for ' + d + ' days'); show('chat'); });
+        });
+        approvalButton(row, 'Dismiss', 'Dismiss the proposal: ' + clip(p.cls, 60) + ' for ' + clip(p.requester, 60), false, function () {
+          if (root.confirm('Turn this proposal down? It is not offered again for 30 days.')) { client.approval(p.id, 'dismiss', undefined, 'Dismiss standing-rule proposal for ' + clip(p.requester, 60)); show('chat'); }
+        });
+        card.appendChild(row);
+        psec.appendChild(card);
+      });
+    }
+    if (!failed(box, 'Derived-profile question', parts.suggestion)) {
+      var sug = itemOf(parts.suggestion);
+      var ssec = region(box, 'Move to the derived profile?');
+      if (sug && sug.due === true) {
+        note(ssec, 'You are due to be asked, and nothing is switched until you answer.');
+        list(sug.preview, 12).forEach(function (l) { ssec.appendChild(el('div', 'card-line', clip(l, 400))); });
+        ssec.appendChild(el('div', 'card-line', 'To answer, tell the chat: ' + list(sug.answers, 8).map(function (a) { return clip(a, 20); }).join(', ') + '.'));
+      } else note(ssec, 'No question is due.');
+    }
+  }
+
+  function sourceOf(v) { return isNum(v) ? 'set by you' : 'not set: the agent\'s runtime decides'; }
+  function pageModels(box, parts) {
+    box.appendChild(el('h2', null, 'Models'));
+    note(box, 'The model routes in use, what limits each has and where every value comes from. This page only shows them; to change one, say so in the chat.');
+    var routes = itemOf(parts.routes);
+    if (!failed(box, 'Routes', parts.routes)) {
+      var rows = list(routes && routes.routes, 200).map(obj).filter(Boolean);
+      var sec = region(box, 'Providers and routes (' + rows.length + ')');
+      if (!rows.length) note(sec, 'No routing table has been set up yet. Ask the chat to set up the model providers.');
+      else {
+        var perProvider = {};
+        rows.forEach(function (r) { var name = clip(r.route, 200).split('/')[0]; perProvider[name] = (perProvider[name] || 0) + 1; });
+        table(sec, 'Providers', ['Provider', 'Routes'], Object.keys(perProvider).sort().map(function (k) { return [k, String(perProvider[k])]; }));
+        table(sec, 'Routes with their effective values and where each comes from', ['Route', 'Context window', 'Reply limit', 'Reasoning cap'], rows.map(function (r) {
+          return [clip(r.route, 200), isNum(r.contextTokens) ? r.contextTokens + ' tokens (from the routing table)' : '-', isNum(r.maxTokens) ? r.maxTokens + ' tokens (' + sourceOf(r.maxTokens) + ')' : sourceOf(r.maxTokens), isNum(r.reasoningTokens) ? r.reasoningTokens + ' tokens (' + sourceOf(r.reasoningTokens) + ')' : sourceOf(r.reasoningTokens)];
+        }));
+      }
+    }
+    if (!failed(box, 'Switched off', parts.controls)) {
+      var ctl = obj(parts.controls && parts.controls.controls) || {};
+      var entries = list(ctl.entries, 100).map(obj).filter(Boolean);
+      var csec = region(box, 'Switched off or moving (' + entries.length + ')');
+      if (!entries.length) note(csec, 'Every route is in service.');
+      else table(csec, 'Routing controls in force', ['Target', 'Level', 'What', 'Why', 'Since'], entries.map(function (e) { return [clip(e.name, 160), clip(e.level, 40), clip(e.mode, 40), clip(e.reason, 300), clip(e.since || e.at, 40)]; }));
+    }
+    if (!failed(box, 'Route state', parts.state)) {
+      var st = itemOf(parts.state);
+      var lines = st && Array.isArray(st.lines) ? st.lines.map(function (l) { return typeof l === 'string' ? l : l && typeof l.text === 'string' ? l.text : ''; }).filter(Boolean).slice(0, 40) : [];
+      if (lines.length) { var ssec = region(box, 'What the controller says about the routes'); lines.forEach(function (l) { ssec.appendChild(el('div', 'card-line', clip(l, 400))); }); }
+    }
+    // Profiles never set read as "not found": that is a state, not a failure.
+    var noProfiles = parts.difficulty && obj(parts.difficulty.error) && parts.difficulty.error.code === 'not_found';
+    if (noProfiles || !failed(box, 'Difficulty profiles', parts.difficulty)) {
+      var dp = noProfiles ? null : itemOf(parts.difficulty);
+      var dsec = region(box, 'How work is run by difficulty');
+      var profiles = obj(dp && dp.profiles) || {};
+      var names = Object.keys(profiles).sort().slice(0, 50);
+      if (!names.length) note(dsec, 'No difficulty profiles are set: a task is run the way its project says. Nothing is invented for you.');
+      else {
+        table(dsec, 'Profiles. Every value was set by you', ['Profile', 'Harness', 'Route', 'Routing profile', 'Reasoning', 'Context', 'Spend limit'], names.map(function (n) {
+          var p = obj(profiles[n]) || {}; var rs = obj(p.reasoning) || {};
+          return [clip(n, 80), clip(p.harness, 80) || '-', p.provider || p.model ? clip(p.provider, 80) + '/' + clip(p.model, 80) : '-', clip(p.routingProfile, 80) || '-', clip(rs.effort, 20) || (isNum(rs.maxThinkingTokens) ? rs.maxThinkingTokens + ' thinking tokens' : '-'), isNum(p.contextTokens) ? p.contextTokens + ' tokens' : '-', isNum(p.spendLimitMicros) ? (p.spendLimitMicros === 0 ? 'no paid route' : p.spendLimitMicros + ' micro') : '-'];
+        }));
+        var map = obj(dp.mapping) || {};
+        table(dsec, 'Which profile each difficulty uses', ['Difficulty', 'Profile'], Object.keys(map).sort().slice(0, 20).map(function (k) { return [clip(k, 40), clip(map[k], 80)]; }));
+      }
+    }
+  }
+  var PAGES = { approvals: pageApprovals, models: pageModels };
+
   function renderView(name) {
     var box = $('view');
     clear(box);
@@ -251,6 +422,7 @@ export const APP_JS = String.raw`(function (root) {
       clear(box);
       if (r.status !== 200) { box.appendChild(el('p', 'meta', r.status === 401 ? 'Signed out.' : 'Could not load: ' + ((r.body && r.body.error && r.body.error.message) || r.status))); return; }
       box.appendChild(el('p', 'meta', 'As of ' + r.body.observedAt));
+      if (PAGES[name]) { PAGES[name](box, r.body.parts || {}); return; }
       var any = false;
       Object.keys(r.body.parts).forEach(function (key) {
         var lines = linesOf(r.body.parts[key]);
