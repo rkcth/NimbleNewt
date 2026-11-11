@@ -338,13 +338,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `generation.stream.get`
 
-The switches for feeding the model stream into revision-bound generation (owner only): `record` (each model call's stream is recorded against the generation it began under) and `cut` (a reply whose generation was interrupted, by a cancel, a correction or a newer generation, is held back from the worker, with the reason). Also `failClosed` (on by default; shown as `onStoreFailure` (closed or open)): when the generation store cannot answer, a call is not sent and a reply being read is cut, with the reason; off, the call and the reply go on unrecorded. Also `recordPaused` (off: a model call of a paused task is refused before it is sent; on: it is sent and recorded as a generation), `checkBridge` (on: the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation) and `requireRecorded` (off by default; on, the bridge also refuses a call no generation recorded). And the limits `storeTimeoutMs`, `batchMs`, `batchChars` and `heldBufferBytes` (0 turns a limit off). `record`, `cut`, `failClosed` and `checkBridge` are on unless the owner turns them off; `recordPaused` and `requireRecorded` are off unless the owner turns them on.
+The switches for feeding the model stream into revision-bound generation (owner only): `record` (each model call's stream is recorded against the generation it began under) and `cut` (a reply whose generation was interrupted, by a cancel, a correction or a newer generation, is held back from the worker, with the reason). Also `failClosed` (on by default; shown as `onStoreFailure` (closed or open)): when the generation store cannot answer, a call is not sent and a reply being read is cut, with the reason; off, the call and the reply go on unrecorded. Also `recordPaused` (off: a model call of a paused task is refused before it is sent; on: it is sent and recorded as a generation), `checkBridge` (on: the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation) and `requireRecorded` (off by default; on, the bridge also refuses a call no generation recorded). Also `bindCall` (on: a recorded call's tool name and arguments must be those of the bridge operation it is presented for), `admitCall` (on: a recorded call that writes through the bridge is admitted as an effect of its generation and settled with the operation's outcome, so a call that is not complete in a current generation can never start anything) and `requireStream` (off: a remote worker that never opened a model stream for its attempt has its bridge calls refused, on; off, the owner is only told once). And the limits `storeTimeoutMs`, `batchMs`, `batchChars` and `heldBufferBytes` (0 turns a limit off). `record`, `cut`, `failClosed` and `checkBridge` are on unless the owner turns them off; `bindCall` and `admitCall` are on unless the owner turns them off; `recordPaused`, `requireRecorded` and `requireStream` are off unless the owner turns them on.
 
 Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `onStoreFailure`, `storeTimeoutMs`, `batchMs`, `batchChars`, `heldBufferBytes`.
+Result: `{ item }`: `revision`, `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `bindCall`, `admitCall`, `requireStream`, `onStoreFailure`, `storeTimeoutMs`, `batchMs`, `batchChars`, `heldBufferBytes`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -2126,7 +2126,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { revision, requireApproval, maxStagedBytes, keepStaged, set } }`.
+Result: `{ item: { revision, requireApproval, maxStagedBytes, keepStaged, startupWindowSeconds, startFailureLevel, set } }`.
 
 #### `agenda.get`
 
@@ -2558,12 +2558,12 @@ Completion: finished when accepted (`completed: true`).
 
 #### `generation.stream.change`
 
-The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge` or `requireRecorded`; `set` gives the limits `storeTimeoutMs` (how long one store call may take, default 20000), `batchMs` (default 250), `batchChars` (default 2000) and `heldBufferBytes` (default 16 MB), each a whole number, 0 = off. With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
+The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `bindCall`, `admitCall` or `requireStream`; `set` gives the limits `storeTimeoutMs` (how long one store call may take, default 20000), `batchMs` (default 250), `batchChars` (default 2000) and `heldBufferBytes` (default 16 MB), each a whole number, 0 = off. With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
 
 Arguments:
 
-- `enable` (optional): settings to turn on: record, cut, failClosed, recordPaused, checkBridge, requireRecorded
-- `disable` (optional): settings to turn off: record, cut, failClosed, recordPaused, checkBridge, requireRecorded
+- `enable` (optional): settings to turn on: record, cut, failClosed, recordPaused, checkBridge, requireRecorded, bindCall, admitCall, requireStream
+- `disable` (optional): settings to turn off: record, cut, failClosed, recordPaused, checkBridge, requireRecorded, bindCall, admitCall, requireStream
 - `set` (optional): limits to set, as an object of whole numbers (0 turns one off): storeTimeoutMs, batchMs, batchChars, heldBufferBytes
 - `expectedRevision` (optional): the revision read with generation.stream.get; a different current one refuses the change
 
@@ -4332,6 +4332,20 @@ Result: `{ id, to, replayed }`: the request and who it was addressed to.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `security.report`
+
+A host or a service tells the controller of a security event it detected (a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check). The controller tells the owner at once as an Urgent item; the same event (same kind, key and project) is told once, also after the owner closed it. Agents and tasks cannot report.
+
+Arguments:
+
+- `kind`: sandbox-escape-attempt, credential-misused, protected-path-touched or integrity-check-failed
+- `key`: your own identifier of the event (up to 200 characters, never a secret, never sent outside); the same key is the same event
+- `projectId` (optional): the project concerned (a project ID)
+
+Result: `{ itemId, held }`: the owner's item; `held` is true when your hourly allowance of separate reports was used and the report went into the collected item.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `notifications.configure`
 
 Owner only: sets how notifications reach the owner; only the fields given change, and they count from the next notification.
@@ -4348,6 +4362,8 @@ Arguments:
 - `escalationsPerHour` (optional): whole number (1 to 1000) of Urgent messages sent outside per hour, escalations and the controller's own Urgent triggers together (default 10); more in a burst are held in the inbox and told in ONE "N more" message; null turns the limit off
 - `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher, also of the Urgent watch (default 60)
 - `urgentMinGapMinutes` (optional): whole minutes (1 to 1440) before the same record (a host that keeps going down and up) is sent again as Urgent (default 30; the item is still raised in the inbox); null turns it off
+- `securityReportsPerHour` (optional): whole number (1 to 1000) of security reports one host or service may raise as separate Urgent items per hour (default 20); the rest of that reporter's burst is collected in ONE item; null turns the limit off
+- `securityDetectors` (optional): true (default) or false: whether the controller's own security detectors report (a task credential used on another task, a host naming an attempt it never held, the signs its local worker sees such as a Git folder planted in a checkout); false stops the reports, not the refusals; the same hourly allowance (securityReportsPerHour) bounds them
 - `deniedAlertsPerHour` (optional): how many agents' repeated refusals (1 to 1000) may send an Urgent message per hour (default 5; the rest are raised in the inbox only); null turns it off
 - `sendTimeoutSeconds` (optional): seconds (1 to 120) one channel send may take before it is retried later (default 10)
 - `urgentInterruptsQuietHours` (optional): true (default): an escalated Urgent item and its retries are also sent in quiet hours; false: they wait for the end of quiet hours
@@ -5902,10 +5918,25 @@ Arguments:
 - `maxStaged` (optional): the most releases staged at once (default 200), or null
 - `maxFiles` (optional): the most artifacts of one release (default 100), or null
 - `maxFileBytes` (optional): the largest artifact in bytes (default 4 GiB), or null
+- `startupWindowSeconds` (optional): seconds (10 to 86400) a started release may stay unconfirmed before the launcher's watchdog counts the start as failed and falls back (default 300); null for the default
+- `startFailureLevel` (optional): needs-you (default) or urgent: how loudly the owner is told when the launcher fell back to the last known good (a failed start with nothing to fall back to is always urgent); null for the default
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 - `commandId`: required
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.start.acknowledge`
+
+Owner only: the owner has seen that a release failed to start or that the launcher fell back to the last known good. Closes the notice (all open ones, or those of one release) and takes it out of the inbox; it changes no release and no setting. A later release that starts and confirms closes them too.
+
+Arguments:
+
+- `releaseId` (optional): only the notices about this release (default: all open ones)
+- `commandId`: required
+
+Result: `{ acknowledged }`: how many notices were closed.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -6008,7 +6039,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `agenda.settle`
 
-Moves an agenda item along after the meeting: `discussed`, `resolved` (with the meeting's words as `outcomeNote`), `deferred` (with a `reason` and a `nextStep`) or `queued` again. A meeting that needs something from the owner sets `ownerQuestion`: it becomes a question of its own that the owner is told about and answers in chat, and the answer is shown on the next agenda. The item's owner or someone with `meeting.manage` does it; only the owner, or a host or service with `meeting.manage`, may set `ownerQuestion` (never an agent or a task credential: an agent asks the owner through an inquiry).
+Moves an agenda item along after the meeting: `discussed`, `resolved` (with the meeting's words as `outcomeNote`), `deferred` (with a `reason` and a `nextStep`) or `queued` again. A meeting that needs something from the owner sets `ownerQuestion`: it becomes a question of its own that the owner is told about and answers in chat, and the answer is shown on the next agenda. The item's owner or someone with `meeting.manage` does it (a task credential only for the topics its own agent owns, whatever grant it carries); only the owner, or a host or service with `meeting.manage`, may set `ownerQuestion` (never an agent or a task credential: an agent asks the owner through an inquiry).
 
 Arguments:
 

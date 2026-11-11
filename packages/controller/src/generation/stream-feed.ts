@@ -177,7 +177,7 @@ export function streamTapFor(deps: StreamFeedDeps, attempt: StreamAttempt): Mode
               const part = safeSlice(e.argumentsDelta.slice(at), GENERATION_LIMITS.delta);
               if (part === "" && at > 0) break;
               at += part.length;
-              pieces.push({ toolCall: { id: e.id, ...(first && e.name !== undefined ? { name: e.name } : {}), argumentsDelta: part, done: e.done && at >= e.argumentsDelta.length } });
+              pieces.push({ toolCall: { id: e.id, ...(first && e.name !== undefined ? { name: e.name } : {}), ...(first && e.alias !== undefined ? { alias: e.alias } : {}), argumentsDelta: part, done: e.done && at >= e.argumentsDelta.length } });
               first = false;
               if (part === "") break;
             }

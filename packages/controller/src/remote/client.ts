@@ -137,6 +137,14 @@ export class RemoteWorkerClient {
     await this.#send("POST", `/worker/session/workspace/${encodeURIComponent(requestId)}`, { body: { outcome: outcome as unknown as Json }, key: `workspace-answer:${requestId}`, session: true });
   }
 
+  /**
+   * Tells the controller of a security event this host detected (card U11d): a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check. The key
+   * is the same for the same event (the controller tells the owner once); it is never a secret. Returns the owner's item; `held` is true when this host's hourly allowance was used.
+   */
+  async reportSecurity(event: { readonly kind: string; readonly key: string; readonly projectId?: string }, key: string = randomUUID()): Promise<{ readonly itemId: string; readonly held: boolean }> {
+    return (await this.#send("POST", "/worker/session/security", { body: { event: event as unknown as Json }, key, session: true })).body as { itemId: string; held: boolean };
+  }
+
   /** One attempt as the worker sees it, under the placement number it was offered. */
   attempt(attemptId: string, placement: number, watchdog?: AttemptWatchdog): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement, watchdog); }
 
@@ -230,6 +238,14 @@ export class RemoteAttempt implements ToolGateway {
     return await this.#post("accept", {}) as never;
   }
   async begin(request: ToolCallRequest): ReturnType<ToolGateway["begin"]> { await this.watchdog?.assertProductive(); return await this.#post("begin", { request: request as unknown as Json }) as never; }
+  /**
+   * An effect call the controller runs for this worker (card H12a): the call and what it wants done go over the wire, the controller judges and records the call, applies the effect through its own bridge for `kind` and
+   * answers with the result. The call ID makes a message sent again (after a lost answer) the same call. Nothing here runs the effect or holds a credential for it.
+   */
+  async effect(request: ToolCallRequest, effect: { readonly kind: string; readonly target: string; readonly input: { readonly [key: string]: Json } }): Promise<ToolResult> {
+    await this.watchdog?.assertProductive();
+    return await this.#post("effect", { request: request as unknown as Json, effect: effect as unknown as Json }) as never;
+  }
   async report(operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> { return await this.#post("report", { operationId, outcome: outcome as unknown as Json }) as never; }
   async usage(usage: TurnUsage): Promise<void> { await this.#post("usage", { usage: usage as unknown as Json }); }
   async heartbeat(): Promise<{ readonly until: string; readonly leaseMs?: number }> {
@@ -278,7 +294,7 @@ export class RemoteAttempt implements ToolGateway {
           if (e.kind === "text") { chars += e.text.length; if (last?.kind === "text") { pending[pending.length - 1] = { kind: "text", text: last.text + e.text }; return; } }
           else if (e.kind === "tool") {
             chars += e.argumentsDelta.length;
-            if (last?.kind === "tool" && last.id === e.id && !last.done) { pending[pending.length - 1] = { kind: "tool", id: last.id, ...(last.name !== undefined ? { name: last.name } : e.name !== undefined ? { name: e.name } : {}), argumentsDelta: last.argumentsDelta + e.argumentsDelta, done: e.done }; return; }
+            if (last?.kind === "tool" && last.id === e.id && !last.done) { pending[pending.length - 1] = { kind: "tool", id: last.id, ...(last.name !== undefined ? { name: last.name } : e.name !== undefined ? { name: e.name } : {}), ...(last.alias !== undefined ? { alias: last.alias } : e.alias !== undefined ? { alias: e.alias } : {}), argumentsDelta: last.argumentsDelta + e.argumentsDelta, done: e.done }; return; }
           }
           pending.push(e);
         };
@@ -340,7 +356,8 @@ export class RemoteAttempt implements ToolGateway {
 
   /** The split form run for a local executor: the controller decides and records, this runs it, the controller records how it ended. */
   async call(request: ToolCallRequest, executor: ToolExecutor): Promise<ToolResult> {
-    if (executor.kind !== "local") throw new Error("a call that goes through the controller's effect ledger cannot be run from a remote worker");
+    // An effect goes through the controller's ledger and bridge; the worker names the kind, target and input and never holds the bridge (the executor's own `bridge` stays here, unused).
+    if (executor.kind === "effect") return await this.effect(request, { kind: executor.effectKind, target: executor.target, input: executor.input as { readonly [key: string]: Json } });
     const begun = await this.begin(request);
     if (!begun.run) return begun.result;
     const controller = new AbortController();
@@ -418,7 +435,11 @@ export class RemoteAttempt implements ToolGateway {
     const r = await this.#send("GET", `${this.#path(`artifacts/${artifactId}/file`)}?placement=${this.placement}&path=${encodeURIComponent(path)}`, { session: true });
     const said = r.headers[DIGEST_HEADER];
     const actual = createHash("sha256").update(r.raw).digest("hex");
-    if (said !== actual) throw new WorkerRequestError(r.status, "integrity", `${path} does not match the digest the controller gave; it is not used`);
+    if (said !== actual) {
+      // The worker-side hook for a failed integrity check (card U11d, A08): the controller is told once per artifact and file (a digest of the path, never the path or the bytes), without waiting and without changing the refusal.
+      try { void this.client.reportSecurity({ kind: "integrity-check-failed", key: `fetch:${artifactId.slice(0, 80)}:${createHash("sha256").update(path).digest("hex").slice(0, 24)}` }, `integrity:${artifactId}:${createHash("sha256").update(path).digest("hex").slice(0, 16)}`).catch(() => undefined); } catch { /* reporting never changes the refusal */ }
+      throw new WorkerRequestError(r.status, "integrity", `${path} does not match the digest the controller gave; it is not used`);
+    }
     return new Uint8Array(r.raw);
   }
 

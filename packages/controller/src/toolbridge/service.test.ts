@@ -266,7 +266,8 @@ for (const backend of backends) {
       call_heldnone: { recorded: false, held: "task T is held (finish_and_hold: wait)" },
     };
     let broken = false;
-    let mode = { check: true, require: false };
+    // The binding and the admission of card L05d have their own tests below; the stub verdicts here carry no name or arguments.
+    let mode: { check: boolean; require: boolean; bind?: boolean; admit?: boolean } = { check: true, require: false, bind: false, admit: false };
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (_t: unknown, raw: unknown) => { seen.push(raw); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
@@ -282,15 +283,15 @@ for (const backend of backends) {
       out["oldRead"] = await send("call_old", "task.get");
       out["none"] = await send("call_none");
       out["heldNone"] = await send("call_heldnone");
-      mode = { check: true, require: true };
+      mode = { check: true, require: true, bind: false, admit: false };
       out["noneRequired"] = await send("call_none");
       out["declare"] = await svc.handle(order.credential, gateway, { op: "tool.discover", callId: "h:0123456789abcdef0123456789abcdef01234567", args: {} });
       // Card W04: the worker's own continuation question is no model call either; a held task refuses it.
       out["continue"] = await svc.handle(order.credential, gateway, { op: "turn.continue", callId: "nudge:0123:1", args: { n: 1, max: 3 } });
       out["continueHeld"] = await svc.handle(order.credential, gateway, { op: "turn.continue", callId: "call_heldnone", args: { n: 1, max: 3 } });
-      mode = { check: false, require: false };
+      mode = { check: false, require: false, bind: false, admit: false };
       out["oldUnchecked"] = await send("call_old");
-      mode = { check: true, require: false };
+      mode = { check: true, require: false, bind: false, admit: false };
       broken = true;
       out["broken"] = await send("call_ok");
       return { status: "completed", text: "x" };
@@ -310,6 +311,183 @@ for (const backend of backends) {
     assert.equal(bad(out["broken"]!).code, "unavailable");
     // Only the calls that passed reached the state API: ok, none, oldUnchecked.
     assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title), ["call_ok", "call_none", "call_old"]);
+  });
+
+  suite("card L05d: a recorded write is admitted as an effect and settled with the outcome; a generation still streaming is waited for; a refusal fails the effect and a crash leaves it uncertain; a repeat is answered from the ledger; reads and unrecorded calls are not admitted", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const seen: unknown[] = [];
+    const ledger = new Map<string, { status: "confirmed" | "failed" | "uncertain"; evidence: JsonObject }>();
+    const admitted: string[] = [];
+    let streamingFor = 0;
+    const verdict = (name: string, args: object) => ({ recorded: true, ok: true, runId: "grun-x", number: 1, callId: "c", name, args: JSON.stringify(args), state: "complete" });
+    const calls: Record<string, ReturnType<typeof verdict> | { recorded: false }> = {
+      w1: verdict("nimblenewt__task-update", { expectedRevision: 1, title: "A" }),
+      w2: verdict("nimblenewt__task-update", { expectedRevision: 1, title: "B" }),
+      w3: verdict("nimblenewt__task-update", { expectedRevision: 1, title: "C" }),
+      r1: verdict("nimblenewt__task-get", {}),
+      u1: { recorded: false },
+      big: verdict("nimblenewt__task-update", { expectedRevision: 1, title: "D" }),
+    };
+    const { GenerationRefused } = await import("../generation/index.js");
+    const { EffectRejected } = await import("../domain/effects.js");
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (_t: unknown, raw: unknown) => { seen.push(raw); const title = (raw as { args: { title?: string } }).args.title; if (title === "B") return { v: 1, op: "x", ok: false, error: { code: "stale_revision", message: "the task changed" } } as never; if (title === "C") throw new Error("the state API fell over"); if (title === "D") return { v: 1, op: "x", ok: true, result: { big: "x".repeat(30_000) } } as never; return { v: 1, op: "x", ok: true, result: { done: title ?? true } } as never; } },
+      isLocalHost: () => true,
+      generations: {
+        checkCall: async (_p: unknown, cmd: { callId: string }) => (calls[cmd.callId] ?? { recorded: false }) as never,
+        admitCall: async (_p: unknown, cmd: { callId: string; target: string; commandId: string }) => {
+          if (streamingFor > 0) { streamingFor--; throw new GenerationRefused("streaming", "generation grun-x is still streaming"); }
+          if (cmd.callId === "gone") throw new GenerationRefused("interrupted", "generation 1 was interrupted (corrected); nothing from it is applied");
+          const again = admitted.includes(`${cmd.callId}:${cmd.target}`);
+          if (!again) admitted.push(`${cmd.callId}:${cmd.target}`);
+          return { effectId: `eff-${cmd.callId}`, runId: "grun-x", toolCallId: cmd.callId, replayed: again };
+        },
+        executeCall: async (_p: unknown, cmd: { toolCallId: string }, bridge: { execute(r: never): Promise<JsonObject> }) => {
+          const kept = ledger.get(cmd.toolCallId);
+          if (kept !== undefined) return { effectId: `eff-${cmd.toolCallId}`, ...kept } as never;
+          try { const evidence = await bridge.execute({} as never); ledger.set(cmd.toolCallId, { status: "confirmed", evidence }); } catch (error) {
+            ledger.set(cmd.toolCallId, error instanceof EffectRejected ? { status: "failed", evidence: error.evidence } : { status: "uncertain", evidence: {} });
+          }
+          return { effectId: `eff-${cmd.toolCallId}`, ...ledger.get(cmd.toolCallId)! } as never;
+        },
+      },
+      callCheck: async () => ({ check: true, require: false }),
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      const send = (callId: string, op: string, args: JsonObject) => svc.handle(order.credential, gateway, { op, callId, args });
+      out["w1"] = await send("w1", "task.update", { expectedRevision: 1, title: "A" });
+      out["w1again"] = await send("w1", "task.update", { expectedRevision: 1, title: "A" });
+      streamingFor = 2;
+      calls["w1b"] = verdict("nimblenewt__task-update", { expectedRevision: 1, title: "A2" });
+      out["streaming"] = await send("w1b", "task.update", { expectedRevision: 1, title: "A2" });
+      out["w2"] = await send("w2", "task.update", { expectedRevision: 1, title: "B" });
+      out["w2again"] = await send("w2", "task.update", { expectedRevision: 1, title: "B" });
+      out["w3"] = await send("w3", "task.update", { expectedRevision: 1, title: "C" });
+      out["w3again"] = await send("w3", "task.update", { expectedRevision: 1, title: "C" });
+      out["r1"] = await send("r1", "task.get", {});
+      out["u1"] = await send("u1", "task.update", { expectedRevision: 1, title: "U" });
+      out["big"] = await send("big", "task.update", { expectedRevision: 1, title: "D" });
+      out["bigAgain"] = await send("big", "task.update", { expectedRevision: 1, title: "D" });
+      calls["gone"] = verdict("nimblenewt__task-update", { expectedRevision: 1, title: "G" });
+      out["gone"] = await send("gone", "task.update", { expectedRevision: 1, title: "G" });
+      streamingFor = 1000;
+      calls["slow"] = verdict("nimblenewt__task-update", { expectedRevision: 1, title: "S" });
+      out["slow"] = await send("slow", "task.update", { expectedRevision: 1, title: "S" });
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    good(out["w1"]!); assert.deepEqual(out["w1again"], out["w1"], "answered from the ledger");
+    good(out["streaming"]!);
+    assert.deepEqual(admitted.filter((a) => a.startsWith("w1")), ["w1:task.update", "w1b:task.update"], "each call is admitted once");
+    assert.equal(seen.filter((r) => (r as { args: { title?: string } }).args.title === "A").length, 1, "the repeat did not run again");
+    // A refusal of the operation's own service did not happen: the effect fails, the answer is that refusal, and the same call says the same again without running.
+    const w2 = bad(out["w2"]!);
+    assert.deepEqual([w2.code, w2.message], ["stale_revision", "the task changed"]);
+    assert.deepEqual(out["w2again"], out["w2"]);
+    assert.equal(ledger.get("w2")!.status, "failed");
+    // A crash leaves the outcome unknown: the effect is uncertain, the first answer is the usual internal one, and a repeat is not run again.
+    assert.equal(bad(out["w3"]!).code, "internal");
+    assert.equal(ledger.get("w3")!.status, "uncertain");
+    assert.equal(bad(out["w3again"]!).code, "unavailable");
+    assert.match(bad(out["w3again"]!).message, /may or may not have happened/);
+    assert.equal(seen.filter((r) => (r as { args: { title?: string } }).args.title === "C").length, 1);
+    // A read, and a write that no generation recorded, are not admitted.
+    good(out["r1"]!); good(out["u1"]!);
+    assert.equal(admitted.some((a) => a.startsWith("r1") || a.startsWith("u1")), false);
+    // A result too large to keep is answered once, and a repeat says it already ran.
+    assert.equal(good(out["big"]!)["big"]?.toString().length, 30_000);
+    assert.equal(good(out["bigAgain"]!)["replayed"], true);
+    // A generation interrupted between the check and the admission, and one that never stops streaming: refused, not run.
+    assert.equal(bad(out["gone"]!).code, "generation_refused");
+    assert.match(bad(out["gone"]!).message, /interrupted.*it was not run/);
+    assert.equal(bad(out["slow"]!).code, "generation_refused");
+    assert.match(bad(out["slow"]!).message, /still streaming/);
+    assert.equal(seen.some((r) => (r as { args: { title?: string } }).args.title === "G" || (r as { args: { title?: string } }).args.title === "S"), false);
+  });
+
+  suite("card L05d: a recorded call is bound to the operation it is presented for (name and arguments); the owner can turn that off", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const seen: unknown[] = [];
+    let mode: { check: boolean; require: boolean; bind?: boolean; admit?: boolean } = { check: true, require: false, bind: true, admit: false };
+    const rec = (name: string, args: string) => ({ recorded: true, ok: true, runId: "r", number: 1, callId: "c", name, args, state: "complete" });
+    const verdicts: Record<string, unknown> = {
+      good: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"A"}'),
+      other: rec("nimblenewt__desk-write", '{"expectedRevision":1,"title":"A"}'),
+      args: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"Z"}'),
+      coerced: rec("nimblenewt__task-update", '{"expectedRevision":"1","title":"A"}'),
+      nested: rec("nimblenewt__tool-invoke", '{"tool":"t.x","input":{"a":[1,{"b":true}]}}'),
+      broken: rec("nimblenewt__task-update", "not json"),
+      extra: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"A"}'),
+    };
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (_t: unknown, raw: unknown) => { seen.push(raw); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      isLocalHost: () => true,
+      generations: { checkCall: async (_p: unknown, cmd: { callId: string }) => (verdicts[cmd.callId] ?? { recorded: false }) as never },
+      callCheck: async () => mode,
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      const send = (callId: string, op: string, args: JsonObject) => svc.handle(order.credential, gateway, { op, callId, args });
+      out["good"] = await send("good", "task.update", { expectedRevision: 1, title: "A" });
+      out["other"] = await send("other", "task.update", { expectedRevision: 1, title: "A" });
+      out["args"] = await send("args", "task.update", { expectedRevision: 1, title: "A" });
+      out["extra"] = await send("extra", "task.update", { expectedRevision: 1, title: "A", description: "more" });
+      out["coerced"] = await send("coerced", "task.update", { expectedRevision: 1, title: "A" });
+      out["nested"] = await send("nested", "tool.invoke", { tool: "t.x", input: { a: [1, { b: true }] } });
+      out["broken"] = await send("broken", "task.update", { expectedRevision: 1, title: "A" });
+      out["declaration"] = await send("good", "tool.discover", {});
+      mode = { check: true, require: false, bind: false, admit: false };
+      out["unbound"] = await send("other", "task.update", { expectedRevision: 1, title: "Q" });
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    good(out["good"]!);
+    assert.match(bad(out["other"]!).message, /written by the model as nimblenewt__desk-write, not as nimblenewt__task-update.*not run/);
+    assert.match(bad(out["args"]!).message, /not those the model wrote/);
+    assert.match(bad(out["extra"]!).message, /not those the model wrote/, "an argument the model did not write is not run");
+    good(out["coerced"]!);
+    assert.notEqual((out["nested"] as { code?: string }).code, "generation_refused", "nested values are compared member by member");
+    assert.match(bad(out["broken"]!).message, /not readable as recorded/);
+    assert.notEqual((out["declaration"] as { code?: string }).code, "generation_refused", "the extension's declaration reads are not a model call");
+    good(out["unbound"]!);
+    assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title), ["A", "A", "Q"]);
+  });
+
+  suite("card L05d review: an admitted tool.invoke parked for review is not settled by its first answer: asked again with the same call ID after the approval it runs, once, through the real generation and effect ledger", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+    c.svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, isLocalHost: () => true, facts: async () => hostFacts,
+      runner: { run: async (launch) => { c.runs.push(launch); return { text: '{"ok":true}', cpuMs: 5 }; } }, generations: c.generation,
+    });
+    const answers: JsonObject[] = [];
+    let effectId: string | undefined;
+    c.worker.script = c.session(async (s) => {
+      const name = await c.install(s, "check", "1.0.0");
+      const args = { tool: name, input: { url: "u" } };
+      // The model's reply holds the call; it is recorded as a complete call of the task's current generation.
+      const d = c.dispatcherPrincipal;
+      const run = await c.generation.begin(d, { commandId: "b1", taskId, contextRevision: 1 });
+      await c.generation.record(d, { commandId: "r1", runId: run.id, seq: 1, toolCall: { id: "inv-1", name: "nimblenewt__tool-invoke", argumentsDelta: JSON.stringify(args), done: true } });
+      await c.generation.complete(d, { commandId: "c1", runId: run.id });
+      answers.push(good(await s.send("tool.invoke", args, "inv-1")));
+      const review = (await c.reviews.get(c.owner, answers[0]!["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+      answers.push(good(await s.send("tool.invoke", args, "inv-1")));
+      answers.push(good(await s.send("tool.invoke", args, "inv-1")));
+      effectId = (await c.generation.view(c.owner, run.id))!.run.toolCalls[0]!.effectId;
+    });
+    await c.tick();
+    assert.deepEqual(answers.map((a) => a["state"]), ["awaiting-approval", "confirmed", "confirmed"], JSON.stringify(answers));
+    assert.equal(c.runs.length, 1, "the approved call ran once, and the repeat was not run again");
+    assert.ok(effectId !== undefined, "the call was admitted as an effect of its generation");
+    assert.equal((await c.storage.getEffect(effectId!))?.status, "confirmed");
   });
 
   suite("an agent holds the grant for its own tool namespace from enrolment, so the tool path asks for approval instead of refusing the call; nothing runs before it", async (c) => {

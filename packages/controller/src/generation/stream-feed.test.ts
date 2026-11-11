@@ -419,6 +419,52 @@ for (const backend of backends) {
     assert.equal(r2.toolCalls[0]!.args, "{}");
   });
 
+  suite("card L05d: an alias is recorded for a provider ID the recorder cannot keep and checkCall finds the call by it, by a long ID and by the extension's number for a repeated ID; it reports the name and arguments; hasStreamed says which attempt streamed", async (c) => {
+    const { bridgeCallIdOf } = await import("../dispatch/model-stream.js");
+    const { reusedCallId } = await import("./index.js");
+    const call = (id: string, args: string) => sse(chunk({ tool_calls: [{ index: 0, id, type: "function", function: { name: "nimblenewt__desk-write", arguments: args } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    const ask = (callId: string) => c.gen.checkCall(c.dispatcher, { taskId: c.task, callId });
+    assert.equal(await c.gen.hasStreamed(c.dispatcher, { taskId: c.task, attemptId: c.attemptId }), false, "nothing streamed yet");
+    const raw = "has spaces/☃";
+    await drain((await c.relayFor(endpoint([[call(raw, "{\"a\":1}")]])).relay(request as never)).body);
+    const r1 = await run(c, 1);
+    assert.deepEqual([r1.toolCalls[0]!.id, r1.toolCalls[0]!.aliases], ["call-0", [bridgeCallIdOf(raw)]]);
+    const found = await ask(bridgeCallIdOf(raw));
+    assert.ok(found.recorded && found.ok && found.callId === "call-0" && found.name === "nimblenewt__desk-write" && found.args === "{\"a\":1}" && found.state === "complete", JSON.stringify(found));
+    assert.deepEqual(await ask("call-0").then((v) => v.recorded && v.ok), true, "the recorded ID itself is found too");
+    assert.equal(await c.gen.hasStreamed(c.dispatcher, { taskId: c.task, attemptId: c.attemptId }), true);
+    assert.equal(await c.gen.hasStreamed(c.dispatcher, { taskId: c.task, attemptId: "att-someone-else" }), false);
+    await assert.rejects(c.gen.hasStreamed({ ...c.dispatcher, id: "agent:ann", kind: "agent" } as never, { taskId: c.task, attemptId: c.attemptId }), /may not ask/);
+    // The provider counts from zero in each reply: the extension sends call_0, then the digest for its second use, and so on.
+    await drain((await c.relayFor(endpoint([[call("call_0", "{\"n\":1}")]])).relay(request as never)).body);
+    await drain((await c.relayFor(endpoint([[call("call_0", "{\"n\":2}")]])).relay(request as never)).body);
+    const second = await ask(reusedCallId("call_0", 2));
+    assert.ok(second.recorded && second.ok && second.args === "{\"n\":2}" && second.number === 3, `the number the extension gave is the use in the window: ${JSON.stringify(second)}`);
+    // The first use is read as call_0 itself and finds the newest generation holding it.
+    const plain = await ask("call_0");
+    assert.ok(plain.recorded && plain.number === 3);
+    assert.deepEqual(await ask(reusedCallId("call_0", 5000)), { recorded: false });
+    // A malformed ID is refused.
+    await assert.rejects(ask("has space"), /is not a tool call ID/);
+  });
+
+  suite("card L05d review: a repeated provider ID is the newest generation's call even when an earlier use never reached the process (a reply that broke off), so the extension's number and the window's count differ", async (c) => {
+    const { reusedCallId } = await import("./index.js");
+    const ask = (callId: string) => c.gen.checkCall(c.dispatcher, { taskId: c.task, callId });
+    // The first reply breaks off in the middle of call_0: the process never runs it, so the extension does not count it.
+    const partial = sse(chunk({ tool_calls: [{ index: 0, id: "call_0", type: "function", function: { name: "nimblenewt__desk-write", arguments: "{\"n\"" } }] }));
+    await assert.rejects(drain((await c.relayFor(endpoint([[partial, sleep(50), new Error("connection reset")]])).relay(request as never)).body));
+    await until(async () => (await run(c, 1)).state !== "streaming");
+    assert.equal((await run(c, 1)).toolCalls[0]!.state, "dropped");
+    const call = (args: string) => sse(chunk({ tool_calls: [{ index: 0, id: "call_0", type: "function", function: { name: "nimblenewt__desk-write", arguments: args } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    await drain((await c.relayFor(endpoint([[call("{\"n\":2}")]])).relay(request as never)).body);
+    await drain((await c.relayFor(endpoint([[call("{\"n\":3}")]])).relay(request as never)).body);
+    await until(async () => (await run(c, 3).catch(() => undefined))?.toolCalls[0]?.state === "complete");
+    // The process ran call_0 of the second reply as `call_0` and now runs the third reply's as its second use.
+    const v = await ask(reusedCallId("call_0", 2));
+    assert.ok(v.recorded && v.ok && v.number === 3 && v.args === "{\"n\":3}", `the current generation's call, not the second generation's: ${JSON.stringify(v)}`);
+  });
+
   suite("a generation is labelled sensitive", async (c) => {
     await drain((await c.relayFor(endpoint([[sse(chunk({ content: "x" }), chunk({}, "stop"))]])).relay(request as never)).body);
     assert.equal((await run(c, 1)).sensitive, true);

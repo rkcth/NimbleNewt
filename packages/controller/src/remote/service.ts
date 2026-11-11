@@ -4,8 +4,11 @@ import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
+import type { CallMonitor, RelayMonitor } from "../dispatch/relay.js";
 import { turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
+import type { SecurityEvent } from "../notifications/urgent.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
+import type { EffectBridge } from "../domain/effects.js";
 import { derivedId } from "../domain/ids.js";
 import { mergeChanges } from "../domain/changes.js";
 import { commandId as checkCommandId, onlyKnown, text } from "../domain/model.js";
@@ -29,6 +32,8 @@ export const PLACEMENT_KIND = "remote-placement";
 export const STORE_KIND = "remote-store";
 export const RECONCILE_KIND = "remote-reconcile";
 
+/** The most a worker may send as the input of one controller-run effect call. */
+export const EFFECT_INPUT_BYTES = 64 * 1024;
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 const HOST = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -214,6 +219,10 @@ function within<T>(promise: Promise<T>, ms: number): Promise<T> {
 // ---- the service -----------------------------------------------------------------------------------------------------------------
 
 export interface RemoteDeps {
+  /** The controller's security detectors (card U11d): a host that names an attempt it never held is a credential used on the wrong host. Never throws, never waits. */
+  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly subject?: string }) => void;
+  /** Where a host's own security report goes (`UrgentWatch.reportSecurityFrom`): the report is the host's, so its allowance, once-per-key rule and collected item apply. Absent: reports are refused as unavailable. */
+  readonly reportSecurity?: (by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }) => Promise<{ readonly itemId: string; readonly held: boolean }>;
   /** The dispatcher's own service principal (`service:dispatcher`): it places attempts, reads host status and moves attempts. */
   readonly principal: Principal;
   readonly hosts: Pick<HostService, "announce" | "heartbeat" | "status">;
@@ -236,6 +245,18 @@ export interface RemoteDeps {
    * `streamStart`, `streamEvents` and `streamEnd`, each checked against the placement like every other message. Absent: a worker's streams are not recorded (its calls are answered `recorded: false`).
    */
   readonly streams?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number }) => ModelStreamTap;
+  /**
+   * The bridge for each effect kind (card H12a): the only code the controller runs for a remote worker's effect call. A worker names a kind; the controller looks it up here and never takes code, a target
+   * address or a credential from the worker. Absent or empty: every effect call from a remote worker is refused. The composed controller passes the dispatcher's own `bridges`.
+   */
+  readonly bridges?: Readonly<Record<string, EffectBridge>>;
+  /**
+   * What the controller tells stall detection about a remote worker's model calls (card L05d): the same `RelayMonitor` a local relay reports to. The worker's calls are not seen by the controller's relay, so the start of a call, its first
+   * output, its end and the time the controller itself spends waiting on its store while it records the reply (not the model's time) are reported from the stream messages. Absent: nothing is reported (as before).
+   */
+  readonly monitor?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number }) => RelayMonitor;
+  /** How often, at most, the output received so far of a remote model call is reported to `monitor` while it streams (ms, default 15,000, as for a local relay; 0 = with every message that carries output). */
+  readonly monitorProgressMs?: number;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
   readonly recordLaunch?: (record: { readonly attemptId: string; readonly agentId: string; readonly outcome: "started" | "refused"; readonly requested: JsonObject; readonly bestEffort: boolean; readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[]; readonly wallTimeMs: number; readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[]; readonly reason?: string }) => Promise<void>;
 }
@@ -311,7 +332,9 @@ export class RemoteWorkerService {
   readonly #asks = new Map<string, WorkspaceAskState>();
   /** The recording taps of attempts and the model calls open on them (card L05c). In memory: a restart loses them, the worker's open call then fails on its next message and the generation stays as the store left it. */
   readonly #taps = new Map<string, ModelStreamTap>();
-  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; last?: LastMessage | undefined }>();
+  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; /** What stall detection is told about this call (card L05d). */ readonly watch?: CallMonitor | undefined; seenOutput?: boolean; outputChars?: number; progressAt?: number; last?: LastMessage | undefined }>();
+  /** One monitor per attempt, like the local relay's: its reports are numbered in order. */
+  readonly #monitors = new Map<string, RelayMonitor>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
   readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
 
@@ -403,7 +426,7 @@ export class RemoteWorkerService {
   #endPoll(hostId: string): void { this.#made.set(hostId, (this.#made.get(hostId) ?? 0) + 1); this.#polls.get(hostId)?.end(); }
 
   /** Ends every open poll (the controller is stopping). */
-  close(): void { this.#closed = true; for (const c of this.#calls.values()) void c.call.ended({ ok: false }).catch(() => undefined); this.#calls.clear(); for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
+  close(): void { this.#closed = true; for (const c of this.#calls.values()) this.#abandon(c); this.#calls.clear(); for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
 
   // ---- workspace operations on a remote host (card H12m) -------------------------------------------------------------------------
 
@@ -483,6 +506,19 @@ export class RemoteWorkerService {
     const late = ask.abandoned;
     for (const wake of [...ask.waiters]) wake();
     return { accepted: true, repeat: false, late };
+  }
+
+  /**
+   * A security event the host itself detected (card U11d, the worker-side hook): the report goes to the controller's Urgent watch as the host's own, so a host can neither fake nor mute another's event. The
+   * kind, key and project are checked there; this only needs a current session of a known host.
+   */
+  async reportSecurity(host: Principal, sessionId: unknown, event: unknown): Promise<{ readonly itemId: string; readonly held: boolean }> {
+    await this.#session(host, sessionId);
+    if (this.#deps.reportSecurity === undefined) throw new DomainError("unavailable", "this controller takes no security reports");
+    if (event === null || typeof event !== "object" || Array.isArray(event)) throw new DomainError("invalid_command", "event: must be an object with kind and key", { field: "event" });
+    const e = event as Record<string, unknown>;
+    for (const k of Object.keys(e)) if (k !== "kind" && k !== "key" && k !== "projectId") throw new DomainError("invalid_command", `event.${k}: is not a field of a security report`, { field: "event" });
+    return this.#deps.reportSecurity(host, e as { kind: string; key: string; projectId?: string });
   }
 
   /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
@@ -836,9 +872,9 @@ export class RemoteWorkerService {
     for (const [id, c] of [...this.#calls.entries()]) {
       if (c.attemptId !== attemptId || (placement !== undefined && c.placement !== placement)) continue;
       this.#calls.delete(id);
-      void c.call.ended({ ok: false }).catch(() => undefined);
+      this.#abandon(c);
     }
-    if (placement === undefined) this.#taps.delete(attemptId);
+    if (placement === undefined) { this.#taps.delete(attemptId); this.#monitors.delete(attemptId); }
   }
 
   #wake(attemptId: string, placement: number, reason: string, result?: StoredResult): void {
@@ -1149,6 +1185,8 @@ export class RemoteWorkerService {
     if (b === undefined) throw new DomainError("not_found", "no such attempt");
     if (b.hostId !== host.id) {
       if (b.history.some((h) => h.hostId === host.id)) throw new DomainError("fenced", `attempt ${b.attemptId} is no longer on this host`);
+      // A host that never held this attempt names it: its session is used for something it was not given (card U11d). The refusal is unchanged; the detectors are only told.
+      try { this.#deps.detect?.("host-channel", { kind: "credential-misused", key: `host:${host.id.slice(0, 80)}>attempt:${b.attemptId.slice(0, 80)}`, subject: host.id }); } catch { /* telling never changes the refusal */ }
       throw new DomainError("not_found", "no such attempt");
     }
     if (typeof placement !== "number" || !Number.isSafeInteger(placement)) invalid("placement", "must be a whole number");
@@ -1200,6 +1238,38 @@ export class RemoteWorkerService {
     return (await this.#deps.dispatch.gateway(b.attemptId)).begin(request);
   }
 
+  /**
+   * The controller-run form of an effect call (card H12a). The worker cannot hold the controller's ledger or a bridge, so it sends the call and what it wants done (`kind`, `target`, `input`); the controller judges the call
+   * exactly as it does a local one (placement, confirmation, generation fence, pauses, decisions, policy, approval), writes it on the S05 ledger and runs its own bridge for that kind. The call ID makes a repeated or delayed
+   * message the same call: it is answered from the record and never applied twice, and an effect that had started when the link was lost is settled from the ledger and the target, not by asking the worker again.
+   */
+  async effect(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, request: ToolCallRequest, effect: { readonly kind: unknown; readonly target: unknown; readonly input: unknown }): Promise<ToolResult> {
+    if (request === null || typeof request !== "object" || Array.isArray(request)) invalid("request", "must be a tool call request");
+    if (effect === null || typeof effect !== "object" || Array.isArray(effect)) invalid("effect", "must be an object");
+    onlyKnown(effect, ["kind", "target", "input"]);
+    const kind = typeof effect.kind === "string" && effect.kind.length >= 1 && effect.kind.length <= 100 ? effect.kind : invalid("effect.kind", "must be an effect kind of 1 to 100 characters");
+    const target = typeof effect.target === "string" && effect.target.length >= 1 && effect.target.length <= 500 ? effect.target : invalid("effect.target", "must be a target of 1 to 500 characters");
+    const input = effect.input !== null && typeof effect.input === "object" && !Array.isArray(effect.input) ? effect.input as JsonObject : invalid("effect.input", "must be an object");
+    let encoded: string;
+    try { encoded = canonicalJson(input); } catch { return invalid("effect.input", "must be plain JSON"); }
+    if (Buffer.byteLength(encoded) > EFFECT_INPUT_BYTES) invalid("effect.input", `must be at most ${EFFECT_INPUT_BYTES} bytes`);
+    // What the bridge runs is what was judged: the policy, the protected-branch check and an approval see the tool name and its arguments, so the worker may not name another bridge or other input
+    // (a call judged as one tool must not run a different kind's bridge, and arguments naming one branch must not push another).
+    const tool = (request as { tool?: unknown }).tool;
+    if (tool === null || typeof tool !== "object" || (tool as { name?: unknown }).name !== kind) invalid("effect.kind", "must be the name of the tool the call is made with");
+    const args = (request as { args?: unknown }).args;
+    let argsEncoded: string | undefined;
+    try { argsEncoded = args !== null && typeof args === "object" && !Array.isArray(args) ? canonicalJson(args as JsonObject) : undefined; } catch { argsEncoded = undefined; }
+    if (argsEncoded !== encoded) invalid("effect.input", "must be the call's arguments");
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any tool call");
+    const bridges = this.#deps.bridges;
+    // Own properties only: a kind such as "constructor" is no bridge.
+    const bridge = bridges !== undefined && Object.hasOwn(bridges, kind) ? bridges[kind] : undefined;
+    if (bridge === undefined) throw new DomainError("invalid_command", `the controller has no bridge for effect kind ${kind}; nothing was recorded or done`, { field: "effect.kind" });
+    return (await this.#deps.dispatch.gateway(b.attemptId)).call(request, { kind: "effect", effectKind: kind, target, input, bridge });
+  }
+
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {
     if (typeof operationId !== "string") invalid("operationId", "must be an operation ID");
     return (await this.#gateway(host, sessionId, attemptId, placement, "any report")).report(operationId, outcome);
@@ -1237,7 +1307,7 @@ export class RemoteWorkerService {
     }
     // At most 4 calls of an attempt are open: the oldest is ended as failed (its partial tool calls are dropped for good).
     const open = [...this.#calls.entries()].filter(([, c]) => c.attemptId === b.attemptId);
-    for (const [id, c] of open.slice(0, Math.max(0, open.length - 3))) { this.#calls.delete(id); void c.call.ended({ ok: false }).catch(() => undefined); }
+    for (const [id, c] of open.slice(0, Math.max(0, open.length - 3))) { this.#calls.delete(id); this.#abandon(c); }
     let feed: ModelStreamCall | undefined;
     try { feed = await tap.started({ requestChars: call.requestChars, ...(call.requestDigest === undefined ? {} : { requestDigest: call.requestDigest }) }); } catch (error) {
       if (error instanceof ModelStreamRefused) return { refused: error.message.slice(0, REMOTE_LIMITS.text) };
@@ -1245,7 +1315,18 @@ export class RemoteWorkerService {
     }
     if (feed === undefined) return { recorded: false };
     const streamId = `rs-${randomUUID()}`;
-    this.#calls.set(streamId, { attemptId: b.attemptId, placement: b.placement, hostId: host.id, call: feed });
+    let watch: CallMonitor | undefined;
+    if (this.#deps.monitor !== undefined) {
+      try {
+        let monitor = this.#monitors.get(b.attemptId);
+        if (monitor === undefined) { monitor = this.#deps.monitor({ attemptId: b.attemptId, taskId: b.taskId, generation: b.generation }); this.#monitors.set(b.attemptId, monitor); while (this.#monitors.size > 256) this.#monitors.delete(this.#monitors.keys().next().value as string); }
+        watch = monitor.started({ requestChars: call.requestChars });
+        const w = watch;
+        // The controller's waits on its own store while it records this call's reply are not the model's time (the remote counterpart of the local relay's `onWait`).
+        feed.onWait = (on) => { try { w.waiting?.(on); } catch { /* the call is not affected */ } };
+      } catch { watch = undefined; }
+    }
+    this.#calls.set(streamId, { attemptId: b.attemptId, placement: b.placement, hostId: host.id, call: feed, ...(watch === undefined ? {} : { watch }) });
     return { streamId, ...(feed.amend === undefined ? {} : { amend: feed.amend.slice(0, REMOTE_LIMITS.text) }), ...(feed.heldBufferBytes === undefined ? {} : { heldBufferBytes: feed.heldBufferBytes }) };
   }
 
@@ -1263,6 +1344,18 @@ export class RemoteWorkerService {
     if (n !== (entry.last?.n ?? 0) + 1) invalid("n", `must be ${(entry.last?.n ?? 0) + 1}, the next message of this call`);
     // Kept before it is awaited: a copy that overlaps the first gets the first's answer and is recorded once.
     const previous = entry.last;
+    if (entry.watch !== undefined) {
+      // The first output, then (at most once in `monitorProgressMs`) how much has arrived: a reply that keeps streaming is not silent (review of card L05d; the local relay reports the same every 15 s).
+      const chars = checked.reduce((sum, e) => sum + (e.kind === "text" ? e.text.length : e.kind === "tool" ? e.argumentsDelta.length + 1 : 0), 0);
+      if (chars > 0) {
+        entry.outputChars = (entry.outputChars ?? 0) + chars;
+        const now = Date.now();
+        try {
+          if (entry.seenOutput !== true) { entry.seenOutput = true; entry.progressAt = now; entry.watch.firstOutput(); }
+          else if (now - (entry.progressAt ?? 0) >= (this.#deps.monitorProgressMs ?? 15_000)) { entry.progressAt = now; entry.watch.progress(entry.outputChars); }
+        } catch { /* the call is not affected */ }
+      }
+    }
     const answer = entry.call.events(checked);
     entry.last = { n: n as number, digest, answer };
     try { return await answer; } catch (error) { entry.last = previous; throw error; }
@@ -1275,15 +1368,22 @@ export class RemoteWorkerService {
     const entry = await this.#openCall(host, sessionId, attemptId, placement, streamId, true);
     if (entry === undefined) return;
     this.#calls.delete(streamId as string);
+    try { entry.watch?.finished({ ok: outcome.ok as boolean }); } catch { /* ignored */ }
     await entry.call.ended({ ok: outcome.ok as boolean });
   }
 
-  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; last?: LastMessage | undefined } | undefined> {
+  /** A call that is ended as failed by the controller (an attempt that ended or moved, the oldest of too many, a closing service): its generation is completed and stall detection is told. */
+  #abandon(c: { readonly call: ModelStreamCall; readonly watch?: CallMonitor | undefined }): void {
+    try { c.watch?.finished({ ok: false }); } catch { /* ignored */ }
+    void c.call.ended({ ok: false }).catch(() => undefined);
+  }
+
+  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; readonly watch?: CallMonitor | undefined; seenOutput?: boolean; outputChars?: number; progressAt?: number; last?: LastMessage | undefined } | undefined> {
     const b = await this.#running(host, sessionId, attemptId, placement);
     const entry = typeof streamId === "string" ? this.#calls.get(streamId) : undefined;
     if (entry === undefined && tolerateClosed === true && typeof streamId === "string" && /^rs-[0-9a-f-]{36}$/.test(streamId)) return undefined;
     if (entry === undefined || entry.attemptId !== b.attemptId || entry.hostId !== host.id) throw new DomainError("not_found", "no such model call is open for this attempt");
-    if (entry.placement !== b.placement) { this.#calls.delete(streamId as string); void entry.call.ended({ ok: false }).catch(() => undefined); throw new DomainError("fenced", `the model call belongs to placement ${entry.placement}, not ${b.placement}`); }
+    if (entry.placement !== b.placement) { this.#calls.delete(streamId as string); this.#abandon(entry); throw new DomainError("fenced", `the model call belongs to placement ${entry.placement}, not ${b.placement}`); }
     return entry;
   }
 
@@ -1495,8 +1595,14 @@ export class RemoteWorkerService {
     return b?.checkpoint === undefined ? undefined : { ...(await this.#readCheckpoint(b.checkpoint)), artifactId: b.checkpoint.artifactId, sequence: b.checkpoint.sequence, digest: b.checkpoint.digest };
   }
 
+  /** A stored file that no longer hashes to its record (card U11d, A08): told to the detectors, then refused as before. The key is the artifact only (no path, no content). */
+  #damaged(artifactId: string, error: unknown): never {
+    if (error instanceof DomainError && error.code === "integrity") { try { this.#deps.detect?.("artifact-store", { kind: "integrity-check-failed", key: `artifact:${artifactId.slice(0, 80)}` }); } catch { /* telling never changes the refusal */ } }
+    throw error;
+  }
+
   async #readCheckpoint(c: NonNullable<PlacementBody["checkpoint"]>): Promise<{ checkpoint: JsonObject }> {
-    const bytes = await this.#deps.artifacts.readFile(c.artifactId, "checkpoint.json", { maxBytes: REMOTE_LIMITS.checkpointBytes });
+    const bytes = await this.#deps.artifacts.readFile(c.artifactId, "checkpoint.json", { maxBytes: REMOTE_LIMITS.checkpointBytes }).catch((error: unknown) => this.#damaged(c.artifactId, error));
     return { checkpoint: JSON.parse(Buffer.from(bytes).toString("utf8")) as JsonObject };
   }
 
@@ -1526,7 +1632,7 @@ export class RemoteWorkerService {
     const entry = artifact?.entries.find((e) => e.path === path);
     if (entry === undefined) throw new DomainError("not_found", "no such file");
     if (entry.size > this.#fileBytes) throw new DomainError("invalid_command", `${path} is ${entry.size} bytes; one fetch returns at most ${this.#fileBytes}`, { field: "path" });
-    const bytes = await this.#deps.artifacts.readFile(artifactId, path, { maxBytes: this.#fileBytes });
+    const bytes = await this.#deps.artifacts.readFile(artifactId, path, { maxBytes: this.#fileBytes }).catch((error: unknown) => this.#damaged(artifactId, error));
     return { bytes, digest: entry.digest, size: entry.size };
   }
 
@@ -1806,11 +1912,13 @@ export function checkStreamEvents(value: unknown): ModelStreamEvent[] {
       case "note": known("text"); return { kind: "note", text: str("text", 1000) };
       case "end": known(); return { kind: "end" };
       case "tool": {
-        known("id", "name", "argumentsDelta", "done");
+        known("id", "name", "alias", "argumentsDelta", "done");
         if (typeof e["done"] !== "boolean") invalid(`events[${i}].done`, "must be true or false");
         const id = str("id", 80);
         if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(id)) invalid(`events[${i}].id`, "is not a tool call ID");
-        return { kind: "tool", id, ...(e["name"] === undefined ? {} : { name: str("name", 80) }), argumentsDelta: str("argumentsDelta", 1024 * 1024), done: e["done"] as boolean };
+        const alias = e["alias"] === undefined ? undefined : str("alias", 120);
+        if (alias !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(alias)) invalid(`events[${i}].alias`, "is not a tool call ID");
+        return { kind: "tool", id, ...(e["name"] === undefined ? {} : { name: str("name", 80) }), ...(alias === undefined ? {} : { alias }), argumentsDelta: str("argumentsDelta", 1024 * 1024), done: e["done"] as boolean };
       }
       default: return invalid(`events[${i}].kind`, "must be text, tool, note or end");
     }

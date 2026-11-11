@@ -34,6 +34,8 @@ export interface LocalWorkspacesOptions {
   readonly busy: () => readonly string[] | Promise<readonly string[]>;
   /** The landing policy of a project (see `WorkspaceHostOptions.landing`). */
   readonly landing?: WorkspaceHostOptions["landing"];
+  /** The worker-side hook for security events (see `WorkspaceHostOptions.security`). */
+  readonly security?: WorkspaceHostOptions["security"];
   readonly clock?: () => string;
 }
 
@@ -60,6 +62,7 @@ export class LocalWorkspaces {
       // Fails closed: a host that cannot say which attempts are busy does not carry the request out (the host treats a throw as not quiet).
       attemptsQuiet: async (attemptIds) => { const busy = new Set(await options.busy()); return !attemptIds.some((id) => busy.has(id)); },
       ...(options.landing === undefined ? {} : { landing: options.landing }),
+      ...(options.security === undefined ? {} : { security: options.security }),
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     });
     this.port = { run: (call) => this.host.run(call) };

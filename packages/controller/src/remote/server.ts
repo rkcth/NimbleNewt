@@ -68,7 +68,8 @@ interface Reply { readonly status: number; readonly body?: unknown; readonly raw
  * task or reads the controller's records: a worker's whole surface is its own session, its offers and the attempts placed on it. Local by default; a remote listener has to be asked for and needs TLS.
  *
  * Routes (all JSON unless noted; `Idempotency-Key` on those that change state, so a retry applies once; every request after `connect` names the session and the negotiated protocol version):
- * `POST /worker/connect`, `POST /worker/session/heartbeat`, `POST /worker/session/reconcile`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|report|usage|heartbeat|acknowledge|complete}`,
+ * `POST /worker/connect`, `POST /worker/session/heartbeat`, `POST /worker/session/reconcile`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|effect|report|usage|heartbeat|acknowledge|complete}`,
+ * `POST /worker/session/security` (a host reports a security event it detected as itself, card U11d),
  * `GET /worker/session/workspace` and `POST /worker/session/workspace/{request}` (the workspace requests for this host and its answer to one, card H12m),
  * `PUT /worker/attempts/{id}/checkpoint`, `GET /worker/attempts/{id}/control`, `GET /worker/attempts/{id}/artifacts`, `GET /worker/attempts/{id}/artifacts/{artifact}/file` (bytes), `POST /worker/attempts/{id}/artifacts`.
  */
@@ -264,6 +265,13 @@ export class WorkerTransport {
       this.#key(req);
       return { status: 200, body: await svc.answerWorkspace(host, session, c, body["outcome"]) };
     }
+    if (a === "session" && b === "security" && c === undefined && parts.length === 3) {
+      allowed("POST");
+      const session = await this.#session(req, host);
+      const body = this.#only(await this.#body(req), ["event"]);
+      this.#key(req);
+      return { status: 200, body: await svc.reportSecurity(host, session, body["event"]) };
+    }
     if (a !== "attempts" || b === undefined || c === undefined) throw new HttpError(404, "not_found", "no such route");
     const session = await this.#session(req, host);
     const attempt = b;
@@ -272,10 +280,11 @@ export class WorkerTransport {
       allowed("POST");
       const body = await this.#body(req);
       const p = placementOf(body);
-      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
+      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "begin": return { status: 200, body: await svc.begin(host, session, attempt, p, body["request"] as never) };
+        case "effect": return { status: 200, body: await svc.effect(host, session, attempt, p, body["request"] as never, body["effect"] as never) };
         case "report": return { status: 200, body: await svc.report(host, session, attempt, p, body["operationId"] as string, body["outcome"] as never) };
         case "usage": await svc.usage(host, session, attempt, p, body["usage"] as never, this.#key(req)); return { status: 204 };
         case "heartbeat": return { status: 200, body: await svc.attemptHeartbeat(host, session, attempt, p) };
