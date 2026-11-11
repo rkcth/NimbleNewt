@@ -512,8 +512,10 @@ test("a confirmed controller that beats and then blocks its event loop is found 
     const files = envLines();
     assert.notEqual(files[0], files[1], "a new file and token per start");
     for (const f of files) assert.ok(f.startsWith(join(w.root, "run", "heartbeat-")), f);
-    await w.waitFor("the new start's first beat", () => runFiles(w).length === 1);
-    assert.deepEqual(runFiles(w), [files[1]!.slice(join(w.root, "run").length + 1)], JSON.stringify({ files, run: runFiles(w) }));
+    // The writer makes each beat as `<file>.<pid>.tmp` and renames it over the record (heartbeat.ts), so a look at the folder can catch that file between the two: only the records count here.
+    const records = (): string[] => runFiles(w).filter((f) => !f.endsWith(".tmp"));
+    await w.waitFor("the new start's first beat", () => records().length === 1);
+    assert.deepEqual(records(), [files[1]!.slice(join(w.root, "run").length + 1)], JSON.stringify({ files, run: runFiles(w) }));
     run.stop();
     assert.equal((await run.done).code, SUPERVISOR_EXIT.stopped);
     assert.deepEqual(runFiles(w), [], "removed when the child is gone");
