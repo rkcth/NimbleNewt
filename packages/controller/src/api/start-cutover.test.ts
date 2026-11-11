@@ -80,8 +80,34 @@ test("the owner sets a route's reply limit and reasoning cap through the state A
       assert.deepEqual((await call("routing.budgets", {})).result.routes, [{ route: "openrouter/qwen", contextTokens: 100_000 }, { route: "strata/qwen", contextTokens: 100_000, maxTokens: 8000, reasoningTokens: 2000 }]);
       const lines = await view();
       assert.match(lines, /1 route\(s\) have a reply limit or a reasoning cap \(a reply cut off at its limit is continued with a nudge to stop deliberating and act\):/);
-      assert.match(lines, /strata\/qwen: replies at most 8000 tokens, reasoning at most 2000 tokens \(no endpoint kind is configured on the controller for this route: on an OpenAI-style endpoint the figures are sent only if the host names the kind; when they are not sent, the task's activity says so\)\./, "the owner can tell why a budget may do nothing");
+      assert.match(lines, /strata\/qwen: replies at most 8000 tokens, reasoning at most 2000 tokens \(no endpoint kind is configured for this route, neither by the controller nor on its provider \(tell the chat what kind of server the provider is\): on an OpenAI-style endpoint the figures are sent only if the host names the kind; when they are not sent, the task's activity says so\)\./, "the owner can tell why a budget may do nothing");
       assert.doesNotMatch(lines, /openrouter\/qwen:/, "a route without a budget is not listed");
+    } finally { await c.close(); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a provider's kind the owner recorded is what the routing view names for its routes, and an unknown kind is refused (card W07 wiring)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rkind-"));
+  try {
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4 });
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
+      const view = async (): Promise<string> => (await call("status.ask", { request: { kind: "model_routes" } })).result.item.lines.map((l: { text: string }) => l.text).join("\n");
+      const providers = [
+        { name: "mine", location: "local", endpoint: "http://127.0.0.1:8002/v1", models: ["big"], contextTokens: 65536, kind: "radiance" },
+        { name: "spare", location: "cloud", endpoint: "https://free.example.invalid/v1", credentialName: "spare-key", models: ["free"], contextTokens: 32000 },
+      ];
+      const added = await call("routing.provider.add", { providers }, "p1");
+      assert.equal(added.ok, true, JSON.stringify(added));
+      for (const route of ["mine/big", "spare/free"]) assert.equal((await call("routing.budget.set", { route, maxTokens: 4000 }, `b-${route}`)).ok, true);
+      const lines = await view();
+      assert.match(lines, /mine\/big: replies at most 4000 tokens, no reasoning cap \(endpoint kind radiance\)\./);
+      assert.match(lines, /spare\/free: replies at most 4000 tokens, no reasoning cap \(no endpoint kind is configured for this route/, "a provider with no recorded kind is told as before");
+      const bad = await call("routing.provider.add", { providers: [{ ...providers[0], kind: "vlmm" }, providers[1]] }, "p2");
+      assert.deepEqual([bad.ok, bad.error?.code], [false, "invalid_command"]);
+      assert.match(bad.error!.message, /providers\[0\]\.kind: must be one of/);
+      assert.match(await view(), /\(endpoint kind radiance\)/, "a refused kind changes nothing");
     } finally { await c.close(); }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

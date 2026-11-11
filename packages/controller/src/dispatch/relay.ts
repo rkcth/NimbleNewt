@@ -93,8 +93,8 @@ export class ModelRelay {
     readonly stream?: ModelStreamTap;
     /** The route's length and reasoning budget (card W07), asked before every call so a change applies to the next call. Absent, or a call with nothing set: the body is sent as the runtime built it. A budget that cannot be read fails the call (the owner's limit is not dropped silently). */
     readonly budget?: () => Promise<RouteBudget | undefined> | RouteBudget | undefined;
-    /** The endpoint's kind when the endpoint itself does not say it (the owner's cache endpoint configuration). */
-    readonly kind?: string;
+    /** The endpoint's kind when the endpoint itself does not say it (the owner's cache endpoint configuration or the provider's record). A function is asked at each call, so a kind the owner changes applies from the next call; one that throws counts as no kind (the figures are then not sent and that is recorded). */
+    readonly kind?: string | (() => Promise<string | undefined> | string | undefined);
     /** Told what of the budget each call carried and what was not sent, with why. Must return at once; a throw is ignored. */
     readonly onBudget?: (applied: BudgetApplied) => void;
   }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
@@ -148,7 +148,11 @@ export class ModelRelay {
             let json: unknown;
             try { json = JSON.parse(Buffer.from(body ?? new Uint8Array()).toString("utf8")); } catch { return refuse("the body is not JSON, so the route's budget cannot be applied"); }
             if (json === null || typeof json !== "object" || Array.isArray(json)) refuse("the body is not a JSON object, so the route's budget cannot be applied");
-            const applied = applyRouteBudget(json as Record<string, unknown>, rest as "chat/completions" | "messages", endpoint!.kind ?? attempt.kind, budget, { addReasoning: !reasoningRefused });
+            let attemptKind: string | undefined;
+            if (endpoint!.kind === undefined && attempt.kind !== undefined) {
+              try { const k = typeof attempt.kind === "function" ? await attempt.kind() : attempt.kind; attemptKind = typeof k === "string" ? k : undefined; } catch (error) { this.#options.onError?.(route, redactText(error instanceof Error ? error.message : String(error)).slice(0, 300)); }
+            }
+            const applied = applyRouteBudget(json as Record<string, unknown>, rest as "chat/completions" | "messages", endpoint!.kind ?? attemptKind, budget, { addReasoning: !reasoningRefused });
             added = applied.added;
             body = Buffer.from(JSON.stringify(json), "utf8");
             try { attempt.onBudget?.(applied); } catch { /* the call is not affected */ }

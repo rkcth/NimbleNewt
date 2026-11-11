@@ -28,6 +28,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
 import type { StallService } from "../health/index.js";
 import { relayMonitor } from "./relay-monitor.js";
+import { providerKind } from "../setup/providers.js";
 
 /** Who the local worker's security hook reports as (card U11d): a host principal with no grants of its own; it can only report. */
 const LOCAL_HOST_REPORTER: Principal = { id: "host:local-worker", kind: "host", name: "local-worker", grants: [] };
@@ -615,8 +616,10 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           const summary = `Route ${order.route}: ${applied.notSent.join("; ")}.`.slice(0, 3900);
           void ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: `rbudget:${order.attemptId}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`, taskId: order.taskId, kind: "model-selected", summary, manifest: { refs: [{ kind: "task", id: order.taskId }] } } as never).catch((error: unknown) => i.onError?.(error));
         };
-        const kind = i.options.cache?.endpoints[order.route]?.config.kind;
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), budget: async () => { const routes = (await i.routing.get())?.routes; const e = routes !== undefined && Object.hasOwn(routes, order.route) ? routes[order.route]! : undefined; return e === undefined ? undefined : { ...(e.maxTokens === undefined ? {} : { maxTokens: e.maxTokens }), ...(e.reasoningTokens === undefined ? {} : { reasoningTokens: e.reasoningTokens }) }; }, ...(kind === undefined ? {} : { kind }), onBudget, onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }), stream: streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, { attemptId: order.attemptId, taskId: order.taskId, generation: order.generation }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
+        // The endpoint's kind: the operator's cache endpoint configuration first, else the kind the owner recorded on the route's provider (guided setup, read at each call so a change applies from the next call).
+        const configured = i.options.cache?.endpoints[order.route]?.config.kind;
+        const kind = configured !== undefined ? configured : (): Promise<string | undefined> => providerKind(storage, order.route);
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), budget: async () => { const routes = (await i.routing.get())?.routes; const e = routes !== undefined && Object.hasOwn(routes, order.route) ? routes[order.route]! : undefined; return e === undefined ? undefined : { ...(e.maxTokens === undefined ? {} : { maxTokens: e.maxTokens }), ...(e.reasoningTokens === undefined ? {} : { reasoningTokens: e.reasoningTokens }) }; }, kind, onBudget, onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }), stream: streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, { attemptId: order.attemptId, taskId: order.taskId, generation: order.generation }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
         relays.set(order.attemptId, found);
       }
       return found.relay;

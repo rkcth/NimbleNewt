@@ -27,6 +27,8 @@ export interface LauncherSecrets {
 export interface LauncherProvider {
   readonly adapter: string;
   readonly endpoint?: string;
+  /** What the model server is (a known backend kind such as `vllm` or `radiance`); the controller refuses an unknown one. */
+  readonly kind?: string;
   readonly credential?: { readonly secret: string };
   readonly enabled: boolean;
   readonly paid: boolean;
@@ -165,12 +167,19 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     return local.length > 0 ? local : chatRoutes(routing, { role: "coordinator", data: "cloud-allowed" })();
   };
   const interpreter = new ModelInterpreter(model, routes);
+  // The second agent that questions a done (card W10 wiring) and the resume reviewer's client: the same HTTP client over the recorded provider addresses, which are re-read before each call (a restart has read none yet). It is asked
+  // only on the route the owner set (`report.reviewerRoute`); with none set the controller records that no second agent questioned the report.
+  const reviewerModel: NonNullable<StartOptions["reviewerModel"]> = {
+    complete: async (route, request) => { await refresh(); return model.complete(route, request); },
+    completeDetailed: async (route, request) => { await refresh(); return model.completeDetailed(route, request); },
+  };
 
   const baseStart: StartOptions = {
     ...(options.start ?? {}),
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => secrets.resolve(name) } }),
     chat: { interpreter },
+    ...(options.start?.reviewerModel === undefined && options.start?.reportInterrogation === undefined ? { reviewerModel } : {}),
     ...(options.serve === undefined ? {} : { conversationTransport: options.serve }),
   };
   let controller = await startController(baseStart);
@@ -218,7 +227,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     const wanted = Object.entries(config.models.providers).filter(([, p]) => p.enabled && p.endpoint !== undefined && p.models.length > 0);
     if (have === undefined && wanted.length > 0) {
       try {
-        const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
+        const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.kind === undefined ? {} : { kind: p.kind }), ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
         notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller: under about 32,768 tokens tasks may stop with a context blocker, and under 8,192 the route is refused).`);
       } catch (error) {
         notes.push(`The model providers in the configuration were not registered yet: ${error instanceof DomainError ? error.message : "a registration problem"}`);

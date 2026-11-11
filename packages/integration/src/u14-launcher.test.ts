@@ -247,3 +247,22 @@ test("the starter configuration the launcher writes loads and holds no secret va
   const loaded = loadConfig(doc);
   assert.ok(loaded.ok, JSON.stringify(loaded));
 });
+
+test("a provider's kind named in the configuration is recorded on the provider with the other fields; an unknown kind keeps the providers from being registered, with the reason told (card W07 wiring)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-u14k-"));
+  try {
+    const good = await launch({ config: configFor(dir, providers({ primary: { ...providers()["primary"]!, kind: "radiance" } })), secrets: memorySecrets(), argv: [], env: {}, print: () => undefined, start });
+    try {
+      const ends = await good.controller.services.setupProviders.endpoints();
+      assert.deepEqual(ends.map((e) => [e.provider, e.kind]).sort(), [["backup", undefined], ["primary", "radiance"]]);
+    } finally { await good.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  const dir2 = mkdtempSync(join(tmpdir(), "nn-u14k-"));
+  try {
+    const bad = await launch({ config: configFor(dir2, providers({ primary: { ...providers()["primary"]!, kind: "vlmm" } })), secrets: memorySecrets(), argv: [], env: {}, print: () => undefined, start });
+    try {
+      assert.match(bad.notes.join("\n"), /model providers in the configuration were not registered yet: .*kind: must be one of/);
+      assert.equal((await bad.controller.services.setupProviders.endpoints()).length, 0);
+    } finally { await bad.close(); }
+  } finally { rmSync(dir2, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

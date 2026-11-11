@@ -20,6 +20,8 @@ export interface Provider {
   /** Which adapter talks to this provider (for example `fake`, `openai-compatible`). */
   readonly adapter: string;
   readonly endpoint?: string;
+  /** What the model server is (`vllm`, `radiance`, `llama-cpp`, `openai`, ...). The controller checks it against the known backends when it registers the provider; it decides how a route's reply limit and reasoning cap are sent. */
+  readonly kind?: string;
   readonly credential?: SecretRef;
   readonly enabled: boolean;
   /** Whether using it costs money. A paid provider is never enabled by a public profile. */
@@ -137,10 +139,11 @@ const SCHEMA: Schema = {
           keyHint: NAME_HINT,
           values: {
             kind: "object",
-            optional: ["endpoint", "credential"],
+            optional: ["endpoint", "credential", "kind"],
             props: {
               adapter: text({ pattern: NAME, hint: NAME_HINT }),
               endpoint: text({ pattern: /^(?:https?:\/\/[^\s/@]+(?:[/?#]\S*)?|\{\{[^}]+\}\})$/, hint: "must be an http(s) URL without embedded credentials" }),
+              kind: text({ pattern: NAME, hint: NAME_HINT }),
               credential: secretRef,
               enabled: { kind: "boolean" },
               paid: { kind: "boolean" },

@@ -488,3 +488,17 @@ test("transfer destinations in the configuration: a PostgreSQL address only as a
   pub.controller.databaseTransfer = { targets: [] };
   assert.match(messages(loadConfig(pub)).join("\n"), /controller\.databaseTransfer: a public profile must not name database transfer destinations/);
 });
+
+test("a provider may name what kind of model server it is (a name, not a secret); anything that is not a plain name is refused with its path (card W07 wiring)", () => {
+  const doc = parsed("private");
+  doc["models"].providers.local.kind = "vllm";
+  const ok = loadOk(doc);
+  assert.equal((ok as any).models.providers.local.kind, "vllm");
+  for (const bad of ["not a name!", 5, "", "../x"]) {
+    const broken = parsed("private");
+    broken["models"].providers.local.kind = bad;
+    const r = loadConfig(broken);
+    assert.equal(r.ok, false, JSON.stringify(bad));
+    assert.ok(!r.ok && r.errors.some((e) => e.path.includes("models.providers.local.kind")), JSON.stringify(bad));
+  }
+});

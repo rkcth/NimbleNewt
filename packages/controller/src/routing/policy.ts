@@ -82,7 +82,7 @@ export interface Selection {
 export const ROUTING_LIMITS = { providers: 50, routes: 200, profiles: 20, perProfile: 20, roles: 50, exclusions: 100, name: 64, capability: 40, capabilities: 20, contextTokens: 10_000_000, reason: 500, maxTokens: 1_000_000, reasoningTokens: 1_000_000 } as const;
 
 const NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
-const ROUTE = /^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+export const ROUTE_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const CAPABILITY = /^[a-z][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const own = <T>(map: Readonly<Record<string, T>>, key: string): T | undefined => (Object.hasOwn(map, key) ? map[key] : undefined);
@@ -101,7 +101,7 @@ function exact(value: unknown, field: string, keys: readonly string[]): Record<s
   for (const key of Object.keys(value)) if (!keys.includes(key)) invalid(`${field}.${key}`, "is not a field here");
   return value as Record<string, unknown>;
 }
-const routeName = (value: unknown, field: string): string => (typeof value === "string" && ROUTE.test(value) ? value : invalid(field, "must be provider/model"));
+const routeName = (value: unknown, field: string): string => (typeof value === "string" && ROUTE_PATTERN.test(value) ? value : invalid(field, "must be provider/model"));
 const plainName = (value: unknown, field: string): string => (typeof value === "string" && NAME.test(value) ? value : invalid(field, "must start with a letter and use letters, digits, '.', '_' or '-' (at most 64 characters)"));
 
 /** Checks a proposed table completely and returns a normalised copy, or refuses with the first problem. Exclusions are managed separately and are not part of a proposal. */

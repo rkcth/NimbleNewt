@@ -7,6 +7,7 @@ import type { RoutingBody } from "../routing/index.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { BACKEND_KINDS } from "../inference-cache/profile.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 const ROUTING: AggregateRef = { kind: "routing-table", id: "routing" };
@@ -35,6 +36,8 @@ export interface ProviderSpec {
   readonly endpoint: string;
   /** The NAME of the secret that holds its key, when it needs one. A value that looks like a key is refused. */
   readonly credentialName?: string;
+  /** What the model server is (one of `BACKEND_KINDS`: `vllm`, `radiance`, `llama-cpp`, `openai`, ...). It names the request fields of a route's reply limit and reasoning cap (card W07) and is never guessed from a name or an address; absent: those figures are not sent on `chat/completions`. */
+  readonly kind?: string;
   readonly models: readonly string[];
   /** The model's context window in tokens; every route needs a known window. */
   readonly contextTokens: number;
@@ -57,7 +60,7 @@ function checkSpec(raw: unknown, i: number): ProviderSpec {
   const at = `providers[${i}]`;
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return invalid(at, "must be an object");
   const e = raw as Record<string, unknown>;
-  for (const k of Object.keys(e)) if (!["name", "location", "paid", "enabled", "endpoint", "credentialName", "models", "contextTokens"].includes(k)) invalid(`${at}.${k}`, "is not a provider field");
+  for (const k of Object.keys(e)) if (!["name", "location", "paid", "enabled", "endpoint", "credentialName", "kind", "models", "contextTokens"].includes(k)) invalid(`${at}.${k}`, "is not a provider field");
   const name = typeof e["name"] === "string" && NAME.test(e["name"]) ? e["name"] : invalid(`${at}.name`, "must start with a letter and use letters, digits, '.', '_' or '-'");
   const location = e["location"] === "local" || e["location"] === "cloud" ? e["location"] : invalid(`${at}.location`, "must be local or cloud");
   for (const k of ["paid", "enabled"]) if (e[k] !== undefined && typeof e[k] !== "boolean") invalid(`${at}.${k}`, "must be true or false");
@@ -69,13 +72,20 @@ function checkSpec(raw: unknown, i: number): ProviderSpec {
     if (!SECRET_NAME.test(c) || redactText(c) !== c) invalid(`${at}.credentialName`, "must be the NAME of a secret in the secret store (letters, digits, '.', '_' or '-'); never the key itself");
     credentialName = c;
   }
+  let kind: string | undefined;
+  if (e["kind"] !== undefined) {
+    // A kind chooses request field names, so only the known ones are taken (matched exactly, as written); a wrong one would send fields a server may refuse or silently ignore.
+    const k = e["kind"];
+    if (typeof k !== "string" || !(BACKEND_KINDS as readonly string[]).includes(k)) invalid(`${at}.kind`, `must be one of ${BACKEND_KINDS.join(", ")} (what the model server is; leave it out when unsure and the reply limit and reasoning cap are simply not sent)`);
+    kind = k as string;
+  }
   if (!Array.isArray(e["models"]) || e["models"].length < 1 || e["models"].length > 20) return invalid(`${at}.models`, "must list 1 to 20 model names");
   const models = e["models"].map((m, j) => (typeof m === "string" && MODEL.test(m) ? m : invalid(`${at}.models[${j}]`, "must be a model name")));
   if (new Set(models).size !== models.length) invalid(`${at}.models`, "lists a model twice");
   const ct = e["contextTokens"];
   if (typeof ct !== "number" || !Number.isSafeInteger(ct) || ct < 1 || ct > ROUTING_LIMITS.contextTokens) invalid(`${at}.contextTokens`, "must be the model's context window as a whole number of tokens");
   if ((ct as number) < MIN_WORKABLE_CONTEXT_TOKENS) invalid(`${at}.contextTokens`, `${String(ct)} tokens is too small for the team to work in (at least ${String(MIN_WORKABLE_CONTEXT_TOKENS)} are needed); give the model's real context window, or choose a model with a larger one`);
-  return { name, location, endpoint, ...(credentialName === undefined ? {} : { credentialName }), ...(e["paid"] === undefined ? {} : { paid: e["paid"] as boolean }), ...(e["enabled"] === undefined ? {} : { enabled: e["enabled"] as boolean }), models, contextTokens: ct as number };
+  return { name, location, endpoint, ...(credentialName === undefined ? {} : { credentialName }), ...(kind === undefined ? {} : { kind }), ...(e["paid"] === undefined ? {} : { paid: e["paid"] as boolean }), ...(e["enabled"] === undefined ? {} : { enabled: e["enabled"] as boolean }), models, contextTokens: ct as number };
 }
 
 /**
@@ -147,7 +157,7 @@ export class SetupProviderService {
           for (const s of specs) {
             const ref: AggregateRef = { kind: PROVIDER_ENDPOINT_KIND, id: s.name };
             const existing = await this.#runner.get(ref.kind, ref.id);
-            const rec: ProviderEndpointBody = { provider: s.name, endpoint: s.endpoint, ...(s.credentialName === undefined ? {} : { credentialName: s.credentialName }), setBy: owner.id };
+            const rec: ProviderEndpointBody = { provider: s.name, endpoint: s.endpoint, ...(s.credentialName === undefined ? {} : { credentialName: s.credentialName }), ...(s.kind === undefined ? {} : { kind: s.kind }), setBy: owner.id };
             changes.push(existing === undefined ? { type: "create", ref, body: rec as unknown as JsonObject } : { type: "update", ref, expectedRevision: existing.revision, body: rec as unknown as JsonObject });
           }
           summary = { providers: specs.map((s) => s.name), routes: added };
@@ -169,4 +179,13 @@ export class SetupProviderService {
     }
     return out;
   }
+}
+
+/** The kind the owner recorded on a route's provider (`provider/model`), or undefined when none is recorded. Read from the records at each call; a stored value that is not a known kind is treated as none. */
+export async function providerKind(storage: ControllerStorage, route: string): Promise<string | undefined> {
+  const slash = route.indexOf("/");
+  if (slash <= 0) return undefined;
+  const record = await storage.getAggregate({ kind: PROVIDER_ENDPOINT_KIND, id: route.slice(0, slash) });
+  const kind = (record?.body as { kind?: unknown } | undefined)?.kind;
+  return typeof kind === "string" && (BACKEND_KINDS as readonly string[]).includes(kind) ? kind : undefined;
 }
