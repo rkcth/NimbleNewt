@@ -113,4 +113,26 @@ for (const backend of backends) {
     await approve(review, rev, c2.id);
     await refuses("forbidden", () => admitAt(review, carol, c2.id, COMMIT), (e) => assert.match(e.message, /does not give one/));
   });
+
+  suite("card A05b: admissions racing for one approval: only the reviewed version can win, and it wins exactly once", async ({ review, ann, rev, task }) => {
+    const r = await ask(review, ann, task, at(COMMIT));
+    await approve(review, rev, r.id);
+    const tries = [COMMIT, "v2", COMMIT, undefined, COMMIT, `${COMMIT} `.trim().toUpperCase()];
+    const outcomes = await Promise.allSettled(tries.map((v) => admitAt(review, ann, r.id, v)));
+    const won = outcomes.flatMap((o, i) => (o.status === "fulfilled" ? [tries[i]] : []));
+    assert.deepEqual(won, [COMMIT], "one admission, at the reviewed version");
+    for (const o of outcomes) if (o.status === "rejected") assert.ok(o.reason instanceof DomainError && o.reason.code === "review_invalid", String(o.reason));
+    assert.equal((await review.get(ann, r.id))!.state, "used");
+  });
+
+  suite("card A05b: a review stored before versions existed (no version in its binding) is cleared and admitted exactly as before", async ({ review, ann, rev, task }) => {
+    const r = await ask(review, ann, task, op());
+    await approve(review, rev, r.id);
+    const stored = (await review.get(rev, r.id))!;
+    assert.deepEqual(Object.keys(stored.binding.target).sort(), ["id", "kind"], "nothing new is written when there is no version");
+    assert.deepEqual(Object.keys(stored.operation.target).sort(), ["id", "kind"]);
+    const again = await ask(review, ann, task, op());
+    assert.deepEqual([again.cleared, again.id], [true, r.id]);
+    assert.equal((await review.admit(ann, { commandId: cid("ad"), requestId: r.id, operation: op() })).admitted, true);
+  });
 }

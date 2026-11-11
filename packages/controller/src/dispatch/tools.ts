@@ -22,6 +22,8 @@ const ENVIRONMENTS = ["development", "testing", "staging", "customer-live"];
 const MAX_ARGS = 64 * 1024;
 const SETTLE_TURNS = 5;
 const TOLD_MAX = 1000;
+/** How long the controller's reading of a target's version may take by default (card A05b). */
+const TARGET_VERSION_MS = 10_000;
 /** Classes whose calls run inside the worker's sandbox or look at things; every other class acts on the outside and goes through the ledger and a bridge. */
 const LOCAL_CLASSES = new Set(["inspect", "workspace-edit", "unknown"]);
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -376,8 +378,17 @@ export class ToolPath {
   async #operation(ready: Ready): Promise<{ name: string; args: JsonObject; script?: string; target: { kind: string; id: string; version?: string } }> {
     const { c, d } = ready;
     const target = c.target ?? { kind: "task", id: d.taskId };
+    const read = this.#deps.targetVersion;
+    if (read === undefined) return { name: c.tool.name, args: c.args, ...(c.script === undefined ? {} : { script: c.script }), target };
+    const limit = this.#deps.targetVersionMs ?? TARGET_VERSION_MS;
     let version: string | undefined;
-    try { version = await this.#deps.targetVersion?.(target, d.taskId); } catch { throw new DomainError("review_invalid", `the version of ${target.kind} ${target.id} could not be read, so the approval cannot be checked against it`, { field: "operation" }); }
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      // A reading that never answers is an unreadable version (fail closed), not a call held forever.
+      version = await Promise.race([read(target, d.taskId), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("no answer")), limit); })]);
+    } catch {
+      throw new DomainError("review_invalid", `the version of ${target.kind} ${target.id} could not be read, so the approval cannot be checked against it`, { field: "operation" });
+    } finally { if (timer !== undefined) clearTimeout(timer); }
     return { name: c.tool.name, args: c.args, ...(c.script === undefined ? {} : { script: c.script }), target: version === undefined ? target : { ...target, version } };
   }
 
