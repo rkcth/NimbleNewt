@@ -260,6 +260,23 @@ export class LocalWorker implements WorkerHost {
   }
 
   /**
+   * Whether an attempt that has finished has anything left here (card L02e): the dispatcher asks again later for an attempt whose close could not end its worker, and a look that finds every sandbox of the attempt
+   * empty is the confirmation (it answers; the attempt's scratch may then be removed). Nothing is killed here (that is Force Stop's `endLocalWork`). It refuses, and the attempt stays unconfirmed, when a process
+   * is still listed, when a sandbox cannot say what it holds, or when this process has no record of the attempt (the controller restarted: nothing can be said about what it left).
+   */
+  async release(attemptId: string, _reason: string, _signal?: AbortSignal): Promise<void> {
+    // A worker of the attempt that is still starting here, or whose handle has not been stopped, is not gone whatever its sandbox lists now (a running worker process is the attempt itself and is not listed, and a start
+    // in progress has launched nothing yet): an end that runs while the start has not answered must not be confirmed (review of L02e).
+    if ((this.#unstopped.get(attemptId) ?? 0) > 0) throw new Error("a worker of the attempt is starting or has not been stopped here");
+    const entry = this.#sessions.get(attemptId);
+    if (entry === undefined) throw new Error("this host has no record of the attempt's sandboxes, so it cannot confirm they are empty");
+    if (entry.sessions.some((s) => s.work === undefined)) throw new Error("a sandbox of the attempt cannot say what it holds");
+    const found = await this.localWork([attemptId]);
+    const left = found.processes.filter((p) => p.attemptId === attemptId).length;
+    if (left > 0) throw new Error(`${left} process${left === 1 ? "" : "es"} of the attempt still run${left === 1 ? "s" : ""} in its sandbox`);
+  }
+
+  /**
    * Force Stop's last step on this host (card L02d): every sandbox session these attempts have had is told to kill what it still holds (`SandboxSession.end`), whether or not its close went through. A session that fails is
    * reported after the others were told (the stop looks again afterwards and names what is left).
    */
@@ -283,7 +300,25 @@ export class LocalWorker implements WorkerHost {
     await hosts.heartbeat(self, { commandId: `beat:${this.hostId}:${this.#beat + 1}`, sequence: ++this.#beat });
   }
 
+  /** For each attempt, how many of its workers this process has started (or is starting) whose handle has not been stopped yet: `release` never confirms such an attempt (review of L02e). */
+  readonly #unstopped = new Map<string, number>();
+  #count(attemptId: string, by: 1 | -1): void {
+    const next = (this.#unstopped.get(attemptId) ?? 0) + by;
+    if (next > 0) this.#unstopped.set(attemptId, next); else this.#unstopped.delete(attemptId);
+  }
+
   async start(order: WorkOrder): Promise<WorkerHandle> {
+    const attemptId = order.attemptId;
+    this.#count(attemptId, 1);
+    let handle: WorkerHandle;
+    try { handle = await this.#start(order); } catch (error) { this.#count(attemptId, -1); throw error; }
+    // The count is taken off once the handle's stop has run, whether or not it ended everything: what is left is then what the sandbox lists.
+    let counted = true;
+    const stop = handle.stop.bind(handle);
+    return { ...handle, stop: async () => { try { await stop(); } finally { if (counted) { counted = false; this.#count(attemptId, -1); } } } };
+  }
+
+  async #start(order: WorkOrder): Promise<WorkerHandle> {
     const options = this.#options;
     const guards = options.guards;
     const report = (what: string, error: unknown): void => { try { options.onGuardError?.(order.attemptId, what, error); } catch { /* the report must not stop the attempt */ } };

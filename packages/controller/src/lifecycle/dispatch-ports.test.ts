@@ -516,3 +516,40 @@ test("a checkpoint quiesces only the attempts the asker may control: a swarm chi
   await ports.checkpoint(task, { by: manager, mode: "suspend" });
   assert.deepEqual(quiesced.sort(), ["att-1", "att-2"], "att-3 belongs to a child the manager may not control");
 });
+
+test("a Stop made after an attempt finished still lists and reaches what its sandbox holds, for a task, an agent and a swarm child; an attempt the asker may not control is left alone (card L02e)", async () => {
+  const held = new Map<string, { taskId: string; agentId: string }>([["att-old", { taskId: "task-x", agentId: "agent:agt-1" }], ["att-kid", { taskId: "task-kid", agentId: "agent:agt-9" }]]);
+  const dispatcher = {
+    liveAttemptsOf: async () => [] as string[],
+    get: async (_by: Principal, id: string) => (held.has(id) ? { taskId: held.get(id)!.taskId, agentId: held.get(id)!.agentId, state: "finished" } : undefined) as never,
+    quiesce: async () => ({}), release: async () => undefined, stop: async () => undefined, operations: async () => [] as never,
+    unconfirmedAttemptsOf: async (_by: Principal, s: { taskId?: string; agentId?: string }) => [...held].filter(([, v]) => (s.taskId === undefined || v.taskId === s.taskId) && (s.agentId === undefined || v.agentId === s.agentId)).map(([id]) => id),
+  };
+  const asked: string[][] = [];
+  const ended: string[][] = [];
+  const local: LocalWork = {
+    processes: async (attempts) => { asked.push([...attempts]); return attempts.map((a) => ({ ref: `pid-of-${a}`, kind: "process" as const, state: "uncooperative" as const })); },
+    costs: async (attempts) => attempts.map((attemptId) => ({ attemptId, costMicros: 5 })),
+    end: async (attempts) => { ended.push([...attempts]); },
+  };
+  const walk = async (ids: readonly string[]) => ({ ids: ids.includes("task-x") ? ["task-kid"] : [], truncated: false });
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), undefined, undefined, undefined, local, undefined, { descendants: async (id) => walk([id]), descendantsOf: walk, mayControl: async (_by, taskId) => taskId !== "task-kid" || mayKid });
+  let mayKid = true;
+  const task = { kind: "task", id: "task-x" } as const;
+  assert.deepEqual((await ports.inventory(task)).map((i) => i.ref).sort(), ["pid-of-att-kid", "pid-of-att-old"], "nothing is live, yet what the finished attempts' sandboxes hold is listed, also a child's");
+  assert.deepEqual((await ports.inventory({ kind: "agent", id: "agt-1" })).map((i) => i.ref), ["pid-of-att-old"], "an agent's Stop reaches its own finished attempt");
+  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 5000).toISOString(), backup: false, by: staff });
+  assert.deepEqual((cleaned.costs ?? []).map((c) => c.attemptId).sort(), ["att-kid", "att-old"], "the cost of winding them down is charged");
+  const forced = await ports.terminate(task, { force: true, by: staff });
+  assert.deepEqual([...forced.unresolved].sort(), ["pid-of-att-kid", "pid-of-att-old"]);
+  assert.deepEqual(ended.at(-1)!.sort(), ["att-kid", "att-old"], "Force Stop kills what their sandboxes hold");
+  // A child the asker may not control is not killed.
+  mayKid = false;
+  await ports.terminate(task, { force: true, by: staff });
+  assert.deepEqual(ended.at(-1), ["att-old"]);
+  // A runtime whose dispatcher cannot say changes nothing.
+  const plain = dispatchStopPorts(() => ({ dispatcher: { ...dispatcher, unconfirmedAttemptsOf: undefined } as never, principal: staff }), undefined, undefined, undefined, local);
+  asked.length = 0;
+  assert.deepEqual(await plain.inventory(task), []);
+  assert.deepEqual(asked, []);
+});
