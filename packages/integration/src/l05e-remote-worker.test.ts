@@ -21,7 +21,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const until = async (ok: () => boolean | Promise<boolean>, why: () => string, ms = 120_000): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(why()); await sleep(100); } };
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
 
-interface Step { readonly call?: { readonly name: string; readonly args: object }; readonly text?: string }
+interface Step { readonly think?: string; readonly call?: { readonly name: string; readonly args: object }; readonly text?: string }
 async function model(steps: Step[]): Promise<{ server: Server; url: string; seen: { body: string; authorization: string | undefined }[] }> {
   const seen: { body: string; authorization: string | undefined }[] = [];
   let at = 0;
@@ -36,6 +36,7 @@ async function model(steps: Step[]): Promise<{ server: Server; url: string; seen
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(sse({ role: "assistant", content: "" }, null));
       const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
+      if (step.think !== undefined) res.write(sse({ reasoning_content: step.think }, null));
       if (step.call !== undefined) {
         res.write(sse({ tool_calls: [{ index: 0, id: `call_${at}`, type: "function", function: { name: step.call.name, arguments: JSON.stringify(step.call.args) } }] }, null));
         res.write(sse({}, "tool_calls", usage));
@@ -57,7 +58,8 @@ test("a remote worker program in a real process takes an offer over the protocol
   git(directory, "init", "-q", "-b", "main", shared);
   writeFileSync(join(shared, "src", "a.ts"), "export const a = 1;\n");
   git(shared, "add", "-A"); git(shared, "commit", "-q", "-m", "first");
-  const answer = await model([{ call: { name: "nimblenewt__work-end", args: { report: "Beans planted.", result: "done", note: "beans" } } }, { text: "Ended." }]);
+  const THOUGHT = "The seeds go in the east bed before the rain.";
+  const answer = await model([{ think: THOUGHT, call: { name: "nimblenewt__work-end", args: { report: "Beans planted.", result: "done", note: "beans" } } }, { text: "Ended." }]);
   const c = await startController({
     storage: { kind: "sqlite", path: join(directory, "c.sqlite") }, argv: [], env: {}, print: () => undefined,
     facts: { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" }, filesystem: async () => ({ type: "ext4", network: false }), features: [], harnesses: [PI],
@@ -108,6 +110,12 @@ test("a remote worker program in a real process takes an offer over the protocol
     const run = (await GenerationService.withEpoch(c.storage, c.epoch).view(owner, GenerationService.runIdOf(taskId, 1)))!.run;
     assert.equal(run.fence?.attemptId, attemptId, "the generation is bound to the remote attempt");
     assert.ok(run.toolCalls.some((call) => call.name === "nimblenewt__work-end"), "the model's tool call was recorded by the controller");
+    // Card U09c: the thinking the model returned crossed the protocol's thinking route to the controller's store, and the owner reads it as they read a local host's. The text is in no line the program printed.
+    const ownerToken = (await s.principals.issueCredential(owner, owner.id)).token;
+    let looked: any;
+    await until(async () => { looked = await c.api.handle(ownerToken, { v: 1, op: "activity.replay.thinking", commandId: `look-${Math.random()}`, args: { taskId, reason: "what was it weighing" } } as never); return looked.ok === true; }, () => `the remote host's thinking never reached the store: ${JSON.stringify(looked)} ${out.join("")}`, 20_000);
+    assert.ok(looked.result.blocks.some((b: { text: string }) => b.text.includes(THOUGHT)), JSON.stringify(looked.result.blocks));
+    assert.equal(out.join("").includes(THOUGHT), false, "the program prints no thinking");
     // The program's only way to the controller's bridge is the tool route, and a task ends as `succeeded` only by the work.end call Pi made, which the bridge answered.
     assert.ok(answer.seen.length >= 1);
     assert.equal(answer.seen[0]!.authorization, `Bearer ${SECRET_TOKEN_MARK}`, "the provider key reached the provider from the host's environment, by the name the configuration gave");

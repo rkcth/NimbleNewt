@@ -24,7 +24,7 @@ import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type DispatcherDeps, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { EnvironmentService } from "../environments/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
@@ -261,6 +261,8 @@ export interface ComposeInput {
    * (an operation is then recorded, run behind the quiesce and answered as a typed outcome). The host is the one that runs the task's live attempt (or the one it is pinned to); with no live attempt, the host of the task's
    * last placement; a live attempt that is waiting with no host pinned names none and nothing is guessed. Only a task never placed anywhere falls back to the one host that has a workspace port, if there is exactly one.
    */
+  /** The controller's reading of a call's target version (card A05b follow-up, `createTargetVersions`); handed to the dispatcher as `targetVersion`. Absent: calls are bound by name only. */
+  readonly targetVersion?: DispatcherDeps["targetVersion"];
   readonly bindWorkspacePort?: (portOf: (taskId: string) => Promise<WorkspacePort | undefined>) => void;
   /** Suspensions and stops the controller was carrying out are carried on each tick, and at start-up by the first one (card L02b). */
   readonly stops?: Pick<StopService, "sweep" | "holding">;
@@ -515,6 +517,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
   const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
   const monitorOf = reporter === undefined ? undefined : (order: WorkOrder & { readonly hostId?: string }): RelayMonitor => relayMonitor(order, reporter, (error) => i.onError?.(error));
+  // The store that keeps the thinking of the task's current attempt, for a local host's process (card U09b) and a remote host's (card U09c): one store, one set of bounds and cleaning.
+  const thinkingStore = ThinkingStore.withEpoch(storage, epoch, ro);
   // The host's launch report goes to the owner's launch record (with what the dispatcher gave the launch and whose each figure was, card A08d) and onto the attempt's own record. The attempt's note is best effort: a note that
   // cannot be written never undoes a launch the host has made.
   const recordLaunch = async (record: LaunchRecord): Promise<void> => {
@@ -593,7 +597,6 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         await context.recordProcessCompaction(principal, { taskId: order.taskId, attemptId: order.attemptId, key: `pc-${createHash("sha256").update(`${order.attemptId}\0${note.digest}`).digest("hex").slice(0, 40)}`, ...note }); } catch (error) { i.onError?.(error); }
     };
     // The thinking the task's own process reported (card U09b): kept for the owner (bounded, cleaned, redacted, switchable), only for the task's current attempt, and only up to the process's own message bounds. A failure is reported and changes nothing for the attempt.
-    const thinkingStore = ThinkingStore.withEpoch(storage, epoch, ro);
     const recordThinking = async (order: WorkOrder, blocks: readonly ReportedThinking[]): Promise<void> => {
       try {
         const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(order.taskId), i.assignments.getAttempt(order.attemptId)]);
@@ -678,6 +681,15 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The placement kept the order's route and the host (card L05e), so a remote call adds its reading of the route's speed on that host.
         ...(monitorOf === undefined ? {} : { monitor: (a: { attemptId: string; taskId: string; generation: number; route?: string; hostId: string }) => monitorOf({ ...a, route: a.route ?? "" } as unknown as WorkOrder) }),
         ...(i.toolBridge === undefined ? {} : { toolBridge: i.toolBridge }),
+        // The thinking a remote host's process reported (card U09c): kept by the same store as a local process's, and only while the attempt is still the task's current one at the placement's generation (anything else is dropped, `stale`). The text is never logged or put in an error.
+        thinking: async (a, blocks) => {
+          try {
+            const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(a.taskId), i.assignments.getAttempt(a.attemptId)]);
+            if (assignment === undefined || attempt === undefined || assignment.state !== "assigned" || assignment.activeAttemptId !== a.attemptId || assignment.generation !== a.generation || attempt.state !== "active") return { kept: 0, reason: "stale" };
+            const r = await thinkingStore.record(principal, { projectId: a.projectId, taskId: a.taskId, agent: a.agentId.startsWith("agent:") ? a.agentId : `agent:${a.agentId}`, attemptId: a.attemptId, blocks });
+            return { kept: r.kept, ...(r.reason === undefined ? {} : { reason: r.reason }) };
+          } catch (error) { i.onError?.(error); return { kept: 0, reason: "unavailable" }; }
+        },
         ...(i.options.remote.monitorProgressMs === undefined ? {} : { monitorProgressMs: i.options.remote.monitorProgressMs }),
         streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id), liveAttempts: (by) => d().liveAttempts(by) },
@@ -733,7 +745,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.onError === undefined ? {} : { onError: i.onError }),
     });
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
+      ...(i.targetVersion === undefined ? {} : { targetVersion: i.targetVersion }), ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses,
       ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,

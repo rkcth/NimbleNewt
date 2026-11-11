@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
-import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
+import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, type ThinkingAnswer, type ThinkingWire, type ArtifactListing, type ControlMessage, type ProcessReport, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
 
 /** One stream-events message carries at most this many events and about this many bytes of JSON (the controller refuses more; its body limit is 1 MB). */
 const STREAM_MESSAGE_EVENTS = 400;
@@ -255,6 +255,24 @@ export class RemoteAttempt implements ToolGateway {
     await this.watchdog?.assertProductive();
     return await this.#post("tool", { token, request: request as unknown as Json }, key ?? `tool:${request.callId}:${createHash("sha256").update(JSON.stringify([request.op, request.args ?? {}])).digest("hex").slice(0, 16)}`) as never;
   }
+  /**
+   * The model's thinking the machine's agent process reported (card U09c), carried to the controller's thinking store. The text is untrusted and goes as it came (the controller cleans and bounds it); a message too large for the route is sent in
+   * parts, each part its own message with a key made from its content, so a part sent again is kept once. Throws `WorkerRequestError` (an older controller refuses the body with 400 "blocks is not a field of this message"); the caller drops it.
+   */
+  async thinking(given: readonly ThinkingWire[], key?: string): Promise<ThinkingAnswer> {
+    await this.watchdog?.assertProductive();
+    // The worker channel lets a process report up to 20,000 characters a block (the local path keeps them, cut by the store); the route takes 8000, so a longer text is cut here (at a character boundary) rather than refused.
+    const cutText = (t: string): string => { if (t.length <= REMOTE_LIMITS.thinkingChars) return t; let end: number = REMOTE_LIMITS.thinkingChars; const c = t.charCodeAt(end - 1); if (c >= 0xd800 && c <= 0xdbff) end -= 1; return t.slice(0, end); };
+    const blocks = given.map((b) => (typeof b.text === "string" && b.text.length > REMOTE_LIMITS.thinkingChars ? { ...b, text: cutText(b.text) } : b));
+    const size = (part: readonly ThinkingWire[]): number => Buffer.byteLength(JSON.stringify(part), "utf8");
+    if (blocks.length > 1 && size(blocks) > REMOTE_LIMITS.thinkingBytes - 4096) {
+      const half = Math.ceil(blocks.length / 2);
+      const a = await this.thinking(blocks.slice(0, half), key === undefined ? undefined : `${key}:a`);
+      const b = await this.thinking(blocks.slice(half), key === undefined ? undefined : `${key}:b`);
+      return { kept: a.kept + b.kept, ...(b.reason === undefined ? {} : { reason: b.reason }) };
+    }
+    return await this.#post("thinking", { blocks: blocks as unknown as Json }, key ?? `thinking:${createHash("sha256").update(JSON.stringify(blocks)).digest("hex").slice(0, 32)}`) as never;
+  }
   async report(operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> { return await this.#post("report", { operationId, outcome: outcome as unknown as Json }) as never; }
   async usage(usage: TurnUsage): Promise<void> { await this.#post("usage", { usage: usage as unknown as Json }); }
   async heartbeat(): Promise<{ readonly until: string; readonly leaseMs?: number }> {
@@ -267,6 +285,8 @@ export class RemoteAttempt implements ToolGateway {
     return { until: answer.until, ...(leaseMs === undefined ? {} : { leaseMs }) };
   }
   async acknowledgeDecisions(): Promise<void> { await this.#post("acknowledge", {}); }
+  /** Tells the controller what this worker holds for the attempt (card L02e); `final` when the sandbox was stopped and looked at again. `kept: false`: the controller already has a newer report (or a final one) and ignored this. */
+  async reportProcesses(report: ProcessReport): Promise<{ readonly kept: boolean }> { return await this.#post("processes", { seq: report.seq, final: report.final, processes: report.processes as unknown as Json }) as { kept: boolean }; }
 
   /**
    * The recorder of this worker's own model calls (card L05c), for the worker's `ModelRelay` (`stream:`). Each call begins a generation on the controller under the task's current context revision and this attempt's fence; the decoded events
