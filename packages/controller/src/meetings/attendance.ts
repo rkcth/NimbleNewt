@@ -816,11 +816,12 @@ export class AttendanceService {
     if (room.body.state !== "open") throw new DomainError("invalid_command", `the room of meeting ${occurrenceId} has ended`, { field: "occurrenceId" });
     if (this.#wake === undefined) throw new DomainError("invalid_command", "waking an agent is not available here: no wake path is composed", { field: "agent" });
     if (att.body.state === "present") return;
-    const availability = await this.#reach(agent);
-    if (availability !== "suspended" && availability !== "stopped") throw new DomainError("invalid_command", `${agent} is ${availability}; only a suspended or stopped agent needs the owner's wake`, { field: "agent" });
     // Each wake of the same agent in the same meeting has its own key (an agent that crashed again must be woken again), but a replay of the command that made the latest wake repeats that key.
     const given = typeof command.commandId === "string" ? command.commandId : undefined;
     const replay = given !== undefined && att.body.wake?.commandId === given && att.body.wake.n !== undefined;
+    // A replay is not asked what the agent reports now: once the host woke it, it reports available (card M04h), and the replay is still the same wake.
+    const availability = replay ? "stopped" : await this.#reach(agent);
+    if (availability !== "suspended" && availability !== "stopped") throw new DomainError("invalid_command", `${agent} is ${availability}; only a suspended or stopped agent needs the owner's wake`, { field: "agent" });
     const n = replay ? att.body.wake!.n! : (att.body.wake?.n ?? (att.body.wake === undefined ? 0 : 1)) + 1;
     await this.#wake.wake({ key: `${occurrenceId}:${agent}:${n}`, agent, occurrenceId, projectId: room.body.projectId });
     if (replay) return;
