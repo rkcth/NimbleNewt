@@ -19,11 +19,15 @@ export function makeRelease(root: string, tag: string): { id: string; digest: st
   return { id, digest: sha256(manifest) };
 }
 
+/** A wall clock and a monotonic clock the test moves together (`advance`), or the wall clock alone (`jump`: the time was set, as a device syncing its clock does). */
 export class Clock {
   #ms: number;
+  #mono = 0;
   constructor(start = "2026-11-11T08:00:00.000Z") { this.#ms = Date.parse(start); }
   now = (): string => new Date(this.#ms).toISOString();
-  advance(seconds: number): void { this.#ms += seconds * 1000; }
+  mono = (): number => this.#mono;
+  advance(seconds: number): void { this.#ms += seconds * 1000; this.#mono += seconds * 1000; }
+  jump(seconds: number): void { this.#ms += seconds * 1000; }
 }
 
 export const pointerSwitcher = (root: string): Switcher => new PointerSwitcher(root);

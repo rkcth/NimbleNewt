@@ -18,7 +18,7 @@ type Reply = { ok: boolean; result?: any; error?: { code: string; message?: stri
 /** What the launcher does when it runs with the controller (and so the database) stopped: only the launcher's file and the pointer change. */
 function launcherSide(root: string, clock: Clock) {
   const sw = pointerSwitcher(root);
-  const launcher = new Launcher({ root, switcher: sw, now: clock.now, workers: { min: 1, max: 1 } });
+  const launcher = new Launcher({ root, switcher: sw, now: clock.now, monotonic: clock.mono, workers: { min: 1, max: 1 } });
   const announce = async (tag: string) => { const r = makeRelease(root, tag); await launcher.expect({ ...r, protocol: { min: 1, max: 1 } }); return r; };
   const run = async (r: { id: string; digest: string }) => { await sw.write(r.id); return launcher.prepare(); };
   return { launcher, announce, run };

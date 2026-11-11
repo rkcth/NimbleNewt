@@ -15,7 +15,7 @@ async function world(body: (w: { root: string; clock: Clock; launcher: Launcher;
   try {
     const clock = new Clock();
     const sw = pointerSwitcher(root);
-    const launcher = new Launcher({ root, switcher: sw, now: clock.now, workers: { min: 1, max: 1 } });
+    const launcher = new Launcher({ root, switcher: sw, now: clock.now, monotonic: clock.mono, workers: { min: 1, max: 1 } });
     const protocol = { min: 1, max: 1 };
     const announce = async (tag: string) => { const r = makeRelease(root, tag); await launcher.expect({ ...r, protocol }); return r; };
     /** The controller's side of an activation: announce, move the pointer, and let the launcher decide. */
@@ -67,6 +67,7 @@ test("the owner's startup window decides when a start is late; it is validated; 
     await assert.rejects(() => w.launcher.setWindow(30.5), LauncherStateError);
     await w.launcher.setWindow(30);
     assert.equal(w.state().window, 30);
+    const good = await w.announce("good"); await w.run(good); await w.launcher.confirm(good.id);
     const first = await w.announce("one");
     await w.run(first);
     w.clock.advance(29);
@@ -75,12 +76,25 @@ test("the owner's startup window decides when a start is late; it is validated; 
     assert.equal((await w.launcher.watchdog()).action, "failed", "30 seconds is the window");
     await w.launcher.setWindow(null);
     assert.equal(w.state().window, undefined, "null puts the default back");
-    // A damaged window in the file is a damaged launcher record: the launcher will not guess.
-    const s = w.state(); writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...s, window: 3 }));
+    // A damaged window or notice never decides what runs: it is the default, or dropped, and the launch goes on (blocking would leave nothing running to repair it). The rest of the record stays strict.
+    const s = w.state();
+    for (const window of [3, 86_401, 30.5, "300", null, -1]) {
+      writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...s, window }));
+      assert.equal((await w.launcher.read()).window, undefined, String(window));
+      assert.equal((await w.launcher.prepare()).action, "run", `window ${String(window)}: the launch goes on`);
+    }
+    const kept = { kind: "failed_start", release: first.id, fallback: true, reason: "r", at: w.clock.now() };
+    writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...w.state(), notices: [{ kind: "nope" }, null, { ...kept, closedBy: "someone" }, kept] }));
+    assert.deepEqual((await w.launcher.read()).notices, [kept], "only the notices that read are kept");
+    assert.equal((await w.launcher.prepare()).action, "run");
+    writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...w.state(), notices: "lots" }));
+    assert.equal((await w.launcher.read()).notices, undefined);
+    writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...w.state(), notices: Array.from({ length: 40 }, () => kept) }));
+    assert.equal((await w.launcher.read()).notices!.length, LAUNCHER_LIMITS.notices, "too many: the newest are kept");
+    // A damaged release entry is still a damaged record: the launcher will not guess what to run.
+    writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...w.state(), known: { id: "x" } }));
     assert.equal((await w.launcher.prepare()).action, "blocked");
     assert.match((await w.launcher.watchdog() as { reason: string }).reason, /not a launcher record/);
-    writeFileSync(join(w.root, LAUNCHER_FILE), JSON.stringify({ ...s, notices: [{ kind: "nope" }] }));
-    assert.equal((await w.launcher.prepare()).action, "blocked");
   });
 });
 
@@ -104,19 +118,117 @@ test("the last known good is never quarantined by the watchdog: a late start of 
   });
 });
 
-test("a start the watchdog finds failed with no last known good leaves nothing to fall back to: the launcher blocks, and the notice says nothing else is known to work (K02e/K02f)", async () => {
+test("a slow start with nothing to fall back to is not set aside: it is late (told as Urgent, left running) and its confirmation still makes it good and closes the notice; if it ends unconfirmed the launcher blocks with one notice (K02e/K02f)", async () => {
   await world(async (w) => {
+    // The first release ever (a long first migration, say): quarantining it would leave the installation blocked for good.
     const only = await w.announce("only");
     await w.run(only);
     w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS);
     const r = await w.launcher.watchdog();
-    assert.equal(r.action, "failed");
-    assert.equal((r as { fallback: boolean }).fallback, false);
+    assert.equal(r.action, "late", JSON.stringify(r));
+    assert.match((r as { reason: string }).reason, /no last known good/);
+    assert.deepEqual(w.state().failed, [], "not quarantined");
+    assert.deepEqual(notices(w.state()).map((n) => [n.kind, n.release, n.fallback]), [["failed_start", only.id, false]]);
+    assert.equal((await w.launcher.watchdog()).action, "none", "judged once");
+    // It comes up after all: it is the last known good, and the Urgent notice about it is over.
+    assert.equal(await w.launcher.confirm(only.id), true);
+    assert.equal(w.state().known.id, only.id);
+    assert.deepEqual(notices(w.state()).map((n) => n.closedBy), ["confirmed"]);
+
+    // A release whose start ends without a confirmation and with nothing to fall back to: blocked, one notice however often the launcher is started.
+    const next = await w.announce("next"); await w.run(next);
+    rmSync(join(w.root, "releases", only.id, "nn.js"));
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS);
+    const r2 = await w.launcher.watchdog();
+    assert.equal(r2.action, "late", "the last known good no longer verifies, so there is nowhere to fall back to");
+    assert.match((r2 as { reason: string }).reason, /no longer verifies/);
+    assert.deepEqual(w.state().failed, []);
     const d = await w.launcher.prepare();
     assert.equal(d.action, "blocked");
-    assert.deepEqual(notices(w.state()).map((n) => [n.kind, n.release, n.fallback]), [["failed_start", only.id, false]], "one notice, however often the launcher is started again");
+    const open = notices(w.state()).filter((n) => n.closedAt === undefined);
+    assert.deepEqual(open.map((n) => [n.kind, n.release, n.fallback]), [["failed_start", next.id, false]]);
     await w.launcher.prepare(); await w.launcher.prepare();
-    assert.equal(notices(w.state()).length, 1);
+    assert.equal(notices(w.state()).filter((n) => n.closedAt === undefined).length, 1, "one notice, however often the launcher is started again");
+  });
+});
+
+test("a clock set forward while a release starts does not fail it under watch(); time on the monotonic clock does (K02e)", async () => {
+  await world(async (w) => {
+    const good = await w.announce("good"); await w.run(good); await w.launcher.confirm(good.id);
+    const slow = await w.announce("slow"); await w.run(slow);
+    const watching = w.launcher.watch({ pollMs: 5 });
+    await new Promise((r) => setTimeout(r, 20));
+    // The device syncs its clock: two days forward, while the release is still starting.
+    w.clock.jump(2 * 86_400);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(w.state().failed, [], "a jump of the wall clock is not time waited");
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS - 1);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(w.state().failed, []);
+    w.clock.advance(1);
+    const r = await watching;
+    assert.equal(r.action, "failed");
+    assert.deepEqual(w.state().failed.map((f: any) => f.id), [slow.id]);
+    // Set back instead: the window is not stretched.
+    const third = await w.announce("third"); await w.run(third);
+    const watching2 = w.launcher.watch({ pollMs: 5 });
+    await new Promise((r) => setTimeout(r, 20));
+    w.clock.jump(-86_400);
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS);
+    assert.equal((await watching2).action, "failed");
+  });
+});
+
+test("a confirmation that arrives after the watchdog set the start aside does not take it out of quarantine; the controller does not record it as good (K02e)", async () => {
+  await world(async (w) => {
+    const good = await w.announce("good"); await w.run(good); await w.launcher.confirm(good.id);
+    const bad = await w.announce("bad"); await w.run(bad);
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS);
+    assert.equal((await w.launcher.watchdog()).action, "failed");
+    // The hung controller comes up before the launcher has stopped it.
+    assert.equal(await w.launcher.confirm(bad.id), false);
+    assert.equal(w.state().known.id, good.id, "the last known good is unchanged");
+    assert.deepEqual(w.state().failed.map((f: any) => f.id), [bad.id]);
+    const d = await w.launcher.prepare();
+    assert.equal((d as { releaseId: string }).releaseId, good.id, "the launcher falls back as decided");
+    // The owner may still vouch for it (owner's decision).
+    await w.launcher.vouch(bad);
+    assert.deepEqual(w.state().failed, []);
+  });
+});
+
+test("the launcher and the controller are two processes writing one file: a change made between another's read and write is not lost (K02e)", async () => {
+  await world(async (w) => {
+    const good = await w.announce("good"); await w.run(good); await w.launcher.confirm(good.id);
+    const slow = await w.announce("slow"); await w.run(slow);
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS);
+    // The controller's process confirms just as the launcher's watchdog has read the record and is deciding: it lands between the watchdog's read and its write.
+    const file = join(w.root, LAUNCHER_FILE);
+    let arm = true;
+    const sneaky = new Launcher({ root: w.root, switcher: w.sw, workers: { min: 1, max: 1 }, monotonic: w.clock.mono, now: () => {
+      if (arm) { arm = false; const s = JSON.parse(readFileSync(file, "utf8")); writeFileSync(file, JSON.stringify({ ...s, attempt: { ...s.attempt, confirmedAt: w.clock.now() }, known: { id: s.attempt.id, digest: s.attempt.digest, confirmedAt: w.clock.now(), protocol: s.attempt.protocol } })); }
+      return w.clock.now();
+    } });
+    const r = await sneaky.watchdog();
+    assert.equal(r.action, "none", "the watchdog read again and found the start confirmed");
+    assert.equal(w.state().known.id, slow.id, "the confirmation was not overwritten");
+    assert.deepEqual(w.state().failed, [], "and the release was not quarantined");
+
+    // The other way: the watchdog's verdict lands between the controller's read of the record and its write (here an announcement, which reads the pointer in between).
+    const late = await w.announce("late"); await w.run(late);
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS);
+    const before = readFileSync(file, "utf8");
+    assert.equal((await new Launcher({ root: w.root, switcher: w.sw, workers: { min: 1, max: 1 }, now: w.clock.now }).watchdog()).action, "failed");
+    const verdict = readFileSync(file, "utf8");
+    writeFileSync(file, before);
+    let once = true;
+    const controllerSide = new Launcher({ root: w.root, now: w.clock.now, switcher: { read: async () => { if (once) { once = false; writeFileSync(file, verdict); } return w.sw.read(); }, write: (id) => w.sw.write(id), clear: () => w.sw.clear() } });
+    const next = makeRelease(w.root, "next");
+    await controllerSide.expect({ ...next, protocol: { min: 1, max: 1 } });
+    assert.equal(once, false, "the verdict did land in between");
+    assert.deepEqual(w.state().failed.map((f: any) => f.id), [late.id], "the quarantine written in between was kept");
+    assert.equal(w.state().expected.id, next.id, "and the announcement was made");
+    assert.equal(notices(w.state()).filter((n) => n.release === late.id).length, 1, "and the watchdog's notice was kept");
   });
 });
 
@@ -128,7 +240,7 @@ test("watch() polls until the start is judged, and stops at once when asked (K02
     const waiting = w.launcher.watch({ pollMs: 5 });
     setTimeout(() => w.clock.advance(11), 30);
     const done = await waiting;
-    assert.equal(done.action, "failed");
+    assert.equal(done.action, "late", "no last known good yet: late, left running");
     // Nothing open any more: the answer comes at once.
     assert.equal((await w.launcher.watch({ pollMs: 5 })).action, "none");
     // A confirmed start ends the watch with nothing judged.
@@ -166,10 +278,12 @@ test("notices are handed over once, a failed send stays pending for the next try
     assert.equal(await w.launcher.closeNotices(() => true, "acknowledged"), 0, "already closed");
     assert.deepEqual(await w.launcher.deliver(sink), { raised: 0, settled: 2, failed: 0 });
     assert.deepEqual(await w.launcher.deliver(sink), { raised: 0, settled: 0, failed: 0 });
-    // An acknowledged notice still stops the same finding from being told again at the next launch.
+    // The owner acknowledged while a controller ran; a fall-back that happens again afterwards (the pointer moved to the failed release once more) is a new event, and it is told.
+    assert.equal(((await w.run(bad)) as { releaseId: string }).releaseId, good.id);
+    assert.deepEqual(notices(w.state()).map((n) => [n.kind, n.closedBy ?? "open"]), [["failed_start", "acknowledged"], ["fell_back", "open"]]);
+    assert.deepEqual(await w.launcher.deliver(sink), { raised: 1, settled: 0, failed: 0 });
     await w.run(bad);
-    assert.equal(notices(w.state()).length, 2);
-    assert.ok(notices(w.state()).every((n) => n.closedBy === "acknowledged"));
+    assert.equal(notices(w.state()).length, 2, "while it is open, a repeat adds nothing");
   });
 });
 
@@ -202,7 +316,7 @@ test("a later start that confirms closes the earlier notices; one that was never
   });
 });
 
-test("the notice list is bounded: finished notices make room first, then the oldest (K02f)", async () => {
+test("the notice list is bounded: finished notices make room first, then told ones, then the oldest; never the new one (K02f)", async () => {
   await world(async (w) => {
     const good = await w.announce("good"); await w.run(good); await w.launcher.confirm(good.id);
     for (let i = 0; i < LAUNCHER_LIMITS.notices + 6; i++) {
@@ -212,6 +326,17 @@ test("the notice list is bounded: finished notices make room first, then the old
     }
     assert.equal(notices(w.state()).length, LAUNCHER_LIMITS.notices);
     assert.equal(w.state().failed.length, LAUNCHER_LIMITS.notices + 6);
+    // Full of open notices: one never told (its send keeps failing) and the rest told. A new one makes room by dropping a told one (it is in the owner's inbox), never the untold one, never itself.
+    const oldest = notices(w.state())[0]!.release;
+    await w.launcher.deliver({ raise: async (n) => { if (n.release === oldest) throw new Error("down"); }, settle: async () => undefined });
+    const secondOldest = notices(w.state())[1]!.release;
+    const last = await w.announce("last"); await w.run(last);
+    w.clock.advance(DEFAULT_STARTUP_WINDOW_SECONDS); await w.launcher.watchdog();
+    const after = notices(w.state());
+    assert.equal(after.length, LAUNCHER_LIMITS.notices);
+    assert.ok(after.some((n) => n.release === oldest), "the notice nobody was told yet is kept");
+    assert.ok(!after.some((n) => n.release === secondOldest), "the oldest told one made room");
+    assert.equal(after.at(-1)!.release, last.id, "the newest is kept");
     assert.deepEqual(readdirSync(w.root).filter((f) => f.includes("tmp")), [], "no temporary file is left behind");
   });
 });
