@@ -116,6 +116,11 @@ export type ToChild =
   /** The controller refused the renewal because the attempt is no longer this process's (moved, replaced, ended): productive work stops at once. */
   | { readonly t: "lease.fenced"; readonly id: number; readonly reason: string };
 
+/** One block of model thinking a process reports (card U09b). `block` is the position within its conversation entry. */
+export interface ThinkingReport { readonly entryId: number; readonly block: number; readonly provider: string; readonly model: string; readonly text: string; readonly opaque: boolean }
+/** The bounds of one `thinking` message: blocks per message and characters per block (the process cuts; the host's parser refuses more). */
+export const THINKING_REPORT = { blocks: 50, chars: 8000, parseChars: 20_000 } as const;
+
 /** Process to host. */
 export type FromChild =
   /** `toolSchemaChars`: the size of the tools as offered to the model; `systemPromptChars` when the process knows it (card H12f: context admission). */
@@ -135,6 +140,11 @@ export type FromChild =
   | { readonly t: "compact.ok"; readonly id: number; readonly contextTokens?: number }
   /** The process compacted its own conversation (card C07q): how many messages it replaced, how long its summary is and the summary's sha-256 in hex. The text stays in the process's store; the host tells the controller, which keeps the compaction in the task's chain. */
   | { readonly t: "compacted"; readonly messageCount: number; readonly summaryChars: number; readonly digest: string }
+  /**
+   * The model's thinking returned during the turn (card U09b): the blocks the conversation kept since the last report, at most `THINKING_REPORT.blocks`, each cut to `THINKING_REPORT.chars` by the process. It is untrusted model output: the host passes
+   * it to the controller, which removes control characters, hides credentials, bounds and stores it for the owner; it is never given to an agent or a model. Told, not asked. A worker from before U09b sends none.
+   */
+  | { readonly t: "thinking"; readonly blocks: readonly ThinkingReport[] }
   /** The lease ended (card H08b3): told on its own so the host sees it whether or not a turn is open (an unsolicited `result` has no waiter). `reason` is a `LossReason`. */
   | { readonly t: "lease.lost"; readonly reason: string }
   /** Asks the controller to extend the attempt's lease (card H08b); answered `lease.ok` or `lease.fenced` with the same ID, or not at all (the controller could not be asked: the lease runs on and may end). */
@@ -259,6 +269,18 @@ export function parseFromChild(value: unknown): FromChild {
       const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");
       const durable = value["durable"] === undefined ? undefined : durabilityOf(obj(value, "durable"));
       return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }), ...(durable === undefined ? {} : { durable }) };
+    }
+    case "thinking": {
+      const list = value["blocks"];
+      if (!Array.isArray(list) || list.length < 1 || list.length > THINKING_REPORT.blocks) return fail(`blocks: 1 to ${THINKING_REPORT.blocks} blocks`);
+      const blocks = list.map((b): ThinkingReport => {
+        if (!isObj(b)) return fail("blocks: each block is an object");
+        if (typeof b["opaque"] !== "boolean") return fail("opaque: must be true or false");
+        const provider = str(b, "provider", 80); const model = str(b, "model", 200);
+        if (provider === "" || model === "") return fail("provider and model: required");
+        return { entryId: int(b, "entryId"), block: int(b, "block"), provider, model, text: str(b, "text", THINKING_REPORT.parseChars), opaque: b["opaque"] };
+      });
+      return { t: "thinking", blocks };
     }
     case "lease.lost": return { t: "lease.lost", reason: str(value, "reason", 40) };
     case "lease.renew": return { t: "lease.renew", id: int(value, "id") };

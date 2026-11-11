@@ -962,3 +962,24 @@ test("W12: a process that goes on with a conversation already showing the same a
   assert.equal(await withoutShownAnchor({ root: () => ({ transcript: async () => cutAway }) } as never, `${GOAL}\n\nKeep going`, digest), `${GOAL}\n\nKeep going`, "an entry before the view's start is not shown to the model");
   assert.equal(await withoutShownAnchor({ root: () => ({ transcript: async () => { throw new Error("store"); } }) } as never, `${GOAL}\n\nx`, digest), `${GOAL}\n\nx`, "a store that cannot be read changes nothing");
 });
+
+test("U09b: the thinking a turn returned is reported once, before its result, as bounded text (the controller, not the process, cleans it)", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage([fauxThinking("I should read the parser file first.\u0007 Key AKIAABCDEFGHIJKLMNOP is in the log."), fauxText("Reading it now.")])]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "fix the parser" });
+  const result = await h.next("result");
+  assert.equal(result.status, "completed");
+  const reports = h.seen.filter((m): m is Extract<FromChild, { t: "thinking" }> => m.t === "thinking");
+  assert.equal(reports.length, 1, "one report for the turn");
+  assert.ok(h.seen.indexOf(reports[0]!) < h.seen.indexOf(result), "told before the result");
+  const [block] = reports[0]!.blocks;
+  assert.equal(block!.model, "scripted");
+  assert.match(block!.text, /read the parser file first/);
+  assert.equal(block!.opaque, false);
+  assert.ok(block!.text.length <= 8000);
+  h.send({ t: "close" });
+  await h.done;
+});

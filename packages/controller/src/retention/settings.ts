@@ -31,7 +31,7 @@ export interface RetentionValues {
   readonly noteArchiveDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;
-  /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). Recorded here; the deletion itself needs adapter support (card K06c). */
+  /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). The controller removes what it kept of the thinking the workers reported (card U09b, retention rule thinking-days); removing the conversation store's own copy needs adapter support (card K06c). */
   readonly thinkingDays: number;
   /** Backup counts the nightly run keeps (the K01 rule: 7 daily, 4 weekly). The newest backup and every pre-upgrade snapshot are always kept. */
   readonly backupDaily: number;

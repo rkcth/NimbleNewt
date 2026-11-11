@@ -521,8 +521,8 @@ export class ChatService {
         // A task's activity, explanations, replay, hand-off, work report (card W10) or stop cleanup is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
         // A title beside an ID, or one that is not text, is dropped: the ID (or the missing task) decides. A stop-cleanup question that names a scope has no use for a title either, so the title goes.
         if (request["kind"] === "stop_cleanup" && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
-        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "attempt_endings" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
-        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "attempt_endings" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "attempt_endings" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "attempt_endings" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           const wanted = request["taskTitle"];
           const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
@@ -1903,8 +1903,10 @@ export class ChatService {
     // Before each part of the plan (the state-changing step) the caller's own authority is looked at again: a request whose browser session was revoked while it ran stops here.
     for (const item of turn.plan) { await guard?.(); outcomes.push(await this.#do(owner, token, turnId, item, turn.text, guard)); }
     const done: TurnBody = fitAnswers({ ...turn, status: "done", outcomes, completedAt: this.#runner.now() });
+    // The model's thinking quoted in an answer (card U09b) is shown now and not kept in the turn or the project's context line: the copy the controller keeps is removed by retention (thinking-days), and a copy in the chat would outlive it.
+    const kept = withoutThinkingText(done);
     try {
-      await this.#finishTurn(owner, turnId, done);
+      await this.#finishTurn(owner, turnId, kept);
     } catch (error) {
       // A database transfer applied by this very message fences the database the turn lives in (card F04m): the move was made, and the note that the turn is done cannot be written to the database that was just retired.
       // The owner is told it was applied. The turn stays unfinished in the new database and the records that would follow (the project's context line, the resumed question) are not written; nothing writes them later (card F04m).
@@ -1926,7 +1928,7 @@ export class ChatService {
     if (turn.projectId !== undefined) {
       const pid = turn.projectId;
       const lastTask = outcomes.map((o) => (o.op?.startsWith("task.") === true ? o.id : undefined)).find((id) => id !== undefined);
-      const summary = replyOf(outcomes).join(" ").slice(0, 200);
+      const summary = replyOf(kept.outcomes ?? []).join(" ").slice(0, 200);
       await this.#updateContext(owner.id, `${turnId}-ctx`, { turnId }, (c, at) => {
         const prev = c.projects[pid] ?? { touchedAt: at, turns: [] };
         const turns = [...prev.turns, { turnId, at, summary: `${turn.text.slice(0, 100)} -> ${summary}`.slice(0, 300) }].slice(-CHAT_LIMITS.turnsPerProject);
@@ -2477,6 +2479,17 @@ const TURN_SLACK_BYTES = 8 * 1024;
  * three-byte script can be over a kilobyte, so eight long answers could pass the limit and the turn could never be recorded as done. Lines are left out from the end of the last answers first until the
  * record fits; each answer counts what it left out in `moreLines`, as an answer cut at 30 lines does.
  */
+/** A finished turn as it is stored: the quoted blocks of a `thinking` status answer (card U09b) are replaced by a line saying they were shown; the count, the label and where to continue stay. */
+export function withoutThinkingText(body: TurnBody): TurnBody {
+  const thinking = new Set(body.plan.filter((it) => it.kind === "status" && (it as { request?: { kind?: unknown } }).request?.kind === "thinking").map((it) => it.i));
+  if (thinking.size === 0) return body;
+  const outcomes = (body.outcomes ?? []).map((o) => (!thinking.has(o.i) || o.lines === undefined ? o : {
+    ...o,
+    lines: o.lines.map((l) => { const m = /^Block (\d+) \(/.exec(l.text); return m === null ? l : { ...l, text: `Block ${m[1]}: shown when it was asked for; the chat keeps no copy of the model's thinking (ask again to see it while it is kept).` }; }),
+  }));
+  return { ...body, outcomes };
+}
+
 export function fitAnswers(body: TurnBody): TurnBody {
   const bytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");
   let excess = bytes(body) - (STORAGE_LIMITS.bodyBytes - TURN_SLACK_BYTES);

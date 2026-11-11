@@ -86,6 +86,7 @@ export function buildSummary(input: SummaryInput): SummaryContent {
     occurrenceId: record.occurrenceId, recordId: input.recordId, title: record.title, meetingState: record.state, partial: record.state === "interrupted",
     attendance: { present, absent, didNotTakePart, ...(record.chair === undefined ? {} : { chair: record.chair }), owner: { present: record.ownerPresent, joins: record.ownerJoins } },
     keyUpdates: tagged("update"), decisions: decisionRows, adopted, applied, notApplied, dissent, unresolved, actions: tagged("action"), plan: tagged("plan"),
+    ...(record.ownerAnswers === undefined || record.ownerAnswers.length === 0 ? {} : { ownerAnswers: record.ownerAnswers.map((a) => ({ ...a })) }),
     consistent: isConsistent(decisionRows, adopted, applied, notApplied, waiting),
     unverifiableCount: all.filter((v) => !v).length,
   };
