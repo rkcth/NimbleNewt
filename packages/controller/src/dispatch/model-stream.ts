@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * The model stream as the controller sees it (card L05b). The relay carries the bytes of every model reply to the worker process; `ModelStreamDecoder` reads the same bytes (it never changes them) and turns them into a few
  * provider-neutral events: text, a piece of a tool call, the end. The generation service records those events against the revision the call began under (`stream-feed.ts`), and the relay holds back the bytes of a reply whose generation was
@@ -7,7 +8,7 @@
 export type ModelStreamEvent =
   | { readonly kind: "text"; readonly text: string }
   /** A piece of a tool call's arguments; `name` arrives with the first piece, `done` with the last. */
-  | { readonly kind: "tool"; readonly id: string; readonly name?: string; readonly argumentsDelta: string; readonly done: boolean }
+  | { readonly kind: "tool"; readonly id: string; readonly name?: string; /** With the first piece: the ID the worker's tool bridge will send for this call when it is not `id` (the provider's own ID was unsafe or too long, see `bridgeCallIdOf`; card L05d). */ readonly alias?: string; readonly argumentsDelta: string; readonly done: boolean }
   | { readonly kind: "end" }
   /** Something the recording could not follow (the decoder gave up, a line was too long, a reply was too big to hold): a short visible note, recorded as text so the gap is not silent. */
   | { readonly kind: "note"; readonly text: string };
@@ -34,6 +35,13 @@ export class ModelStreamRefused extends Error { constructor(message: string) { s
 
 const MAX_LINE = 1024 * 1024;
 const MAX_WHOLE = 4 * 1024 * 1024;
+/**
+ * The call ID the Pi extension's tool bridge sends for a provider's tool call ID (`pi-adapter/src/bridge.ts`, `safeCallId`): the ID itself when it is 1 to 120 letters, digits or . _ : -, else `h:` and the first 40 hex digits of its SHA-256.
+ * A provider ID the recorder cannot keep (over 80 characters, other characters, or none) is recorded as `call-<n>`; its bridge ID is recorded as an alias, so the call is still found when the bridge presents it (card L05d). The second use of one
+ * ID in an attempt (`d:...`) is derived by `reusedCallIds` in the generation service, from the recorded ID.
+ */
+export function bridgeCallIdOf(raw: string): string { return /^[A-Za-z0-9._:-]{1,120}$/.test(raw) ? raw : `h:${createHash("sha256").update(raw).digest("hex").slice(0, 40)}`; }
+const aliasOf = (raw: unknown, id: string): string | undefined => { if (typeof raw !== "string" || raw === "") return undefined; const bridge = bridgeCallIdOf(raw); return bridge === id ? undefined : bridge; };
 const safeId = (value: unknown, fallback: string): string => (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : fallback);
 
 interface Open { id: string; named: boolean; done: boolean }
@@ -139,7 +147,8 @@ export class ModelStreamDecoder {
             if (open === undefined) { open = { id: safeId(t["id"], `call-${index}`), named: false, done: false }; this.#calls.set(key, open); }
             const args = typeof fn["arguments"] === "string" ? fn["arguments"] : "";
             if (!fresh && name === undefined && args === "") continue;
-            out.push({ kind: "tool", id: open.id, ...(name !== undefined && !open.named ? { name } : {}), argumentsDelta: args, done: false });
+            const alias = fresh ? aliasOf(t["id"], open.id) : undefined;
+            out.push({ kind: "tool", id: open.id, ...(name !== undefined && !open.named ? { name } : {}), ...(alias === undefined ? {} : { alias }), argumentsDelta: args, done: false });
             if (name !== undefined) open.named = true;
           }
         }
@@ -155,7 +164,8 @@ export class ModelStreamDecoder {
       if (block["type"] === "tool_use") {
         const id = safeId(block["id"], `call-${index}`);
         this.#calls.set(key, { id, named: true, done: false });
-        out.push({ kind: "tool", id, name: safeId(block["name"], "tool"), argumentsDelta: "", done: false });
+        const alias = aliasOf(block["id"], id);
+        out.push({ kind: "tool", id, name: safeId(block["name"], "tool"), ...(alias === undefined ? {} : { alias }), argumentsDelta: "", done: false });
       } else if (typeof block["text"] === "string" && block["text"] !== "") out.push({ kind: "text", text: block["text"] });
     } else if (type === "content_block_delta") {
       const delta = (typeof j["delta"] === "object" && j["delta"] !== null ? j["delta"] : {}) as Record<string, unknown>;
@@ -183,14 +193,20 @@ export class ModelStreamDecoder {
         (message["tool_calls"] as (Record<string, unknown> | null)[]).forEach((t, index) => {
           if (t === null || typeof t !== "object") return;
           const fn = (typeof t["function"] === "object" && t["function"] !== null ? t["function"] : {}) as Record<string, unknown>;
-          out.push({ kind: "tool", id: safeId(t["id"], `call-${index}`), name: safeId(fn["name"], "tool"), argumentsDelta: typeof fn["arguments"] === "string" ? fn["arguments"] : "", done: true });
+          const id = safeId(t["id"], `call-${index}`);
+          const alias = aliasOf(t["id"], id);
+          out.push({ kind: "tool", id, name: safeId(fn["name"], "tool"), ...(alias === undefined ? {} : { alias }), argumentsDelta: typeof fn["arguments"] === "string" ? fn["arguments"] : "", done: true });
         });
       }
     } else if (Array.isArray(j["content"])) {
       (j["content"] as (Record<string, unknown> | null)[]).forEach((b, index) => {
         if (b === null || typeof b !== "object") return;
         if (b["type"] === "text" && typeof b["text"] === "string" && b["text"] !== "") out.push({ kind: "text", text: b["text"] });
-        else if (b["type"] === "tool_use") out.push({ kind: "tool", id: safeId(b["id"], `call-${index}`), name: safeId(b["name"], "tool"), argumentsDelta: JSON.stringify(b["input"] ?? {}), done: true });
+        else if (b["type"] === "tool_use") {
+          const id = safeId(b["id"], `call-${index}`);
+          const alias = aliasOf(b["id"], id);
+          out.push({ kind: "tool", id, name: safeId(b["name"], "tool"), ...(alias === undefined ? {} : { alias }), argumentsDelta: JSON.stringify(b["input"] ?? {}), done: true });
+        }
       });
     } else return;
     out.push({ kind: "end" });

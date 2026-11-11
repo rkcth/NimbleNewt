@@ -13,7 +13,7 @@ export const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", versio
 export const AGENT = "agt-abcdefghijklmnopqrst";
 
 /** A composed controller with two remote hosts, a clock the test moves and an agent with tasks to run. */
-export async function world(d: string, policy: { dataHosts?: string[]; platforms?: { os: string; arch: string }[]; credentialHosts?: string[] }, options: { requirements?: () => Record<string, unknown>; checkpointWaitMs?: number; start?: Partial<Parameters<typeof startController>[0]> } = {}) {
+export async function world(d: string, policy: { dataHosts?: string[]; platforms?: { os: string; arch: string }[]; credentialHosts?: string[] }, options: { requirements?: () => Record<string, unknown>; checkpointWaitMs?: number; /** More grants for the agent (for a test that writes through the bridge). */ grants?: { action: string; project?: string }[]; start?: Partial<Parameters<typeof startController>[0]> } = {}) {
   let now = Date.now();
   const timer = new ManualTimer();
   const requirements = (options.requirements ?? (() => ({ data: "local-only" as const, harness: "pi" }))) as () => never;
@@ -32,7 +32,7 @@ export async function world(d: string, policy: { dataHosts?: string[]; platforms
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
   const rob = await c.services.principals.authenticate(boot.token);
   const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
-  await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: AGENT, grants: workGrants(project, ["read-file"]) });
+  await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project, ["read-file"]), ...(options.grants ?? [])] as never });
   const host = async (name: string, connect = true, caps: Record<string, unknown> = CAPS) => {
     await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "host", name, grants: [] });
     const token = (await c.services.principals.issueCredential(rob, `host:${name}`)).token;

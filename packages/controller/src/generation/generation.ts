@@ -41,6 +41,8 @@ export type CallState = "partial" | "complete" | "held" | "admitted" | "dropped"
 
 export interface ToolCall {
   readonly id: string;
+  /** The IDs the worker's tool bridge presents for this call when they are not `id` (the provider's own ID was unsafe or over 80 characters; card L05d). */
+  readonly aliases?: readonly string[];
   readonly name: string;
   readonly args: string;
   readonly state: CallState;
@@ -99,7 +101,7 @@ export interface BeginRun extends NoActor {
   /** The task is paused (L01) but its model call is recorded anyway (card L05c): the generation is begun and marked `beganPaused`. Only the dispatcher may ask. Nothing the generation produces can be admitted as an effect while the pause stands. */
   readonly whilePaused?: boolean;
 }
-export interface RecordPiece { readonly text?: string; readonly toolCall?: { readonly id: string; readonly name?: string; readonly argumentsDelta?: string; readonly done?: boolean } }
+export interface RecordPiece { readonly text?: string; readonly toolCall?: { readonly id: string; readonly name?: string; /** With the first piece: the ID the tool bridge will present for the call when it is not `id`. */ readonly alias?: string; readonly argumentsDelta?: string; readonly done?: boolean } }
 export interface RecordChunk extends NoActor, RecordPiece {
   readonly runId: string;
   readonly seq: number;
@@ -117,13 +119,24 @@ export class GenerationRefused extends DomainError {
 }
 
 export interface RunView { readonly run: View<RunBody>; /** True while this is still the task's current generation at the current context revision and it has not been interrupted (a hold does not change it). */ readonly current: boolean }
+/** What the generation record says of a tool call a bridge request presents (card L05c, L05d). `name` and `args` are what the model wrote, for the bridge to compare with the operation it was asked for. */
+export type CallVerdict =
+  | { readonly recorded: false; /** The task is held: even a call no generation holds is not to run. */ readonly held?: string }
+  | { readonly recorded: true; readonly ok: boolean; readonly runId: string; readonly number: number; readonly reason?: string; /** The call's own recorded ID (the presented one may be an alias). */ readonly callId: string; readonly name: string; readonly args: string; readonly state: CallState; readonly effectId?: string };
 export interface GateView { readonly gate: View<GateBody> }
 
 export const GENERATION_LIMITS = { batch: 64, text: 64 * 1024, delta: 8 * 1024, args: 16 * 1024, toolCalls: 32, late: 50, preview: 200, reason: 500, callId: 80, kind: 40, target: 500 } as const;
 /** How many of a task's latest generations are searched for a tool call. */
 export const GENERATION_CHECK_RUNS = 20;
+/** The most a repeated provider ID is numbered when it is looked for (`d:` IDs), and the most digests one look makes. */
+export const GENERATION_REUSE_MAX = 1000;
+export const GENERATION_REUSE_HASHES = 50_000;
+/** The ID the Pi extension's tool bridge sends for a provider ID it is given a second time (the nth use, n from 2): `d:` and 40 hex digits of SHA-256 over the base ID, a NUL and n (`pi-adapter/src/bridge.ts`, `unique`). */
+export const reusedCallId = (base: string, n: number): string => `d:${createHash("sha256").update(`${base}\0${n}`).digest("hex").slice(0, 40)}`;
 const RUN_ID = /^grun-[a-z2-7]{20}-\d{10}$/;
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
+/** The IDs the tool bridge presents (`pi-adapter` `safeCallId`): a provider's own ID up to 120 characters, or `h:` and a digest. */
+const BRIDGE_CALL_ID = /^[A-Za-z0-9_.:-]{1,120}$/;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string, max: number): string => {
@@ -250,7 +263,7 @@ export class GenerationService {
     return this.recordMany(principal, { commandId: command.commandId, runId: command.runId, seq: command.seq, pieces: [{ ...(command.text === undefined ? {} : { text: command.text }), ...(command.toolCall === undefined ? {} : { toolCall: command.toolCall }) }] });
   }
 
-  #shape(piece: unknown): { text?: string; delta?: { id: string; name?: string; argumentsDelta: string; done: boolean } } {
+  #shape(piece: unknown): { text?: string; delta?: { id: string; name?: string; alias?: string; argumentsDelta: string; done: boolean } } {
     if (piece === null || typeof piece !== "object" || Array.isArray(piece)) invalid("pieces", "each piece must be an object");
     onlyKnown(piece as object, ["text", "toolCall"]);
     const p = piece as RecordPiece;
@@ -261,14 +274,15 @@ export class GenerationService {
     }
     const t = p.toolCall as unknown;
     if (t === null || typeof t !== "object" || Array.isArray(t)) invalid("toolCall", "must be an object");
-    onlyKnown(t as object, ["id", "name", "argumentsDelta", "done"]);
-    const c = t as { id?: unknown; name?: unknown; argumentsDelta?: string; done?: unknown };
+    onlyKnown(t as object, ["id", "name", "alias", "argumentsDelta", "done"]);
+    const c = t as { id?: unknown; name?: unknown; alias?: unknown; argumentsDelta?: string; done?: unknown };
     if (typeof c.id !== "string" || !CALL_ID.test(c.id)) invalid("toolCall.id", "must be 1 to 80 letters, digits or . _ : -");
     if (c.name !== undefined && (typeof c.name !== "string" || !CALL_ID.test(c.name))) invalid("toolCall.name", "must be 1 to 80 letters, digits or . _ : -");
     if (c.argumentsDelta !== undefined && (typeof c.argumentsDelta !== "string" || c.argumentsDelta.length > GENERATION_LIMITS.delta)) invalid("toolCall.argumentsDelta", `must be a string of at most ${GENERATION_LIMITS.delta} characters`);
     if (c.done !== undefined && typeof c.done !== "boolean") invalid("toolCall.done", "must be true or false");
     if ((c.argumentsDelta === undefined || c.argumentsDelta.length === 0) && c.done !== true && c.name === undefined) invalid("toolCall", "carries nothing");
-    return { delta: { id: c.id as string, ...(c.name === undefined ? {} : { name: c.name as string }), argumentsDelta: c.argumentsDelta ?? "", done: c.done === true } };
+    if (c.alias !== undefined && (typeof c.alias !== "string" || !BRIDGE_CALL_ID.test(c.alias))) invalid("toolCall.alias", "must be 1 to 120 letters, digits or . _ : -");
+    return { delta: { id: c.id as string, ...(c.name === undefined ? {} : { name: c.name as string }), ...(c.alias === undefined ? {} : { alias: c.alias as string }), argumentsDelta: c.argumentsDelta ?? "", done: c.done === true } };
   }
 
   /**
@@ -472,13 +486,18 @@ export class GenerationService {
    * `kind` and `target` say what the effect is (the tool mapping is T-card territory); the input is the call's arguments. A call that is partial, dropped or withdrawn, or a generation that is streaming, is refused.
    */
   async admitEffect(principal: Principal, command: NoActor & { runId: string; toolCallId: string; kind: string; target: string }): Promise<{ effectId: string; replayed: boolean }> {
+    return this.#admitEffect(principal, command, false);
+  }
+
+  async #admitEffect(principal: Principal, command: NoActor & { runId: string; toolCallId: string; kind: string; target: string }, forBridge: boolean): Promise<{ effectId: string; replayed: boolean }> {
     onlyKnown(command, ["commandId", "runId", "toolCallId", "kind", "target"]);
     if (typeof command.toolCallId !== "string" || !CALL_ID.test(command.toolCallId)) invalid("toolCallId", "is not a tool call ID");
     const kind = typeof command.kind === "string" && KIND.test(command.kind) ? command.kind : invalid("kind", "must be 1 to 40 lower-case letters, digits or hyphens, starting with a letter");
     const target = text(command.target, "target", { min: 1, max: GENERATION_LIMITS.target });
     const found = await this.#mine(principal, command.runId, "attempt.work");
     const run0 = found.body as unknown as RunBody;
-    if (principal.kind !== "owner" && !allows(principal, "effect.perform", run0.projectId, { resource: { kind: "task", id: run0.taskId } })) throw new DomainError("forbidden", `${principal.id} may not perform effects on that task`);
+    // The bridge's admission (card L05d) records what the tool bridge is about to do for the attempt as the service principal; the operation itself is judged by the bridge and its services, so no `effect.perform` of the agent is asked.
+    if (!forBridge && principal.kind !== "owner" && !allows(principal, "effect.perform", run0.projectId, { resource: { kind: "task", id: run0.taskId } })) throw new DomainError("forbidden", `${principal.id} may not perform effects on that task`);
     const scoped = scopedCommandId(principal.id, command.commandId);
     const effectId = derivedId("eff", scoped);
     return this.#retrying(async () => {
@@ -536,11 +555,15 @@ export class GenerationService {
    * and the check commits with the claim, so a pause landing meanwhile either comes first (refused) or finds the effect started. An effect that has started is only ever reconciled by the ledger, as S05 says.
    */
   async execute(principal: Principal, command: { runId: string; toolCallId: string }, bridge: EffectBridge): Promise<EffectOutcome> {
+    return this.#execute(principal, command, bridge, false);
+  }
+
+  async #execute(principal: Principal, command: { runId: string; toolCallId: string }, bridge: EffectBridge, forBridge: boolean): Promise<EffectOutcome> {
     onlyKnown(command, ["runId", "toolCallId"]);
     const effects = this.#effects ?? invalid("effects", "this service has no effect service");
     const found = await this.#mine(principal, command.runId, "attempt.work");
     const run = found.body as unknown as RunBody;
-    if (principal.kind !== "owner" && !allows(principal, "effect.perform", run.projectId, { resource: { kind: "task", id: run.taskId } })) throw new DomainError("forbidden", `${principal.id} may not perform effects on that task`);
+    if (!forBridge && principal.kind !== "owner" && !allows(principal, "effect.perform", run.projectId, { resource: { kind: "task", id: run.taskId } })) throw new DomainError("forbidden", `${principal.id} may not perform effects on that task`);
     const call = run.toolCalls.find((c) => c.id === command.toolCallId);
     if (call === undefined || call.effectId === undefined) invalid("toolCallId", "is not an admitted tool call of this generation");
     if (call!.state === "withdrawn") {
@@ -617,33 +640,103 @@ export class GenerationService {
    * did not know). Otherwise `ok` is true only when the newest generation holding the call is the task's current one at the current context revision, was not interrupted, the task is not held and the call's arguments are
    * complete (`complete`, or `admitted` for the same call asked again); `reason` says why not, in words the worker's model can be told. Read by the owner and the dispatcher only; anyone else gets `forbidden`.
    */
-  async checkCall(viewer: Principal, command: { taskId: string; callId: string }): Promise<{ recorded: false; /** The task is held: even a call no generation holds is not to run. */ held?: string } | { recorded: true; ok: boolean; runId: string; number: number; reason?: string }> {
+  async checkCall(viewer: Principal, command: { taskId: string; callId: string }): Promise<CallVerdict> {
     onlyKnown(command, ["taskId", "callId"]);
     const taskId = checkTaskId(command.taskId);
-    if (typeof command.callId !== "string" || !CALL_ID.test(command.callId)) invalid("callId", "is not a tool call ID");
+    if (typeof command.callId !== "string" || !BRIDGE_CALL_ID.test(command.callId)) invalid("callId", "is not a tool call ID");
     if (!(viewer.kind === "owner" || isDispatcher(viewer))) throw new DomainError("forbidden", `${viewer.id} may not check tool calls against generations`);
     const gateRow = await this.#runner.get("generation-gate", gateIdOf(taskId));
     const gate = gateRow?.body as unknown as GateBody | undefined;
     if (gate === undefined) return { recorded: false };
     const unrecorded = { recorded: false as const, ...(gate.hold === undefined ? {} : { held: `task ${taskId} is held (${gate.hold.mode}: ${gate.hold.reason})` }) };
     if (gate.current === undefined) return unrecorded;
+    const found = await this.#locateCall(taskId, gate.current, command.callId);
+    if (found === undefined) return unrecorded;
+    const { row, run, call } = found;
+    const base = { recorded: true as const, runId: row.id, number: run.number, callId: call.id, name: call.name, args: call.args, state: call.state, ...(call.effectId === undefined ? {} : { effectId: call.effectId }) };
+    const no = (reason: string): CallVerdict => ({ ...base, ok: false, reason });
+    if (run.interrupted !== undefined) return no(`generation ${run.number} of task ${taskId} was ${run.interrupted.kind} by ${run.interrupted.by} (${run.interrupted.reason}); its tool calls are withdrawn`);
+    if (run.number !== gate.current) return no(`generation ${run.number} of task ${taskId} is no longer the current one (generation ${gate.current} is)`);
+    if (run.contextRevision !== gate.contextRevision) return no(`generation ${run.number} was begun under context revision ${run.contextRevision}; the task is at ${gate.contextRevision} (it was corrected)`);
+    if (gate.hold !== undefined) return no(`task ${taskId} is held (${gate.hold.mode}: ${gate.hold.reason})`);
+    if (call.state === "complete" || call.state === "admitted") return { ...base, ok: true };
+    return no(`tool call ${call.id} of generation ${run.number} is ${call.state}${call.reason === undefined ? "" : ` (${call.reason})`}: only a complete call of a current generation runs`);
+  }
+
+  /**
+   * Finds the recorded call a tool bridge ID stands for, searching the task's newest `GENERATION_CHECK_RUNS` generations from `current` backwards (newest first, so a call withdrawn in an older generation is still found and refused).
+   * The ID may be the call's own recorded ID, an alias (the ID the Pi extension makes of a provider ID it cannot send as it is, `h:...`, or a long one), or the extension's ID for a provider ID it was given a second time (`d:...`:
+   * the digest of the base ID and its number, see `reusedCallId`). A repeated provider ID is first read as the extension numbers it (the nth use in the window is the number n), then, failing that, as any number up to
+   * `GENERATION_REUSE_MAX`, newest generation first within a budget of `GENERATION_REUSE_HASHES` digests: a stale call whose number equals a newer use of the same provider ID is judged as that newer one (provisional).
+   */
+  async #locateCall(taskId: string, current: number, callId: string): Promise<{ row: Aggregate; run: RunBody; call: ToolCall } | undefined> {
+    const rows: { row: Aggregate; run: RunBody }[] = [];
+    for (let n = current; n >= 1 && n > current - GENERATION_CHECK_RUNS; n--) {
+      const row = await this.#runner.get("generation-run", runIdOf(taskId, n));
+      if (row !== undefined) rows.push({ row, run: row.body as unknown as RunBody });
+    }
+    for (const r of rows) {
+      const call = r.run.toolCalls.find((c) => c.id === callId || (c.aliases !== undefined && c.aliases.includes(callId)));
+      if (call !== undefined) return { ...r, call };
+    }
+    if (!callId.startsWith("d:")) return undefined;
+    const baseOf = (c: ToolCall): string => c.aliases?.[0] ?? c.id;
+    // As the extension numbers a repeated ID: the nth time the same base appears in the window, oldest first.
+    const seen = new Map<string, number>();
+    for (const r of [...rows].reverse()) for (const c of r.run.toolCalls) {
+      const base = baseOf(c);
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      if (n >= 2 && reusedCallId(base, n) === callId) return { ...r, call: c };
+    }
+    let budget = GENERATION_REUSE_HASHES;
+    for (const r of rows) for (const c of r.run.toolCalls) {
+      const base = baseOf(c);
+      for (let n = 2; n <= GENERATION_REUSE_MAX && budget > 0; n++, budget--) if (reusedCallId(base, n) === callId) return { ...r, call: c };
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether any of the task's newest generations was streamed by this attempt (card L05d): a remote worker that never opens a model stream leaves no generation bound to its fence, so the tool bridge cannot check its calls.
+   * Read from the records (it survives a restart of the controller). Dispatcher or owner only.
+   */
+  async hasStreamed(viewer: Principal, command: { taskId: string; attemptId: string }): Promise<boolean> {
+    onlyKnown(command, ["taskId", "attemptId"]);
+    const taskId = checkTaskId(command.taskId);
+    if (typeof command.attemptId !== "string" || command.attemptId.length === 0 || command.attemptId.length > 120) invalid("attemptId", "is not an attempt ID");
+    if (!(viewer.kind === "owner" || isDispatcher(viewer))) throw new DomainError("forbidden", `${viewer.id} may not ask who streamed a generation`);
+    const gate = (await this.#runner.get("generation-gate", gateIdOf(taskId)))?.body as unknown as GateBody | undefined;
+    if (gate?.current === undefined) return false;
     for (let n = gate.current; n >= 1 && n > gate.current - GENERATION_CHECK_RUNS; n--) {
       const row = await this.#runner.get("generation-run", runIdOf(taskId, n));
-      if (row === undefined) continue;
-      const run = row.body as unknown as RunBody;
-      const call = run.toolCalls.find((c) => c.id === command.callId);
-      // Newest first, at most GENERATION_CHECK_RUNS runs: a call withdrawn in an older generation (superseded, then the task corrected) must still be found and refused, so older revisions are not skipped.
-      if (call === undefined) continue;
-      const base = { recorded: true as const, runId: row.id, number: run.number };
-      const no = (reason: string): { recorded: true; ok: false; runId: string; number: number; reason: string } => ({ ...base, ok: false, reason });
-      if (run.interrupted !== undefined) return no(`generation ${run.number} of task ${taskId} was ${run.interrupted.kind} by ${run.interrupted.by} (${run.interrupted.reason}); its tool calls are withdrawn`);
-      if (run.number !== gate.current) return no(`generation ${run.number} of task ${taskId} is no longer the current one (generation ${gate.current} is)`);
-      if (run.contextRevision !== gate.contextRevision) return no(`generation ${run.number} was begun under context revision ${run.contextRevision}; the task is at ${gate.contextRevision} (it was corrected)`);
-      if (gate.hold !== undefined) return no(`task ${taskId} is held (${gate.hold.mode}: ${gate.hold.reason})`);
-      if (call.state === "complete" || call.state === "admitted") return { ...base, ok: true };
-      return no(`tool call ${call.id} of generation ${run.number} is ${call.state}${call.reason === undefined ? "" : ` (${call.reason})`}: only a complete call of a current generation runs`);
+      if ((row?.body as unknown as RunBody | undefined)?.fence?.attemptId === command.attemptId) return true;
     }
-    return unrecorded;
+    return false;
+  }
+
+  /**
+   * Admits the recorded call a tool bridge request stands for as an effect of its generation (card L05d), so that a call that is partial, dropped or withdrawn, or whose generation was interrupted, superseded or held, can never start
+   * anything through the bridge either: the intent is recorded in the same commit that checks the hold and the generation (`admitEffect`). `callId` is the ID the bridge presents (`checkCall` finds it); `kind` is "bridge" and `target` the bridge
+   * operation. The same call asked again (its effect already admitted) answers with its effect. Dispatcher or owner only; the effect needs no `effect.perform` of the agent, since the bridge judges the operation itself.
+   */
+  async admitCall(viewer: Principal, command: { commandId: string; taskId: string; callId: string; target: string }): Promise<{ effectId: string; runId: string; toolCallId: string; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "callId", "target"]);
+    const taskId = checkTaskId(command.taskId);
+    if (typeof command.callId !== "string" || !BRIDGE_CALL_ID.test(command.callId)) invalid("callId", "is not a tool call ID");
+    if (!(viewer.kind === "owner" || isDispatcher(viewer))) throw new DomainError("forbidden", `${viewer.id} may not admit tool calls as effects`);
+    const gate = (await this.#runner.get("generation-gate", gateIdOf(taskId)))?.body as unknown as GateBody | undefined;
+    const found = gate?.current === undefined ? undefined : await this.#locateCall(taskId, gate.current, command.callId);
+    if (found === undefined) throw new GenerationRefused("incomplete", `call ${command.callId.slice(0, 60)} belongs to no recorded generation of task ${taskId}`);
+    if (found.call.state === "admitted" && found.call.effectId !== undefined) return { effectId: found.call.effectId, runId: found.row.id, toolCallId: found.call.id, replayed: true };
+    const done = await this.#admitEffect(viewer, { commandId: command.commandId, runId: found.row.id, toolCallId: found.call.id, kind: "bridge", target: command.target }, true);
+    return { effectId: done.effectId, runId: found.row.id, toolCallId: found.call.id, replayed: done.replayed };
+  }
+
+  /** Runs an admitted bridge call through the effect ledger (card L05d): the intent was recorded by `admitCall`; the bridge's operation is the effect bridge, its outcome the ledger's. See `execute`. */
+  async executeCall(viewer: Principal, command: { runId: string; toolCallId: string }, bridge: EffectBridge): Promise<EffectOutcome> {
+    if (!(viewer.kind === "owner" || isDispatcher(viewer))) throw new DomainError("forbidden", `${viewer.id} may not run tool calls as effects`);
+    return this.#execute(viewer, command, bridge, true);
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
@@ -731,13 +824,13 @@ export class GenerationService {
   }
 
   /** The tool call after one more piece of its stream. */
-  #extend(calls: readonly ToolCall[], d: { id: string; name?: string; argumentsDelta: string; done: boolean }): ToolCall[] {
+  #extend(calls: readonly ToolCall[], d: { id: string; name?: string; alias?: string; argumentsDelta: string; done: boolean }): ToolCall[] {
     const at = calls.findIndex((c) => c.id === d.id);
     let call: ToolCall;
     if (at < 0) {
       if (d.name === undefined) invalid("toolCall.name", "is required with the first piece of a call");
       if (calls.length >= GENERATION_LIMITS.toolCalls) throw new DomainError("unavailable", `a generation holds at most ${GENERATION_LIMITS.toolCalls} tool calls`);
-      call = { id: d.id, name: d.name as string, args: "", state: "partial" };
+      call = { id: d.id, ...(d.alias === undefined || d.alias === d.id ? {} : { aliases: [d.alias] }), name: d.name as string, args: "", state: "partial" };
     } else {
       call = calls[at]!;
       if (call.state !== "partial") invalid("toolCall.id", `call ${d.id} is already ${call.state}; its arguments are final`);

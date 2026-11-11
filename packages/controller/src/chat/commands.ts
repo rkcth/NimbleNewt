@@ -93,7 +93,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "workers.limits.besteffort": { verb: "Allow or forbid local agents to start when a limit cannot be fully enforced on this system (enable or disable best effort)", mode: "propose" },
   // Whether each model call is recorded against its generation and a late reply held back (card L05b): neither is a limit; both are on unless the owner turns them off.
-  "generation.stream.change": { verb: "Turn recording of the model stream, holding back a late reply, failing closed when the store cannot answer, recording a paused task's model call (recordPaused), refusing a tool call of a corrected generation at the bridge (checkBridge) or one no generation recorded (requireRecorded) on or off, or set their limits", mode: "propose" },
+  "generation.stream.change": { verb: "Turn recording of the model stream, holding back a late reply, failing closed when the store cannot answer, recording a paused task's model call (recordPaused), refusing a tool call of a corrected generation at the bridge (checkBridge) or one no generation recorded (requireRecorded) on or off, requiring a tool call's name and arguments to match the bridge operation it asks for (bindCall), admitting a bridge write as an effect of its generation (admitCall), refusing the calls of a remote worker that never reports its model stream (requireStream), or set their limits", mode: "propose" },
   // How many attempts may run at once for one project, one agent or one supervisor is a resource decision: shown first in every profile; all caps are off unless the owner turns them on.
   "capacity.limits.change": { verb: "Change the capacity caps (per project, per agent, fan-in)", mode: "propose" },
   // The host and global quotas and the limits on spawning child tasks (card H10) are resource decisions too: shown first in every profile.
@@ -447,6 +447,11 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
 const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion", "verdict", "rule", "what", "specDigest", "concernId"]);
 
+/**
+ * `generation.stream.change` names the switches it turns on or off (`enable`, `disable`) from a fixed list the service checks (card L05d): the owner says what they want in their own words ("stop checking that a tool call is the one the model wrote"),
+ * the interpreter chooses the switch, and the proposal shows the names before anything is applied. The names are not words an owner has to say, so they are not searched for in the message (an unknown name is refused by the service).
+ */
+export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable"]);
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
 export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */

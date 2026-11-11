@@ -326,13 +326,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `generation.stream.get`
 
-The switches for feeding the model stream into revision-bound generation (owner only): `record` (each model call's stream is recorded against the generation it began under) and `cut` (a reply whose generation was interrupted, by a cancel, a correction or a newer generation, is held back from the worker, with the reason). Also `failClosed` (on by default; shown as `onStoreFailure` (closed or open)): when the generation store cannot answer, a call is not sent and a reply being read is cut, with the reason; off, the call and the reply go on unrecorded. Also `recordPaused` (off: a model call of a paused task is refused before it is sent; on: it is sent and recorded as a generation), `checkBridge` (on: the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation) and `requireRecorded` (off by default; on, the bridge also refuses a call no generation recorded). And the limits `storeTimeoutMs`, `batchMs`, `batchChars` and `heldBufferBytes` (0 turns a limit off). `record`, `cut`, `failClosed` and `checkBridge` are on unless the owner turns them off; `recordPaused` and `requireRecorded` are off unless the owner turns them on.
+The switches for feeding the model stream into revision-bound generation (owner only): `record` (each model call's stream is recorded against the generation it began under) and `cut` (a reply whose generation was interrupted, by a cancel, a correction or a newer generation, is held back from the worker, with the reason). Also `failClosed` (on by default; shown as `onStoreFailure` (closed or open)): when the generation store cannot answer, a call is not sent and a reply being read is cut, with the reason; off, the call and the reply go on unrecorded. Also `recordPaused` (off: a model call of a paused task is refused before it is sent; on: it is sent and recorded as a generation), `checkBridge` (on: the tool bridge refuses a call that a recorded generation shows is not a complete call of the task's current generation) and `requireRecorded` (off by default; on, the bridge also refuses a call no generation recorded). Also `bindCall` (on: a recorded call's tool name and arguments must be those of the bridge operation it is presented for), `admitCall` (on: a recorded call that writes through the bridge is admitted as an effect of its generation and settled with the operation's outcome, so a call that is not complete in a current generation can never start anything) and `requireStream` (off: a remote worker that never opened a model stream for its attempt has its bridge calls refused, on; off, the owner is only told once). And the limits `storeTimeoutMs`, `batchMs`, `batchChars` and `heldBufferBytes` (0 turns a limit off). `record`, `cut`, `failClosed` and `checkBridge` are on unless the owner turns them off; `bindCall` and `admitCall` are on unless the owner turns them off; `recordPaused`, `requireRecorded` and `requireStream` are off unless the owner turns them on.
 
 Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `onStoreFailure`, `storeTimeoutMs`, `batchMs`, `batchChars`, `heldBufferBytes`.
+Result: `{ item }`: `revision`, `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `bindCall`, `admitCall`, `requireStream`, `onStoreFailure`, `storeTimeoutMs`, `batchMs`, `batchChars`, `heldBufferBytes`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -2503,12 +2503,12 @@ Completion: finished when accepted (`completed: true`).
 
 #### `generation.stream.change`
 
-The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge` or `requireRecorded`; `set` gives the limits `storeTimeoutMs` (how long one store call may take, default 20000), `batchMs` (default 250), `batchChars` (default 2000) and `heldBufferBytes` (default 16 MB), each a whole number, 0 = off. With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
+The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `bindCall`, `admitCall` or `requireStream`; `set` gives the limits `storeTimeoutMs` (how long one store call may take, default 20000), `batchMs` (default 250), `batchChars` (default 2000) and `heldBufferBytes` (default 16 MB), each a whole number, 0 = off. With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
 
 Arguments:
 
-- `enable` (optional): settings to turn on: record, cut, failClosed, recordPaused, checkBridge, requireRecorded
-- `disable` (optional): settings to turn off: record, cut, failClosed, recordPaused, checkBridge, requireRecorded
+- `enable` (optional): settings to turn on: record, cut, failClosed, recordPaused, checkBridge, requireRecorded, bindCall, admitCall, requireStream
+- `disable` (optional): settings to turn off: record, cut, failClosed, recordPaused, checkBridge, requireRecorded, bindCall, admitCall, requireStream
 - `set` (optional): limits to set, as an object of whole numbers (0 turns one off): storeTimeoutMs, batchMs, batchChars, heldBufferBytes
 - `expectedRevision` (optional): the revision read with generation.stream.get; a different current one refuses the change
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseName } from "@nimblenewt/registry";
+import { parseName, wireName } from "@nimblenewt/registry";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { StateApi } from "../api/index.js";
 import { catalogFacts } from "../dispatch/local-worker.js";
@@ -11,8 +11,9 @@ import type { ToolGateway, ToolResult } from "../dispatch/ports.js";
 import type { AdmissionService } from "../admission/index.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
+import { EffectRejected, type EffectBridge } from "../domain/effects.js";
 import { onlyKnown } from "../domain/model.js";
-import type { GenerationService } from "../generation/index.js";
+import { GenerationRefused, type CallVerdict, type GenerationService } from "../generation/index.js";
 import type { HostService } from "../hosts/index.js";
 import type { PauseGuard } from "../lifecycle/index.js";
 import { allows } from "../security/access.js";
@@ -119,9 +120,12 @@ export interface ToolExecutionDeps {
    * Card L05c: asks the generation service whether the call belongs to a complete, current generation of the task. Absent: calls are not checked against generations. A call a recorded generation shows is withdrawn, dropped, partial, held,
    * superseded, or begun under an older context revision is refused with the reason (`checkBridge`, on by default); a call no generation recorded is refused only when `requireRecorded` is on (off by default).
    */
-  readonly generations?: Pick<GenerationService, "checkCall">;
-  /** The owner's switches `checkBridge` and `requireRecorded`, read at every request. A failed read leaves the defaults (check on, require off). */
-  readonly callCheck?: () => Promise<{ readonly check: boolean; readonly require: boolean }>;
+  readonly generations?: Pick<GenerationService, "checkCall"> & Partial<Pick<GenerationService, "admitCall" | "executeCall" | "hasStreamed">>;
+  /**
+   * The owner's switches `checkBridge` and `requireRecorded` (card L05c) and, from card L05d, `bindCall`, `admitCall`, `requireStream` and `record` (all optional here), read at every request. A failed read leaves the defaults
+   * (check on, require off, bind on, admit on, requireStream off, record on).
+   */
+  readonly callCheck?: () => Promise<{ readonly check: boolean; readonly require: boolean; readonly bind?: boolean; readonly admit?: boolean; readonly requireStream?: boolean; readonly record?: boolean }>;
   /**
    * Card T07b: the job records and the runs of this machine. With both, the agent can start a catalogue tool as a long-running job (`job.start`), and read its state and output and stop it by its handle (`job.status`, `job.output`,
    * `job.cancel`) from any later attempt of the same task. Absent: the job operations answer as unavailable.
@@ -135,6 +139,41 @@ export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
 const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]);
+/** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
+const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
+/** How long a call waits for its generation to be completed, in steps of this many ms. */
+const STREAMING_WAIT_MS = 100;
+const STREAMING_WAIT_TOTAL_MS = 3000;
+/** The most of an admitted write's result kept in the effect ledger for a repeat of the call; a larger one is answered without it. */
+const ADMITTED_RESULT_CHARS = 20_000;
+/** The operations a model's tool call is not bound to by name and arguments: the extension's own declaration reads and the turn continuation. */
+const modelToolName = (op: string): string => wireName(`nimblenewt.${op.replace(".", "-")}`);
+const scalar = (v: unknown): v is string | number | boolean => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+/** Whether a value the bridge was sent is the one the model wrote: equal, or (for numbers, truthvalues and strings that a schema may convert) equal when written as text. Objects and lists are compared member by member. */
+const sameValue = (written: unknown, sent: unknown): boolean => {
+  if (scalar(written) && scalar(sent)) return written === sent || String(written) === String(sent);
+  if (Array.isArray(written) && Array.isArray(sent)) return written.length === sent.length && written.every((v, i) => sameValue(v, sent[i]));
+  if (written !== null && sent !== null && typeof written === "object" && typeof sent === "object" && !Array.isArray(written) && !Array.isArray(sent)) {
+    const a = written as Record<string, unknown>, b = sent as Record<string, unknown>;
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const k of keys) if (!sameValue(a[k], b[k])) return false;
+    return true;
+  }
+  return written === sent;
+};
+/**
+ * Binds a recorded call to the operation it is presented for (card L05d): the name the model wrote must be the wire name of the operation (`nimblenewt__desk-write` for `desk.write`) and the arguments it wrote must be the arguments
+ * of the request, so a call the model wrote as one thing is not run as another. Returns the reason when they differ.
+ */
+function callMismatch(verdict: Extract<CallVerdict, { recorded: true }>, request: BridgeRequest): string | undefined {
+  const expected = modelToolName(request.op);
+  if (verdict.name !== expected) return `call ${request.callId.slice(0, 60)} was written by the model as ${verdict.name.slice(0, 80)}, not as ${expected} (${request.op})`;
+  let written: unknown;
+  try { written = JSON.parse(verdict.args.trim() === "" ? "{}" : verdict.args); } catch { return `the arguments of call ${request.callId.slice(0, 60)} are not readable as recorded`; }
+  if (!sameValue(written, request.args ?? {})) return `the arguments of call ${request.callId.slice(0, 60)} are not those the model wrote for it`;
+  return undefined;
+}
+
 /** The most continuations of one turn the controller agrees to (card W04; the worker's own bound is 3). */
 const MAX_TURN_CONTINUATIONS = 10;
 /** The end kinds a continuation may name (card W02's, restated: the controller does not depend on the worker's contracts). */
@@ -207,6 +246,8 @@ export class ToolExecutionService {
   readonly #deps: ToolExecutionDeps;
   /** Calls this service is handing to the gateway right now (attempt and call ID), for the replay-safe hook. */
   readonly #bridgeCalls = new Set<string>();
+  /** The attempts of remote workers the owner was told once never reported a model stream (card L05d). Bounded. */
+  readonly #silent = new Set<string>();
   /** What each call ID of an attempt was first used for (a digest of the request), so a provider ID that repeats cannot stand for a different request. Bounded per attempt and overall. */
   readonly #calls = new Map<string, Map<string, { digest: string; inFlight: number; answered: boolean }>>();
 
@@ -288,31 +329,34 @@ export class ToolExecutionService {
       let response: BridgeResponse | undefined;
       try {
         // A call of a generation that was corrected, superseded or never completed is refused before anything else (card L05c).
-        const stale = await this.#generationRefusal(context, request);
+        const checked = await this.#generationCheck(context, request);
         // A pause stops everything the agent writes through the bridge; reading goes on.
-        const paused = stale !== undefined ? undefined : WRITES.has(request.op as BridgeOperation) ? await this.#deps.pauses.guard(context.taskId) : undefined;
-        if (stale !== undefined) response = stale;
+        const paused = checked.refusal !== undefined ? undefined : WRITES.has(request.op as BridgeOperation) ? await this.#deps.pauses.guard(context.taskId) : undefined;
+        if (checked.refusal !== undefined) response = checked.refusal;
         else if (paused !== undefined && paused.blockedBy.length > 0) response = refusal("paused", `the task is paused (${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}); ${request.op} is refused until it is resumed`);
         else {
-          switch (request.op as BridgeOperation) {
-            case "desk.read": response = await this.#deskRead(context, args); break;
-            case "desk.write": response = await this.#deskWrite(context, args); break;
-            case "task.get": case "task.update": case "task.transition": response = await this.#task(token, context, request.op as BridgeOperation, args); break;
-            case "message.send": response = await this.#message(context, args); break;
-            case "artifact.publish": response = await this.#artifact(token, context, args); break;
-            case "tool.register": response = await this.#register(context, args); break;
-            case "tool.discover": response = await this.#discover(context, args); break;
-            case "tool.describe": response = await this.#describe(context, args); break;
-            case "tool.invoke": response = await this.#invoke(context, gateway, args); break;
-            case "job.start": response = await this.#jobStart(context, gateway, args); break;
-            case "job.status": case "job.output": response = await this.#jobRead(context, request.op as BridgeOperation, args); break;
-            case "job.cancel": response = await this.#jobCancel(context, args); break;
-            case "work.end": response = await this.#workEnd(token, context, args); break;
-            case "work.note": case "work.answer": response = await this.#workWrite(token, context, request.op as "work.note" | "work.answer", args); break;
-            case "maintenance.request": response = await this.#maintenanceRequest(token, context, args); break;
-            case "maintenance.status": response = await this.#maintenanceStatus(token, context, args); break;
-            case "turn.continue": response = this.#turnContinue(context, args); break;
-          }
+          const perform = async (): Promise<BridgeResponse> => {
+            switch (request.op as BridgeOperation) {
+              case "desk.read": return await this.#deskRead(context, args);
+              case "desk.write": return await this.#deskWrite(context, args);
+              case "task.get": case "task.update": case "task.transition": return await this.#task(token, context, request.op as BridgeOperation, args);
+              case "message.send": return await this.#message(context, args);
+              case "artifact.publish": return await this.#artifact(token, context, args);
+              case "tool.register": return await this.#register(context, args);
+              case "tool.discover": return await this.#discover(context, args);
+              case "tool.describe": return await this.#describe(context, args);
+              case "tool.invoke": return await this.#invoke(context, gateway, args);
+              case "job.start": return await this.#jobStart(context, gateway, args);
+              case "job.status": case "job.output": return await this.#jobRead(context, request.op as BridgeOperation, args);
+              case "job.cancel": return await this.#jobCancel(context, args);
+              case "work.end": return await this.#workEnd(token, context, args);
+              case "work.note": case "work.answer": return await this.#workWrite(token, context, request.op as "work.note" | "work.answer", args);
+              case "maintenance.request": return await this.#maintenanceRequest(token, context, args);
+              case "maintenance.status": return await this.#maintenanceStatus(token, context, args);
+              case "turn.continue": return this.#turnContinue(context, args);
+            }
+          };
+          response = checked.admit !== undefined && ADMITTED.has(request.op as BridgeOperation) ? await this.#admitted(context, request, checked.admit, perform) : await perform();
         }
       } finally {
         this.#endCall(context.attemptId, request.callId, response?.ok === true);
@@ -326,23 +370,110 @@ export class ToolExecutionService {
     }
   }
 
-  /** The refusal of a call that does not belong to a complete, current generation of its task (card L05c), or undefined. Nothing is read or changed by a refused call. */
-  async #generationRefusal(c: Context, request: BridgeRequest): Promise<BridgeResponse | undefined> {
-    if (this.#deps.generations === undefined) return undefined;
-    let mode = { check: true, require: false };
+  /**
+   * The check of a call against the task's recorded generations (cards L05c, L05d). `refusal` is set for a call that does not belong to a complete, current generation of its task, whose tool name or arguments are not those of the operation
+   * it asks for, or (when the owner requires it) that comes from a remote worker that never reported a model stream; nothing is read or changed by a refused call. `admit` is set for a recorded, current, complete call: the caller admits it
+   * as an effect of its generation before a write runs.
+   */
+  async #generationCheck(c: Context, request: BridgeRequest): Promise<{ readonly refusal?: BridgeResponse; readonly admit?: Extract<CallVerdict, { recorded: true }> }> {
+    const generations = this.#deps.generations;
+    if (generations === undefined) return {};
+    let mode: Awaited<ReturnType<NonNullable<ToolExecutionDeps["callCheck"]>>> = { check: true, require: false };
     try { if (this.#deps.callCheck !== undefined) mode = await this.#deps.callCheck(); } catch { /* the defaults stay */ }
-    if (!mode.check && !mode.require) return undefined;
-    let verdict: Awaited<ReturnType<GenerationService["checkCall"]>>;
-    try { verdict = await this.#deps.generations.checkCall(this.#deps.principal, { taskId: c.taskId, callId: request.callId }); } catch (error) {
+    const bind = mode.bind !== false, admit = mode.admit !== false;
+    if (!mode.check && !mode.require && !bind && !admit && mode.requireStream !== true) return {};
+    let verdict: CallVerdict;
+    try { verdict = await generations.checkCall(this.#deps.principal, { taskId: c.taskId, callId: request.callId }); } catch (error) {
       // The check could not be made: fail closed (a call is not run on a guess), and say so.
-      return refusal("unavailable", `the call could not be checked against the task's generation (${error instanceof DomainError ? error.message.slice(0, 160) : "the generation record could not be read"}); ask again`);
+      return { refusal: refusal("unavailable", `the call could not be checked against the task's generation (${error instanceof DomainError ? error.message.slice(0, 160) : "the generation record could not be read"}); ask again`) };
     }
-    // A held task runs nothing, recorded or not. The extension's own declaration reads (`tool.discover`, whose call IDs the extension makes up and may rewrite) are not a model's tool call: they need no generation under `requireRecorded`.
-    if (!verdict.recorded && verdict.held !== undefined && mode.check) return refusal("generation_refused", `${verdict.held}; the call was not run`);
-    // A turn continuation (card W04) is the worker's own question, not a model's tool call, and has no generation of its own either; a held task still refuses it above.
-    if (!verdict.recorded) return mode.require && request.op !== "tool.discover" && request.op !== "turn.continue" ? refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) : undefined;
-    if (!verdict.ok && mode.check) return refusal("generation_refused", `${verdict.reason ?? `call ${request.callId.slice(0, 60)} does not belong to a current generation`}; it was not run`);
-    return undefined;
+    // A model's own tool call: the extension's declaration reads (`tool.discover`, whose call IDs the extension makes up and may rewrite) and a turn continuation (card W04, the worker's own question, with no generation of its own) are not.
+    const modelCall = request.op !== "tool.discover" && request.op !== "turn.continue";
+    // A held task runs nothing, recorded or not.
+    if (!verdict.recorded && verdict.held !== undefined && mode.check) return { refusal: refusal("generation_refused", `${verdict.held}; the call was not run`) };
+    if (!verdict.recorded) {
+      if (mode.require && modelCall) return { refusal: refusal("generation_refused", `call ${request.callId.slice(0, 60)} belongs to no recorded generation of task ${c.taskId}; the owner requires every call to come from one`) };
+      return modelCall ? await this.#silentStream(c, request, mode) : {};
+    }
+    if (!verdict.ok && mode.check) return { refusal: refusal("generation_refused", `${verdict.reason ?? `call ${request.callId.slice(0, 60)} does not belong to a current generation`}; it was not run`) };
+    if (!verdict.ok) return {};
+    if (bind && modelCall) {
+      const mismatch = callMismatch(verdict, request);
+      if (mismatch !== undefined) return { refusal: refusal("generation_refused", `${mismatch}; it was not run`) };
+    }
+    return admit && modelCall && ADMITTED.has(request.op as BridgeOperation) && generations.admitCall !== undefined && generations.executeCall !== undefined ? { admit: verdict } : {};
+  }
+
+  /**
+   * A model-originated call that no generation holds, from an attempt on a remote host (card L05d): when no generation of the task was ever streamed by this attempt, the worker never opened a model stream (its calls are unrecorded
+   * and cannot be tied to what the model wrote). The owner's activity feed is told once per attempt; with `requireStream` the call is refused. A local worker's relay records its calls itself, so a call it makes that no generation holds
+   * is a choice of the owner (recording off) or a reply of a format that is not read, not a missing stream. With recording off nothing is asked.
+   */
+  async #silentStream(c: Context, request: BridgeRequest, mode: { readonly requireStream?: boolean; readonly record?: boolean }): Promise<{ readonly refusal?: BridgeResponse }> {
+    const generations = this.#deps.generations;
+    if (generations?.hasStreamed === undefined || mode.record === false || this.#deps.isLocalHost(c.hostId)) return {};
+    let streamed: boolean;
+    try { streamed = await generations.hasStreamed(this.#deps.principal, { taskId: c.taskId, attemptId: c.attemptId }); } catch { return {}; }
+    if (streamed) return {};
+    if (!this.#silent.has(c.attemptId)) {
+      this.#silent.add(c.attemptId);
+      while (this.#silent.size > 256) this.#silent.delete(this.#silent.values().next().value as string);
+      try { await this.#deps.activity?.({ commandId: `brq:${createHash("sha256").update(c.attemptId).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", summary: `The worker of ${c.agent.id} on ${c.hostId} has made tool calls but never reported a model stream for this attempt: its calls cannot be checked against what the model wrote.`, refs: [{ kind: "task", id: c.taskId }] }); } catch { /* telling never changes the answer */ }
+    }
+    return mode.requireStream === true ? { refusal: refusal("generation_refused", `this attempt's worker on ${c.hostId} never reported a model stream, so call ${request.callId.slice(0, 60)} cannot be checked; the owner requires a stream from remote workers`) } : {};
+  }
+
+  /**
+   * Runs a write of a recorded, current, complete call through the generation service (card L05d): the call is admitted as an effect of its generation (the intent is recorded in the commit that checks the hold, the generation and
+   * the call, so a partial or withdrawn call can never start anything by this route either), the operation runs as the effect bridge, and the ledger records its outcome. The same call asked again is answered from the ledger and does
+   * not run again. A refused operation is a failed effect (it did not happen); an operation that threw leaves the effect uncertain, and the error goes on as before.
+   */
+  async #admitted(c: Context, request: BridgeRequest, verdict: Extract<CallVerdict, { recorded: true }>, perform: () => Promise<BridgeResponse>): Promise<BridgeResponse> {
+    const generations = this.#deps.generations!;
+    let thrown: unknown;
+    let ran = false;
+    let performed: BridgeResponse | undefined;
+    const bridge: EffectBridge = {
+      idempotent: false,
+      execute: async () => {
+        ran = true;
+        let response: BridgeResponse;
+        try { response = await perform(); } catch (error) {
+          // A typed refusal of the operation's own service (a bad argument, a right it does not hold, a stale revision) did not happen: a failed effect, answered as the refusal it is. Anything else leaves the outcome unknown.
+          if (error instanceof DomainError) throw new EffectRejected(error.message, { code: error.code, message: error.message.slice(0, 500) });
+          thrown = error; throw error;
+        }
+        performed = response;
+        if (!response.ok) throw new EffectRejected(response.message, { code: response.code, message: response.message.slice(0, 500) });
+        const kept = canonicalJson(response.result as JsonObject).length <= ADMITTED_RESULT_CHARS;
+        return { ok: true, ...(kept ? { result: response.result as JsonObject } : { truncated: true }) };
+      },
+    };
+    try {
+      const commandId = `ba-${createHash("sha256").update(`${c.attemptId}\0${request.callId}`).digest("hex").slice(0, 40)}`;
+      // The model's reply ends (its generation is completed) a moment after the worker has read it whole, and a tool can be called in that moment: a generation that is still streaming is waited for, briefly, before the call is refused.
+      let admitted: Awaited<ReturnType<NonNullable<typeof generations.admitCall>>>;
+      for (let waited = 0; ; waited += STREAMING_WAIT_MS) {
+        try { admitted = await generations.admitCall!(this.#deps.principal, { commandId, taskId: c.taskId, callId: request.callId, target: request.op }); break; } catch (error) {
+          if (!(error instanceof GenerationRefused && error.reason === "streaming") || waited >= STREAMING_WAIT_TOTAL_MS) throw error;
+          await new Promise((r) => setTimeout(r, STREAMING_WAIT_MS));
+        }
+      }
+      const outcome = await generations.executeCall!(this.#deps.principal, { runId: admitted.runId, toolCallId: admitted.toolCallId }, bridge);
+      if (thrown !== undefined) throw thrown;
+      const evidence = (outcome.evidence ?? {}) as JsonObject;
+      if (outcome.status === "confirmed") {
+        if (ran && performed?.ok === true) return performed;
+        // Asked again: the operation ran for the first request and is not run again.
+        return evidence["truncated"] === true ? ok({ replayed: true, note: "this call already ran; its result was too large to keep" }) : ok(((evidence["result"] ?? {}) as JsonObject));
+      }
+      if (outcome.status === "failed") return refusal(typeof evidence["code"] === "string" ? evidence["code"] : "refused", typeof evidence["message"] === "string" ? evidence["message"] : typeof evidence["reason"] === "string" ? evidence["reason"] : "the call did not run");
+      return refusal("unavailable", `call ${request.callId.slice(0, 60)} may or may not have happened (${outcome.status}); it is not run again`);
+    } catch (error) {
+      if (error instanceof GenerationRefused) return refusal("generation_refused", `${error.message}; it was not run`);
+      if (thrown !== undefined) throw thrown;
+      throw error;
+    }
   }
 
   /**
