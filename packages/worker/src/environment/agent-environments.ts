@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { digestOf, validPackageName, validPackageVersion } from "./archive.js";
 import { ContentStore, StoreError, type StoredPackage } from "./store.js";
@@ -31,6 +32,32 @@ const AGENT = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const encodeName = (name: string): string => name.replace(/[^A-Za-z0-9._-]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 export const manifestDigestOf = (packages: readonly PackageRef[]): string => digestOf(Buffer.from(JSON.stringify([...packages].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map((p) => [p.name, p.version, p.digest]))));
 const MIB = 1024 * 1024;
+const OWNER = /^\d{1,10}-lock(?:-\d{1,20}-[0-9a-f-]{36})?$/;
+/** How old a lock directory without an owner must be before it is taken over (only an older version could leave one). */
+const OWNERLESS_STALE_MS = 5_000;
+/** How long a broken lock's tombstone is kept (a writer that judged the same dead lock must find it); `recover` removes older ones. */
+const TOMBSTONE_KEEP_MS = 10 * 60_000;
+
+/** A process's start time as Linux counts it (field 22 of /proc/<pid>/stat), or undefined where it cannot be read. With the pid it names one process. */
+export function processStart(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const start = fields[19];
+    return start !== undefined && /^\d+$/.test(start) ? start : undefined;
+  } catch { return undefined; }
+}
+/** Whether a lock's owner is gone: its process has ended, or its pid now belongs to a process started at another time. */
+function lockAbandoned(owner: string): boolean {
+  const [pid, , start] = owner.split("-");
+  const known = start !== undefined && start !== "0";
+  // A lock with this process's pid was made by this process only if the start time is also this process's (a host restarted in a container often gets the same pid).
+  if (Number(pid) === process.pid) return known && start !== processStart(process.pid);
+  if (abandoned(`${pid}-x`)) return true;
+  if (!known) return false;
+  const now = processStart(Number(pid));
+  return now !== undefined && now !== start;
+}
 
 /**
  * The per-agent environments (card A09 follow-up): `<root>/agents/<agent>/revisions/<n>/{packages/<name>/...,record.json}`, with `active` (and `previous`) as relative links to a revision. A revision is built in a private
@@ -52,24 +79,52 @@ export class AgentEnvironments {
   agentDir(agentId: string): string { if (typeof agentId !== "string" || !AGENT.test(agentId) || agentId.includes("..")) throw new EnvironmentStoreError("invalid", "an agent id is letters, digits and . _ : - (at most 128)"); return join(this.#root, "agents", encodeName(agentId)); }
   revisionDir(agentId: string, revision: number): string { if (!Number.isSafeInteger(revision) || revision < 0 || revision > 1_000_000_000) throw new EnvironmentStoreError("invalid", "a revision is a whole number"); return join(this.agentDir(agentId), "revisions", String(revision)); }
 
-  /** Runs `fn` as the only writer of the agent's environment. */
+  /**
+   * Runs `fn` as the only writer of the agent's environment. The lock is a directory `lock` holding its owner (`<pid>-lock-<process start time>-<random>`). It is made whole under a private name and renamed into place, so it
+   * never exists without its owner. A lock whose owner process is gone (by pid, and by start time, so a reused pid does not keep it) is broken by renaming it to a tombstone named for that owner; the tombstone stays, so a second
+   * writer that judged the same dead lock cannot move a fresh lock away (its rename onto the existing tombstone fails). Review of the A09 fourth slice: two writers taking over one dead lock both held it.
+   */
   async withLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
     const dir = this.agentDir(agentId);
     const previous = this.#local.get(dir) ?? Promise.resolve();
     const mine = previous.catch(() => undefined).then(async () => {
       const lock = join(dir, "lock");
       await mkdir(dir, { recursive: true, mode: 0o700 });
+      const token = `${process.pid}-lock-${processStart(process.pid) ?? "0"}-${randomUUID()}`;
       const until = Date.now() + this.#wait;
       for (;;) {
-        try { await mkdir(lock, { mode: 0o700 }); await writeFile(join(lock, "owner"), `${process.pid}-lock`); break; } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-          const owner = await readFile(join(lock, "owner"), "utf8").catch(() => undefined);
-          if (owner !== undefined && abandoned(owner)) { await removeAll(lock); continue; }
-          if (Date.now() > until) throw new EnvironmentStoreError("busy", "another change to this agent's environment is still running");
-          await new Promise((r) => setTimeout(r, 15));
+        const made = join(dir, `.lock-${token}`);
+        await mkdir(made, { mode: 0o700 });
+        try { await writeFile(join(made, "owner"), token, { mode: 0o600 }); await rename(made, lock); break; } catch (error) {
+          await removeAll(made);
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST" && (error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
         }
+        const owner = await readFile(join(lock, "owner"), "utf8").catch(() => undefined);
+        if (owner !== undefined && OWNER.test(owner) && lockAbandoned(owner)) {
+          try { await rename(lock, join(dir, `.broken-${owner}`)); } catch { /* broken by another writer already, or gone */ }
+          continue;
+        }
+        if (owner === undefined) {
+          // Only a crash of an older version (between making the directory and writing its owner) leaves this; it is taken over once it is clearly not being written.
+          const info = await lstat(lock).catch(() => undefined);
+          if (info !== undefined && Date.now() - info.mtimeMs > OWNERLESS_STALE_MS) {
+            const tomb = join(dir, `.broken-none-${randomUUID()}`);
+            try {
+              await rename(lock, tomb);
+              // What was moved may be a fresh lock made since it was looked at: that one goes back.
+              if (await readFile(join(tomb, "owner"), "utf8").then(() => true, () => false)) await rename(tomb, lock).catch(() => undefined);
+            } catch { /* gone, or moved by another writer */ }
+            continue;
+          }
+        }
+        if (Date.now() > until) throw new EnvironmentStoreError("busy", "another change to this agent's environment is still running");
+        await new Promise((r) => setTimeout(r, 15));
       }
-      try { return await fn(); } finally { await removeAll(lock); }
+      try { return await fn(); } finally {
+        // Moved away first, so nobody ever sees a lock without its owner while it is removed.
+        const gone = join(dir, `.released-${token}`);
+        if ((await readFile(join(lock, "owner"), "utf8").catch(() => undefined)) === token) { await rename(lock, gone); await removeAll(gone); }
+      }
     });
     this.#local.set(dir, mine);
     try { return await mine; } finally { if (this.#local.get(dir) === mine) this.#local.delete(dir); }
@@ -175,8 +230,7 @@ export class AgentEnvironments {
       }
       const work = await makeTemp(join(this.#root, "tmp"), "rev");
       try {
-        const reuse = [] as { agentId: string; revision: number }[];
-        for (const which of ["active", "previous"] as const) { const n = await this.active(agentId, which).catch(() => undefined); if (n !== undefined && n !== revision) reuse.push({ agentId, revision: n }); }
+        const reuse = await this.reuseOrder(agentId, revision);
         const built = await this.build(work, packages, { ...(options.runScriptsFor === undefined ? {} : { runScriptsFor: options.runScriptsFor }), ...(options.diskMb === undefined ? {} : { diskMb: options.diskMb }), reuse });
         const record: RevisionRecord = { agentId, revision, manifestDigest, packages: built, createdAt: new Date().toISOString() };
         await this.#io.writeFile(join(work, "record.json"), Buffer.from(JSON.stringify(record)), 0o644);
@@ -189,16 +243,43 @@ export class AgentEnvironments {
     });
   }
 
+  /**
+   * The agent's revisions a package may be copied from (with the result of an install script that ran there), most relevant first: the active one, the previous one, then every other built revision newest first. Review of the A09
+   * fourth slice: only `active` and `previous` were looked at, so a package whose script ran in an older revision (the owner activated it since, or two changes went by) was copied from the store without its script's work.
+   */
+  async reuseOrder(agentId: string, except?: number): Promise<{ readonly agentId: string; readonly revision: number }[]> {
+    const order: number[] = [];
+    for (const which of ["active", "previous"] as const) { const n = await this.active(agentId, which).catch(() => undefined); if (n !== undefined) order.push(n); }
+    const built = (await readdir(join(this.agentDir(agentId), "revisions")).catch(() => [] as string[])).filter((n) => /^(?:0|[1-9]\d{0,9})$/.test(n)).map(Number).sort((a, b) => b - a);
+    return [...new Set([...order, ...built])].filter((n) => n !== except).map((revision) => ({ agentId, revision }));
+  }
+
   /** Verifies the revision and switches `active` to it with one atomic rename of a link; `previous` keeps the revision that was active. */
-  async activate(agentId: string, revision: number, expectedManifest?: string): Promise<{ readonly previous: number | undefined }> {
+  async activate(agentId: string, revision: number, expectedManifest?: string): Promise<{ readonly previous: number | undefined; readonly links: { readonly active: number | undefined; readonly previous: number | undefined } }> {
     return this.withLock(agentId, async () => {
       await this.verify(agentId, revision, expectedManifest);
       const dir = this.agentDir(agentId);
       const before = await this.active(agentId).catch(() => undefined);
+      const beforePrevious = await this.active(agentId, "previous").catch(() => undefined);
       if (before !== undefined && before !== revision) await this.#point(dir, "previous", before);
       this.#fail("env:before-switch");
       await this.#point(dir, "active", revision);
-      return { previous: before };
+      return { previous: before, links: { active: before, previous: beforePrevious } };
+    });
+  }
+
+  /**
+   * Puts `active` and `previous` back to what `activate` found (an undo of a switch the worker could not take). Nothing is verified: these were the links before the switch, and a revision that no longer verifies is refused
+   * when it is used. No `active` before means none after (review of the A09 fourth slice: a refused first revision stayed active).
+   */
+  async restore(agentId: string, links: { readonly active: number | undefined; readonly previous: number | undefined }): Promise<void> {
+    await this.withLock(agentId, async () => {
+      const dir = this.agentDir(agentId);
+      for (const name of ["previous", "active"] as const) {
+        const want = links[name];
+        if (want === undefined) await unlink(join(dir, name)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+        else await this.#point(dir, name, want);
+      }
     });
   }
 
@@ -215,7 +296,14 @@ export class AgentEnvironments {
     for (const agent of await readdir(agents).catch(() => [] as string[])) {
       for (const name of await readdir(join(agents, agent)).catch(() => [] as string[])) {
         const m = /^\.(?:active|previous)-(\d+)-/.exec(name);
-        if (m !== null && abandoned(`${m[1]}-x`)) { await rm(join(agents, agent, name), { force: true }); n++; }
+        if (m !== null && abandoned(`${m[1]}-x`)) { await rm(join(agents, agent, name), { force: true }); n++; continue; }
+        // A lock being made or released by a process that died, and tombstones of broken locks old enough that no writer still acts on them.
+        const made = /^\.(?:lock|released)-(\d+)-lock-/.exec(name);
+        if (made !== null && abandoned(`${made[1]}-x`)) { await removeAll(join(agents, agent, name)); n++; continue; }
+        if (name.startsWith(".broken-")) {
+          const info = await lstat(join(agents, agent, name)).catch(() => undefined);
+          if (info !== undefined && Date.now() - info.mtimeMs > TOMBSTONE_KEEP_MS) { await removeAll(join(agents, agent, name)); n++; }
+        }
       }
     }
     return n;

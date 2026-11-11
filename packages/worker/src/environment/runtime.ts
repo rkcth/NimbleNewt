@@ -109,7 +109,9 @@ export class LocalEnvironmentRuntime {
       const refs: PackageRef[] = input.candidate.packages.map((p) => ({ name: p.name, version: p.version, digest: p.digest }));
       const run = input.installScripts && declared;
       if (run && !this.environments.hasScripts) return { ok: false, reason: "install scripts were approved but this host has no sandbox to run them in; nothing was run" };
-      const built = await this.environments.build(join(work, "env"), refs, { ...(run ? { runScriptsFor: input.artifact.digest } : {}), diskMb: input.candidate.limits.diskMb });
+      // The other packages come as the agent has them (with what their install scripts made), so the trial tries the environment the reload will build.
+      const reuse = await this.environments.reuseOrder(input.agentId);
+      const built = await this.environments.build(join(work, "env"), refs, { ...(run ? { runScriptsFor: input.artifact.digest } : {}), diskMb: input.candidate.limits.diskMb, reuse });
       const mine = built.find((b) => b.name === input.artifact.name);
       return { ok: true, digestVerified: true, scriptsDeclared: declared, scriptsRan: mine?.scriptsRan === true && run, ...(run ? { notes: "install scripts ran in the sandbox" } : {}) };
     } catch (error) {
@@ -136,12 +138,15 @@ export class LocalEnvironmentRuntime {
       const runScriptsFor = input.change !== undefined && input.change.installScripts === true ? input.change.digest : undefined;
       const expected = manifestDigestOf(refs);
       await this.environments.stage(input.agentId, input.revision, refs, { ...(runScriptsFor === undefined ? {} : { runScriptsFor }), diskMb: input.manifest.limits.diskMb });
-      const { previous } = await this.environments.activate(input.agentId, input.revision, expected);
-      const directory = realpathSync(this.environments.revisionDir(input.agentId, input.revision));
-      try { await this.#opts.worker.restart?.({ agentId: input.agentId, revision: input.revision, directory, checkpointId: input.checkpointId }); } catch (error) {
-        // The worker could not take the revision: the link goes back to what it was, so the agent's environment is the one it had.
-        if (previous !== undefined) await this.environments.activate(input.agentId, previous).catch(() => undefined);
-        return { ok: false, reason: `the worker could not be restarted on revision ${input.revision}: ${say(error)}` };
+      const { links } = await this.environments.activate(input.agentId, input.revision, expected);
+      try {
+        const directory = realpathSync(this.environments.revisionDir(input.agentId, input.revision));
+        await this.#opts.worker.restart?.({ agentId: input.agentId, revision: input.revision, directory, checkpointId: input.checkpointId });
+      } catch (error) {
+        // The worker could not take the revision: the links go back to exactly what they were (no active revision when there was none), so the agent's environment is the one it had.
+        let undo = "";
+        try { await this.environments.restore(input.agentId, links); } catch (problem) { undo = `; the switch could not be undone (${say(problem)}), revision ${input.revision} may still be active`; }
+        return { ok: false, reason: `the worker could not be restarted on revision ${input.revision}: ${say(error)}${undo}` };
       }
       return { ok: true, observed: await this.#observe(input.manifest.protectedExtensions.map((e) => e.name)) };
     } catch (error) { return { ok: false, reason: this.#why(error) }; }
