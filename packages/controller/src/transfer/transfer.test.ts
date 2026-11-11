@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -936,6 +936,43 @@ test("the journal and the authority file carry an integrity mark; a file changed
     // A key that is not a key is refused rather than replaced.
     writeFileSync(keyPath, "not a key");
     await assert.rejects(readAuthority(st(f)), /is not a valid key/);
+  } finally { await finish(f); }
+});
+
+test("making the integrity key survives a stop at any step: a key being put in place is read, files not yet marked with it are accepted, and the next write finishes the step; a half-written key never appears under the key's name (card F04m review)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const svc = await service(f, [target]);
+    await svc.apply("sqlite2", (await svc.preview("sqlite2")).token);
+    const authorityPath = join(st(f), "storage-authority.json"), journalPath = join(st(f), "database-transfer-journal.json");
+    const keyPath = join(st(f), INTEGRITY_KEY_FILE), pendingPath = `${keyPath}.new`;
+    const marked = { authority: readFileSync(authorityPath, "utf8"), journal: readFileSync(journalPath, "utf8") };
+    // Stopped after the pending key was placed and the journal marked with it, before the authority file was marked and before the key was promoted.
+    const key = readFileSync(keyPath, "utf8");
+    rmSync(keyPath); writeFileSync(pendingPath, key, { mode: 0o600 });
+    { const old = JSON.parse(marked.authority); delete old.integrity; writeFileSync(authorityPath, JSON.stringify(old, null, 2)); }
+    assert.equal((await readAuthority(st(f)))?.generation, 1, "an unmarked file is still an old file while the key is being put in place");
+    assert.equal((await readJournal(st(f)))?.phase, "switched", "a file marked with the key being put in place reads");
+    await guardStart(st(f), { fingerprint: target.fingerprint });
+    // A mark that does not match the key being put in place is rejected, as with the key itself.
+    writeFileSync(journalPath, marked.journal.replace('"phase": "switched"', '"phase": "failed"'));
+    await assert.rejects(readJournal(st(f)), /does not match its integrity mark/);
+    writeFileSync(journalPath, marked.journal);
+    // The next write finishes: the same key becomes the key, the other file is marked, the pending name is gone.
+    await writeAuthority(st(f), (await readAuthority(st(f)))!);
+    assert.equal(readFileSync(keyPath, "utf8"), key, "the key put in place is the one the files were marked with");
+    assert.equal(existsSync(pendingPath), false);
+    assert.match(JSON.parse(readFileSync(authorityPath, "utf8")).integrity, /^hmac-sha256:/);
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+    if (process.platform !== "win32") assert.equal(statSync(keyPath).mode & 0o777, 0o600);
+    // Stopped before anything was marked, in a folder with no key at all: the first write makes the key through the pending name and leaves no temp file.
+    rmSync(keyPath);
+    for (const path of [authorityPath, journalPath]) { const old = JSON.parse(readFileSync(path, "utf8")); delete old.integrity; writeFileSync(path, JSON.stringify(old, null, 2)); }
+    await writeAuthority(st(f), (await readAuthority(st(f)))!);
+    assert.match(readFileSync(keyPath, "utf8"), /^[0-9a-f]{64}\n$/);
+    assert.deepEqual(readdirSync(st(f)).filter((n) => n.includes(INTEGRITY_KEY_FILE)), [INTEGRITY_KEY_FILE]);
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
   } finally { await finish(f); }
 });
 

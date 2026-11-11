@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, statfs } from "node:fs/promises";
+import { link, mkdir, open, readFile, rename, rm, statfs } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { canon } from "../backup/canon.js";
 import { DataLockBusy, acquireDataLock, type DataLock } from "../backup/data-lock.js";
@@ -170,34 +170,49 @@ async function rawWrite(path: string, value: object): Promise<void> {
 const markOf = (key: Buffer, body: Record<string, unknown>): string => `hmac-sha256:${createHmac("sha256", key).update(canonicalJson(body as never)).digest("hex")}`;
 const withoutMark = (value: object): Record<string, unknown> => { const body = JSON.parse(JSON.stringify(value)) as Record<string, unknown>; delete body["integrity"]; return body; };
 
-async function readKey(dir: string): Promise<Buffer | undefined> {
+/** The key while it is being put in place: files an earlier version wrote are marked with it, then it becomes the key. A start between those steps reads it, so a stop half way never locks the owner out. */
+const PENDING_KEY_FILE = `${INTEGRITY_KEY_FILE}.new`;
+
+async function readKey(dir: string, name: string = INTEGRITY_KEY_FILE): Promise<Buffer | undefined> {
   let text: string;
-  try { text = await readFile(join(dir, INTEGRITY_KEY_FILE), "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-  if (!/^[0-9a-f]{64}\s*$/.test(text)) throw new DomainError("unavailable", `${join(dir, INTEGRITY_KEY_FILE)} is not a valid key; the database transfer files cannot be trusted until it is looked at`);
+  try { text = await readFile(join(dir, name), "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  if (!/^[0-9a-f]{64}\s*$/.test(text)) throw new DomainError("unavailable", `${join(dir, name)} is not a valid key; the database transfer files cannot be trusted until it is looked at`);
   return Buffer.from(text.trim(), "hex");
+}
+async function syncDir(dir: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await open(dir, "r").catch(() => undefined);
+  if (handle !== undefined) { try { await handle.sync(); } catch { /* a file system that cannot flush a directory */ } finally { await handle.close(); } }
+}
+/** Places a whole key file under `name` only if none is there (written to a temp file, flushed, then linked: the name never shows a half-written key). Returns the key that is there afterwards. */
+async function placeKey(dir: string, name: string, key: Buffer): Promise<Buffer> {
+  const temp = join(dir, `${name}.${randomUUID().slice(0, 8)}.tmp`);
+  const handle = await open(temp, "wx", 0o600);
+  try { await handle.writeFile(`${key.toString("hex")}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
+  try { await link(temp, join(dir, name)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; } finally { await rm(temp, { force: true }); }
+  await syncDir(dir);
+  const there = await readKey(dir, name);
+  if (there === undefined) throw new Error(`${join(dir, name)} could not be written`);
+  return there;
 }
 /**
  * The key is made by the first write. Files an earlier version wrote (no mark) are marked then, so an upgrade does not lock the owner out; once the key exists an unmarked file is rejected.
- * `wx`: two processes cannot make two keys; the one that loses reads the winner's.
+ * In three steps that each survive a stop: a whole pending key is placed (never overwriting one that is there), the unmarked files are marked with it, then it becomes the key. A later write finishes a step left half done.
  */
 async function keyForWrite(dir: string): Promise<Buffer> {
   const have = await readKey(dir);
   if (have !== undefined) return have;
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  const fresh = randomBytes(32);
-  try {
-    const handle = await open(join(dir, INTEGRITY_KEY_FILE), "wx", 0o600);
-    try { await handle.writeFile(`${fresh.toString("hex")}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") { const winner = await readKey(dir); if (winner !== undefined) return winner; }
-    throw error;
-  }
+  const pending = (await readKey(dir, PENDING_KEY_FILE)) ?? (await placeKey(dir, PENDING_KEY_FILE, randomBytes(32)));
   for (const name of FILES) {
     let text: string;
     try { text = await readFile(join(dir, name), "utf8"); } catch { continue; }
-    try { const old = JSON.parse(text) as Record<string, unknown>; if (old["integrity"] === undefined) await rawWrite(join(dir, name), { ...old, integrity: markOf(fresh, old) }); } catch { /* not JSON: the read will say so */ }
+    try { const old = JSON.parse(text) as Record<string, unknown>; if (old["integrity"] === undefined) await rawWrite(join(dir, name), { ...old, integrity: markOf(pending, old) }); } catch { /* not JSON: the read will say so */ }
   }
-  return fresh;
+  const key = await placeKey(dir, INTEGRITY_KEY_FILE, pending);
+  await rm(join(dir, PENDING_KEY_FILE), { force: true });
+  await syncDir(dir);
+  return key;
 }
 
 /** Writes the file with an integrity mark over its content (HMAC with the folder's key). */
@@ -215,10 +230,13 @@ async function readJson<T>(path: string): Promise<T | undefined> {
   const body = withoutMark(parsed);
   const mark = (parsed as Record<string, unknown>)["integrity"];
   const key = await readKey(dirname(path));
+  // A key being put in place (see keyForWrite): files not yet marked with it are accepted, a mark must match it.
+  const pending = key === undefined ? await readKey(dirname(path), PENDING_KEY_FILE) : undefined;
   const changed = (why: string): never => { throw new DomainError("unavailable", `${path} ${why}; it was changed by something other than NimbleNewt, so nothing is done with it until it is looked at (restore it from a backup, or remove it only if you know no database transfer has happened)`); };
-  if (key === undefined) { if (mark !== undefined) changed("carries an integrity mark but its key file is missing"); return body as T; }
+  if (key === undefined && pending === undefined) { if (mark !== undefined) changed("carries an integrity mark but its key file is missing"); return body as T; }
+  if (key === undefined && mark === undefined) return body as T;
   if (typeof mark !== "string") return changed("has no integrity mark");
-  const want = Buffer.from(markOf(key, body)), got = Buffer.from(mark);
+  const want = Buffer.from(markOf((key ?? pending)!, body)), got = Buffer.from(mark);
   if (want.length !== got.length || !timingSafeEqual(want, got)) changed("does not match its integrity mark");
   return body as T;
 }
