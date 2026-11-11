@@ -167,6 +167,30 @@ for (const backend of backends) {
     assert.equal(h[0]!.outcome, undefined);
   });
 
+  suite("agents racing for a free lease: exactly one is granted, each other is blocked visibly (never an error to retry by hand)", async ({ leases, resource, ann, bob, owner }) => {
+    const all = await Promise.all([ann, bob, owner].map((who) => leases.acquire(who, { commandId: cid("race"), resourceId: resource, purpose: `race ${who.id}` })));
+    assert.deepEqual(all.map((r) => r.status).sort(), ["blocked", "blocked", "granted"]);
+    const winner = [ann, bob, owner][all.findIndex((r) => r.status === "granted")]!;
+    const lease = all.find((r) => r.status === "granted")!.lease;
+    assert.equal(lease.holderId, winner.id);
+    const final = (await leases.acquire(winner, { commandId: cid("renew"), resourceId: resource, purpose: "renew" })).lease;
+    assert.deepEqual([final.generation, final.blockedCount], [1, 2]);
+  });
+
+  suite("a release replayed after the lease moved on completes its own records, not the next holding's", async ({ owner, duties, inc, project, leases, resource, duty, ann, bob }) => {
+    await leases.acquire(ann, { commandId: cid("a"), resourceId: resource, purpose: "patch" });
+    const id = cid("rel");
+    await leases.release(ann, { commandId: id, resourceId: resource, validation: "passed", evidence: "health 200" });
+    await leases.acquire(bob, { commandId: cid("a"), resourceId: resource, purpose: "upgrade" });
+    const failed = await leases.release(bob, { commandId: cid("r"), resourceId: resource, validation: "failed", evidence: "500s", onFailure: "escalate" });
+    const replay = await leases.release(ann, { commandId: id, resourceId: resource, validation: "passed", evidence: "health 200" });
+    assert.equal(replay.response, undefined, "ann's release had no failure response");
+    assert.equal(replay.incidentId, undefined);
+    const history = (await duties.history(owner, duty, { limit: 50 }))!.items.filter((h) => h.kind === "intervention");
+    assert.deepEqual(history.map((h) => h.outcome), ["ok", "failed"], "one entry per holding, nothing doubled");
+    assert.equal((await inc.list(owner, project))!.find((i) => i.id === failed.incidentId)!.count, 1, "the incident is reported once");
+  });
+
   suite("the lease survives a new service instance (restart): the holder, the end and the blocks are in the store", async ({ project, leases, resource, ann, bob }) => {
     await leases.acquire(ann, { commandId: cid("a"), resourceId: resource, purpose: "long", minutes: 120 });
     await leases.acquire(bob, { commandId: cid("a"), resourceId: resource, purpose: "wait" });

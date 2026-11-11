@@ -24,6 +24,8 @@ export interface LeaseRelease {
   /** For a failed validation: `rollback` (the responsibility permits the action `rollback`) or `escalate` (an incident was opened and escalated now). */
   readonly response?: "rollback" | "escalate";
   readonly evidence: string;
+  /** The release command (a hash), so a repeat of it finds its own holding's outcome even after the lease moved on. */
+  readonly key?: string;
 }
 
 /**
@@ -64,6 +66,15 @@ const LEASE = "maintenance-lease";
 const hash = (...parts: string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24);
 const leaseIdOf = (resourceId: string): string => `mlease-${hash(resourceId)}`;
 const BLOCKS_KEPT = 10;
+/** Agents racing for the same lease meet a changed record; the loser runs again against the new state (granted, renewed or blocked visibly) instead of seeing an error. */
+const CONTENDED_ATTEMPTS = 8;
+const LEASE_CHANGED = "the lease changed meanwhile; try again";
+const contended = (error: unknown): boolean => error instanceof DomainError && error.code === "stale_revision" && error.message === LEASE_CHANGED;
+async function retryContended<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await run(); } catch (error) { if (!contended(error) || attempt >= CONTENDED_ATTEMPTS) throw error; }
+  }
+}
 
 export interface AcquireResult { readonly status: "granted" | "blocked"; readonly lease: LeaseView }
 export interface ReleaseResult { readonly lease: LeaseView; readonly response?: "rollback" | "escalate"; readonly incidentId?: string }
@@ -93,7 +104,7 @@ export class MaintenanceLeaseService {
   /** Takes, renews or is blocked from the lease on a managed resource. A block is a normal answer (`status: "blocked"`), recorded on the lease. */
   async acquire(by: Principal, command: NoActor & { resourceId: string; purpose: string; minutes?: number }): Promise<AcquireResult> {
     const key = hash(scopedCommandId(by.id, command.commandId));
-    await this.#runner.command("responsibility.lease.acquire", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => {
+    await retryContended(() => this.#runner.command("responsibility.lease.acquire", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => {
       onlyKnown(command, ["commandId", "resourceId", "purpose", "minutes"]);
       const resourceId = text(command.resourceId, "resourceId", { min: 1, max: 100 });
       const purpose = noCredential(text(command.purpose, "purpose", { min: 1, max: L.summary, multiline: true }), "purpose");
@@ -124,10 +135,10 @@ export class MaintenanceLeaseService {
             };
           }
           const changes: Change[] = [found === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }];
-          return { ref, creates: found === undefined, changes, detail: { resourceId, responsibilityId: claim.responsibilityId, blocked: next.grantKey !== key }, contention: async () => new DomainError("stale_revision", "the lease changed meanwhile; try again") };
+          return { ref, creates: found === undefined, changes, detail: { resourceId, responsibilityId: claim.responsibilityId, blocked: next.grantKey !== key }, contention: async () => new DomainError("stale_revision", LEASE_CHANGED) };
         },
       };
-    });
+    }));
     const lease = (await this.#read(command.resourceId))!;
     return { status: lease.grantKey === key ? "granted" : "blocked", lease };
   }
@@ -145,7 +156,8 @@ export class MaintenanceLeaseService {
     if (command.validation === "failed" && command.onFailure === undefined) invalid("onFailure", "a failed validation needs a response: rollback (if the responsibility permits it) or escalate");
     if (command.validation !== "failed" && command.onFailure !== undefined) invalid("onFailure", "a response is only for a failed validation");
     const forced = command.validation === undefined;
-    await this.#runner.command("responsibility.lease.release", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    const key = hash(scopedCommandId(by.id, command.commandId));
+    await retryContended(() => this.#runner.command("responsibility.lease.release", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { resourceId, evidence, ...(command.validation === undefined ? {} : { validation: command.validation }), ...(command.onFailure === undefined ? {} : { onFailure: command.onFailure }) },
       build: async (): Promise<Built> => {
         const managed = await this.#managed(by, resourceId, "release that lease");
@@ -157,25 +169,26 @@ export class MaintenanceLeaseService {
         if (holder !== by.id && by.kind !== "owner") throw hidden(by, "release a lease another agent holds");
         if (holder !== by.id && !forced) invalid("validation", "only the holder can report how the maintenance validated; the owner releases another agent's lease with a reason only");
         if (command.onFailure === "rollback" && !managed.duty.permittedActions.includes("rollback")) invalid("onFailure", `responsibility ${managed.duty.id} does not permit the action rollback; escalate instead`);
-        const last: LeaseRelease = { by: by.id, at: this.#runner.now(), forced, generation: before!.generation, evidence, ...(command.validation === undefined ? {} : { validation: command.validation }), ...(command.onFailure === undefined ? {} : { response: command.onFailure }) };
+        const last: LeaseRelease = { by: by.id, at: this.#runner.now(), forced, generation: before!.generation, evidence, ...(command.validation === undefined ? {} : { validation: command.validation }), ...(command.onFailure === undefined ? {} : { response: command.onFailure }), key };
         const { holderId: _h, purpose: _p, acquiredAt: _a, expiresAt: _e, tookOverFrom: _t, grantKey: _g, ...kept } = before!;
         void [_h, _p, _a, _e, _t, _g];
         const next: LeaseBody = { ...kept, state: "free", lastRelease: last };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found!.revision, body: next as unknown as JsonObject }], detail: { resourceId, validation: command.validation ?? "forced", ...(command.onFailure === undefined ? {} : { response: command.onFailure }) }, contention: async () => new DomainError("stale_revision", "the lease changed meanwhile; try again") };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found!.revision, body: next as unknown as JsonObject }], detail: { resourceId, validation: command.validation ?? "forced", ...(command.onFailure === undefined ? {} : { response: command.onFailure }) }, contention: async () => new DomainError("stale_revision", LEASE_CHANGED) };
       },
-    }));
-    // The records that follow are keyed by the lease and its holding, so a repeat (or a crash between them) completes the rest and writes nothing twice.
+    })));
+    // The records that follow are keyed by the release command itself, so a repeat (or a crash between them) completes the rest and writes nothing twice. They follow this command's own validation and response
+    // (a repeat carries the same ones, or it is refused as a different command), never the lease's latest release: by the time of a repeat another agent may have taken and released the lease.
     const lease = (await this.#read(resourceId))!;
-    const stamp = hash(lease.id, String(lease.lastRelease?.generation ?? lease.generation));
+    const stamp = hash(lease.id, key);
     let incidentId: string | undefined;
-    const response = lease.lastRelease?.response;
+    const response = command.onFailure;
     if (response === "escalate") {
       const reported = await this.#incidents.report(by, { commandId: `mlv-${stamp}`, responsibilityId: lease.responsibilityId, signature: `maintenance-validation:${resourceId}`, summary: `Validation failed after maintenance of ${resourceId}: ${evidence}`.slice(0, L.summary), outcome: "failed" });
       incidentId = reported.id;
       await this.#incidents.escalateNow(by, incidentId);
     }
-    const what = forced ? `Lease on ${resourceId} released by force (${evidence})` : lease.lastRelease?.validation === "passed" ? `Maintenance of ${resourceId} validated: ${evidence}` : response === "rollback" ? `Validation failed on ${resourceId}; rolled back under the permitted action: ${evidence}` : `Validation failed on ${resourceId}; escalated (incident ${incidentId}): ${evidence}`;
-    await this.#duties.record(by, { commandId: `mlo-${stamp}`, responsibilityId: lease.responsibilityId, kind: "intervention", summary: what.slice(0, L.summary), ...(forced ? {} : { outcome: lease.lastRelease?.validation === "passed" ? "ok" : "failed" } as const) });
+    const what = forced ? `Lease on ${resourceId} released by force (${evidence})` : command.validation === "passed" ? `Maintenance of ${resourceId} validated: ${evidence}` : response === "rollback" ? `Validation failed on ${resourceId}; rolled back under the permitted action: ${evidence}` : `Validation failed on ${resourceId}; escalated (incident ${incidentId}): ${evidence}`;
+    await this.#duties.record(by, { commandId: `mlo-${stamp}`, responsibilityId: lease.responsibilityId, kind: "intervention", summary: what.slice(0, L.summary), ...(forced ? {} : { outcome: command.validation === "passed" ? "ok" : "failed" } as const) });
     return { lease, ...(response === undefined ? {} : { response }), ...(incidentId === undefined ? {} : { incidentId }) };
   }
 
