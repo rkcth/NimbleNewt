@@ -36,6 +36,7 @@ import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
+import type { CoordinatorService } from "../chat/coordinator.js";
 import type { StandupService } from "../standups/standups.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
@@ -146,6 +147,8 @@ export interface Context {
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
+  /** The coordinator, looked up when asked (it is built after the state API). Absent, or answering undefined: the coordinator is not set up here. */
+  readonly coordinator?: () => Pick<CoordinatorService, "get"> | undefined;
   /** Absent when the controller runs without remote hosts. */
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
@@ -357,6 +360,7 @@ const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> =>
 
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
 const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
+const coordinatorOf = (c: Context): Pick<CoordinatorService, "get"> => c.coordinator?.() ?? unavailable("the coordinator");
 const quietHostSettingsOf = (c: Context): NonNullable<Context["quietHostSettings"]> => c.quietHostSettings ?? unavailable("the quiet-host setting");
 const quietHostsOf = (c: Context): NonNullable<Context["quietHosts"]> => c.quietHosts ?? unavailable("remote hosts");
 const recoveryLadderOf = (c: Context): NonNullable<Context["recoveryLadder"]> => c.recoveryLadder ?? unavailable("the recovery ladder");
@@ -627,6 +631,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["maxRounds", "expectedRevision"]); return asJson({ ...(await resumeSettingsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "project.branches.change", kind: "command", summary: "The owner protects more branches of a project or takes named ones off the list, leaving the others as they are (owner only). This is the form the chat uses, so a request that waits to be accepted does only what it says. Taking off a branch from a project still on the default list writes the default out first, so the other default stays protected.", args: { project: "the project ID", "add?": "branch names or prefixes such as `release/*` to protect", "remove?": "branch names or prefixes to stop protecting", "landing?": "the landing branch, or null to clear it", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["project", "add", "remove", "landing", "expectedRevision"]); notFromTask(c, "change branch settings"); const { project, ...rest } = a as { project: string }; return asJson({ ...(await branchSettingsOf(c).change(c.principal, { commandId: need(id), projectId: project, ...rest } as never)) }); } },
+  { name: "coordinator.get", kind: "query", summary: "The coordinator, as the owner reads it (owner only): its principal, its model routes in the order tried (the primary first, then the fallbacks), the order the owner last gave and, when the principal is an agent record (a hosted coordinator, card U03c), the agent it runs as and where (`hosted: { agentId, host }`). For a hosted coordinator `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` lists the pause gates that hold it (its own, a team's, the installation's) with what each reported; pausing, stopping or resuming the agent, or a team above it, therefore changes this at once. Its grants are the agent's grants (`grant.list` with its principal) and are revoked like any agent's. `item` is null when no coordinator is set up.", args: {}, result: "`{ item }`: `id`, `revision`, `principalId`, `routes`, `state`, `hosted?`, `lifecycle?: { agent, state, heldBy: [{ scope, observed?, reason?, by? }] }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: (await coordinatorOf(c).get(c.principal)) ?? null }); } },
   { name: "host.quiet.get", kind: "query", summary: "What happens when a host stops reporting while it holds work (owner only): the owner is warned first, and the work is re-placed after a grace period unless the owner turns that off. Shows the owner's figures, the defaults and the effective ones.", args: {}, result: "`{ item }`: `revision`, `graceHours`, `autoMove`, `recoverMinutes` and `noticeHours` (the owner's, or null), `damaged` (the stored setting is damaged: automatic moves are off until `autoMove` is stated), `default` and `effective` (each `{ graceHours, autoMove, recoverMinutes, noticeHours }`).", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await quietHostSettingsOf(c).get(c.principal) }); } },
   { name: "host.quiet.change", kind: "command", summary: "The owner sets what happens when a host stops reporting while it holds work (owner only). `graceHours` is how long the owner has to answer the warning before the work is re-placed from its last checkpoint on another allowed host (a whole number from 1 to 720; default 12). `autoMove` false means the work is never moved by itself (the owner can still move it with host.move-work); true turns it on. `recoverMinutes` is how long a host must report without a gap before its quiet episode is over (1 to 1440; default 10), so a host that drops out and reports again is one quiet host, not many. `noticeHours` is the least time between two notices about the same host (1 to 720; default 6). `null` clears a figure to its default; a figure not named keeps its value. When the stored setting is damaged, state `autoMove` (true or false) with the change: automatic moves stay off until you do. It counts from the next pass.", args: { "graceHours?": "1 to 720, or null to clear", "autoMove?": "true, false, or null to clear", "recoverMinutes?": "1 to 1440, or null to clear", "noticeHours?": "1 to 720, or null to clear", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

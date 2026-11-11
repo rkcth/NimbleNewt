@@ -6,5 +6,6 @@ export { CHAT_LIMITS, ScriptedInterpreter, checkIntents, evidenceInText, evidenc
 export { ChatService, replyOf, type ApplyResult, type ChatDeps, type ContextBody, type Outcome, type ChatPin, type ChatProposalBody, type ChatStep, type ChatStepResult, type TurnBody, type TurnResult } from "./chat.js";
 export { GRANT_LENGTH_OPTIONS, DEFAULT_GRANT_DAYS, MAX_GRANT_DAYS, GRANT_DAYS_CEILING, POLICY_EDIT_LIMITS, PolicyEditService, chooseGrantLength, type GrantLengthRules, lengthInWords, ownerOrders, targetsOf, type EditDraft, type EditOp, type EditResult, type EditStatus, type PolicyEditBody, type PolicyEditDeps, type PrepareInput, type PolicyEditPrepared } from "./policy-edit.js";
 export { checkPolicyChange, type PolicyEditChange } from "./policy-intent.js";
-export { COORDINATOR_ID, CoordinatorService, type Answer, type CoordinatorBody, type CoordinatorDeps, type CoordinatorModel, type CoordinatorRequest, type CoordinatorState, type Decomposition } from "./coordinator.js";
+export { COORDINATOR_ID, CoordinatorService, type Answer, type CoordinatorBody, type CoordinatorDeps, type CoordinatorModel, type CoordinatorRequest, type CoordinatorLifecycleState, type CoordinatorState, type CoordinatorView, type Decomposition } from "./coordinator.js";
 export { FOLLOW_UP_LIMITS, chatTurnFollowUps } from "./follow-ups.js";
+export { agentLifecycle, type AgentLifecyclePort, type HostedLook, type HostedState } from "./coordinator-host.js";

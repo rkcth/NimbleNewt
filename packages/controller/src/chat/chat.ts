@@ -71,7 +71,7 @@ type PlanItem =
   | { readonly i: number; readonly kind: "command"; readonly typed: string }
   | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string; readonly lengthDays?: number }
   | { readonly i: number; readonly kind: "status"; readonly request: JsonObject }
-  | { readonly i: number; readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly projectId?: string; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly routes?: readonly string[]; /** The revision of the coordinator record the order expects, read once when the message was planned, so a retry of the turn sends the same thing. */ readonly expectedRevision?: number }
+  | { readonly i: number; readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly projectId?: string; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly agentName?: string; readonly routes?: readonly string[]; /** The revision of the coordinator record the order expects, read once when the message was planned, so a retry of the turn sends the same thing. */ readonly expectedRevision?: number }
   | { readonly i: number; readonly kind: "policy"; readonly editId: string; readonly draft: EditDraft; readonly preview: readonly string[] }
   | { readonly i: number; readonly kind: "asked"; readonly question: string; readonly options: readonly string[]; /** For a question the service asked: which command (by position) and which argument the answer fills, and the answers that are allowed. */ readonly intentIndex?: number; readonly field?: string; readonly choices?: readonly string[] }
   | { readonly i: number; readonly kind: "held"; readonly preview: string }
@@ -546,7 +546,7 @@ export class ChatService {
       }
       if (intent.kind === "coordinator") {
         // What is said to the coordinator is the owner's own: its texts must be in the message, like any command's. The project is the one named or in focus.
-        const texts = { ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: [...intent.routes] }) };
+        const texts = { ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.agentName === undefined ? {} : { agentName: intent.agentName }), ...(intent.routes === undefined ? {} : { routes: [...intent.routes] }) };
         const foreign = foreignValue(texts, words);
         if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
         let target: string | undefined;
@@ -557,6 +557,17 @@ export class ChatService {
           target = found.id;
           projectId = found.id;
         }
+        // The agent that is to be the coordinator, named in the owner's own words: looked up among the active agents (card U03c), and asked about when several fit. Its principal is what the coordinator is set up with.
+        let principalId = intent.principalId;
+        if (intent.action === "configure" && intent.agentName !== undefined) {
+          const agents = await this.#listAll(token, "agent.list", { state: "active" });
+          const wanted = intent.agentName.trim().toLowerCase();
+          const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
+          const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
+          if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called ${quotedText(intent.agentName.trim(), 80)}` }); continue; }
+          if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) }); continue; }
+          principalId = String(found[0]!["principalId"]);
+        }
         // The coordinator record's revision is read once, here, and counted for each earlier change to it in this message; a retry of the turn then sends the very same order.
         let expectedRevision: number | undefined;
         if (intent.action === "configure" || intent.action === "start" || intent.action === "pause" || intent.action === "stop") {
@@ -566,7 +577,7 @@ export class ChatService {
           if (now !== undefined) expectedRevision = now;
           coordinatorRevision = (now ?? 0) + 1;
         }
-        push({ i, kind: "coordinator", action: intent.action, ...(expectedRevision === undefined ? {} : { expectedRevision }), ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
+        push({ i, kind: "coordinator", action: intent.action, ...(expectedRevision === undefined ? {} : { expectedRevision }), ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(principalId === undefined ? {} : { principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
         continue;
       }
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
@@ -1943,7 +1954,8 @@ export class ChatService {
         case "start": case "pause": case "stop": {
           if (item.expectedRevision === undefined) return { i: item.i, status: "refused", code: "not_found", message: "the coordinator is not set up yet" };
           const made = await service.setState(owner, { commandId, expectedRevision: item.expectedRevision, to: item.action === "start" ? "running" : item.action === "pause" ? "paused" : "stopped" });
-          return { i: item.i, status: "applied", op: "coordinator.state", commandId, id: made.id, revision: made.revision };
+          // A hosted coordinator is started through its agent's own gate; a pause above it (a team, the installation) still holds it, and the owner is told so.
+          return { i: item.i, status: "applied", op: "coordinator.state", commandId, id: made.id, revision: made.revision, ...(made.stillHeldBy === undefined ? {} : { shown: [`The coordinator's own pause is lifted, but it is still held by ${made.stillHeldBy.join(", ")}.`] }) };
         }
       }
     } catch (error) { return refusal(item.i, error); }

@@ -16,6 +16,7 @@ import type { ChatService, ChatStep } from "./chat.js";
 import { quoted as quotedText } from "../status/explain.js";
 import { describe } from "./commands.js";
 import { CHAT_LIMITS } from "./interpreter.js";
+import type { AgentLifecyclePort, HostedLook, HostedState } from "./coordinator-host.js";
 
 /** What the coordinator's model is asked. The model call is behind this interface (scripted in tests); its answer is validated here and never acted on directly. */
 export type CoordinatorRequest =
@@ -30,9 +31,17 @@ export interface CoordinatorModel {
 
 export type CoordinatorState = "running" | "paused" | "stopped";
 
+/** What the owner is told the coordinator is doing: the three it always had, and for a hosted one what the agent controls report besides. */
+export type CoordinatorLifecycleState = CoordinatorState | HostedState;
+
 export interface CoordinatorBody {
   /** The coordinator's own principal: an agent with its own grants, which decide what it may do (it holds nothing by being the coordinator). */
   readonly principalId: string;
+  /**
+   * Set when the principal is an agent record (card U03c): the coordinator then runs as that agent, on the controller's own host, and its lifecycle is the agent's (the pause gates of its agent scope and of the scopes above it, and a
+   * Stop). `state` is then only what the owner last ordered; what decides is the agent's gates. Absent: the controller holds the coordinator's state itself, as before.
+   */
+  readonly hosted?: { readonly agentId: string; readonly host: "controller" };
   /** Provider routes in the order to try: the primary, then the fallbacks. */
   readonly routes: readonly string[];
   readonly state: CoordinatorState;
@@ -71,7 +80,14 @@ export interface CoordinatorDeps {
   readonly agents?: () => Promise<readonly { readonly id: string; readonly name: string; readonly roles: readonly string[] }[]>;
   /** The coordinator's own authenticated principal (the controller holds its credential). */
   readonly principal: () => Promise<Principal>;
+  /** The agent controls (pause gates and Stop) a coordinator that is an agent record runs under (card U03c). Absent: a coordinator is never hosted; its state is its own. */
+  readonly lifecycle?: AgentLifecyclePort;
 }
+
+/** The coordinator as the owner reads it: its record, and for a hosted one the lifecycle the agent controls report. */
+export type CoordinatorView = Omit<CoordinatorBody, "state"> & { readonly id: string; readonly revision: number; readonly state: CoordinatorLifecycleState; readonly lifecycle?: HostedLook };
+
+const AGENT_RECORD = /^agent:(agt-[a-z2-7]{20})$/;
 
 /**
  * The persistent coordinator (card U03): a controller-managed agent record with its own principal (so its own grants), a list of provider routes (primary and fallbacks) and lifecycle controls
@@ -102,51 +118,101 @@ export class CoordinatorService {
     if (typeof command.principalId !== "string" || !/^agent:[a-z0-9][a-z0-9-]{0,39}$/.test(command.principalId)) invalid("principalId", "must be an agent principal ID such as agent:coordinator");
     if (!Array.isArray(command.routes) || command.routes.length < 1 || command.routes.length > CHAT_LIMITS.routes || command.routes.some((r) => typeof r !== "string" || r.length < 1 || r.length > 80)) invalid("routes", `must be 1 to ${CHAT_LIMITS.routes} route names (the primary first)`);
     const routes = [...new Set(command.routes)];
+    // An agent record as the principal makes the coordinator a hosted agent (card U03c): it must be an active agent, and it starts under a pause of its own agent scope unless the coordinator was already running.
+    const hostedId = this.#deps.lifecycle === undefined ? undefined : AGENT_RECORD.exec(command.principalId)?.[1];
+    const before = await this.#runner.get("coordinator", COORDINATOR_ID);
+    if (hostedId !== undefined) {
+      const look = await this.#deps.lifecycle!.look(owner, hostedId);
+      if (look.agent !== "active") invalid("principalId", look.agent === "retired" ? "that agent is retired" : "no such agent");
+      const was = before === undefined ? undefined : (before.body as unknown as CoordinatorBody);
+      const newlyHosted = was?.hosted?.agentId !== hostedId;
+      const wouldApply = before === undefined ? command.expectedRevision === undefined : command.expectedRevision === before.revision;
+      // The pause comes first, so the record never exists with the agent free to be used before the owner starts it. Repeating the command repeats the same pause by its command ID.
+      if (newlyHosted && wouldApply && (was === undefined || was.hosted !== undefined || was.state !== "running")) await this.#deps.lifecycle!.pause(owner, hostedId, `coord-host-${command.commandId}`.slice(0, 120), "the coordinator is set up as this agent and waits for the owner to start it");
+    }
     return this.#runner.command("coordinator.configure", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: asJson({ principalId: command.principalId, routes, expectedRevision: command.expectedRevision ?? null }),
       build: async () => {
         const ref: AggregateRef = { kind: "coordinator", id: COORDINATOR_ID };
         const current = await this.#runner.get("coordinator", COORDINATOR_ID);
+        const hosted = hostedId === undefined ? undefined : ({ agentId: hostedId, host: "controller" } as const);
         if (current === undefined) {
           if (command.expectedRevision !== undefined) throw new DomainError("not_found", "the coordinator is not set up");
-          const body: CoordinatorBody = { principalId: command.principalId, routes, state: "paused", createdAt: this.#runner.now() };
-          return { ref, creates: true, changes: [{ type: "create", ref, body: asJson(body) }], detail: { principalId: command.principalId } };
+          const body: CoordinatorBody = { principalId: command.principalId, routes, state: "paused", createdAt: this.#runner.now(), ...(hosted === undefined ? {} : { hosted }) };
+          return { ref, creates: true, changes: [{ type: "create", ref, body: asJson(body) }], detail: { principalId: command.principalId, hosted: hosted !== undefined } };
         }
         if (command.expectedRevision !== current.revision) throw new DomainError("stale_revision", `the coordinator is at revision ${current.revision}`, { currentRevision: current.revision });
-        const next: CoordinatorBody = { ...(current.body as unknown as CoordinatorBody), principalId: command.principalId, routes };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: asJson(next) }], detail: { principalId: command.principalId } };
+        const old = current.body as unknown as CoordinatorBody;
+        const { hosted: _was, ...rest } = old;
+        // A coordinator taken off its agent record has no gates to answer for it: it comes back paused, never as whatever it last was.
+        const next: CoordinatorBody = { ...rest, principalId: command.principalId, routes, ...(old.hosted !== undefined && hosted === undefined ? { state: "paused" as const } : {}), ...(hosted === undefined ? {} : { hosted }) };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: asJson(next) }], detail: { principalId: command.principalId, hosted: hosted !== undefined } };
       },
     }));
   }
 
-  /** Start (`running`), `paused` or `stopped`. A stopped coordinator can only be started again. */
-  async setState(owner: Principal, command: { commandId: string; expectedRevision: number; to: CoordinatorState }): Promise<{ id: string; revision: number; replayed: boolean }> {
+  /**
+   * Start (`running`), `paused` or `stopped`. A stopped coordinator can only be started again.
+   * A hosted coordinator (card U03c) is started, paused and stopped through the agent controls: the pause gate of its agent scope is lifted or set, and a Stop is asked of the stop service, exactly as the owner would for any agent.
+   * The record keeps what the owner ordered (and its revision moves, so the order is audited and a stale order is refused); what the coordinator is doing is read from the gates. Starting it lifts only its own gate:
+   * a team or the installation that is paused still holds it, and the answer says so (`stillHeldBy`).
+   */
+  async setState(owner: Principal, command: { commandId: string; expectedRevision: number; to: CoordinatorState }): Promise<{ id: string; revision: number; replayed: boolean; stillHeldBy?: readonly string[] }> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "expectedRevision", "to"]);
     if (command.to !== "running" && command.to !== "paused" && command.to !== "stopped") invalid("to", "must be running, paused or stopped");
-    return this.#runner.command("coordinator.state", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+    const before = await this.#runner.get("coordinator", COORDINATOR_ID);
+    const hosted = before === undefined ? undefined : (before.body as unknown as CoordinatorBody).hosted;
+    let held: readonly string[] | undefined;
+    // The agent controls are used only for an order that would be accepted, and each repeats safely by its command ID.
+    if (hosted !== undefined && before!.revision === command.expectedRevision && this.#deps.lifecycle !== undefined) {
+      const port = this.#deps.lifecycle;
+      const look = await port.look(owner, hosted.agentId);
+      if (look.agent !== "active") throw new DomainError("invalid_command", "the coordinator's agent is retired", { field: "to" });
+      if (look.state === "stopped" && command.to === "paused") throw new DomainError("invalid_command", "a stopped coordinator can only be started", { field: "to" });
+      const id = `coord-${scopedCommandId(owner.id, command.commandId).slice(-60)}`;
+      if (command.to === "running") held = (await port.resume(owner, hosted.agentId, id, "the owner started the coordinator")).stillHeldBy.map((s) => `${s.kind} ${s.id}`);
+      else if (command.to === "paused") { await port.pause(owner, hosted.agentId, id, "the owner paused the coordinator"); await this.#reportIfIdle(owner, hosted.agentId); }
+      else await port.stop(owner, hosted.agentId, id, "the owner stopped the coordinator");
+    }
+    const done = await this.#runner.command("coordinator.state", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { expectedRevision: command.expectedRevision, to: command.to },
       build: async () => {
         const current = await this.#runner.existing("coordinator", COORDINATOR_ID, command.expectedRevision);
         const body = current.body as unknown as CoordinatorBody;
-        if (body.state === "stopped" && command.to === "paused") throw new DomainError("invalid_command", "a stopped coordinator can only be started", { field: "to" });
+        // A hosted coordinator was checked against its agent's gates before they were touched; the order recorded last is not what decides (the agent may have been started through its own controls since).
+        if (body.hosted === undefined && body.state === "stopped" && command.to === "paused") throw new DomainError("invalid_command", "a stopped coordinator can only be started", { field: "to" });
         const ref: AggregateRef = { kind: "coordinator", id: COORDINATOR_ID };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: asJson({ ...body, state: command.to }) }], detail: { from: body.state, to: command.to } };
       },
     }));
+    return held === undefined || held.length === 0 ? done : { ...done, stillHeldBy: held };
   }
 
-  async get(owner: Principal): Promise<(CoordinatorBody & { id: string; revision: number }) | undefined> {
+  /**
+   * The coordinator as the owner reads it. For a hosted one `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` carries the gates that hold it; the order the
+   * owner last gave stays in the record's history. A hosted coordinator whose agent record is gone or retired reads as stopped.
+   */
+  async get(owner: Principal): Promise<CoordinatorView | undefined> {
     this.#requireOwner(owner);
     const found = await this.#runner.get("coordinator", COORDINATOR_ID);
-    return found === undefined ? undefined : view<CoordinatorBody>(found);
+    if (found === undefined) return undefined;
+    const plain = view<CoordinatorBody>(found);
+    if (plain.hosted === undefined || this.#deps.lifecycle === undefined) return plain;
+    const look = await this.#deps.lifecycle.look(owner, plain.hosted.agentId).then((l) => l, () => undefined);
+    if (look === undefined) return { ...plain, state: "stopped" };
+    return { ...plain, state: look.agent !== "active" ? "stopped" : look.state, lifecycle: look };
   }
 
   /**
    * Answers from the project's records. The model sees only the records the owner may read and must cite them; an answer that cites nothing it was shown is not an answer. When records do not
    * answer and a task is named, an inquiry to the owner is opened (once per command ID); with no task there is nowhere to ask, and the owner is told the records are not enough.
    */
-  async answer(owner: Principal, command: { commandId: string; projectId: string; question: string; taskId?: string; to?: string }): Promise<Answer> {
+  answer(owner: Principal, command: { commandId: string; projectId: string; question: string; taskId?: string; to?: string }): Promise<Answer> {
+    return this.#busy(() => this.#answer(owner, command));
+  }
+
+  async #answer(owner: Principal, command: { commandId: string; projectId: string; question: string; taskId?: string; to?: string }): Promise<Answer> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "projectId", "question", "taskId", "to"]);
     if (command.to !== undefined && (typeof command.to !== "string" || !/^agent:[a-z0-9][a-z0-9-]{0,39}$/.test(command.to))) invalid("to", "must be an agent principal ID");
@@ -154,7 +220,7 @@ export class CoordinatorService {
     if (typeof command.question !== "string" || command.question.length < 1 || command.question.length > CHAT_LIMITS.question) invalid("question", `must be text of 1 to ${CHAT_LIMITS.question} characters`);
     if (redactText(command.question) !== command.question) invalid("question", "looks like a credential or key");
     const taskId = command.taskId === undefined ? undefined : checkTaskId(command.taskId);
-    const state = await this.#usable();
+    const state = await this.#usable(owner);
     if (state.kind === "unavailable") return state;
     const found = await this.#deps.retrieval.search(owner, { projectId, query: command.question, limit: 5 });
     if (found.hits.length > 0) {
@@ -175,13 +241,17 @@ export class CoordinatorService {
   }
 
   /** Breaks an outcome into tasks with dependencies, saved as a proposal. Nothing exists until the owner applies it. */
-  async decompose(owner: Principal, command: { commandId: string; projectId: string; outcome: string }): Promise<Decomposition | { kind: "unavailable"; reason: string }> {
+  decompose(owner: Principal, command: { commandId: string; projectId: string; outcome: string }): Promise<Decomposition | { kind: "unavailable"; reason: string }> {
+    return this.#busy(() => this.#decompose(owner, command));
+  }
+
+  async #decompose(owner: Principal, command: { commandId: string; projectId: string; outcome: string }): Promise<Decomposition | { kind: "unavailable"; reason: string }> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "projectId", "outcome"]);
     const projectId = checkProjectId(command.projectId);
     if (typeof command.outcome !== "string" || command.outcome.length < 1 || command.outcome.length > CHAT_LIMITS.text) invalid("outcome", `must be text of 1 to ${CHAT_LIMITS.text} characters`);
     if (redactText(command.outcome) !== command.outcome) invalid("outcome", "looks like a credential or key");
-    const state = await this.#usable();
+    const state = await this.#usable(owner);
     if (state.kind === "unavailable") return state;
     const project = await this.#deps.projects.getProject(projectId);
     if (project === undefined) throw new DomainError("not_found", "no such project");
@@ -221,11 +291,15 @@ export class CoordinatorService {
    * `assignment.manage` for the project makes the assignments itself under its own credential, each with the reason recorded; without the grant they are saved as a proposal for the owner.
    * Only assignments are made without the owner's apply: a plan with anything else in it (task creation, dependencies) waits for the owner.
    */
-  async assign(owner: Principal, command: { commandId: string; projectId: string }): Promise<{ kind: "unavailable"; reason: string } | { kind: "made"; assigned: { taskId: string; owner: string; reason: string }[]; skipped: string[] } | { kind: "proposed"; proposalId: string; skipped: string[] }> {
+  assign(owner: Principal, command: { commandId: string; projectId: string }): Promise<{ kind: "unavailable"; reason: string } | { kind: "made"; assigned: { taskId: string; owner: string; reason: string }[]; skipped: string[] } | { kind: "proposed"; proposalId: string; skipped: string[] }> {
+    return this.#busy(() => this.#assign(owner, command));
+  }
+
+  async #assign(owner: Principal, command: { commandId: string; projectId: string }): Promise<{ kind: "unavailable"; reason: string } | { kind: "made"; assigned: { taskId: string; owner: string; reason: string }[]; skipped: string[] } | { kind: "proposed"; proposalId: string; skipped: string[] }> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "projectId"]);
     const projectId = checkProjectId(command.projectId);
-    const state = await this.#usable();
+    const state = await this.#usable(owner);
     if (state.kind === "unavailable") return state;
     const all = (await this.#deps.projects.listTasks({ projectId, limit: 100 })).items.filter((t) => t.state === "proposed" || t.state === "ready");
     const open: { id: string; title: string; repositoryId?: string }[] = [];
@@ -264,17 +338,46 @@ export class CoordinatorService {
     if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", "only the owner uses the coordinator");
   }
 
-  async #usable(): Promise<{ kind: "ok"; body: CoordinatorBody; principal: Principal } | { kind: "unavailable"; reason: string }> {
+  async #usable(owner: Principal): Promise<{ kind: "ok"; body: CoordinatorBody; principal: Principal } | { kind: "unavailable"; reason: string }> {
     const found = await this.#runner.get("coordinator", COORDINATOR_ID);
     if (found === undefined) return { kind: "unavailable", reason: "the coordinator is not set up" };
     const body = found.body as unknown as CoordinatorBody;
+    // A hosted coordinator whose agent was retired says so (retiring also disables the identity, which would otherwise read as a missing credential).
+    if (body.hosted !== undefined && this.#deps.lifecycle !== undefined && (await this.#deps.lifecycle.look(owner, body.hosted.agentId).then((l) => l.agent, () => undefined)) === "retired") return { kind: "unavailable", reason: "the coordinator's agent is retired" };
     // The credential the controller holds must be the principal the owner configured; otherwise the coordinator would act with someone else's grants.
     // A credential that is missing or no longer valid makes the coordinator unavailable; it is never an error for the caller.
     const principal = await this.#deps.principal().then((p) => p, () => undefined);
     const held = principal?.id;
     if (principal === undefined || held === undefined) return { kind: "unavailable", reason: "the coordinator has no valid credential" };
     if (held !== body.principalId) return { kind: "unavailable", reason: "the coordinator's credential is not the configured principal" };
+    if (body.hosted !== undefined) {
+      // A hosted coordinator is as available as its agent: the agent record is active and no pause gate on its chain holds it. The same gates pause any agent, so a pause by the owner, a team's pause or the installation's all reach it.
+      if (this.#deps.lifecycle === undefined) return { kind: "unavailable", reason: "the coordinator's agent controls are not available" };
+      if (body.hosted.agentId !== AGENT_RECORD.exec(body.principalId)?.[1]) return { kind: "unavailable", reason: "the coordinator's agent is not its configured principal" };
+      const look = await this.#deps.lifecycle.look(owner, body.hosted.agentId).then((l) => l, () => undefined);
+      if (look === undefined) return { kind: "unavailable", reason: "the coordinator's agent controls could not be read" };
+      if (look.agent !== "active") return { kind: "unavailable", reason: "the coordinator's agent is retired" };
+      if (look.state !== "running") {
+        const outer = look.heldBy.find((h) => h.scope.kind !== "agent");
+        return { kind: "unavailable", reason: `the coordinator is ${look.state}${look.heldBy.every((h) => h.scope.kind !== "agent") && outer !== undefined ? ` (held by ${outer.scope.kind} ${outer.scope.id})` : ""}` };
+      }
+      return { kind: "ok", body, principal };
+    }
     return body.state === "running" ? { kind: "ok", body, principal } : { kind: "unavailable", reason: `the coordinator is ${body.state}` };
+  }
+
+  /**
+   * Operations in flight (an answer, a draft, an assignment round, from the availability check to its last write), so a pause is reported as reached only when none is: a pause never cuts an operation that has
+   * begun (its model call ends and its answer is still the owner's to read, its assignments are made), and the safe boundary is claimed only after it (review: counting only the model call let a pause be reported
+   * between the availability check and the call, or before an assignment round made its assignments).
+   */
+  #inflight = 0;
+  #reportWhenIdle: { readonly owner: Principal; readonly agentId: string } | undefined;
+
+  async #reportIfIdle(owner: Principal, agentId: string): Promise<void> {
+    if (this.#inflight > 0) { this.#reportWhenIdle = { owner, agentId }; return; }
+    this.#reportWhenIdle = undefined;
+    await this.#deps.lifecycle?.settled(owner, agentId).catch(() => undefined);
   }
 
   /** The primary route, then the fallbacks in order, at most four tries; the first usable reply wins and none is a refusal to answer, not an error. */
@@ -285,6 +388,15 @@ export class CoordinatorService {
       try { return await this.#deps.model.respond(route, request); } catch { /* try the next route */ }
     }
     return undefined;
+  }
+
+  async #busy<T>(work: () => Promise<T>): Promise<T> {
+    this.#inflight++;
+    try { return await work(); } finally {
+      this.#inflight--;
+      const waiting = this.#reportWhenIdle;
+      if (this.#inflight === 0 && waiting !== undefined) await this.#reportIfIdle(waiting.owner, waiting.agentId);
+    }
   }
 }
 
