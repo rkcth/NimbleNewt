@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, statSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -1278,26 +1278,99 @@ for (const [label, make] of backends) {
   });
 }
 
-test("rollback, late work found and the journal cannot be written back: nothing else changes, the fence stays and the owner is told not to restart (card F04n)", { skip: process.platform === "win32" || (process.getuid?.() === 0) }, async () => {
+/** Makes the next journal write fail without chmod (which root ignores): the journal's place becomes a folder holding the journal as it was; `restore` puts the file back. A rename onto a folder fails on every platform. */
+function blockJournal(f: Fixture): { restore: () => void; text: string } {
+  const path = join(st(f), "database-transfer-journal.json");
+  const text = readFileSync(path, "utf8");
+  rmSync(path); mkdirSync(path); writeFileSync(join(path, "kept"), text);
+  return { text, restore: () => { rmSync(path, { recursive: true, force: true }); writeFileSync(path, text, { mode: 0o600 }); } };
+}
+
+test("rollback, late work found and the journal cannot be written back: nothing else changes, the fence stays; the next start on the new database finds the work and keeps the move (card F04n)", async () => {
   const f = await fixture();
   try {
     const target = await sqlTarget(f, "dest.sqlite");
     await (await service(f, [target])).apply("sqlite2", (await (await service(f, [target])).preview("sqlite2")).token);
     let live: ControllerStorage | undefined, liveEpoch = 0;
-    const wrapped = (inner: ControllerStorage) => failingTakeBack(inner);
     const started = await startOnDestination(f, target);
     live = started.live; liveEpoch = started.epoch;
-    const w = wrapped(live);
-    const svc = new DatabaseTransferService({ storage: w.storage, source: { kind: "sqlite", fingerprint: target.fingerprint, name: target.name }, targets: () => [], stateDirectory: st(f), barrier: started.barrier, now: () => new Date(AT), inject: async (p) => { if (p === "rollback:journal") await live!.applyOperation(op("slip", liveEpoch, { audit: [{ type: "late.record", detail: {} }] })); if (p === "rollback:fenced") { w.arm(); chmodSync(st(f), 0o500); } } });
+    const w = failingTakeBack(live);
+    let blocked: ReturnType<typeof blockJournal> | undefined;
+    const svc = new DatabaseTransferService({ storage: w.storage, source: { kind: "sqlite", fingerprint: target.fingerprint, name: target.name }, targets: () => [], stateDirectory: st(f), barrier: started.barrier, now: () => new Date(AT), inject: async (p) => { if (p === "rollback:journal") await live!.applyOperation(op("slip", liveEpoch, { audit: [{ type: "late.record", detail: {} }] })); if (p === "rollback:fenced") { w.arm(); blocked = blockJournal(f); } } });
     const authorityBefore = readFileSync(join(st(f), "storage-authority.json"), "utf8");
     try {
-      await assert.rejects(svc.rollback(), /record of the move could not be written back.*Do NOT restart/s);
-    } finally { chmodSync(st(f), 0o700); }
+      await assert.rejects(svc.rollback(), /record of the move could not be written back.*Restart the controller on the new database \(not the previous one\)/s);
+      assert.equal(readFileSync(join(st(f), "database-transfer-journal.json", "kept"), "utf8"), blocked!.text, "the journal is as it was (the write failed whole)");
+    } finally { blocked?.restore(); }
     assert.equal(w.takes(), 0, "the fence was not touched");
     assert.match(String((await rows(live))["state"]![0]!["holder"]), /^rolled-back:/);
     assert.equal(readFileSync(join(st(f), "storage-authority.json"), "utf8"), authorityBefore, "the authority file is as it was");
-    assert.equal((await readJournal(st(f)))?.phase, "rolling-back", "the journal is as it was (the write failed whole)");
+    assert.equal((await readJournal(st(f)))?.phase, "rolling-back");
     assert.equal(started.barrier.held, true);
+    // The restart on the new database (as the configuration says): before it is open nothing is decided; open, it shows the late work, so the rollback is not finished and the move stands.
+    const dest = { fingerprint: target.fingerprint };
+    assert.deepEqual(await guardStart(st(f), dest, undefined, "later"), {});
+    assert.equal((await readJournal(st(f)))?.phase, "rolling-back");
+    const settled = await guardStart(st(f), dest, undefined, live);
+    assert.equal(settled.resolved, "finished"); assert.match(settled.note ?? "", /not finished.*recorded work.*move stands/);
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+    assert.equal((await readAuthority(st(f)))?.active.fingerprint, target.fingerprint);
+    await assertNotFenced(st(f), dest, live);
+    assert.ok((await rows(live))["audit"]!.some((r) => r["type"] === "late.record"));
+    await assert.rejects(guardStart(st(f), { fingerprint: await sqliteFingerprint(f.srcPath) }), /moved to/, "the previous database is refused");
+  } finally { await finish(f); }
+});
+
+test("a rollback stopped after the fence, before its last check, with work slipped in: the start on the new database finds the work and keeps the move; without work it finishes the rollback (card F04n review)", async () => {
+  for (const late of [true, false]) {
+    const f = await fixture();
+    try {
+      const target = await sqlTarget(f, "dest.sqlite");
+      await (await service(f, [target])).apply("sqlite2", (await (await service(f, [target])).preview("sqlite2")).token);
+      let live: ControllerStorage | undefined, liveEpoch = 0;
+      const started = await startOnDestination(f, target, { inject: async (p) => { if (p === "rollback:journal" && late) await live!.applyOperation(op("slip", liveEpoch, { effects: [{ effectId: "eff-late", target: "repo:z", inputDigest: "e".repeat(64) }] })); if (p === "rollback:fenced") throw new Error("crash"); } });
+      live = started.live; liveEpoch = started.epoch;
+      await assert.rejects(started.svc.rollback(), /crash/);
+      assert.equal((await readJournal(st(f)))?.phase, "rolling-back");
+      const dest = { fingerprint: target.fingerprint }, source = { fingerprint: await sqliteFingerprint(f.srcPath) };
+      assert.deepEqual(await guardStart(st(f), dest, undefined, "later"), {}, "nothing is decided before the database is open");
+      if (late) {
+        const settled = await guardStart(st(f), dest, undefined, live);
+        assert.match(settled.note ?? "", /effects changed/);
+        assert.equal((await readJournal(st(f)))?.phase, "switched");
+        await assertNotFenced(st(f), dest, live);
+        await assert.rejects(guardStart(st(f), source), /moved to/);
+      } else {
+        await assert.rejects(guardStart(st(f), dest, undefined, live), /moved to/);
+        assert.equal((await readJournal(st(f)))?.phase, "rolled-back");
+        await guardStart(st(f), source);
+        await assertNotFenced(st(f), source, f.src);
+      }
+    } finally { await finish(f); }
+  }
+});
+
+test("rollback, the fence cannot be taken and the journal cannot be written back: work stays paused (the barrier stays up), and the next start settles the rollback (card F04n review)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    await (await service(f, [target])).apply("sqlite2", (await (await service(f, [target])).preview("sqlite2")).token);
+    const started = await startOnDestination(f, target);
+    const live = started.live;
+    const failingFence = new Proxy(live, { get(t, k) { if (k === "acquireEpoch") return async (input: Parameters<ControllerStorage["acquireEpoch"]>[0]) => { if (input.holder.startsWith("rolled-back:")) throw new Error("the fence failed postgres://u:secret@db.example/x"); return t.acquireEpoch(input); }; const v = Reflect.get(t, k, t) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v; } }) as ControllerStorage;
+    let blocked: ReturnType<typeof blockJournal> | undefined;
+    const svc = new DatabaseTransferService({ storage: failingFence, source: { kind: "sqlite", fingerprint: target.fingerprint, name: target.name }, targets: () => [], stateDirectory: st(f), barrier: started.barrier, now: () => new Date(AT), inject: async (p) => { if (p === "rollback:journal") blocked = blockJournal(f); } });
+    try {
+      await assert.rejects(svc.rollback(), (e: Error) => /could not be fenced.*neither made nor undone.*must be restarted/s.test(e.message) && !/secret|db\.example/.test(e.message));
+    } finally { blocked?.restore(); }
+    assert.equal(started.barrier.held, true, "no work goes on under a journal that says rolling-back");
+    assert.equal((await rows(live))["state"]![0]!["holder"], "c2", "not fenced");
+    assert.equal((await readJournal(st(f)))?.phase, "rolling-back");
+    // The restart: the database recorded nothing, so the rollback is finished and the previous database is the one that starts.
+    await assert.rejects(guardStart(st(f), { fingerprint: target.fingerprint }, undefined, live), /moved to/);
+    const source = { fingerprint: await sqliteFingerprint(f.srcPath) };
+    await guardStart(st(f), source);
+    await assertNotFenced(st(f), source, f.src);
   } finally { await finish(f); }
 });
 
