@@ -54,16 +54,18 @@ test("a question a stand-up asked the owner is told by a short notification keye
   assert.equal(notes.length, 4);
 });
 
-test("the advance notice of a stand-up is filed against the agent's task once per key; an agent with no task is not told; a notice that can never be filed is skipped and one that failed for another reason is raised to be tried again (card M03h)", async () => {
+test("the advance notice of a stand-up is filed against the agent's task once per key; what was not filed answers false (no task, a notice that cannot be filed now, a full inbox) so it is not recorded as told; the key already used for another task counts as told; any other failure is raised (card M03h)", async () => {
   const sent: { commandId: string; taskId: string; to: string; purpose: string; text: string }[] = [];
   let failure: Error | undefined;
   const sink = preparationNoticeSink({ noticeFromController: async (c) => { if (failure !== undefined) throw failure; sent.push(c); } });
   const n = { key: "mto-a:agent:agt-x:prepare", occurrenceId: "mto-a", projectId: "proj-a", agent: "agent:agt-x", startsAt: "2026-11-12T09:00:00.000Z", coversFrom: "2026-11-11T09:00:00.000Z", message: "Stand-up at 2026-11-12T09:00:00.000Z. Reach a safe boundary." };
-  await sink.notify(n);
+  assert.equal(await sink.notify(n), false);
   assert.deepEqual(sent.map((x) => [x.commandId, x.taskId, x.to, x.text]), []);
-  await sink.notify({ ...n, taskId: "task-1" });
+  assert.equal(await sink.notify({ ...n, taskId: "task-1" }), true);
   assert.deepEqual(sent.map((x) => [x.commandId, x.taskId, x.to, x.text]), [["spn:mto-a:agent:agt-x:prepare", "task-1", "agent:agt-x", n.message]]);
-  for (const code of ["forbidden", "not_found", "invalid_command"] as const) { failure = new DomainError(code, "that agent cannot be told about that task"); await sink.notify({ ...n, taskId: "task-1" }); }
+  for (const code of ["forbidden", "not_found", "invalid_command", "unavailable"] as const) { failure = new DomainError(code, "that agent cannot be told about that task now"); assert.equal(await sink.notify({ ...n, taskId: "task-1" }), false, code); }
+  failure = new DomainError("command_conflict", "command ID spn:... was already used for a different command");
+  assert.equal(await sink.notify({ ...n, taskId: "task-2" }), true, "filed before, on the task the agent held then");
   assert.equal(sent.length, 1);
-  for (const error of [new DomainError("unavailable", "the inbox is full"), new Error("storage down")]) { failure = error; await assert.rejects(sink.notify({ ...n, taskId: "task-1" }), (e) => e === error); }
+  for (const error of [new DomainError("stale_revision", "the inbox changed"), new Error("storage down")]) { failure = error; await assert.rejects(sink.notify({ ...n, taskId: "task-1" }), (e) => e === error); }
 });

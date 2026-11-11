@@ -484,6 +484,8 @@ export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, s
 const REPLAY_LINE_ITEMS = 12;
 /** How many names of one stand-up's roster the stand-ups answer lists before counting the rest (card M03h): a roster may hold 50 principals. */
 const STANDUP_ROSTER_LISTED = 10;
+/** The ID of the one coordinator record (`COORDINATOR_ID` in chat/coordinator.ts), cited when there is none or it cannot be read. */
+const COORDINATOR_RECORD = "coordinator:main";
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const HANDLING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const TASK_ID_IN_TEXT = /task-[a-z2-7]{20}/g;
@@ -1536,7 +1538,10 @@ export class StatusService {
     const state: "active" | "retired" = request.state === "retired" ? "retired" : "active";
     const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
     let listed: Awaited<ReturnType<typeof source.list>>;
-    try { listed = await source.list(by, { state, limit }); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined; throw error; }
+    // One more than the page is asked for, so a list of exactly `limit` agents is not said to have more (the agent list gives `next` whenever a page is full).
+    try { listed = await source.list(by, { state, limit: limit + 1 }); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined; throw error; }
+    const more = listed.items.length > limit || listed.next !== undefined;
+    listed = { items: listed.items.slice(0, limit), ...(more ? { next: listed.next ?? listed.items[limit]!.id } : {}) };
     // Only the owner who is not a task credential is told which agent is the coordinator; a coordinator that cannot be read marks nothing (the list still works).
     const mayMark = by.kind === "owner" && by.taskScope === undefined && source.coordinator !== undefined;
     let coordinator: CoordinatorRowView | undefined;
@@ -1559,7 +1564,9 @@ export class StatusService {
     if (coordinator !== undefined) {
       if (hostedId === undefined) lines.push(line(`The coordinator is not an agent: it runs under ${shown(coordinator.principalId, 80)} and is ${coordinatorWords(coordinator)}.`, cite("coordinator", coordinator.id, coordinator.revision)));
       else if (!seen.has(hostedId)) lines.push(line(`The coordinator is the agent ${shown(hostedId, 60)}, which is not in this list: ${coordinatorWords(coordinator)}.`, cite("coordinator", coordinator.id, coordinator.revision), cite("agent", hostedId)));
-    } else if (coordinatorKnown) lines.push(line("No coordinator is set up.", cite("coordinator", "main")));
+    } else if (coordinatorKnown) lines.push(line("No coordinator is set up.", cite("coordinator", COORDINATOR_RECORD)));
+    // A coordinator that could not be read is said to be so: the owner who asks whether it runs is not left to read silence as "none".
+    else if (mayMark) lines.push(line("Which agent is the coordinator could not be read just now; ask again shortly.", cite("coordinator", COORDINATOR_RECORD)));
     return { observedAt: this.#runner.now(), lines };
   }
 

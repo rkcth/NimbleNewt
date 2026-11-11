@@ -61,6 +61,11 @@ for (const backend of backends) {
       assert.match(said(r.lines), /3 active agents/);
       assert.match(said(r.lines), /"Ada" \(agt-[^)]*\): active, roles author/);
       assert.match(said(r.lines), /No coordinator is set up\./);
+      assert.deepEqual(r.lines.find((l) => /No coordinator/.test(l.text))!.cites.map((x) => [x.kind, x.id]), [["coordinator", "coordinator:main"]], "the cite names the coordinator record's own ID");
+      // Exactly as many agents as the limit: the list is whole, not "or more".
+      const whole = said((await ask(owner, { limit: 3 }))!.lines);
+      assert.match(whole, /^3 active agents\./);
+      assert.doesNotMatch(whole, /or more|larger limit/);
       assert.doesNotMatch(said(r.lines), /"Old"/, "retired agents are listed only when asked for");
 
       // A hosted coordinator, paused by its own gate: its agent's line carries the mark and the pause that holds it, citing the coordinator record.
@@ -112,6 +117,7 @@ for (const backend of backends) {
       const down = (await ask(owner))!;
       assert.match(said(down.lines), /"Ada"/);
       assert.doesNotMatch(said(down.lines), MARK);
+      assert.match(said(down.lines), /Which agent is the coordinator could not be read just now/, "an unreadable coordinator is said to be so, not read as none");
       coordinatorFails = false;
       // Bad words are refused, not guessed.
       await assert.rejects(() => ask(owner, { state: "gone" }), /state/);

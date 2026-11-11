@@ -107,13 +107,13 @@ test("a scheduled stand-up runs through the running controller and every sink se
     assert.deepEqual(briefs.map((b) => b.body.agent).sort(), [`agent:${annId}`, `agent:${bobId}`].sort());
     assert.deepEqual(Object.keys(prepared.briefs).sort(), briefs.map((b) => b.body.agent).sort());
 
-    // SINK 2a, the advance notice: Ann (who holds a task) is told once, on that task; Bob (none) is recorded as told and nothing is filed for him.
+    // SINK 2a, the advance notice: Ann (who holds a task) is told once, on that task; nothing is filed for Bob (none), and he is not recorded as told (he is asked about again should he take a task before the meeting).
     const noticesNow = async () => (await kinds("agent-message")).filter((m) => m.body.purpose === "A stand-up is coming");
     assert.equal((await noticesNow()).length, 1);
     assert.equal((await noticesNow())[0]!.body.to, `agent:${annId}`);
     assert.equal((await noticesNow())[0]!.body.taskId, waterTask);
     assert.match((await noticesNow())[0]!.body.text, /Stand-up at 20\d\d-\d\d-\d\dT09:00:00\.000Z\. Reach a safe boundary/);
-    assert.deepEqual(Object.keys(prepared.notified).sort(), [`agent:${annId}`, `agent:${bobId}`].sort());
+    assert.deepEqual(Object.keys(prepared.notified), [`agent:${annId}`]);
 
     // SINK 3, the usage sink: the review counts the worker-slot time of the attempt the dispatcher recorded (one attempt, not a count of tasks).
     const reviewText = (prepared.review.lines as { text: string }[]).map((l) => l.text).join("\n");

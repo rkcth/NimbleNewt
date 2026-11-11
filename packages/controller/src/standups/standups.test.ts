@@ -15,9 +15,10 @@ import { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { MEETING_SETTINGS, MeetingService, type AgendaBody, type OccurrenceBody, type ScheduleBody } from "../meetings/index.js";
 import { ContractService } from "../planning/index.js";
-import { PrincipalService, type Grant, type Principal } from "../security/index.js";
+import { AgentMessageService, MESSAGE_LIMITS } from "../messaging/index.js";
+import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import {
-  ImprovementService, StandupService, allocationFrom, needsOwnerFrom, outcomeLine, type BriefBody, type OutcomeNotice, type PrepNotice, type StandupConfigBody,
+  ImprovementService, StandupService, allocationFrom, needsOwnerFrom, outcomeLine, preparationNoticeSink, type BriefBody, type OutcomeNotice, type PrepNotice, type StandupConfigBody,
 } from "./index.js";
 
 after(stopServer);
@@ -213,6 +214,40 @@ for (const backend of backends) {
     await c.task("Current job", c.agentB, "in_progress");
     await c.standups.prepare(c.host, occ);
     assert.equal(c.notices.filter((n) => n.agent === c.pB).length, 1);
+  });
+
+  suite("through the controller's own messages, the advance notice cannot stop a preparation: a full inbox is told later and the briefs are made, a notice filed before a lost preparation record is not refused once the agent's task changed, and only an agent that was told is recorded as told (card M03h review)", async (c) => {
+    const grants = GrantService.withEpoch(c.storage, c.epoch, options);
+    for (const p of [c.pA, c.pB, c.pC]) await grants.grant(c.owner, { commandId: cid("g"), grantee: p, action: "task.read", project: c.a, source: "direct", basis: "test" });
+    const messages = AgentMessageService.withEpoch(c.storage, c.epoch, { availability: c.pauses.availability, taskPaused: (t) => c.pauses.isPaused(t), guard: (t) => c.pauses.guard(t), waits: c.waits, assignments: c.assignments, ...options });
+    const real = preparationNoticeSink(messages);
+    let stopAt: string | undefined;
+    const standups = c.make({ notices: { notify: async (n: PrepNotice) => { if (n.agent === stopAt) { stopAt = undefined; await real.notify(n); throw new Error("the controller stopped here"); } return real.notify(n); } } });
+    const firstJob = await c.task("First job", c.agentA, "ready");
+    const bJob = await c.task("B's job", c.agentB, "ready");
+    // B holds a task it is not running, so it reads no notices: its inbox is full of the controller's.
+    for (let i = 0; i < MESSAGE_LIMITS.perSenderQueue; i++) await messages.noticeFromController({ commandId: cid("old"), taskId: bJob, to: c.pB, purpose: "An older notice", text: "Something from before." });
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    const told = async (to: string): Promise<string[]> => (await c.storage.listAggregates("agent-message", { limit: 500 } as never)).map((m) => m.body as unknown as { to: string; purpose: string; taskId: string }).filter((m) => m.to === to && m.purpose === "A stand-up is coming").map((m) => m.taskId);
+    // The controller stops right after A's notice is filed, before the preparation record is written.
+    stopAt = c.pA;
+    await assert.rejects(standups.prepare(c.host, occ), /stopped here/);
+    assert.deepEqual(await told(c.pA), [firstJob]);
+    assert.equal(await c.storage.getAggregate({ kind: "standup-prep", id: occ }), undefined);
+    // Meanwhile A starts other work, so the task its notice would name now differs from the one it was told on.
+    await c.task("Urgent job", c.agentA, "in_progress");
+    const r = await standups.prepare(c.host, occ);
+    assert.deepEqual(await told(c.pA), [firstJob], "A is not told twice, and the same key on another task does not fail the preparation");
+    assert.deepEqual(await told(c.pB), [], "B's full inbox takes nothing");
+    assert.deepEqual(r.briefs.map((b) => b.agent).sort(), [c.pA, c.pB, c.pC].sort(), "every brief is made all the same");
+    const prepared = (await standups.prepared(c.owner, occ))!;
+    assert.deepEqual(Object.keys(prepared.notified), [c.pA], "only the agent that was told is recorded as told: not B (full inbox) nor C (no task)");
+    // C takes a task before the meeting: the next preparation tells it, once.
+    const cJob = await c.task("C's job", c.agentC, "ready");
+    await standups.prepare(c.host, occ);
+    await standups.prepare(c.host, occ);
+    assert.deepEqual(await told(c.pC), [cJob]);
+    assert.deepEqual(Object.keys((await standups.prepared(c.owner, occ))!.notified).sort(), [c.pA, c.pC].sort());
   });
 
   suite("when an agent holds a ready and an in-progress task, the notice is filed against the one in progress (card M03h)", async (c) => {

@@ -116,8 +116,11 @@ export interface PrepNotice {
   /** The task the agent is working on now (in progress first, then ready or blocked), read from the records, when it has one: the notice is filed against it. Absent: the agent holds no task, so there is nothing for the notice to interrupt. */
   readonly taskId?: string;
 }
-/** Delivers the advance notice (a message to the agent, a note in its inbox). Called only for agents that may be reached; must be idempotent by `key`. It must not start, resume or wake anything. */
-export interface PreparationSink { notify(notice: PrepNotice): Promise<void> }
+/**
+ * Delivers the advance notice (a message to the agent, a note in its inbox). Called only for agents that may be reached; must be idempotent by `key`. It must not start, resume or wake anything. `false`: nothing was
+ * delivered (no task to file it against, an inbox that is full), so the agent is not recorded as told and is asked about again at the next preparation; anything else (`true`, nothing) records it as told.
+ */
+export interface PreparationSink { notify(notice: PrepNotice): Promise<void | boolean> }
 
 export interface Allocation { readonly floor?: number; readonly target?: number; readonly ceiling?: number }
 
@@ -526,10 +529,12 @@ export class StandupService {
         if (!live || notified[p.id] !== undefined || this.#options.notices === undefined) continue;
         const own = facts.tasks.filter((t) => t.owner === p.id && (t.body.state === "in_progress" || t.body.state === "ready" || t.body.state === "blocked"));
         const taskId = (own.find((t) => t.body.state === "in_progress") ?? own[0])?.id;
-        await this.#options.notices.notify({
+        const delivered = await this.#options.notices.notify({
           key: `${id}:${p.id}:prepare`, occurrenceId: id, projectId: occurrence.projectId, agent: p.id, startsAt: occurrence.startsAt, coversFrom, ...(taskId === undefined ? {} : { taskId }),
           message: `Stand-up at ${occurrence.startsAt}. Reach a safe boundary and save your position before then. Your brief is put together from the records of your work; you do not need to write it, and your assignment stays as it is.`,
         });
+        // Not delivered: not recorded as told (the record says who was told), and asked about again next time.
+        if (delivered === false) continue;
         notified[p.id] = nowIso;
         sent.push(p.id);
       }
