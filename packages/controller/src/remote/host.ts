@@ -64,15 +64,25 @@ export class RemoteWorkerHost implements WorkerHost {
   }
 
   /**
-   * What this host holds for Stop (card L02d). The controller cannot see a remote worker's processes, and no worker report of them exists yet, so a live remote placement of an asked attempt reads as one unknown item: a Stop that
-   * ends the attempt (the placement is then over) is clean, and a look while it is still live says that nothing is known about what the worker runs. Bounded to 500 attempts.
+   * What this host holds for Stop (card L02d, L02e). The controller cannot look into a remote machine, so it goes by the worker's own report of the processes it holds for the placement (`reportProcesses`, kept on the placement):
+   * - a live placement with a report: the entries reported, as the worker gave them (running, asked to stop and not stopped, or unknown);
+   * - a live placement with no report (a worker that does not report, or has not yet): one unknown item, as before;
+   * - a placement that is over, whose worker said it stopped the sandbox and looked (a final report): what that report lists (normally nothing), so a Stop is clean on the worker's word;
+   * - a placement that is over whose worker last listed something and never confirmed (no final report): those entries as unknown, since nobody has said they are gone;
+   * - a placement that is over and never reported: nothing, as before. A report of another placement (an older holder) is never read.
+   * Bounded to 500 attempts.
    */
   async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
-    const processes: { attemptId: string; ref: string; kind: "process"; state: "unknown" }[] = [];
+    const processes: { attemptId: string; ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" }[] = [];
     for (const attemptId of attemptIds.slice(0, 500)) {
       const placement = await this.remote.placement(this.by, attemptId);
-      if (placement === undefined || placement.hostId !== this.hostId || !["offered", "accepted", "relocating"].includes(placement.state)) continue;
-      processes.push({ attemptId, ref: `remote:${attemptId}`, kind: "process", state: "unknown" });
+      if (placement === undefined || placement.hostId !== this.hostId) continue;
+      const live = ["offered", "accepted", "relocating"].includes(placement.state);
+      const report = placement.processReport !== undefined && placement.processReport.placement === placement.placement ? placement.processReport : undefined;
+      if (live && report === undefined) { processes.push({ attemptId, ref: `remote:${attemptId}`, kind: "process", state: "unknown" }); continue; }
+      if (report === undefined) continue;
+      if (!live && report.final) { for (const p of report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state }); continue; }
+      for (const p of report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: live ? p.state : "unknown" });
     }
     return { processes, costs: [], known: attemptIds.slice(0, 500) };
   }

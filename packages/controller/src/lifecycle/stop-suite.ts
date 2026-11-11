@@ -7,7 +7,7 @@ import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backendsNamed, stopServer } from "../domain/testing/backends.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { PauseService, STOP_LIMITS, StopService, type InventoryItem, type StopPorts } from "./index.js";
+import { PauseService, STOP_LIMITS, StopService, addCapped, type InventoryItem, type StopPorts } from "./index.js";
 import { dispatchStopPorts } from "./dispatch-ports.js";
 import type { PauseScope } from "./pause.js";
 
@@ -754,6 +754,60 @@ export function defineStopTests(backendName: string): void {
       assert.ok(spentBefore !== undefined && spentBefore > 0);
       await c.stops.choose(c.owner, { commandId: cid("c"), intentId: g.intentId, choice: "wait" });
       assert.equal((await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.spent, spentBefore);
+    });
+
+    suite("the cumulative cleanup total keeps what earlier cleanup budget windows counted: each wait on a blocked preparation restarts the window, the total adds them up, and it is never below the window's figure (card L02e)", async (c) => {
+      c.rt.seenAttempts = ["att-a", "att-b"];
+      const stuck = { kind: "process" as const, ref: "pid-7", state: "uncooperative" as const };
+      c.rt.items = [stuck];
+      c.rt.cleanups = [{ remaining: [stuck], costs: [{ attemptId: "att-a", costMicros: 5000, computeMs: 0 }] }];
+      const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+      assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "blocked");
+      const first = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+      assert.deepEqual([first.spent, first.cumulativeSpent], [5000, 5000], "one window: the total is the window's figure");
+      // Wait: the window starts again from nothing, and the total keeps the 5000.
+      await c.stops.choose(c.owner, { commandId: cid("c1"), intentId, choice: "wait" });
+      const restarted = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+      assert.deepEqual([restarted.spent, restarted.cumulativeSpent], [0, 5000], "the window restarted; the total did not lose the earlier window");
+      // The second window blocks again after spending 3000; a third wait adds that too.
+      c.rt.cleanups = [{ remaining: [stuck], costs: [{ attemptId: "att-b", costMicros: 3000, computeMs: 0 }] }];
+      assert.equal((await c.stops.advance(c.owner, { intentId })).phase, "blocked");
+      const second = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+      assert.deepEqual([second.spent, second.cumulativeSpent], [3000, 8000]);
+      await c.stops.choose(c.owner, { commandId: cid("c2"), intentId, choice: "wait" });
+      const third = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+      assert.deepEqual([third.spent, third.cumulativeSpent], [0, 8000]);
+      // The last window settles the work: the total is the earlier windows plus this one.
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 6000, computeMs: 0 }] }];
+      const done = await c.stops.advance(c.owner, { intentId });
+      assert.notEqual(done.phase, "blocked");
+      const end = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+      assert.equal(end.cumulativeSpent, end.spent + 8000, "the earlier windows plus this one");
+      assert.ok(end.cumulativeSpent >= end.spent);
+    });
+
+    suite("the cumulative total reads sound from a record written before it was kept, from damaged figures and from a Force Stop that took the request over (card L02e)", async (c) => {
+      assert.equal(addCapped(0, 0), 0);
+      assert.equal(addCapped(5000, 3000), 8000);
+      assert.equal(addCapped(Number.MAX_SAFE_INTEGER, 5), Number.MAX_SAFE_INTEGER, "a sum that would pass the safe range is held at it");
+      assert.equal(addCapped(-4, 7), 7, "a negative figure counts as nothing");
+      assert.equal(addCapped(Number.NaN, 7), 7);
+      assert.equal(addCapped(1.5, 7), 7, "a figure that is not a whole number counts as nothing");
+      c.rt.seenAttempts = ["att-a"];
+      const stuck = { kind: "process" as const, ref: "pid-7", state: "uncooperative" as const };
+      c.rt.items = [stuck];
+      c.rt.cleanups = [{ remaining: [stuck], costs: [{ attemptId: "att-a", costMicros: 4000, computeMs: 0 }] }];
+      const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+      await c.stops.advance(c.owner, { intentId });
+      await c.stops.choose(c.owner, { commandId: cid("c1"), intentId, choice: "wait" });
+      // A Force Stop over the request keeps the earlier windows in the total.
+      await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" });
+      const forced = (await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))!;
+      assert.ok(forced.cumulativeSpent >= forced.spent);
+      assert.equal(forced.cumulativeSpent, 4000 + forced.spent, "the window before the wait is still counted after the Force Stop");
+      // A record from a build that did not keep the field (no earlier-window figure) reads as a total equal to the window.
+      const old = await c.stops.get(c.owner, intentId);
+      assert.equal(old?.spentBefore, 4000);
     });
 
     suite("an older request that took over earlier work reads as having a preparation by each sign it can carry, and a pure Force Stop by none (card L02d review)", async (c) => {

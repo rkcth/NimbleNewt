@@ -72,6 +72,10 @@ export const REMOTE_LIMITS = {
   toolBytes: 160 * 1024,
   /** The longest task credential a bridge request may carry, in characters (the controller authenticates it; a longer one cannot be one). */
   toolTokenChars: 512,
+  /** A worker's report of the processes it holds for an attempt (card L02e): at most this many entries, a reference of at most `processRef` characters each, in a body of at most `processBytes` bytes. */
+  processes: 50,
+  processRef: 120,
+  processBytes: 16 * 1024,
 } as const;
 
 // ---- wire shapes -----------------------------------------------------------------------------------------------------------------
@@ -120,6 +124,16 @@ export interface WorkspaceAsk {
 /** What the host answers: the same typed outcomes a local host gives (done, or a refusal with its reason). */
 /** `failed`: the host's port threw, so the work may be half done (the controller records it as failed, as it does a local host's throw), not a refusal that changed nothing. */
 export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string; readonly failed?: true };
+
+/**
+ * What a remote worker reports of the processes it started for an attempt and has not cleaned up (card L02e), the same entries a local sandbox reports to Stop. `seq` rises with every report of a placement (a repeat or an older one changes nothing);
+ * `final` says the worker has stopped the attempt's sandbox and looked: what it lists then (normally nothing) is what is left. A report names no path of the controller and carries no credential: a reference is redacted and cut.
+ */
+export interface ProcessReport {
+  readonly seq: number;
+  readonly final: boolean;
+  readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[];
+}
 
 /** A tool bridge request as the worker's tool extension made it (card L05e): the same shape the controller's `ToolExecutionService.handle` takes, restated here because the worker side imports nothing of the controller. */
 export interface ToolBridgeRequest { readonly op: string; readonly callId: string; readonly args?: JsonObject }
