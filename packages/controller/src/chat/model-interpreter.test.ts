@@ -100,3 +100,12 @@ test("the model is told how the owner switches backup encryption off and on, nar
   assert.match(system, /Off means new backups are written in plain/);
   assert.match(system, /Never put a passcode, a recovery code or a key in any argument/);
 });
+
+test("U09b: the model is told it can show the owner what an agent was thinking (owner only, quoted as untrusted) and turn collecting it off or on, in any words", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  assert.match(system, /thinking\(taskId\|taskTitle, after, limit\) - owner only: what the model was thinking/);
+  assert.match(system, /thinking\.collection\.set\([^)]*enabled[^)]*\) - Turn collecting the model's thinking off or on/);
+  assert.ok(acceptedArgs("thinking.collection.set")?.includes("enabled"), "the chat accepts the switch");
+});

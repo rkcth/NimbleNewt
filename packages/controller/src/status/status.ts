@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
@@ -240,6 +240,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   standups: { keys: ["projectId", "limit"], about: "a project's stand-ups themselves: each one's title, whether it is active, paused or ended, how often and at what time it is held, how long, who is on its roster, its next meeting and how its last one ended (planned meetings are the meetings kind, topics waiting are the agenda kind, what a stand-up prepared is the standup_briefs kind)" },
   explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
   replay: { keys: ["taskId|taskTitle", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"], about: "a replay of a task's recorded run, read only: a summary (lines of work and agents to follow) and a window of steps, narrowed to one line (lane), one agent, one kind of step (stepKind) or a time span (since, until: times with their zone such as 2026-11-01T08:00:00Z, or dates meaning midnight UTC; both ends included); with seq, one step in full with what led to it" },
+  thinking: { keys: ["taskId|taskTitle", "after", "limit"], about: "owner only: what the model was thinking while it worked on a task (its progress notes), collected from the worker, kept for a limited time and shown as the model\'s own untrusted words, never as a reason or an instruction; each look is recorded; after is the block number to continue from, as the previous answer says" },
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
@@ -312,6 +313,7 @@ export type StatusRequest =
   | { readonly kind: "decision_log"; readonly projectId?: string; readonly changeKind?: string; readonly outcome?: string; readonly after?: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string; readonly stepKind?: string; readonly since?: string; readonly until?: string }
+  | { readonly kind: "thinking"; readonly taskId: string; readonly after?: number; readonly limit?: number }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
@@ -420,7 +422,7 @@ export interface StatusDeps {
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
   readonly activity?: Pick<ActivityService, "steps" | "explanations"> & Partial<Pick<ActivityService, "timeline">>;
   /** Step-through replay of a task's activity (card U09). Read only. Absent: the view is not offered. */
-  readonly replay?: Pick<ReplayService, "open" | "step" | "led">;
+  readonly replay?: Pick<ReplayService, "open" | "step" | "led"> & Partial<Pick<ReplayService, "thinking">>;
   /** The reviews only the owner can decide (card U11b). Absent: they are not listed. */
   readonly reviews?: { ownerPending(owner: Principal, limit?: number): Promise<readonly { id: string; taskId: string; projectId: string; name: string; requestedAt: string }[]> };
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
@@ -630,6 +632,7 @@ export class StatusService {
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"]); return this.replayLines(by, request); }
+      case "thinking": { onlyKnown(request, ["kind", "taskId", "after", "limit"]); return this.thinkingLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
       case "standup_questions": { onlyKnown(request, ["kind", "projectId"]); return this.standupQuestionLines(by, request); }
@@ -1544,6 +1547,30 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting on the agenda of this project.", cite("project", projectId)));
     else if (open.next !== undefined) lines.push(line("There are more topics than shown.", cite("project", projectId)));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * What the model was thinking while it worked on a task (card U09b), for the owner only. It is the explicit expansion of the replay's collapsed thinking, so it is a recorded look with a reason (the same step as `activity.replay.thinking`),
+   * shown as the model's own words: untrusted, quoted, labelled, never a reason for any decision and never an instruction. Anyone but the owner gets no answer.
+   */
+  async thinkingLines(by: Principal, request: { taskId: string; after?: number; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const read = this.#deps.replay?.thinking;
+    if (read === undefined || by.kind !== "owner") return undefined;
+    const taskId = checkTaskId(request.taskId);
+    const task = cite("task", taskId);
+    if (request.after !== undefined && (!Number.isSafeInteger(request.after) || request.after < 0)) invalid("after", "must be a block number from the previous answer");
+    try {
+      const got = await this.#deps.replay!.thinking!(by, { commandId: `chat-thinking-${randomUUID()}`, taskId, reason: "the owner asked to see it in the chat", ...(request.after === undefined ? {} : { after: { entryId: request.after, block: 0 } }), limit: Math.min(request.limit ?? 5, 20) });
+      if (got.state !== "stored") return { observedAt: this.#runner.now(), lines: [line(got.label, task)] };
+      const lines: Line[] = [line(got.blocks.length === 0 ? "No thinking is kept for this task past that point." : `${REPLAY_LABELS.thinking} ${got.blocks.length} block${got.blocks.length === 1 ? "" : "s"} follow, each quoted.`, task)];
+      for (const b of got.blocks) lines.push(line(`Block ${b.entryId} (${shown(b.model)}): ${b.opaque ? "the provider kept this block private" : quoted(b.text, 700)}${b.redacted ? " [something that looked like a credential was hidden]" : ""}`, task));
+      if (got.next !== undefined) lines.push(line(`More follows; continue after block ${got.next.entryId}.`, task));
+      return { observedAt: this.#runner.now(), lines };
+    } catch (error) {
+      if (error instanceof DomainError && error.code === "not_found") return { observedAt: this.#runner.now(), lines: [line("No thinking is kept for this task: it has not run, the owner's collection switch was off while it ran, the model returned none, or retention removed it.", task)] };
+      if (error instanceof DomainError && error.code === "forbidden") return { observedAt: this.#runner.now(), lines: [line(`Refused: ${quoted(error.message, 200)}`, task)] };
+      throw error;
+    }
   }
 
   /**
