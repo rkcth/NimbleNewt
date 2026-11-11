@@ -105,6 +105,21 @@ for (const backend of backends) {
       const third = await keep(done, `${SECRET} one`);
       assert.equal(third.replayed, false); assert.equal(await has(aDone.id), true, "and written a third time");
 
+      // A task that is gone is final: its old archive is a candidate. A task read that fails is not "gone": the run stops and removes nothing.
+      box.at = real - 40 * DAY;
+      const vanished = await mk("vanished"); const running = await mk("still running");
+      const aVanished = await keep(vanished, `${SECRET} vanished`); const aRunning = await keep(running, `${SECRET} running`);
+      const t = (await storage.getAggregate({ kind: "task", id: vanished }))!;
+      await storage.applyOperation({ operationId: cid("gone"), epoch, actor: "test", correlationId: "gone", at: new Date(real).toISOString(), changes: [{ type: "delete", ref: { kind: "task", id: vanished }, expectedRevision: t.revision }], audit: [{ type: "test.gone", subject: { kind: "task", id: vanished }, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      const p5 = await svc().run(owner, {});
+      assert.ok(p5.candidates.some((c) => c.id === aVanished.id), "the archive of a task that is gone is a candidate");
+      assert.ok(!p5.candidates.some((c) => c.id === aRunning.id), "a task that can still run keeps its archive");
+      const failing = new Proxy(storage, { get: (s, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => { if (ref.kind === "task") throw new Error("disk read failed"); return s.getAggregate(ref as never); } : (typeof (s as never)[k] === "function" ? ((s as never)[k] as (...a: unknown[]) => unknown).bind(s) : (s as never)[k]) });
+      const broken = RetentionService.withEpoch(failing as ControllerStorage, epoch, { settings: { effective: async () => on }, now: () => real } as never, { clock: () => new Date(real).toISOString(), pause: async () => undefined });
+      await assert.rejects(broken.run(owner, {}), "a task that cannot be read is not taken for gone");
+      await assert.rejects(broken.run(owner, { dryRun: false, confirm: p5.digest! }));
+      for (const id of [aVanished.id, aRunning.id]) assert.equal(await has(id), true, "nothing was removed");
+
       // The audit names the rule, ID, project and age; never the text.
       const rules = new Set<string>(); let after = 0;
       for (;;) {

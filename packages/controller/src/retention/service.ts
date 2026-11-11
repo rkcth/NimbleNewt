@@ -442,16 +442,17 @@ export class RetentionService {
       // a task that can still run keeps it (its notes name it). The writer of an archive makes it again under the same ID after a removal, with a command ID that is new then (see `archiveNote`), so a late write of the same note is not lost.
       const cutoff = now - values.noteArchiveDays * DAY;
       const tasks = new Map<string, boolean>();
-      const old: Aggregate[] = [];
-      if (!(await scan(this.#runner, "ctx-note-archive", (a) => { if (Date.parse(a.updatedAt) < cutoff) old.push(a); }))) partial = true;
+      // Only what the rule needs is kept from the scan: an archive holds up to `archiveChars` of text, and up to SCAN_LIMIT of them are read, so keeping the records themselves could hold gigabytes for one run.
+      const old: { id: string; revision: number; updatedAt: string; taskId: unknown; projectId: unknown }[] = [];
+      if (!(await scan(this.#runner, "ctx-note-archive", (a) => { if (Date.parse(a.updatedAt) < cutoff) { const b = a.body as { taskId?: unknown; projectId?: unknown }; old.push({ id: a.id, revision: a.revision, updatedAt: a.updatedAt, taskId: b.taskId, projectId: b.projectId }); } }))) partial = true;
       for (const a of old) {
         if (candidates.length >= limit) { partial = true; break; }
-        const b = a.body as { taskId?: unknown; projectId?: unknown };
-        if (typeof b.taskId !== "string") continue;
-        let final = tasks.get(b.taskId);
-        if (final === undefined) { const state = (await this.#runner.get("task", b.taskId))?.body as { state?: string } | undefined; final = state === undefined || state.state === "done" || state.state === "cancelled"; tasks.set(b.taskId, final); }
+        if (typeof a.taskId !== "string") continue;
+        let final = tasks.get(a.taskId);
+        // A read that fails throws (the run stops); only a task that is really not there counts as gone.
+        if (final === undefined) { const state = (await this.#runner.get("task", a.taskId))?.body as { state?: string } | undefined; final = state === undefined || state.state === "done" || state.state === "cancelled"; tasks.set(a.taskId, final); }
         if (!final) continue;
-        candidates.push({ kind: "ctx-note-archive", id: a.id, revision: a.revision, projectId: typeof b.projectId === "string" ? b.projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+        candidates.push({ kind: "ctx-note-archive", id: a.id, revision: a.revision, projectId: typeof a.projectId === "string" ? a.projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
       }
     }
     let incidentsDue: { archive: string[]; purge: string[]; more: boolean } | undefined;
