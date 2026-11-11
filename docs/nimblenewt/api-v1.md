@@ -2126,7 +2126,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { revision, requireApproval, maxStagedBytes, keepStaged, set } }`.
+Result: `{ item: { revision, requireApproval, maxStagedBytes, keepStaged, startupWindowSeconds, startFailureLevel, set } }`.
 
 #### `agenda.get`
 
@@ -5918,10 +5918,25 @@ Arguments:
 - `maxStaged` (optional): the most releases staged at once (default 200), or null
 - `maxFiles` (optional): the most artifacts of one release (default 100), or null
 - `maxFileBytes` (optional): the largest artifact in bytes (default 4 GiB), or null
+- `startupWindowSeconds` (optional): seconds (10 to 86400) a started release may stay unconfirmed before the launcher's watchdog counts the start as failed and falls back (default 300); null for the default
+- `startFailureLevel` (optional): needs-you (default) or urgent: how loudly the owner is told when the launcher fell back to the last known good (a failed start with nothing to fall back to is always urgent); null for the default
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 - `commandId`: required
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.start.acknowledge`
+
+Owner only: the owner has seen that a release failed to start or that the launcher fell back to the last known good. Closes the notice (all open ones, or those of one release) and takes it out of the inbox; it changes no release and no setting. A later release that starts and confirms closes them too.
+
+Arguments:
+
+- `releaseId` (optional): only the notices about this release (default: all open ones)
+- `commandId`: required
+
+Result: `{ acknowledged }`: how many notices were closed.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -134,6 +134,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
   // Marking the current release as the last known good decides where a failed start falls back to: shown first (card K02, second slice).
   "release.confirm": { verb: "Confirm the current release as the last known good", mode: "propose" },
+  // The owner saying they have seen a failed start or fall-back only closes a notice: it changes no release and no setting (card K02f).
+  "release.start.acknowledge": { verb: "Acknowledge that a release failed to start or fell back", mode: "apply" },
   "release.staging.settings.set": { verb: "Change the release staging settings", mode: "propose" },
   "release.approval.enable": { verb: "Require an approved release for activation", mode: "apply" },
   "release.approval.disable": { verb: "Stop requiring an approved release for activation", mode: "propose" },
