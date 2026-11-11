@@ -32,16 +32,24 @@ export class FaultProxy {
   trace: string[] | undefined;
   fired = 0;
   port = 0;
+  #frozen = false;
 
   private constructor(server: net.Server) { this.#server = server; }
 
   static async start(target: { host: string; port: number }): Promise<FaultProxy> {
-    const proxy = new FaultProxy(net.createServer());
+    // Half open: the relay decides itself whether a client's goodbye is answered (a frozen relay never answers it, like a paused server).
+    const proxy = new FaultProxy(net.createServer({ allowHalfOpen: true }));
     proxy.#server.on("connection", (client) => proxy.#relay(client, target));
     await new Promise<void>((resolve, reject) => { proxy.#server.on("error", reject); proxy.#server.listen(0, "127.0.0.1", () => resolve()); });
     proxy.port = (proxy.#server.address() as net.AddressInfo).port;
     return proxy;
   }
+
+  /**
+   * From now on every connection, open or new, behaves like a paused server (SIGSTOP) or a black-holed network: the connections stay open, nothing more is
+   * forwarded either way, and nobody answers a client's goodbye. Only `stop()` ends them (card 19 review).
+   */
+  freeze(): void { this.#frozen = true; }
 
   /** Queue a pattern fault; faults fire in the order queued, each once. */
   inject(fault: ProxyFault): void { this.#faults.push(fault); }
@@ -68,11 +76,13 @@ export class FaultProxy {
     let silent = false;
     const closeBoth = () => { client.destroy(); upstream.destroy(); };
     client.on("error", closeBoth);
-    upstream.on("error", () => { if (silent) upstream.destroy(); else closeBoth(); });
+    upstream.on("error", () => { if (silent || this.#frozen) upstream.destroy(); else closeBoth(); });
     client.on("close", () => upstream.destroy());
-    upstream.on("close", () => { if (!silent) client.destroy(); }); // a silent server's goodbye is not heard either
+    client.on("end", () => { if (!this.#frozen) client.end(); }); // the client said goodbye: answered, unless the "server" is frozen
+    upstream.on("close", () => { if (!silent && !this.#frozen) client.destroy(); }); // a silent server's goodbye is not heard either
 
     client.on("data", (chunk: Buffer) => {
+      if (this.#frozen) return;
       buffer = Buffer.concat([buffer, chunk]);
       for (;;) {
         // Startup (and SSL request) messages have no type byte; everything after has one.
@@ -114,7 +124,7 @@ export class FaultProxy {
       }
     });
     upstream.on("data", (chunk: Buffer) => {
-      if (silent) return; // the server answered; the client never hears from it again
+      if (silent || this.#frozen) return; // the server answered; the client never hears from it again
       if (dropAnswer) {
         // The statement ran; the client never learns the result.
         dropAnswer = false;

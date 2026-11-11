@@ -7,7 +7,7 @@ import pg from "pg";
 import { commitOperation, isStorageError, runStorageConformance, type OperationInput } from "../index.js";
 import { classify, isConnectionLoss } from "./errors.js";
 import { LATEST_VERSION, PostgresStorage } from "./index.js";
-import { REPLY_MARGIN_MS } from "./storage.js";
+import { CLOSE_GRACE_MS, REPLY_MARGIN_MS } from "./storage.js";
 import { registry } from "../qualification/migration-registry.js";
 import { FaultProxy } from "./testing/proxy.js";
 import { startEmbeddedServer, startTestServer, withClient, type TestServer } from "./testing/server.js";
@@ -285,6 +285,33 @@ test("a server that stops answering (a paused host, a silent network) fails each
     // The silent connections were discarded, not handed out again: the store works, and closes without waiting on them.
     assert.equal((await rig.storage.getAggregate({ kind: "task", id: "t2" }))?.revision, 1);
   } finally { await rig.proxy.stop(); await within("close", rig.close()); }
+});
+
+test("close() returns when the server has stopped answering, with idle connections, the live lock's connection and a call in flight (card 19 review)", async () => {
+  // A graceful end waits for the server to close its side; a paused server never does. Before the fix close() waited for ever (seen: still pending after 120 s with SIGSTOP).
+  const statementTimeoutMs = 1000;
+  const rig = await throughProxy({ statementTimeoutMs, connectTimeoutMs: 2000 });
+  if (rig === undefined) return;
+  try {
+    await Promise.all([1, 2, 3].map(() => rig.storage.getAggregate({ kind: "task", id: "none" }))); // idle pooled connections
+    assert.equal(rig.storage.holdsLiveLock, true);
+    rig.proxy.freeze();
+    const inFlight = rig.storage.getAggregate({ kind: "task", id: "none" }).then(() => "answered", (e: unknown) => (isStorageError(e, "retryable") ? "retryable" : String(e)));
+    await sleep(100);
+    const sockets = () => process.getActiveResourcesInfo().filter((r) => r === "TCPSocketWrap").length;
+    const ours = rig.storage.poolStats().total + 1; // the pooled connections and the live lock's
+    const before = sockets();
+    const bound = statementTimeoutMs + REPLY_MARGIN_MS + CLOSE_GRACE_MS + 10_000;
+    const t0 = Date.now();
+    let timer: NodeJS.Timeout | undefined;
+    const closed = await Promise.race([rig.storage.close().then(() => "closed"), new Promise<string>((resolve) => { timer = setTimeout(() => resolve("still waiting"), bound); })]);
+    clearTimeout(timer);
+    assert.equal(closed, "closed", `close() still waiting after ${Date.now() - t0} ms on a frozen server (the bound is ${bound} ms)`);
+    assert.equal(await inFlight, "retryable", "the call in flight failed as retryable");
+    // Nothing is left half open (the pool ends idle connections without waiting; a half-open socket would also keep the process alive).
+    assert.ok(before - sockets() >= ours, `${before - sockets()} of the store's ${ours} sockets were released`);
+    await assert.rejects(rig.storage.getAggregate({ kind: "task", id: "none" }), (e) => isStorageError(e), "a closed store refuses calls");
+  } finally { await rig.proxy.stop(); await rig.close(); }
 });
 
 test("a claim whose answer was lost is safe to repeat once its lease ends", async () => {

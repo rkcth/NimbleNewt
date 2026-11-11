@@ -101,6 +101,29 @@ interface Tx { q(sql: string, params?: unknown[]): Promise<Row[]> }
  */
 export const REPLY_MARGIN_MS = 10_000;
 
+/**
+ * How long a closing connection may take to say goodbye before its socket is cut (card 19 review). A graceful end waits for the server to close its side,
+ * which a paused or hung server never does, so `close()` (and with it a controller's shutdown) waited for ever. Cutting the socket ends the session the
+ * same way for the server: its open transaction, if any, is rolled back and its locks released when it next runs.
+ */
+export const CLOSE_GRACE_MS = 5_000;
+
+const socketOf = (client: pg.ClientBase): { destroyed: boolean; destroy(): void; once(event: "close", listener: () => void): unknown } | undefined =>
+  (client as unknown as { connection?: { stream?: { destroyed: boolean; destroy(): void; once(event: "close", listener: () => void): unknown } } }).connection?.stream;
+
+/** Waits up to `ms` for `done`, then calls `cut` and waits for `done` again (it settles once the socket is gone). */
+async function within(done: Promise<unknown>, ms: number, cut: () => void): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = await Promise.race([done.then(() => false, () => false), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), ms); })]);
+  clearTimeout(timer);
+  if (late) { cut(); await done.catch(() => undefined); }
+}
+
+/** Ends a connection of our own; one whose server does not answer the goodbye within `CLOSE_GRACE_MS` is cut. */
+async function endConnection(client: pg.Client): Promise<void> {
+  await within(client.end().catch(() => undefined), CLOSE_GRACE_MS, () => socketOf(client)?.destroy());
+}
+
 const optional = <K extends string, V>(name: K, value: V | undefined | null): { [P in K]?: V } => (value === undefined || value === null ? {} : ({ [name]: value } as { [P in K]?: V }));
 const plus = (at: Timestamp, ms: number): Timestamp => new Date(Date.parse(at) + ms).toISOString();
 const text = (row: Row, key: string): string => row[key] as string;
@@ -166,12 +189,16 @@ export class PostgresStorage implements ControllerStorage {
   #schemaOid: string | undefined;
   /** Set when the schema was found replaced under this storage (a restore swapped in while its lock was lost): every later call is refused. */
   #replaced: StorageError | undefined;
+  /** The pool's connections, so a close can cut those whose goodbye is not answered (the pool ends its idle connections without waiting for them). */
+  readonly #pooled = new Set<pg.ClientBase>();
 
   private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
     this.#pool = pool;
     this.#options = options;
     this.#version = version;
     pool.on("error", (error) => { this.#poolError = error; }); // an idle connection dropped; the pool discards it and the next use reconnects
+    pool.on("connect", (client) => { this.#pooled.add(client); });
+    pool.on("remove", (client) => { this.#pooled.delete(client); });
   }
 
   /** The reason the server is older than the supported minimum, when it was accepted anyway because `allowUnsupportedServer` was set; undefined otherwise. Start-up prints and audits it. */
@@ -234,8 +261,7 @@ export class PostgresStorage implements ControllerStorage {
       store.#schemaOid = await store.#schemaIdentity();
       return store;
     } catch (error) {
-      await store.#dropLive();
-      await pool.end().catch(() => undefined);
+      await Promise.all([store.#dropLive(), store.#endPool()]);
       throw classify(error);
     }
   }
@@ -261,13 +287,13 @@ export class PostgresStorage implements ControllerStorage {
         const now = (await client.query("SELECT oid::text AS o FROM pg_namespace WHERE nspname = $1", [this.#options.schema])).rows[0]?.o as string | undefined;
         if (now !== this.#schemaOid) this.#replaced = new StorageError("unavailable", `the schema ${this.#options.schema} was replaced (a restore was swapped in) while this controller had it open; it is no longer used by this controller. Start the controller again.`);
       }
-    } catch (error) { await client.end().catch(() => undefined); throw error; }
-    if (this.#closed || this.#replaced !== undefined) { await client.end().catch(() => undefined); return; }
+    } catch (error) { await endConnection(client); throw error; }
+    if (this.#closed || this.#replaced !== undefined) { await endConnection(client); return; }
     this.#liveHold = client;
     const lost = (): void => {
       if (this.#liveHold !== client) return;
       this.#liveHold = undefined;
-      void client.end().catch(() => undefined);
+      void endConnection(client);
       this.#retakeLive(0);
     };
     client.on("error", lost);
@@ -313,7 +339,7 @@ export class PostgresStorage implements ControllerStorage {
     await this.#liveTaking;
     const client = this.#liveHold;
     this.#liveHold = undefined;
-    if (client !== undefined) await client.end().catch(() => undefined);
+    if (client !== undefined) await endConnection(client);
   }
 
   /** Whether this storage holds its schema's live lock now (false only while a lost connection is being replaced, or once closed). */
@@ -956,7 +982,21 @@ export class PostgresStorage implements ControllerStorage {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    await Promise.all([this.#dropLive(), this.#pool.end()]);
+    await Promise.all([this.#dropLive(), this.#endPool()]);
+  }
+
+  /**
+   * Ends the pool: it waits for connections in use to come back (each statement on them is bounded by `REPLY_MARGIN_MS`) and ends the idle ones without
+   * waiting for their goodbye; a connection whose goodbye is not answered within `CLOSE_GRACE_MS` is then cut, so nothing is left half open.
+   */
+  async #endPool(): Promise<void> {
+    await this.#pool.end().catch(() => undefined);
+    await Promise.all([...this.#pooled].map(async (client) => {
+      const socket = socketOf(client);
+      if (socket === undefined || socket.destroyed) return;
+      await within(new Promise<void>((resolve) => { socket.once("close", () => resolve()); }), CLOSE_GRACE_MS, () => socket.destroy());
+    }));
+    this.#pooled.clear();
   }
 
   /** Connections now open, idle and waiting for a free one: the pool pressure, for workload reports. */
