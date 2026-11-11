@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
+import type { HoldsUp } from "../critical/critical-path.js";
 import type { Principal } from "../security/index.js";
 import {
-  DEFAULT_BACKUP_MAX_AGE_HOURS, DEFAULT_DENIED_ALERTS_PER_HOUR, DEFAULT_DENIED_WINDOW_MINUTES, DEFAULT_HOST_DOWN_AFTER_MINUTES, DEFAULT_SECURITY_REPORTS_PER_HOUR, DEFAULT_STOPPED_WORK_AFTER_MINUTES, DEFAULT_SWEEP_SECONDS, type NotificationService,
+  DEFAULT_BACKUP_MAX_AGE_HOURS, DEFAULT_CRITICAL_BLOCKED_AFTER_MINUTES, DEFAULT_DENIED_ALERTS_PER_HOUR, DEFAULT_DENIED_WINDOW_MINUTES, DEFAULT_HOST_DOWN_AFTER_MINUTES, DEFAULT_SECURITY_REPORTS_PER_HOUR, DEFAULT_STOPPED_WORK_AFTER_MINUTES, DEFAULT_SWEEP_SECONDS, type NotificationService,
 } from "./notifications.js";
 
 /** What the watch needs from the backup service (card K01): the newest good backup by the scheduler's own rule, the folder being unreadable, and the last failed run. */
@@ -19,9 +20,13 @@ export interface HostSource {
  */
 export interface WorkSource { idle(projectId: string): Promise<boolean | undefined> }
 
+/** What the critical-path trigger needs (card U11d, "U11f"): the owner's marks turned into "does this task hold up the path" for one pass (`CriticalPathService.holdsUp`); `undefined`: nothing is marked. A throw means "not known" and decides nothing. */
+export interface CriticalSource { holdsUp(): Promise<HoldsUp | undefined> }
+
 export interface UrgentWatchOptions {
   readonly notifications: NotificationService;
   readonly work?: WorkSource;
+  readonly critical?: CriticalSource;
   readonly backups?: BackupSource;
   readonly hosts?: HostSource;
   /** Test clock; the production clock is the system's. */
@@ -75,6 +80,10 @@ export class UrgentWatch {
   #hostsSeen = new Set<string>();
   #hostsSeenFull = false;
   #stopCursor: string | undefined;
+  #critCursor: string | undefined;
+  /** When each waiting item was first seen holding up the critical path, and when an item the watch raised was first seen not doing so (hysteresis). Memory only: a restart delays a page or a put-back, it never fires early. */
+  readonly #critSince = new Map<string, number>();
+  readonly #critClear = new Map<string, number>();
   /** When each project was first seen with nothing to do (this episode); a project that is seen with work is forgotten. Memory only: a restart starts the count again, which only delays a page. */
   readonly #idleSince = new Map<string, number>();
 
@@ -101,6 +110,7 @@ export class UrgentWatch {
     let failure: unknown;
     try { if (this.#o.backups !== undefined) await this.#backupCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.hosts !== undefined) failure ??= await this.#hostCheck(by, settings, raised, cleared); } catch (error) { failure ??= error; }
+    try { if (this.#o.critical !== undefined) await this.#criticalCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.work !== undefined) await this.#stoppedCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     if (failure !== undefined) { this.#nextSweepAt = 0; throw failure; }
     return { raised, cleared };
@@ -122,6 +132,8 @@ export class UrgentWatch {
     let failure: unknown; let made = 0;
     for (const item of page.items) {
       try {
+        // An item the critical-path watch raised is that watch's to put back.
+        if (item.critical) continue;
         if (limitM === null) {
           // Turned off: what it raised is put back.
           if (item.stopped && (await this.#n.lowerStopped(item.id))) cleared.push(`work:${item.id}`);
@@ -148,6 +160,57 @@ export class UrgentWatch {
     }
     if (failure !== undefined) throw failure;
   }
+
+  /**
+   * The critical path (card U11d, "U11f"): a decision that waits on the owner (a blocker, a review, a question) and holds up a task on the critical path the owner marked is raised to Urgent with its reason, after the
+   * owner's `criticalBlockedAfterMinutes` (default 5, `null` off), and put back to Needs you, silently, once it has stopped doing so for the same number of minutes (hysteresis: a mark taken off and put back, or a
+   * blocker that flickers, does not page twice). What is critical comes from the owner's marks and the dependency records alone; the item's text is never read. The message is an Urgent trigger like the U11c ones: inside
+   * the hourly Urgent limit, and counted per PROJECT (`critical|<project>`) for the gap, so many decisions in one project are one page per gap. Bounded like the stopped-work check: `waitingPerSweep` items from a cursor,
+   * `raisesPerSweep` raises, the marks and each task read once per pass. A pass that cannot read the marks decides nothing.
+   */
+  async #criticalCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[], cleared: string[]): Promise<void> {
+    const limitM = settings.criticalBlockedAfterMinutes === undefined ? DEFAULT_CRITICAL_BLOCKED_AFTER_MINUTES : settings.criticalBlockedAfterMinutes;
+    const nowMs = Date.parse(this.#now());
+    const page = await this.#n.waitingOnOwner({ ...(this.#critCursor === undefined ? {} : { after: this.#critCursor }), limit: URGENT_LIMITS.waitingPerSweep, withTask: true });
+    this.#critCursor = page.next;
+    let holds: HoldsUp | undefined;
+    if (limitM !== null && page.items.length > 0) {
+      try { holds = await within(this.#o.critical!.holdsUp(), this.#stepMs, "reading the critical path"); } catch { return; }
+    }
+    let failure: unknown; let made = 0;
+    for (const item of page.items) {
+      try {
+        if (item.stopped) continue;
+        if (limitM === null) {
+          // Turned off: what it raised is put back.
+          if (item.critical && (await this.#n.lowerCritical(item.id))) cleared.push(`critical:${item.id}`);
+          this.#critSince.delete(item.id); this.#critClear.delete(item.id);
+          continue;
+        }
+        let blocks = false;
+        if (holds !== undefined && item.taskId !== undefined) { try { blocks = await within(holds(item.taskId), this.#stepMs, "reading the critical path"); } catch { continue; } }
+        if (blocks) {
+          this.#critClear.delete(item.id);
+          if (item.critical) continue;
+          if (!this.#critSince.has(item.id)) { this.#critSince.set(item.id, nowMs); this.#trim(this.#critSince); }
+          if (made >= URGENT_LIMITS.raisesPerSweep) continue;
+          const since = Math.max(Date.parse(item.firstAt), this.#critSince.get(item.id)!);
+          if (!Number.isFinite(since) || nowMs - since < limitM * 60_000) continue;
+          if (await this.#n.raiseCritical(item.id, { minutes: Math.floor((nowMs - since) / 60_000), limit: limitM })) { made++; raised.push(`critical:${item.id}`); this.#critSince.delete(item.id); }
+        } else {
+          this.#critSince.delete(item.id);
+          if (!item.critical) continue;
+          if (!this.#critClear.has(item.id)) { this.#critClear.set(item.id, nowMs); this.#trim(this.#critClear); }
+          if (nowMs - this.#critClear.get(item.id)! < limitM * 60_000) continue;
+          if (await this.#n.lowerCritical(item.id)) cleared.push(`critical:${item.id}`);
+          this.#critClear.delete(item.id);
+        }
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  }
+
+  #trim(map: Map<string, number>): void { while (map.size > URGENT_LIMITS.projectsCounted) map.delete(map.keys().next().value as string); }
 
   async #backupCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[], cleared: string[]): Promise<void> {
     const limitH = settings.backupMaxAgeHours === undefined ? DEFAULT_BACKUP_MAX_AGE_HOURS : settings.backupMaxAgeHours;

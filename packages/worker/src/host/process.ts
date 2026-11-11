@@ -1,4 +1,4 @@
-import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseFromChild, type BridgeReplyMessage, type ChannelStart, type FromChild, type HeaderList, type ToChild } from "@nimblenewt/contracts";
+import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseFromChild, type BridgeReplyMessage, type ChannelStart, type FromChild, type ThinkingReport, type HeaderList, type ToChild } from "@nimblenewt/contracts";
 import type { LimitEnforcement } from "../sandbox/limits.js";
 import type { LaunchRequest, RunResult, SandboxLauncher, SandboxRun } from "../sandbox/launcher.js";
 import type { RunProcess } from "../sandbox/proc.js";
@@ -23,10 +23,12 @@ export interface ProcessHandlers {
   renew?(): Promise<{ readonly leaseMs: number } | { readonly fenced: string }>;
   /** The process compacted its own conversation (card C07q): how much and the summary's digest. Told, not asked: a throw is dropped and changes nothing for the process. */
   compacted?(note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }): Promise<void> | void;
+  /** The process reported the model's thinking (card U09b). Untrusted text, passed on as it came; told, not asked: a throw is dropped and changes nothing for the process. */
+  thinking?(blocks: readonly ThinkingReport[]): Promise<void> | void;
 }
 
 /** `killWaitMs`: how long `close` waits after the kill for the process to end before it gives up and says so (card L02d: a process the OS cannot end is reported, never waited on for ever). */
-export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, compactedInFlight: 2, compactions: 1000, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
+export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, compactedInFlight: 2, compactions: 1000, thinkingInFlight: 2, thinkingMessages: 2000, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
 
 /** `close` gave up: the process was asked to end, then killed, and it is still there (card L02d). */
 export class ProcessNotEnded extends Error {}
@@ -51,6 +53,8 @@ export class WorkerProcess {
   /** Compaction notices being kept at the controller now, and all this process has sent (card C07q): each is a write at the controller, so a process may not flood it. Past the in-flight bound a notice is refused (and counts toward the kill); past the total it is dropped. */
   #compacting = 0;
   #compactions = 0;
+  #thinking = 0;
+  #thinkingMessages = 0;
   #pendingBytes = 0;
   #refused = 0;
   #next = 0;
@@ -168,6 +172,15 @@ export class WorkerProcess {
         const { messageCount, summaryChars, digest } = m;
         this.#compacting++;
         void Promise.resolve().then(() => told.call(this.#handlers, { messageCount, summaryChars, digest })).catch(() => undefined).finally(() => { this.#compacting--; });
+        return;
+      }
+      case "thinking": {
+        const told = this.#handlers.thinking;
+        if (told === undefined) return;
+        // A process that reports faster than the controller keeps them, or without end, is not waited on: the reports past the bound are dropped (the work goes on; only the owner's view of it is shorter).
+        if (this.#thinking >= PROCESS_LIMITS.thinkingInFlight || ++this.#thinkingMessages > PROCESS_LIMITS.thinkingMessages) return;
+        this.#thinking++;
+        void Promise.resolve().then(() => told.call(this.#handlers, m.blocks)).catch(() => undefined).finally(() => { this.#thinking--; });
         return;
       }
       case "bridge": void this.#bridge(m); return;

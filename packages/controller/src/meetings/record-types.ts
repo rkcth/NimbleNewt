@@ -251,6 +251,8 @@ export interface SummaryContent {
   readonly unresolved: readonly { readonly kind: "question" | "motion" | "owner"; readonly text: string; readonly ref: string }[];
   readonly actions: readonly SummaryItem[];
   readonly plan: readonly SummaryItem[];
+  /** The owner's answers to the questions this meeting put to them about deferred decisions (card M03i), as the record carries them; absent when there are none. */
+  readonly ownerAnswers?: readonly OwnerAnswerNote[];
   /** The summary agrees with the decision records it was built from (every counted change is in exactly one list). */
   readonly consistent: boolean;
   /** Some conclusions rest on private records the readers cannot see: they are shown as claims, marked unverifiable. */

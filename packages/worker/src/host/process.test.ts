@@ -268,3 +268,39 @@ test("C07q review: compaction notices are bounded; a flood is refused past the i
   assert.equal(q.alive, true);
   f.exit(); g.exit();
 });
+
+test("U09b: a thinking report from the process reaches the host's handler as it came; a handler that throws or is absent changes nothing", async () => {
+  const blocks = [{ entryId: 1, block: 0, provider: "p", model: "m", text: "first look", opaque: false }];
+  const got: unknown[] = [];
+  const f = fake();
+  const process = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, thinking: (b) => { got.push(b); throw new Error("controller down"); } });
+  f.send({ t: "thinking", blocks });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(got, [blocks]);
+  assert.equal(process.alive, true, "a handler that throws does not end the process");
+  const g = fake();
+  const plain = await launch(g);
+  g.send({ t: "thinking", blocks });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(plain.alive, true);
+  f.exit(); g.exit();
+});
+
+test("U09b: thinking reports are bounded; past the in-flight bound and the per-process total they are dropped and the work goes on", async () => {
+  const blocks = [{ entryId: 1, block: 0, provider: "p", model: "m", text: "t", opaque: false }];
+  let held = 0;
+  const f = fake();
+  const p = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, thinking: () => { held++; return new Promise<void>(() => undefined); } });
+  for (let i = 0; i < PROCESS_LIMITS.thinkingInFlight + 50; i++) f.send({ t: "thinking", blocks });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(held, PROCESS_LIMITS.thinkingInFlight, "only the in-flight bound reaches the controller");
+  assert.equal(p.alive, true, "a flood of reports is dropped, not a reason to end the work");
+  let kept = 0;
+  const g = fake();
+  const q = await WorkerProcess.launch(g.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, thinking: async () => { kept++; } });
+  for (let i = 0; i < PROCESS_LIMITS.thinkingMessages + 10; i++) { g.send({ t: "thinking", blocks }); await new Promise((r) => setImmediate(r)); }
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(kept, PROCESS_LIMITS.thinkingMessages);
+  assert.equal(q.alive, true);
+  f.exit(); g.exit();
+});

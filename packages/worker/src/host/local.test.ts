@@ -417,3 +417,14 @@ test("C07q: ownerPolicyOptions connects the controller's compaction record to th
   assert.deepEqual(seen, [[order, note]]);
   assert.equal(ownerPolicyOptions(base).onCompaction, undefined);
 });
+
+test("U09b: ownerPolicyOptions connects the controller's thinking record to the host, and leaves it out when the controller gave none", async () => {
+  const seen: unknown[] = [];
+  const base = { currentLimits: async () => undefined, bestEffortAllowed: async () => false, recordLaunch: async () => undefined };
+  const blocks = [{ entryId: 1, block: 0, provider: "p", model: "m", text: "t", opaque: false }];
+  const order = { attemptId: "att-1" } as never;
+  const withRecord = ownerPolicyOptions({ ...base, recordThinking: async (o, b) => { seen.push([o, b]); } });
+  await withRecord.onThinking!(order, blocks);
+  assert.deepEqual(seen, [[order, blocks]]);
+  assert.equal(ownerPolicyOptions(base).onThinking, undefined);
+});

@@ -19,6 +19,7 @@ import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
+import type { CriticalPathService } from "../critical/index.js";
 import type { NotificationService, SecurityEvent } from "../notifications/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
@@ -66,6 +67,7 @@ import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { ReplayService } from "../activity/replay.js";
 import type { ReplayLimitsService } from "../activity/replay-limits.js";
+import type { ThinkingStore } from "../context/thinking-store.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { ContinuationService } from "../continuation/continuation.js";
@@ -207,6 +209,7 @@ export interface StateApiDeps {
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
+  readonly thinkingStore?: Pick<ThinkingStore, "collection" | "setCollection" | "summary">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
@@ -244,6 +247,8 @@ export interface StateApiDeps {
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** When present, the owner can read and set notification settings through the API (card U11b). */
   readonly notifications?: Pick<NotificationService, "configure" | "settings">;
+  /** When present, the owner can mark the critical path through the API (card U11d, "U11f"). */
+  readonly critical?: Pick<CriticalPathService, "mark" | "list">;
   /** When present, hosts and services can report security events to the Urgent watch (card U11c). */
   /** The controller's security detectors (card U11d), handed to each call as `Context.detect`. */
   readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly projectId?: string; readonly subject?: string }) => void;
@@ -388,6 +393,7 @@ export class StateApi {
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
         ...(this.#deps.replay === undefined ? {} : { replay: this.#deps.replay }),
         ...(this.#deps.replayLimits === undefined ? {} : { replayLimits: this.#deps.replayLimits }),
+        ...(this.#deps.thinkingStore === undefined ? {} : { thinkingStore: this.#deps.thinkingStore }),
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
         ...(this.#deps.continuations === undefined ? {} : { continuations: this.#deps.continuations }),
         ...(this.#deps.handoffs === undefined ? {} : { handoffs: this.#deps.handoffs }),
@@ -400,6 +406,7 @@ export class StateApi {
         ...(this.#deps.handoffNotes === undefined ? {} : { handoffNotes: this.#deps.handoffNotes }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
         ...(this.#deps.notifications === undefined ? {} : { notifications: this.#deps.notifications }),
+        ...(this.#deps.critical === undefined ? {} : { critical: this.#deps.critical }),
         ...(this.#deps.security === undefined ? {} : { security: this.#deps.security }),
         ...(this.#deps.detect === undefined ? {} : { detect: this.#deps.detect }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),

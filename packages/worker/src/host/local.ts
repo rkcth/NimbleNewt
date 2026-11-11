@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { endKindOf, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
+import { endKindOf, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
@@ -191,11 +191,14 @@ export interface OwnerPolicyServices {
   readonly recordLaunch: (record: LaunchEnforcement) => Promise<void>;
   /** Card C07q: keeps a compaction the attempt's process made. Optional, so a builder written before it still type-checks. The order is the controller's own (it names the task), as for the other services the builder passes through. */
   readonly recordCompaction?: (order: never, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => Promise<void>;
+  /** Card U09b: keeps the model's thinking the attempt's process reported (untrusted text; the controller cleans, bounds and stores it for the owner). Optional, so a builder written before it still type-checks. */
+  readonly recordThinking?: (order: never, blocks: readonly ThinkingReport[]) => Promise<void>;
 }
 /** The three options that connect a host to the owner's limits, best-effort setting and launch record, from the services the controller gave `build`. Spread into `localWorkerParts` options. */
-export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch" | "onCompaction"> {
+export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch" | "onCompaction" | "onThinking"> {
   const record = services.recordCompaction;
-  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (r) => services.recordLaunch(r), ...(record === undefined ? {} : { onCompaction: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => record(order as never, note) }) };
+  const thinking = services.recordThinking;
+  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (r) => services.recordLaunch(r), ...(record === undefined ? {} : { onCompaction: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => record(order as never, note) }), ...(thinking === undefined ? {} : { onThinking: (order: HostOrder, blocks: readonly ThinkingReport[]) => thinking(order as never, blocks) }) };
 }
 /** What one named reach of the sandbox adds to the recipe: read-only inputs (under /inputs or /opt) and environment. Nothing else can be added by a name: not a writable path, not a network. */
 export interface ReachGrant { readonly readOnly?: readonly ReadOnlyMount[]; readonly env?: Readonly<Record<string, string>> }
@@ -243,6 +246,8 @@ export interface LocalHostOptions<Call> {
   readonly onLaunch?: (record: LaunchEnforcement) => Promise<void> | void;
   /** Told when an attempt's process compacted its own conversation (card C07q): how much and the summary's digest. A failure is dropped; it never changes the attempt. */
   readonly onCompaction?: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => Promise<void> | void;
+  /** Told when an attempt's process reported the model's thinking (card U09b): untrusted text. A failure is dropped; it never changes the attempt. */
+  readonly onThinking?: (order: HostOrder, blocks: readonly ThinkingReport[]) => Promise<void> | void;
   /**
    * How the sandbox shows what it mounts. `private` (default; bubblewrap): its own view, so the program is at `/opt/node/...` and the conversation store at `/home/agent/pi`. `host` (Seatbelt on macOS, which confines by what a process may touch and has no private filesystem
    * view): every path is the host's own, so the program, its entry file and the store are given by their host paths. The mounts are still checked and still the only things the profile lets the process read.
@@ -419,6 +424,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           bridge: (token, request) => options.bridge(order, call, token, request),
           relay: (request) => options.relay(order, request),
           ...(options.onCompaction === undefined ? {} : { compacted: (note) => options.onCompaction!(order, note) }),
+          ...(options.onThinking === undefined ? {} : { thinking: (blocks) => options.onThinking!(order, blocks) }),
           ...(lease === undefined ? {} : {
             renew: async () => {
               try { return { leaseMs: (await lease.renew()).leaseMs }; } catch (error) {
