@@ -67,3 +67,37 @@ test("an event's data may span several lines; a comment line shows a stream; onl
   const long = enc.encode(`data: ${"x".repeat(1024 * 1024 + 10)}`);
   assert.ok(run(long, 200_000).some((e) => e.kind === "note" && /longer than 1 MB/.test(e.text)));
 });
+
+test("a provider ID the recorder cannot keep is recorded under a safe one with the ID the tool bridge will send as its alias; a safe ID has none (card L05d)", async () => {
+  const { bridgeCallIdOf } = await import("./model-stream.js");
+  const { createHash } = await import("node:crypto");
+  const raw = "has spaces and ☃";
+  const hashed = `h:${createHash("sha256").update(raw).digest("hex").slice(0, 40)}`;
+  assert.equal(bridgeCallIdOf(raw), hashed);
+  assert.equal(bridgeCallIdOf("call_1"), "call_1");
+  const long = "x".repeat(100);
+  assert.equal(bridgeCallIdOf(long), long, "up to 120 characters the extension sends the ID as it is");
+  assert.equal(bridgeCallIdOf("y".repeat(121)).startsWith("h:"), true);
+  // OpenAI style streamed: the alias comes with the first piece only.
+  const streamed = run(enc.encode(data({ choices: [{ delta: { tool_calls: [{ index: 3, id: raw, function: { name: "t", arguments: "{" } }] } }] }) + data({ choices: [{ delta: { tool_calls: [{ index: 3, function: { arguments: "}" } }] } }] }) + data({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })), 100).filter((e) => e.kind === "tool");
+  assert.deepEqual(streamed[0], { kind: "tool", id: "call-3", name: "t", alias: hashed, argumentsDelta: "{", done: false });
+  assert.equal((streamed[1] as { alias?: string }).alias, undefined);
+  // An ID of 100 characters is too long to record but is sent as it is.
+  const longOne = run(enc.encode(data({ choices: [{ delta: { tool_calls: [{ index: 0, id: long, function: { name: "t", arguments: "{}" } }] } }] })), 100)[0] as { id: string; alias?: string };
+  assert.deepEqual([longOne.id, longOne.alias], ["call-0", long]);
+  // A safe ID has no alias, in any of the four reply shapes.
+  const safe = [
+    run(enc.encode(data({ choices: [{ delta: { tool_calls: [{ index: 0, id: "ok_1", function: { name: "t", arguments: "{}" } }] } }] })), 100),
+    run(enc.encode(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: "ok_1", function: { name: "t", arguments: "{}" } }] } }] })), 1000),
+    run(enc.encode(data({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "ok_1", name: "t" } })), 100),
+    run(enc.encode(JSON.stringify({ content: [{ type: "tool_use", id: "ok_1", name: "t", input: {} }] })), 1000),
+  ];
+  for (const events of safe) assert.equal((events.find((e) => e.kind === "tool") as { alias?: string }).alias, undefined);
+  // Whole replies and Anthropic style carry the alias too.
+  const whole = run(enc.encode(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: raw, function: { name: "t", arguments: "{}" } }] } }] })), 1000).find((e) => e.kind === "tool") as { id: string; alias?: string };
+  assert.deepEqual([whole.id, whole.alias], ["call-0", hashed]);
+  const anthropic = run(enc.encode(data({ type: "content_block_start", index: 2, content_block: { type: "tool_use", id: raw, name: "t" } })), 100).find((e) => e.kind === "tool") as { id: string; alias?: string };
+  assert.deepEqual([anthropic.id, anthropic.alias], ["call-2", hashed]);
+  const anthropicWhole = run(enc.encode(JSON.stringify({ content: [{ type: "tool_use", id: raw, name: "t", input: {} }] })), 1000).find((e) => e.kind === "tool") as { id: string; alias?: string };
+  assert.deepEqual([anthropicWhole.id, anthropicWhole.alias], ["call-0", hashed]);
+});

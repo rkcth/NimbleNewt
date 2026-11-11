@@ -19,7 +19,7 @@ test("the model stream settings: both on by default, owner-only, changed by the 
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
-    const base = { record: true, cut: true, onStoreFailure: "closed", failClosed: true, recordPaused: false, checkBridge: true, requireRecorded: false, storeTimeoutMs: 20_000, batchMs: 250, batchChars: 2000, heldBufferBytes: 16 * 1024 * 1024 };
+    const base = { record: true, cut: true, onStoreFailure: "closed", failClosed: true, recordPaused: false, checkBridge: true, requireRecorded: false, bindCall: true, admitCall: true, requireStream: false, storeTimeoutMs: 20_000, batchMs: 250, batchChars: 2000, heldBufferBytes: 16 * 1024 * 1024 };
     assert.deepEqual((await call("generation.stream.get", {})).result.item, { revision: 0, ...base });
     const off = await call("generation.stream.change", { disable: ["cut"], expectedRevision: 0 }, "s1");
     assert.ok(off.ok, JSON.stringify(off));
@@ -46,6 +46,17 @@ test("the model stream settings: both on by default, owner-only, changed by the 
     const l05c = (await call("generation.stream.get", {})).result.item;
     assert.deepEqual([l05c.requireRecorded, l05c.checkBridge, l05c.recordPaused], [true, false, true]);
     assert.ok((await call("generation.stream.change", { disable: ["requireRecorded", "recordPaused"], enable: ["checkBridge"] }, "s11")).ok);
+    // Card L05d switches: binding a call to its operation and admitting a bridge write as an effect are on, requiring a stream from a remote worker is off; each can be turned the other way by the owner in chat, in the owner's own words.
+    const l05dText = "stop checking that a tool call is the one the model wrote, and make remote workers show me a model stream";
+    const l05d = await turn("m3", l05dText, [{ kind: "command", op: "generation.stream.change", args: { disable: ["bindCall"], enable: ["requireStream"] }, evidence: l05dText, basis: "owner" }]);
+    assert.equal(l05d[0]!.status, "proposed", JSON.stringify(l05d));
+    assert.equal((await call("generation.stream.get", {})).result.item.bindCall, true, "nothing changed while it waits for the owner");
+    const doneL05d = await turn("m4", "yes, please do that", [{ kind: "apply_proposal", proposalId: l05d[0]!.proposalId, evidence: "do that", basis: "owner" }]);
+    assert.equal(doneL05d[0]!.status, "applied", JSON.stringify(doneL05d));
+    const after = (await call("generation.stream.get", {})).result.item;
+    assert.deepEqual([after.bindCall, after.admitCall, after.requireStream], [false, true, true]);
+    assert.ok((await call("generation.stream.change", { enable: ["bindCall"], disable: ["requireStream", "admitCall"] }, "s12")).ok);
+    assert.ok((await call("generation.stream.change", { enable: ["admitCall"] }, "s13")).ok);
     assert.equal((await call("generation.stream.change", { set: { nope: 1 } }, "s7")).ok, false);
     assert.equal((await call("generation.stream.change", { set: { batchMs: -1 } }, "s8")).ok, false);
     assert.ok((await call("generation.stream.change", { enable: ["failClosed"] }, "s9")).ok);

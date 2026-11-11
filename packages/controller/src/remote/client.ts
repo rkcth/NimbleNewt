@@ -294,7 +294,7 @@ export class RemoteAttempt implements ToolGateway {
           if (e.kind === "text") { chars += e.text.length; if (last?.kind === "text") { pending[pending.length - 1] = { kind: "text", text: last.text + e.text }; return; } }
           else if (e.kind === "tool") {
             chars += e.argumentsDelta.length;
-            if (last?.kind === "tool" && last.id === e.id && !last.done) { pending[pending.length - 1] = { kind: "tool", id: last.id, ...(last.name !== undefined ? { name: last.name } : e.name !== undefined ? { name: e.name } : {}), argumentsDelta: last.argumentsDelta + e.argumentsDelta, done: e.done }; return; }
+            if (last?.kind === "tool" && last.id === e.id && !last.done) { pending[pending.length - 1] = { kind: "tool", id: last.id, ...(last.name !== undefined ? { name: last.name } : e.name !== undefined ? { name: e.name } : {}), ...(last.alias !== undefined ? { alias: last.alias } : e.alias !== undefined ? { alias: e.alias } : {}), argumentsDelta: last.argumentsDelta + e.argumentsDelta, done: e.done }; return; }
           }
           pending.push(e);
         };
