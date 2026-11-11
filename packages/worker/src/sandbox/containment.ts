@@ -128,6 +128,8 @@ interface Fixture {
   readonly server: Server;
   readonly port: number;
   readonly connections: () => number;
+  /** Puts the planted files back as they were and removes anything an attempt created next to them (the unconfined pairing changes them on purpose). */
+  reset(): void;
   close(): Promise<void>;
 }
 
@@ -148,27 +150,53 @@ async function buildFixture(): Promise<Fixture> {
   const server = createServer((socket) => { connections += 1; socket.on("error", () => undefined); socket.end("HOST-SERVICE"); });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
-  return { root, controllerDir, controllerFile, home, credentialFile, outsideDir, outsideFile, server, port, connections: () => connections, close: async () => { await new Promise<void>((resolve) => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); } };
+  const planted: readonly (readonly [string, string, string])[] = [[outsideDir, outsideFile, OUTSIDE_ORIGINAL], [controllerDir, controllerFile, SECRET_CONTROLLER], [join(home, ".ssh"), credentialFile, SECRET_KEY]];
+  const reset = (): void => {
+    for (const [d, keep, content] of planted) {
+      for (const name of readdirSync(d)) if (join(d, name) !== keep) rmSync(join(d, name), { recursive: true, force: true });
+      rmSync(keep, { force: true });
+      writeFileSync(keep, content);
+    }
+  };
+  return { root, controllerDir, controllerFile, home, credentialFile, outsideDir, outsideFile, server, port, connections: () => connections, reset, close: async () => { await new Promise<void>((resolve) => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); } };
 }
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
-const short = (s: string): string => (s.length > 300 ? `${s.slice(0, 300)}...` : s).replace(/[\r\n]+/g, " ");
+/** Bounded, one line, and printable (program output may carry terminal controls; `parseReport` refuses them). */
+const short = (s: string): string => (s.length > 300 ? `${s.slice(0, 300)}...` : s).replace(/[\r\n]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "?");
 
 interface Attempt {
-  readonly recipe: SandboxRecipe;
   readonly script: string;
   /** Judges what the program printed: a failure reason, `inconclusive:<why>`, or undefined when the case holds. */
   readonly judge: (out: string) => string | undefined;
+  /** Judges the host after the attempt (a file that must not change, a server that must not be reached): a failure reason or undefined. */
+  readonly host: (out: string) => string | undefined | Promise<string | undefined>;
+  /**
+   * For a denial: what of this attempt did NOT get through when it ran without the sandbox (undefined: every part got through). Decided on the host where the attempt changes the host, else from the output of
+   * the unconfined run. A denial counts only when the very same attempt is shown to work unconfined, so a probe that fails for an unrelated reason (a typo, a missing tool or fixture) is inconclusive, never a pass.
+   */
+  readonly proof?: (out: string) => string | undefined | Promise<string | undefined>;
+}
+
+interface CaseDef {
+  readonly id: string;
+  /** Builds the attempt on a fresh agent directory set (links and protected names are planted there). Called once for the unconfined pairing and once for the confined run. */
+  readonly make: (recipe: SandboxRecipe) => Attempt;
 }
 
 export interface SuiteOptions {
   /** The launcher under test. Default: a production launcher for this platform. */
   readonly launcher?: SandboxLauncher;
   readonly timeoutMs?: number;
+  /** Tests only: changes a case's script before it runs (both the unconfined pairing and the confined run), to show that a broken probe is reported inconclusive. Never set by `produceReport`'s command line. */
+  readonly rewriteScript?: (id: string, script: string) => string;
 }
+
+const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Runs every case through the launcher and returns the verdicts. The launcher defaults to the production one for this OS (never a stand-in); a test may pass one built on another backend to show that the cases can fail.
+ * Each denial is first run WITHOUT the sandbox (through a trusted-host launcher configured for the suite alone) and must get through there; only then does the confined run's refusal count.
  * The service user's HOME is pointed at the fixture for the duration (the launcher protects the credential places under it).
  */
 export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{ capacity: SandboxLauncher["capacity"]; cases: CaseResult[]; trustedHost: TrustedHostException | undefined }> {
@@ -176,11 +204,15 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
   const originalHome = process.env["HOME"];
   process.env["HOME"] = fixture.home;
   const timeoutMs = options.timeoutMs ?? 30_000;
+  const rewrite = options.rewriteScript ?? ((_id: string, script: string) => script);
   try {
     const launcher = options.launcher ?? await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined });
     const capacity = launcher.capacity;
     if (!capacity.available) return { capacity, cases: REQUIRED_CASE_IDS.map((id) => ({ id, category: CATEGORY[id]!, verdict: "not_run" as const, detail: `no capacity: ${capacity.reason ?? "unavailable"}` })), trustedHost: undefined };
     const linuxView = capacity.backend === "bubblewrap";
+    const authority = "G05 containment evidence (the suite's own test authority)";
+    let unconfined: SandboxLauncher | undefined;
+    try { unconfined = await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], trustedHost: { authority }, audit: () => undefined }); } catch { unconfined = undefined; }
     let n = 0;
     const recipeOf = (): SandboxRecipe => {
       n += 1;
@@ -188,116 +220,149 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
       const d = (name: string): string => { const p = join(base, name); mkdirSync(p, { recursive: true }); return p; };
       return { mode: "sandboxed", workdir: d("work"), home: d("home"), scratch: d("scratch"), readOnly: [], network: "none", env: {}, protectedSubpaths: [".git"] };
     };
+
+    /** Runs one attempt and says what the host and the output show: undefined (nothing got through), a failure reason, or `inconclusive:<why>`. */
+    const execute = async (via: SandboxLauncher, recipe: SandboxRecipe, id: string, attempt: Attempt): Promise<{ problem: string | undefined; out: string }> => {
+      fixture.reset();
+      const run = await via.launch({ recipe, command: ["/bin/sh", "-c", rewrite(id, attempt.script)], timeoutMs, maxOutputBytes: 200_000 });
+      const result = await run.result;
+      // A connection the program made just before it ended may not have been accepted yet: give the host's event loop a moment before asking the witness.
+      await settle(100);
+      const out = `${result.stdout}\n${result.stderr}`;
+      if (result.timedOut) return { problem: "inconclusive:the attempt timed out", out };
+      if (!out.includes(END)) return { problem: `inconclusive:the attempt did not reach its end marker (${short(out)})`, out };
+      return { problem: attempt.judge(out) ?? await attempt.host(out), out };
+    };
+
     const results: CaseResult[] = [];
-    const record = async (id: string, attempt: Attempt, host: (out: string) => string | undefined): Promise<void> => {
-      const category = CATEGORY[id]!;
+    const record = async (def: CaseDef): Promise<void> => {
+      const category = CATEGORY[def.id]!;
+      const push = (verdict: Verdict, detail: string): void => { results.push({ id: def.id, category, verdict, detail: short(detail) }); };
       try {
-        const run = await launcher.launch({ recipe: attempt.recipe, command: ["/bin/sh", "-c", attempt.script], timeoutMs, maxOutputBytes: 200_000 });
-        const result = await run.result;
-        const out = `${result.stdout}\n${result.stderr}`;
-        let problem: string | undefined;
-        if (result.timedOut) problem = "inconclusive:the attempt timed out";
-        else if (!out.includes(END)) problem = `inconclusive:the attempt did not reach its end marker (${short(out)})`;
-        else problem = attempt.judge(out) ?? host(out);
-        if (problem === undefined) results.push({ id, category, verdict: "pass", detail: "held" });
-        else if (problem.startsWith("inconclusive:")) results.push({ id, category, verdict: "inconclusive", detail: short(problem.slice("inconclusive:".length)) });
-        else results.push({ id, category, verdict: "fail", detail: short(problem) });
+        let paired = "";
+        const first = recipeOf();
+        const probe = def.make(first);
+        if (probe.proof !== undefined) {
+          // The pairing: without the sandbox the same attempt must get through, or a refusal below proves nothing.
+          if (unconfined === undefined) return push("inconclusive", "the attempt could not be run without the sandbox to show that it works");
+          const free = await execute(unconfined, { ...first, mode: "trusted-host" }, def.id, { ...probe, judge: () => undefined, host: () => undefined });
+          if (free.problem !== undefined) return push("inconclusive", `the attempt did not run to its end without the sandbox: ${free.problem.replace(/^inconclusive:/, "")}`);
+          const missing = await probe.proof(free.out);
+          if (missing !== undefined) return push("inconclusive", `without the sandbox the same attempt did not get through (${missing}), so a refusal would prove nothing`);
+          paired = "; the same attempt got through without the sandbox";
+        }
+        // A control runs once; a denial runs again on fresh directories (the unconfined run may have changed its own).
+        const recipe = probe.proof === undefined ? first : recipeOf();
+        const confined = probe.proof === undefined ? probe : def.make(recipe);
+        const { problem } = await execute(launcher, recipe, def.id, confined);
+        if (problem === undefined) push("pass", `held${paired}`);
+        else if (problem.startsWith("inconclusive:")) push("inconclusive", problem.slice("inconclusive:".length));
+        else push("fail", problem);
       } catch (error) {
-        results.push({ id, category, verdict: "inconclusive", detail: short(`the attempt could not be launched: ${(error as Error).message}`) });
+        push("inconclusive", `the attempt could not be launched: ${(error as Error).message}`);
       }
     };
     const leaked = (out: string, ...secrets: string[]): string | undefined => (secrets.some((x) => out.includes(x)) ? "the confined program printed protected content" : undefined);
+    const shown = (out: string, ...secrets: string[]): string | undefined => { const absent = secrets.filter((x) => !out.includes(x)); return absent.length === 0 ? undefined : `not read: ${absent.join(", ")}`; };
     const same = (file: string, expected: string): boolean => existsSync(file) && readFileSync(file, "utf8") === expected;
     const none = (): undefined => undefined;
 
-    // Controls: what the agent is allowed to do works. Without these a denial could be a probe that never ran.
-    {
-      const r = recipeOf();
+    // Controls: what the agent is allowed to do works. Without these a denial could be a sandbox that refuses everything.
+    await record({ id: "control-write-own-directories", make: (r) => {
       const scratchGuest = linuxView ? GUEST.scratch : r.scratch;
-      await record("control-write-own-directories", { recipe: r, script: `echo w > "$PWD/c-work"; echo h > "$HOME/c-home"; echo s > ${quote(scratchGuest)}/c-scratch; echo ${END}`, judge: none }, () =>
-        existsSync(join(r.workdir, "c-work")) && existsSync(join(r.home, "c-home")) && existsSync(join(r.scratch, "c-scratch")) ? undefined : "the agent could not write its own directories");
-    }
-    {
-      const r = recipeOf();
+      return { script: `echo w > "$PWD/c-work"; echo h > "$HOME/c-home"; echo s > ${quote(scratchGuest)}/c-scratch; echo ${END}`, judge: none, host: () =>
+        existsSync(join(r.workdir, "c-work")) && existsSync(join(r.home, "c-home")) && existsSync(join(r.scratch, "c-scratch")) ? undefined : "the agent could not write its own directories" };
+    } });
+    await record({ id: "control-read-own-decoy", make: (r) => {
       writeFileSync(join(r.workdir, "decoy.txt"), OWN_DECOY);
-      await record("control-read-own-decoy", { recipe: r, script: `cat "$PWD/decoy.txt"; echo; echo ${END}`, judge: (out) => (out.includes(OWN_DECOY) ? undefined : "the agent could not read its own file") }, none);
-    }
+      return { script: `cat "$PWD/decoy.txt"; echo; echo ${END}`, judge: (out) => (out.includes(OWN_DECOY) ? undefined : "the agent could not read its own file"), host: none };
+    } });
 
-    // Writes outside the workspace.
-    {
-      const r = recipeOf();
-      const sys = ["/usr/g05-x", "/etc/g05-x", "/bin/g05-x", "/g05-x"];
-      await record("deny-write-system", { recipe: r, script: `for p in ${sys.join(" ")}; do ( : > "$p" ) 2>/dev/null; done; echo ${END}`, judge: none }, () => (sys.some((p) => existsSync(p)) ? "a file was created in a system directory of the host" : undefined));
-    }
-    {
-      const r = recipeOf();
-      const targets = [join(fixture.outsideDir, "g05-created"), join(fixture.controllerDir, "g05-created"), join(fixture.home, ".ssh", "g05-created")];
-      await record("deny-write-host-path", { recipe: r, script: `( echo overwritten > ${quote(fixture.outsideFile)} ) 2>/dev/null; ${targets.map((t) => `( : > ${quote(t)} ) 2>/dev/null;`).join(" ")} echo ${END}`, judge: none }, () => {
+    // Writes outside the workspace. The system directories are not paired: an unprivileged process cannot write there without a sandbox either (a regression guard for a run as root or a writable bind).
+    const sys = ["/usr/g05-x", "/etc/g05-x", "/bin/g05-x", "/g05-x"];
+    await record({ id: "deny-write-system", make: () => ({ script: `for p in ${sys.join(" ")}; do ( : > "$p" ) 2>/dev/null; done; echo ${END}`, judge: none, host: () => (sys.some((p) => existsSync(p)) ? "a file was created in a system directory of the host" : undefined) }) });
+    const targets = [join(fixture.outsideDir, "g05-created"), join(fixture.controllerDir, "g05-created"), join(fixture.home, ".ssh", "g05-created")];
+    await record({ id: "deny-write-host-path", make: () => ({
+      script: `( echo overwritten > ${quote(fixture.outsideFile)} ) 2>/dev/null; ${targets.map((t) => `( : > ${quote(t)} ) 2>/dev/null;`).join(" ")} echo ${END}`, judge: none,
+      host: () => {
         if (!same(fixture.outsideFile, OUTSIDE_ORIGINAL)) return "a host file outside the workspace was changed";
         if (targets.some((t) => existsSync(t))) return "a file was created in a host directory outside the workspace";
         return undefined;
-      });
-    }
+      },
+      proof: () => (same(fixture.outsideFile, OUTSIDE_ORIGINAL) ? "the outside file was not changed" : targets.find((t) => !existsSync(t))),
+    }) });
 
     // Links in the checkout that lead out of it.
-    {
-      const r = recipeOf();
+    await record({ id: "deny-symlink-read", make: (r) => {
       symlinkSync(fixture.controllerFile, join(r.workdir, "link-abs-file"));
       symlinkSync(fixture.controllerDir, join(r.workdir, "link-abs-dir"));
       symlinkSync(`../../../../../../../../../../..${fixture.credentialFile}`, join(r.workdir, "link-rel-key"));
       symlinkSync("/proc/1/root", join(r.workdir, "link-proc-root"));
-      await record("deny-symlink-read", { recipe: r, script: `cat "$PWD/link-abs-file" 2>/dev/null; ls "$PWD/link-abs-dir" 2>/dev/null; cat "$PWD/link-rel-key" 2>/dev/null; echo ${END}`, judge: (out) => leaked(out, SECRET_CONTROLLER, SECRET_KEY, "controller.db") }, none);
-    }
-    {
-      const r = recipeOf();
+      // Each read is tagged, so the pairing can tell that every one of them works without the sandbox. The /proc/1/root read is not required there (an unprivileged process may not follow it).
+      return {
+        script: `echo "A:$(cat "$PWD/link-abs-file" 2>/dev/null)"; echo "D:$(ls "$PWD/link-abs-dir" 2>/dev/null)"; echo "R:$(cat "$PWD/link-rel-key" 2>/dev/null)"; echo "P:$(cat "$PWD/link-proc-root"${quote(fixture.controllerFile)} 2>/dev/null)"; echo ${END}`,
+        judge: (out) => leaked(out, SECRET_CONTROLLER, SECRET_KEY, "controller.db"), host: none,
+        proof: (out) => shown(out, `A:${SECRET_CONTROLLER}`, "D:controller.db", `R:${SECRET_KEY}`),
+      };
+    } });
+    await record({ id: "deny-symlink-write", make: (r) => {
       symlinkSync(fixture.outsideFile, join(r.workdir, "link-write"));
       symlinkSync(fixture.outsideDir, join(r.workdir, "link-dir"));
-      await record("deny-symlink-write", { recipe: r, script: `( echo overwritten > "$PWD/link-write" ) 2>/dev/null; ( : > "$PWD/link-dir/g05-via-link" ) 2>/dev/null; echo ${END}`, judge: none }, () =>
-        !same(fixture.outsideFile, OUTSIDE_ORIGINAL) || existsSync(join(fixture.outsideDir, "g05-via-link")) ? "a write through a link changed a host path outside the workspace" : undefined);
-    }
+      return {
+        script: `( echo overwritten > "$PWD/link-write" ) 2>/dev/null; ( : > "$PWD/link-dir/g05-via-link" ) 2>/dev/null; echo ${END}`, judge: none,
+        host: () => (!same(fixture.outsideFile, OUTSIDE_ORIGINAL) || existsSync(join(fixture.outsideDir, "g05-via-link")) ? "a write through a link changed a host path outside the workspace" : undefined),
+        proof: () => (same(fixture.outsideFile, OUTSIDE_ORIGINAL) ? "the write through the file link" : !existsSync(join(fixture.outsideDir, "g05-via-link")) ? "the write through the directory link" : undefined),
+      };
+    } });
 
     // Credentials and the controller's own data.
-    {
-      const r = recipeOf();
-      await record("deny-credential-read", { recipe: r, script: `cat ${quote(fixture.credentialFile)} 2>/dev/null; ls ${quote(join(fixture.home, ".ssh"))} 2>/dev/null; env; echo ${END}`, judge: (out) => leaked(out, SECRET_KEY, "id_g05_fixture") }, none);
-    }
-    {
-      const r = recipeOf();
-      await record("deny-controller-data-read", { recipe: r, script: `cat ${quote(fixture.controllerFile)} 2>/dev/null; ls ${quote(fixture.controllerDir)} 2>/dev/null; echo ${END}`, judge: (out) => leaked(out, SECRET_CONTROLLER, "controller.db") }, none);
-    }
+    await record({ id: "deny-credential-read", make: () => ({
+      script: `echo "K:$(cat ${quote(fixture.credentialFile)} 2>/dev/null)"; echo "L:$(ls ${quote(join(fixture.home, ".ssh"))} 2>/dev/null)"; env; echo ${END}`,
+      judge: (out) => leaked(out, SECRET_KEY, "id_g05_fixture"), host: none, proof: (out) => shown(out, `K:${SECRET_KEY}`, "L:id_g05_fixture"),
+    }) });
+    await record({ id: "deny-controller-data-read", make: () => ({
+      script: `echo "C:$(cat ${quote(fixture.controllerFile)} 2>/dev/null)"; echo "L:$(ls ${quote(fixture.controllerDir)} 2>/dev/null)"; echo ${END}`,
+      judge: (out) => leaked(out, SECRET_CONTROLLER, "controller.db"), host: none, proof: (out) => shown(out, `C:${SECRET_CONTROLLER}`, "L:controller.db"),
+    }) });
 
-    // The network: nothing leaves the sandbox. The host's loopback server is the witness.
-    {
-      const r = recipeOf();
+    // The network: nothing leaves the sandbox. The host's loopback server is the witness (it must see the unconfined attempt and not the confined one).
+    await record({ id: "deny-network-loopback", make: () => {
       const before = fixture.connections();
-      const probe = `tried=0; if command -v nc >/dev/null 2>&1; then tried=1; nc -z -w 2 127.0.0.1 ${fixture.port} && echo CONNECTED-NC; fi; if command -v bash >/dev/null 2>&1; then tried=1; bash -c 'exec 3<>/dev/tcp/127.0.0.1/${fixture.port}' 2>/dev/null && echo CONNECTED-BASH; fi; echo tried=$tried; if [ -r /proc/net/dev ]; then echo ifaces=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ,); fi; echo ${END}`;
-      await record("deny-network-loopback", { recipe: r, script: probe, judge: (out) => {
-        if (!out.includes("tried=1")) return "inconclusive:no tool (nc or bash) was available to attempt a connection";
-        if (/CONNECTED-/.test(out)) return "the confined program connected to a host service";
-        const ifaces = /ifaces=([^\n]*)/.exec(out)?.[1];
-        if (ifaces !== undefined && ifaces !== "lo,") return `the confined program sees a network interface besides loopback (${ifaces})`;
-        return undefined;
-      } }, () => (fixture.connections() === before ? undefined : "the host service received a connection from the confined program"));
-    }
+      const script = `tried=0; if command -v nc >/dev/null 2>&1; then tried=1; nc -z -w 2 127.0.0.1 ${fixture.port} && echo CONNECTED-NC; fi; if command -v bash >/dev/null 2>&1; then tried=1; bash -c 'exec 3<>/dev/tcp/127.0.0.1/${fixture.port}' 2>/dev/null && echo CONNECTED-BASH; fi; echo tried=$tried; if [ -r /proc/net/dev ]; then echo ifaces=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ,); fi; echo ${END}`;
+      return {
+        script,
+        judge: (out) => {
+          if (!out.includes("tried=1")) return "inconclusive:no tool (nc or bash) was available to attempt a connection";
+          if (/CONNECTED-/.test(out)) return "the confined program connected to a host service";
+          const ifaces = /ifaces=([^\n]*)/.exec(out)?.[1];
+          if (ifaces !== undefined && ifaces !== "lo,") return `the confined program sees a network interface besides loopback (${ifaces})`;
+          return undefined;
+        },
+        host: () => (fixture.connections() === before ? undefined : "the host service received a connection from the confined program"),
+        proof: () => (fixture.connections() > before ? undefined : "the host service saw no connection"),
+      };
+    } });
 
     // Protected names under the checkout.
-    {
-      const r = recipeOf();
+    await record({ id: "deny-write-protected-name", make: (r) => {
       const gitDir = join(r.workdir, ".git");
       mkdirSync(gitDir);
       writeFileSync(join(gitDir, "config"), GIT_ORIGINAL);
-      await record("deny-write-protected-name", { recipe: r, script: `( echo changed > "$PWD/.git/config" ) 2>/dev/null; ( : > "$PWD/.git/g05-hook" ) 2>/dev/null; ( rm -rf "$PWD/.git/config" ) 2>/dev/null; echo ${END}`, judge: none }, () =>
-        same(join(gitDir, "config"), GIT_ORIGINAL) && !existsSync(join(gitDir, "g05-hook")) ? undefined : "a protected name under the checkout was changed");
-    }
+      return {
+        script: `( echo changed > "$PWD/.git/config" ) 2>/dev/null; ( : > "$PWD/.git/g05-hook" ) 2>/dev/null; ( rm -rf "$PWD/.git/config" ) 2>/dev/null; echo ${END}`, judge: none,
+        host: () => (same(join(gitDir, "config"), GIT_ORIGINAL) && !existsSync(join(gitDir, "g05-hook")) ? undefined : "a protected name under the checkout was changed"),
+        proof: () => (same(join(gitDir, "config"), GIT_ORIGINAL) ? ".git/config was not changed" : existsSync(join(gitDir, "g05-hook")) ? undefined : ".git/g05-hook was not created"),
+      };
+    } });
 
     // The documented exception: a trusted-host run is not confined, and only an owner-configured authority permits it.
     let trustedHost: TrustedHostException | undefined;
     try {
-      const authority = "G05 containment evidence (the suite's own test authority)";
+      fixture.reset();
       const refusing = await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined });
-      const refused = await refusing.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: ["/bin/true"], timeoutMs, maxOutputBytes: 100 }).then(() => false, (e: unknown) => (e as { code?: string }).code === "not_authorized");
-      const host = await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], trustedHost: { authority }, audit: () => undefined });
-      const run = await host.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: ["/bin/sh", "-c", `cat ${quote(fixture.outsideFile)}`], timeoutMs, maxOutputBytes: 1000 });
+      const refused = await refusing.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: ["/bin/true"], timeoutMs, maxOutputBytes: 100 }).then(async (run) => { await run.result; return false; }, (e: unknown) => (e as { code?: string }).code === "not_authorized");
+      if (unconfined === undefined) throw new Error("no trusted-host launcher");
+      const run = await unconfined.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: ["/bin/sh", "-c", `cat ${quote(fixture.outsideFile)}`], timeoutMs, maxOutputBytes: 1000 });
       const out = await run.result;
       trustedHost = { mode: "trusted-host", authority, reachesHostFiles: out.stdout.includes(OUTSIDE_ORIGINAL), refusedWithoutAuthority: refused };
     } catch { /* the exception is recorded only when it could be shown */ }
@@ -343,7 +408,10 @@ const VERDICTS: readonly Verdict[] = ["pass", "fail", "inconclusive", "not_run"]
 const PHASES = ["launch", "exec", "results", "teardown"] as const;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const str = (v: unknown, max = 500): v is string => typeof v === "string" && v.length <= max && !v.includes("\0");
+/** Control characters and bidirectional overrides are refused: report text is printed into release logs and terminals, where they could hide or rewrite a line. */
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+const str = (v: unknown, max = 500): v is string => typeof v === "string" && v.length <= max && !UNPRINTABLE.test(v);
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const bool = (v: unknown): v is boolean => typeof v === "boolean";
 const phases = (v: unknown): boolean => isObject(v) && PHASES.every((k) => bool(v[k]));
 
@@ -353,7 +421,7 @@ export function parseReport(raw: string): { report: ContainmentReport } | { erro
   let v: unknown;
   try { v = JSON.parse(raw); } catch { return { error: "the report is not JSON" }; }
   if (!isObject(v) || v["schema"] !== CONTAINMENT_SCHEMA) return { error: "not a containment report (schema)" };
-  if (!str(v["generatedAt"], 40) || Number.isNaN(Date.parse(v["generatedAt"]))) return { error: "generatedAt: an ISO time" };
+  if (!str(v["generatedAt"], 40) || !ISO_TIME.test(v["generatedAt"]) || !Number.isFinite(Date.parse(v["generatedAt"]))) return { error: "generatedAt: an ISO time" };
   if (typeof v["implementationCommit"] !== "string" || !COMMIT.test(v["implementationCommit"])) return { error: "implementationCommit: 40 hex digits" };
   if (!bool(v["dirty"])) return { error: "dirty: true or false" };
   if (v["platform"] !== "linux" && v["platform"] !== "darwin" && v["platform"] !== "win32") return { error: "platform: linux, darwin or win32" };
@@ -397,7 +465,9 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
   const blockers: string[] = [];
   const now = (options.now ?? new Date()).getTime();
   const required = options.platforms ?? REQUIRED_PLATFORMS;
-  if (!COMMIT.test(options.commit)) return { ok: false, blockers: ["the release commit must be 40 hex digits"], platforms: {} };
+  if (typeof options.commit !== "string" || !COMMIT.test(options.commit)) return { ok: false, blockers: ["the release commit must be 40 hex digits"], platforms: {} };
+  if (!Number.isFinite(now)) return { ok: false, blockers: ["the gate's clock is not a valid time"], platforms: {} };
+  if (required.length === 0) return { ok: false, blockers: ["no platform is required: an empty platform list proves nothing"], platforms: {} };
   const platforms: Record<string, boolean> = {};
   for (const platform of required) {
     const mine = reports.filter((r) => r.platform === platform);
@@ -409,7 +479,8 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
       if (r.implementationCommit !== options.commit) problems.push(`the evidence is for commit ${r.implementationCommit.slice(0, 12)}, not ${options.commit.slice(0, 12)}`);
       if (r.dirty) problems.push("the evidence was produced from a working tree with uncommitted changes");
       const age = now - Date.parse(r.generatedAt);
-      if (age < -5 * 60 * 1000) problems.push("the report is dated in the future");
+      if (!Number.isFinite(age)) problems.push("the report's time is not a valid time");
+      else if (age < -5 * 60 * 1000) problems.push("the report is dated in the future");
       else if (age > MAX_REPORT_AGE_MS) problems.push("the report is more than 30 days old");
       if (!r.capacityAvailable) problems.push(`the backend gave no capacity${r.capacityReason === undefined ? "" : ` (${r.capacityReason})`}`);
       const seen = new Set<string>();

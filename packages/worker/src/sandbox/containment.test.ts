@@ -40,6 +40,35 @@ describe("G05 containment suite on the production launcher (Linux, bubblewrap)",
     assert.deepEqual(suite.cases.map((c) => c.id).sort(), [...REQUIRED_CASE_IDS].sort());
     for (const c of suite.cases) assert.equal(c.verdict, "pass", `${c.id}: ${c.detail}`);
     assert.ok(suite.trustedHost !== undefined && suite.trustedHost.refusedWithoutAuthority && suite.trustedHost.reachesHostFiles, "the exception is shown, not assumed");
+    // Every denial an unprivileged process could make without a sandbox was shown to get through without it (the pairing), so its refusal here is the sandbox's doing.
+    for (const c of suite.cases) if (c.id.startsWith("deny-") && c.id !== "deny-write-system") assert.match(c.detail, /got through without the sandbox/, c.id);
+  });
+
+  // Review of G05: a denial whose attempt fails for a reason that has nothing to do with the sandbox (a misspelt command, the wrong port, a path that does not exist) must not pass.
+  test("a probe broken for an unrelated reason is inconclusive, never a pass", async (t) => {
+    if (!onLinux) return t.skip("Linux only");
+    const broken: Record<string, (s: string) => string> = {
+      "deny-credential-read": (s) => s.replace(/cat /g, "kat "),
+      "deny-controller-data-read": (s) => s.replace(/cat /g, "kat ").replace(/ls /g, "lz "),
+      "deny-symlink-read": (s) => s.replace("link-rel-key", "link-rel-kye"),
+      "deny-network-loopback": (s) => s.replace(/127\.0\.0\.1([ /])\d+/g, "127.0.0.1$11"), // the right host, the wrong port: nothing listens on port 1
+      "deny-write-host-path": (s) => s.replace(/outside/g, "outsid"),
+      "deny-symlink-write": (s) => s.replace("link-write", "link-wirte"),
+      "deny-write-protected-name": (s) => s.replace(/\.git\//g, ".gti/"),
+    };
+    const suite = await runContainmentSuite({ rewriteScript: (id, script) => (broken[id] ?? ((x: string) => x))(script) });
+    if (!suite.capacity.available) { if (required) assert.fail(`sandbox required but unusable: ${suite.capacity.reason}`); return t.skip(`unusable: ${suite.capacity.reason}`); }
+    const got = Object.fromEntries(suite.cases.map((c) => [c.id, c]));
+    for (const id of Object.keys(broken)) {
+      assert.equal(got[id]!.verdict, "inconclusive", `${id}: ${got[id]!.verdict} ${got[id]!.detail}`);
+      assert.match(got[id]!.detail, /without the sandbox the same attempt did not get through/, id);
+    }
+    // The unbroken cases are untouched.
+    for (const id of ["control-write-own-directories", "control-read-own-decoy", "deny-write-system"]) assert.equal(got[id]!.verdict, "pass", id);
+    // And the gate refuses such a report.
+    const r = assessRelease([{ ...report("linux", { generatedAt: new Date().toISOString() }), cases: suite.cases }], { commit: COMMIT, platforms: ["linux"] });
+    assert.equal(r.ok, false);
+    assert.ok(r.blockers.some((b) => /deny-credential-read: inconclusive/.test(b)), r.blockers.join(" | "));
   });
 
   // Mutation tests: with one guard removed, exactly the matching case fails (fail before, pass after).
@@ -150,6 +179,12 @@ describe("G05 release gate", () => {
     blocked(all({ linux: report("linux", { windows: w }) }), /Windows evidence in a non-Windows report/);
   });
   test("a malformed release commit blocks everything", () => assert.equal(assessRelease(all(), { commit: "HEAD", now: NOW }).ok, false));
+  test("an empty platform list, an invalid clock or an invalid report time never passes (review of G05)", () => {
+    assert.equal(assessRelease(all(), { commit: COMMIT, now: NOW, platforms: [] }).ok, false);
+    assert.match(assessRelease(all(), { commit: COMMIT, now: NOW, platforms: [] }).blockers.join(), /empty platform list/);
+    assert.equal(assessRelease(all(), { commit: COMMIT, now: new Date("nonsense") }).ok, false);
+    blocked(all({ linux: report("linux", { generatedAt: "not a time" }) }), /not a valid time/);
+  });
   test("a platform list narrows what is required, never what a report must contain", () => {
     const r = assessRelease(all().filter((x) => x.platform === "linux"), { commit: COMMIT, now: NOW, platforms: ["linux"] });
     assert.equal(r.ok, true);
@@ -178,6 +213,12 @@ describe("G05 report parsing (reports are data from a file)", () => {
     bad({ ...report("win32"), windows: { ...goodWindows(), afterReboot: { launch: true } } }, /windows/);
     bad({ ...report("win32"), windows: { ...goodWindows(), supervisorAclCheck: "maybe" } }, /windows/);
     bad(`{"schema":"${CONTAINMENT_SCHEMA}","pad":"${"x".repeat(MAX_REPORT_BYTES)}"}`, /at most/);
+    // Review of G05: text printed into release logs may not carry terminal controls or direction overrides, and the time must be an ISO time, not anything Date.parse accepts.
+    bad({ ...report("linux"), cases: [{ ...report("linux").cases[0]!, detail: "held\u001b[2K\rblocked: nothing" }] }, /case needs/);
+    bad({ ...report("linux"), backend: "bwrap\u202e" }, /short text/);
+    bad({ ...report("linux"), capacityReason: "a\u0007" }, /capacityReason/);
+    bad({ ...report("linux"), generatedAt: "Nov 10 2026" }, /ISO time/);
+    bad({ ...report("linux"), generatedAt: "2026-11-10" }, /ISO time/);
   });
 });
 
