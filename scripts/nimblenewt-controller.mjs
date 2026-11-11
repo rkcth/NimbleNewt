@@ -20,7 +20,7 @@
 // itself (when the record names the running release as current) and this entry says in the log whether it happened.
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { environmentsRequested, localHostBuilder } from "./local-host.mjs";
 
@@ -44,7 +44,7 @@ Exit codes: 0 stopped on purpose, 75 restart me, 1 could not start. Stops on SIG
 const BOOLEAN = new Set(["serve", "allow-unsupported-environment", "local-host-environments", "help"]);
 const VALUE = new Set(["data", "config", "release-root", "release-switcher"]);
 
-/** Strict arguments: an unknown flag or a flag without its value is an error (a supervised program must not run with a setting it silently ignored). */
+/** Strict arguments: an unknown flag, a flag without its value or a flag given twice is an error (a supervised program must not run with a setting it silently ignored). */
 export function parseControllerArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
@@ -52,6 +52,7 @@ export function parseControllerArgs(argv) {
     if (!a.startsWith("--")) throw new Error(`unexpected argument "${a}"`);
     const eq = a.indexOf("=");
     const k = a.slice(2, eq < 0 ? undefined : eq);
+    if (Object.hasOwn(flags, k)) throw new Error(`--${k} is given more than once`);
     if (BOOLEAN.has(k)) { if (eq >= 0) throw new Error(`--${k} takes no value`); flags[k] = true; continue; }
     if (!VALUE.has(k)) throw new Error(`unknown option --${k}`);
     const v = eq >= 0 ? a.slice(eq + 1) : argv[++i];
@@ -75,6 +76,16 @@ export function controllerSettings(flags, env) {
   if (running !== undefined && !/^rcn-[0-9a-f]{24}$/.test(running)) throw new Error("NIMBLENEWT_RUNNING_RELEASE is not a release ID");
   if (running !== undefined && rootGiven === undefined) throw new Error("NIMBLENEWT_RUNNING_RELEASE is set but there is no release root (--release-root or NIMBLENEWT_RELEASE_ROOT): the release this process runs as could not be confirmed");
   if (kind !== undefined && rootGiven === undefined) throw new Error("a release switcher is given but there is no release root");
+  if (running !== undefined) {
+    // Under the launcher the process runs in the release directory, so a relative path would name a folder inside the release (a new, empty installation for every release); and the launcher's own root and
+    // pointer kind must be the ones used, or this start could never be confirmed. Both are refused rather than guessed.
+    for (const [what, v] of [["--data", flags.data], ["NIMBLENEWT_DATA", flags.data === undefined ? env.NIMBLENEWT_DATA || undefined : undefined], ["--config", flags.config], ["the release root", rootGiven]]) {
+      if (v !== undefined && !isAbsolute(v)) throw new Error(`${what} is the relative path ${JSON.stringify(v)}; under the launcher this process runs in the release directory, so give an absolute path`);
+    }
+    for (const [flag, name] of [["release-root", "NIMBLENEWT_RELEASE_ROOT"], ["release-switcher", "NIMBLENEWT_RELEASE_SWITCHER"]]) {
+      if (flags[flag] !== undefined && env[name] && (flag === "release-root" ? resolve(flags[flag]) !== resolve(env[name]) : flags[flag] !== env[name])) throw new Error(`--${flag} differs from the launcher's ${name}; the launcher's setting must be used`);
+    }
+  }
   return {
     dataDir, configFile,
     ...(rootGiven === undefined ? {} : { release: { root: resolve(rootGiven), ...(kind === undefined ? {} : { switcher: kind }), ...(running === undefined ? {} : { runningRelease: running }) } }),
@@ -90,8 +101,10 @@ export function controllerSettings(flags, env) {
  */
 export function composeSecrets(store, env, ownerPrefix, environmentSecrets) {
   const fromEnv = environmentSecrets(env);
+  // Letter case does not matter: the environment's names are upper case, and the stores treat names that differ only by case as the same.
+  const owners = (name) => name.toLowerCase().startsWith(ownerPrefix.toLowerCase());
   return {
-    resolve: async (name) => (await store.resolve(name)) ?? (name.startsWith(ownerPrefix) ? undefined : fromEnv.resolve(name)),
+    resolve: async (name) => (await store.resolve(name)) ?? (owners(name) ? undefined : fromEnv.resolve(name)),
     set: (name, value) => store.set(name, value),
     ...(store.remove === undefined ? {} : { remove: (name) => store.remove(name) }),
   };
@@ -108,9 +121,20 @@ export function controllerStartOptions(settings, config, requestRestart) {
 }
 
 /**
+ * Whether the launcher's record says this start (the open start attempt) was confirmed: the same test the supervisor makes before it takes an exit 0 as a stop on purpose. The last known good alone is not
+ * enough: after a restart or a crash it can still name this release from an earlier run while this start was not confirmed.
+ */
+export function startConfirmed(state, releaseId) {
+  return state?.attempt?.id === releaseId && state.attempt.confirmedAt !== undefined && !(state.failed ?? []).some((f) => f.id === releaseId);
+}
+
+/** How long closing the controller may take before the entry gives up and exits 1 (the launcher's own grace usually ends it first). */
+export const CLOSE_TIMEOUT_MS = 60_000;
+
+/**
  * @param {string[]} argv
- * @param {{ stderr: { write(t: string): unknown }, env: Record<string, string | undefined>, signal?: AbortSignal, ready?: (handle: { controller: unknown, requestRestart: (why: string) => void }) => void }} io
- *   `signal` stands for the stop signals in tests; `ready` is called once the controller is up (tests and embedding).
+ * @param {{ stderr: { write(t: string): unknown }, env: Record<string, string | undefined>, signal?: AbortSignal, closeTimeoutMs?: number, ready?: (handle: { controller: unknown, requestRestart: (why: string) => void }) => void }} io
+ *   `signal` stands for the stop signals in tests; `ready` is called once the controller is up (tests and embedding); `closeTimeoutMs` bounds the close (default CLOSE_TIMEOUT_MS).
  * @returns {Promise<number>} the exit code
  */
 export async function main(argv, io = { stderr: process.stderr, env: process.env, signal: undefined }) {
@@ -140,6 +164,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     const loaded = loadConfig(readFileSync(settings.configFile, "utf8"));
     if (!loaded.ok) throw new Error(`the configuration ${settings.configFile} is not valid:\n${formatErrors(loaded.errors)}`);
     const config = loaded.config;
+    if (settings.release?.runningRelease !== undefined && !isAbsolute(config.installation.dataDir)) throw new Error(`the configuration's installation.dataDir is the relative path ${JSON.stringify(config.installation.dataDir)}; under the launcher this process runs in the release directory, so the configuration must give an absolute path`);
     const { store, reason } = await chooseSecretStore({ dataDir: config.installation.dataDir });
     const { launch, OWNER_SECRET } = await load("controller");
     const secrets = composeSecrets(store, io.env, OWNER_SECRET, environmentSecrets);
@@ -158,8 +183,8 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
       const { PointerSwitcher, SymlinkSwitcher } = await lib("release/activation.js");
       const kind = settings.release.switcher ?? (process.platform === "win32" ? "pointer" : "symlink");
       const state = await new Launcher({ root: settings.release.root, switcher: kind === "pointer" ? new PointerSwitcher(settings.release.root) : new SymlinkSwitcher(settings.release.root) }).read();
-      if (state.known?.id === settings.release.runningRelease) err(`start confirmed: ${settings.release.runningRelease} is the last known good release`);
-      else err(`start NOT confirmed for ${settings.release.runningRelease}: the activation record does not name it as current, so the launcher will count this start as failed`);
+      if (startConfirmed(state, settings.release.runningRelease)) err(`start confirmed: ${settings.release.runningRelease} is the last known good release`);
+      else err(`start NOT confirmed for ${settings.release.runningRelease} (see the release activation lines above, if any): unless the owner confirms the release, the launcher will count this start as failed`);
     }
     io.ready?.({ controller: launched.controller, requestRestart });
     // Nothing in a controller without a dispatcher or a listener keeps the process alive by itself: this timer does, until the stop.
@@ -167,7 +192,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
       const keepAlive = setInterval(() => undefined, 1 << 30);
       try { await new Promise((done) => stop.signal.addEventListener("abort", done, { once: true })); } finally { clearInterval(keepAlive); }
     }
-    return await closeAndCode(launched, restartWanted, err);
+    return await closeAndCode(launched, restartWanted, err, io.closeTimeoutMs ?? CLOSE_TIMEOUT_MS);
   } catch (error) {
     // The start-up check has already printed why (through `print`); it is not said twice.
     if (error?.name !== "UnsupportedEnvironmentError") err(`could not start: ${String(error?.message ?? error)}`);
@@ -178,12 +203,17 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
   }
 }
 
-async function closeAndCode(launched, restartWanted, err) {
-  try { await launched.close(); } catch (error) { err(`closing failed: ${String(error?.message ?? error).slice(0, 200)}`); return 1; }
+async function closeAndCode(launched, restartWanted, err, timeoutMs) {
+  let timer;
+  const timedOut = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`it did not finish within ${Math.round(timeoutMs / 1000)} s`)), timeoutMs); });
+  try { await Promise.race([launched.close(), timedOut]); } catch (error) { err(`closing failed: ${String(error?.message ?? error).slice(0, 200)}`); return 1; } finally { clearTimeout(timer); }
   err(restartWanted ? "closed; exiting 75 so the launcher starts it again" : "closed; stopped on purpose");
   return restartWanted ? 75 : 0;
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`controller: ${String(error?.message ?? error)}\n`); process.exitCode = 1; });
+  // The exit code is the contract, so it must not depend on every handle being let go: once main has returned, anything still holding the event loop (a close that timed out, a leaked socket) gets a few
+  // seconds and then the process exits with that code anyway (the timer is unref'd, so a clean exit is not delayed).
+  const exit = (code) => { process.exitCode = code; setTimeout(() => process.exit(code), 5_000).unref(); };
+  main(process.argv.slice(2)).then(exit, (error) => { process.stderr.write(`controller: ${String(error?.message ?? error)}\n`); exit(1); });
 }

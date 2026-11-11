@@ -27,10 +27,15 @@ const FALLBACK_WINDOW = 32_768;
  */
 export function environmentsRequested(flag, envValue) {
   if (flag === true) return true;
-  const v = typeof envValue === "string" ? envValue.trim().toLowerCase() : "";
-  if (v === "" || v === "0" || v === "false" || v === "off") return false;
-  if (v === "1" || v === "true" || v === "on") return true;
-  throw new Error("NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS must be 1, true, on, 0, false or off");
+  const read = (value, what) => {
+    const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+    if (v === "" || v === "0" || v === "false" || v === "off") return false;
+    if (v === "1" || v === "true" || v === "on") return true;
+    throw new Error(`${what} must be 1, true, on, 0, false or off`);
+  };
+  // `--local-host-environments=VALUE` (a parser that keeps the text after `=`) is read like the variable and wins over it: before, any such value silently left the switch off.
+  if (typeof flag === "string") return read(flag === "" ? "-" : flag, "--local-host-environments=VALUE");
+  return read(envValue, "NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS");
 }
 
 /** The folder beside the data directory where the host keeps checkouts, attempt homes and script runs (the data directory itself is a protected path no sandbox mount may reach). */

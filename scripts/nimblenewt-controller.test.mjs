@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { composeSecrets, controllerSettings, controllerStartOptions, main, parseControllerArgs } from "./nimblenewt-controller.mjs";
+import { composeSecrets, controllerSettings, controllerStartOptions, main, parseControllerArgs, startConfirmed } from "./nimblenewt-controller.mjs";
 import { environmentsRequested, localHostBuilder } from "./local-host.mjs";
 import { main as startMain, starterConfig } from "./nimblenewt.mjs";
 
@@ -37,11 +37,11 @@ function installation(extra = (c) => c) {
 }
 
 /** Runs the entry in this process until `during` has run against the live controller, then stops it the way SIGTERM does. */
-async function runEntry(args, env, during = async () => undefined) {
+async function runEntry(args, env, during = async () => undefined, extra = {}) {
   const c = capture();
   const ac = new AbortController();
   let seen;
-  const done = main(["--allow-unsupported-environment", ...args], { stderr: c.stderr, env, signal: ac.signal, ready: (handle) => { seen = handle; } });
+  const done = main(["--allow-unsupported-environment", ...args], { stderr: c.stderr, env, signal: ac.signal, ready: (handle) => { seen = handle; }, ...extra });
   await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
   try { await during(seen); } finally { ac.abort(); }
   return { code: await done, log: c.text };
@@ -49,7 +49,28 @@ async function runEntry(args, env, during = async () => undefined) {
 
 test("arguments are strict: an unknown option, a stray word, a missing or empty value are refused (entry)", () => {
   assert.deepEqual(parseControllerArgs(["--serve", "--data", "/d", "--config=/c.json", "--local-host-environments"]), { serve: true, data: "/d", config: "/c.json", "local-host-environments": true });
-  for (const bad of [["--frobnicate"], ["start"], ["--data"], ["--data", "--serve"], ["--data="], ["--serve=yes"], ["--release-root"]]) assert.throws(() => parseControllerArgs(bad), Error, bad.join(" "));
+  for (const bad of [["--frobnicate"], ["start"], ["--data"], ["--data", "--serve"], ["--data="], ["--serve=yes"], ["--release-root"], ["--"], ["--dat", "/d"]]) assert.throws(() => parseControllerArgs(bad), Error, bad.join(" "));
+  // Review: a repeated option used to be last-wins, silently ignoring the first value.
+  for (const twice of [["--data", "/a", "--data", "/b"], ["--data=/a", "--data", "/a"], ["--serve", "--serve"]]) assert.throws(() => parseControllerArgs(twice), /more than once/, twice.join(" "));
+});
+
+test("under the launcher a relative path, or a release root or pointer kind that contradicts the launcher's, is refused (entry review)", () => {
+  const launcherEnv = { NIMBLENEWT_RELEASE_ROOT: "/r", NIMBLENEWT_RELEASE_SWITCHER: "pointer", NIMBLENEWT_RUNNING_RELEASE: RELEASE };
+  assert.throws(() => controllerSettings({ data: "data" }, launcherEnv), /--data is the relative path "data"/);
+  assert.throws(() => controllerSettings({}, { ...launcherEnv, NIMBLENEWT_DATA: "./data" }), /NIMBLENEWT_DATA is the relative path/);
+  assert.throws(() => controllerSettings({ data: "/d", config: "c.json" }, launcherEnv), /--config is the relative path/);
+  assert.throws(() => controllerSettings({ data: "/d", "release-root": "/elsewhere" }, launcherEnv), /--release-root differs from the launcher's NIMBLENEWT_RELEASE_ROOT/);
+  assert.throws(() => controllerSettings({ data: "/d", "release-switcher": "symlink" }, launcherEnv), /--release-switcher differs/);
+  assert.deepEqual(controllerSettings({ data: "/d", "release-root": "/r/", "release-switcher": "pointer" }, launcherEnv).release, { root: "/r", switcher: "pointer", runningRelease: RELEASE }, "the same settings again are fine");
+  assert.equal(controllerSettings({ data: "rel" }, {}).dataDir, resolve("rel"), "by hand a relative path is the current directory's, as before");
+});
+
+test("'start confirmed' is said only when this start (the open attempt) is confirmed, not because the last known good names the release from an earlier run (entry review)", () => {
+  const known = { id: RELEASE, digest: "d", confirmedAt: "2026-11-11T00:00:00.000Z" };
+  assert.equal(startConfirmed({ known, attempt: { id: RELEASE, digest: "d", startedAt: "2026-11-11T01:00:00.000Z" }, failed: [], log: [] }, RELEASE), false, "restarted, not confirmed yet");
+  assert.equal(startConfirmed({ known, failed: [], log: [] }, RELEASE), false, "no open attempt");
+  assert.equal(startConfirmed({ known, attempt: { id: RELEASE, confirmedAt: "x" }, failed: [{ id: RELEASE }], log: [] }, RELEASE), false, "judged failed");
+  assert.equal(startConfirmed({ attempt: { id: RELEASE, confirmedAt: "x" }, failed: [], log: [] }, RELEASE), true);
 });
 
 test("the release wiring: the running release comes from NIMBLENEWT_RUNNING_RELEASE and needs a release root; the root and the pointer kind come from the flags or the launcher's variables (entry, K02a)", () => {
@@ -76,6 +97,11 @@ test("environment changes are off unless asked for, by the flag or the variable;
   assert.throws(() => controllerSettings({}, { NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS: "yes please" }), /must be 1, true, on/);
   assert.equal(environmentsRequested(undefined, undefined), false);
   assert.equal(environmentsRequested(undefined, "TRUE"), true);
+  // Review: nimblenewt.mjs keeps the text of `--local-host-environments=VALUE`; such a value used to leave the switch silently off.
+  assert.equal(environmentsRequested("1", undefined), true);
+  assert.equal(environmentsRequested("off", "1"), false, "the flag wins over the variable");
+  assert.throws(() => environmentsRequested("yes", undefined), /--local-host-environments=VALUE must be/);
+  assert.throws(() => environmentsRequested("", undefined), /--local-host-environments=VALUE must be/);
 });
 
 test("a restart can be requested only under the launcher and only when a database move is configured (entry)", () => {
@@ -101,6 +127,7 @@ test("secrets: the store first, the environment for a name the store lacks, neve
   assert.equal(await s.resolve("db"), "from-store");
   assert.equal(await s.resolve("key-x"), "env-key");
   assert.equal(await s.resolve("nimblenewt-owner-token-ab"), undefined);
+  assert.equal(await s.resolve("NIMBLENEWT-OWNER-TOKEN-AB"), undefined, "letter case does not open the environment to the owner's name");
   assert.equal(await s.resolve("absent"), undefined);
   await s.set("new", "v");
   assert.deepEqual(wrote, ["new"]);
@@ -127,6 +154,12 @@ test("a missing configuration, an invalid one and a bad option are refused with 
     const lost = capture();
     assert.equal(await main(["--data", inst.dataDir], { stderr: lost.stderr, env: { NIMBLENEWT_RUNNING_RELEASE: RELEASE } }), 1);
     assert.match(lost.text, /no release root/);
+    // Under the launcher a configuration with a relative data directory would put the installation inside the release directory.
+    writeFileSync(inst.configFile, JSON.stringify({ ...inst.config, installation: { ...inst.config.installation, dataDir: "data" }, controller: { storage: { kind: "sqlite", path: "controller.sqlite" } } }));
+    const rel = capture();
+    assert.equal(await main(["--data", inst.dataDir], { stderr: rel.stderr, env: { NIMBLENEWT_RELEASE_ROOT: join(inst.base, "rel"), NIMBLENEWT_RUNNING_RELEASE: RELEASE } }), 1);
+    assert.match(rel.text, /installation\.dataDir is the relative path "data"/);
+    assert.equal(existsSync(join(inst.base, "rel")), false, "nothing was started");
   } finally { inst.cleanup(); }
 });
 
@@ -159,6 +192,36 @@ test("a restart request closes the controller and exits 75; a signal already giv
     const ac = new AbortController();
     ac.abort();
     assert.equal(await main(["--data", inst.dataDir, "--allow-unsupported-environment"], { stderr: c.stderr, env: {}, signal: ac.signal }), 0, c.text);
+  } finally { inst.cleanup(); }
+});
+
+test("a close that does not finish is given up after the timeout and the entry exits 1, not 0 (entry review)", async () => {
+  const inst = installation();
+  let real;
+  let controllerSeen;
+  try {
+    const r = await runEntry(["--data", inst.dataDir], {}, async ({ controller }) => {
+      controllerSeen = controller;
+      real = controller.close.bind(controller);
+      controller.close = () => new Promise(() => undefined);
+    }, { closeTimeoutMs: 300 });
+    assert.equal(r.code, 1, r.log);
+    assert.match(r.log, /closing failed: it did not finish within 0 s/);
+    assert.doesNotMatch(r.log, /stopped on purpose/);
+  } finally { if (real !== undefined) { controllerSeen.close = real; await real().catch(() => undefined); } inst.cleanup(); }
+});
+
+test("a secret name that is the owner's credential's is never resolved for a database, a provider or a transfer target (launch review)", async () => {
+  const inst = installation((c) => ({ ...c, controller: { storage: { kind: "postgres", url: { secret: "NimbleNewt-Owner-Token-0123" }, maxConnections: 2 } } }));
+  try {
+    const { launch } = await dist("controller", "index.js");
+    const { loadConfig } = await dist("config", "index.js");
+    const loaded = loadConfig(readFileSync(inst.configFile, "utf8"));
+    assert.equal(loaded.ok, true, JSON.stringify(loaded.errors));
+    const asked = [];
+    const secrets = { resolve: async (n) => { asked.push(n); return "postgres://owner-token-would-go-here"; }, set: async () => undefined };
+    await assert.rejects(launch({ config: loaded.config, secrets, argv: [], env: {}, print: () => undefined }), /reserved for the owner's credential/);
+    assert.deepEqual(asked, [], "the store was not even asked");
   } finally { inst.cleanup(); }
 });
 
@@ -244,12 +307,29 @@ test("the configuration's workspace folders reach the start-up file system check
     const asked = [];
     const facts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
     const start = (detect) => ({ facts, filesystem: detect, features: [], harnesses: [] });
-    const l = await launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: () => undefined, start: start(async (path) => { asked.push(path); return { type: "ext4", network: false }; }) });
+    const printed = [];
+    const l = await launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: (t) => printed.push(t), start: start(async (path) => { asked.push(path); return { type: "ext4", network: false }; }) });
     await l.close();
     assert.ok(asked.includes(join(inst.dataDir, "checkouts")), `asked: ${asked.join(", ")}`);
     assert.ok(asked.includes(join(tmpdir(), "nn-ws-elsewhere")));
-    // A workspace on a file system that is not supported refuses the start, as the data directory's would.
-    await assert.rejects(launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: () => undefined, start: start(async (path) => (path.endsWith("checkouts") ? { type: "nfs", network: true } : { type: "ext4", network: false })) }), /workspace/);
+    assert.doesNotMatch(printed.join("\n"), /installation\.workspaces/, "nothing extra is said when the folders are fine");
+    // A workspace on a file system that is not supported refuses the start, as the data directory's would, and the refusal says where the folder came from and what to do.
+    const refused = [];
+    await assert.rejects(launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: (t) => refused.push(t), start: start(async (path) => (path.endsWith("checkouts") ? { type: "nfs", network: true } : { type: "ext4", network: false })) }), /workspace/);
+    assert.ok(refused.join("\n").includes(`come from the configuration (installation.workspaces: main = ${join(inst.dataDir, "checkouts")}, abs = `), refused.join("\n"));
+    assert.match(refused.join("\n"), /remove it from the configuration, or start with --allow-unsupported-environment/);
+    // An explicit start.workspaceRoots wins: the configuration's folders are then not checked.
+    const only = [];
+    const l2 = await launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: () => undefined, start: { ...start(async (path) => { only.push(path); return { type: "ext4", network: false }; }), workspaceRoots: [] } });
+    await l2.close();
+    assert.equal(only.includes(join(inst.dataDir, "checkouts")), false);
+    // `~` is not expanded, and that is said.
+    const tilde = loadConfig(JSON.stringify({ ...loaded.config, installation: { ...loaded.config.installation, workspaces: { home: { path: "~/code" } } } }));
+    assert.equal(tilde.ok, true);
+    const said = [];
+    const l3 = await launch({ config: tilde.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: (t) => said.push(t), start: start(async () => ({ type: "ext4", network: false })) });
+    await l3.close();
+    assert.match(said.join("\n"), /The workspace folder ~\/code \(installation\.workspaces\.home\) starts with ~, which is not expanded/);
   } finally { inst.cleanup(); }
 });
 
