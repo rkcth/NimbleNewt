@@ -71,12 +71,55 @@ test("U11d: a flood of different signals is bounded: at most four reports at onc
   const overflow = reported.filter((r) => r.key.startsWith("overflow:"));
   assert.equal(overflow.length, 1, "one overflow event");
   assert.ok(reported.length - 1 <= DETECT_LIMITS.queued + DETECT_LIMITS.parallel, `reported ${reported.length}`);
-  assert.match(overflow[0]!.key, /^overflow:\d+:\d+$/);
+  assert.match(overflow[0]!.key, /^overflow:\d+$/);
+});
+
+test("U11d review: a second flood in the same hour adds no second overflow event (one per source and hour)", async () => {
+  let release!: () => void;
+  let hold = new Promise<void>((r) => { release = r; });
+  const reported: { by: string; key: string }[] = [];
+  const d = new SecurityDetectors({ report: async (by, e) => { await hold; reported.push({ by: by.id, key: e.key }); }, enabled: async () => true, now: () => 1_000_000 });
+  for (let i = 0; i < 500; i++) d.signal("credential", { kind: "credential-misused", key: `a${i}` });
+  release(); await d.settled();
+  hold = new Promise<void>((r) => { release = r; });
+  for (let i = 0; i < 500; i++) d.signal("credential", { kind: "credential-misused", key: `b${i}` });
+  release(); await d.settled();
+  assert.equal(reported.filter((r) => r.key.startsWith("overflow:")).length, 1, JSON.stringify(reported.filter((r) => r.key.startsWith("overflow:"))));
+});
+
+test("U11d review: a flood from one source cannot crowd another source's sign out of the queue", async () => {
+  let release!: () => void;
+  const hold = new Promise<void>((r) => { release = r; });
+  const { d, reported } = make({ hold });
+  for (let i = 0; i < 1000; i++) d.signal("credential", { kind: "credential-misused", key: `task:a>${i}` });
+  d.signal("artifact-store", { kind: "integrity-check-failed", key: "artifact:art-real" });
+  release();
+  await d.settled();
+  assert.ok(reported.some((r) => r.by === "service:detect-artifact-store" && r.key === "artifact:art-real"), "the other source's own sign is reported as itself, not folded into an overflow");
+  assert.ok(reported.filter((r) => r.by === "service:detect-credential").length <= DETECT_LIMITS.perSource + DETECT_LIMITS.parallel + 1);
+});
+
+test("U11d review: one subject naming target after target raises a few events and then ONE more, so it cannot use up the detector's allowance; another subject is not affected", async () => {
+  const { d, reported } = make();
+  for (let i = 0; i < 50; i++) d.signal("credential", { kind: "credential-misused", key: `task:evil>task-${i}`, subject: "task:evil" });
+  d.signal("credential", { kind: "credential-misused", key: "task:other>task-x", subject: "task:other" });
+  await d.settled();
+  const evil = reported.filter((r) => r.key.startsWith("task:evil>") || r.key.startsWith("many:"));
+  assert.equal(evil.length, DETECT_LIMITS.perSubjectPerHour + 1, JSON.stringify(evil));
+  assert.equal(evil.filter((r) => r.key.startsWith("many:")).length, 1);
+  assert.doesNotMatch(JSON.stringify(reported), /many:[^"]*evil/, "the collapsed key holds a digest of the subject, not its text");
+  assert.ok(reported.some((r) => r.key === "task:other>task-x"));
+  // A repeat of a pair already told does not count against the subject.
+  const two = make();
+  for (let i = 0; i < 10; i++) two.d.signal("credential", { kind: "credential-misused", key: "task:a>task-b", subject: "task:a" });
+  two.d.signal("credential", { kind: "credential-misused", key: "task:a>task-c", subject: "task:a" });
+  await two.d.settled();
+  assert.deepEqual(two.reported.map((r) => r.key), ["task:a>task-b", "task:a>task-c"]);
 });
 
 test("U11d: the keys remembered are bounded: the oldest is forgotten first (the watch still tells one event once)", async () => {
   const { d, reported } = make();
-  for (let i = 0; i < DETECT_LIMITS.recentKeys + 10; i++) { d.signal("credential", { kind: "credential-misused", key: `k${i}` }); if (i % 100 === 0) await d.settled(); }
+  for (let i = 0; i < DETECT_LIMITS.recentKeys + 10; i++) { d.signal("credential", { kind: "credential-misused", key: `k${i}` }); if (i % 40 === 0) await d.settled(); }
   await d.settled();
   const before = reported.length;
   d.signal("credential", { kind: "credential-misused", key: "k0" });

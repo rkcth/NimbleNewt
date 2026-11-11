@@ -81,6 +81,13 @@ test("U11d: a task credential used on other tasks raises one Urgent item per pai
     await until(async () => (await items()).length === 4, "the fourth is the collected item");
     assert.ok((await items()).some((i) => /held/.test(i.label)), JSON.stringify((await items()).map((i) => i.label)));
     assert.equal((await call(cred, "notifications.settings", {})).ok, false, "the task credential still cannot read the settings");
+    // U11d review: one credential naming task after task (made-up IDs) raises at most a few more items, not one per name.
+    await set({ securityReportsPerHour: 1000 }, "s5");
+    const before = (await items()).length;
+    for (let i = 0; i < 30; i++) assert.equal((await call(cred, "activity.steps", { taskId: `task-made-up-${i}` })).ok, false);
+    assert.equal((await call(cred, "activity.steps", {})).ok, false, "a call that names no task is refused");
+    await sleep(400);
+    assert.ok((await items()).length - before <= 1, `one credential's burst is ONE more item (got ${(await items()).length - before})`);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
@@ -115,5 +122,13 @@ test("U11d: the hook given to the local worker host reports as the local worker:
     await until(async () => { await c.dispatch!.dispatcher.tick(); return sent.some((m) => /protected path/.test(m.text)); }, "sent at once");
     await c.dispatch.dispatcher.tick();
     assert.equal(sent.filter((m) => /protected path/.test(m.text)).length, 1, "told once");
+    // U11d review: the owner's switch covers the local worker's hook too (it is one of the controller's detectors).
+    assert.ok((await call("notifications.configure", { securityDetectors: false, expectedRevision: await rev() }, "s2")).ok);
+    hook!({ kind: "sandbox-escape-attempt", key: "ws:refresh:bbb" });
+    await sleep(300);
+    assert.equal((await items()).length, 1, "switched off: the local worker's hook raises nothing");
+    assert.ok((await call("notifications.configure", { securityDetectors: true, expectedRevision: await rev() }, "s3")).ok);
+    hook!({ kind: "sandbox-escape-attempt", key: "ws:refresh:bbb" });
+    await until(async () => (await items()).length === 2, "on again: reported");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

@@ -227,7 +227,7 @@ export interface Context {
   readonly notifications?: Pick<NotificationService, "configure" | "settings">;
   /** Absent when the controller runs without the Urgent watch (card U11c). */
   /** The controller's security detectors (card U11d): a sign seen while serving a call (a task credential used on another task) is handed here; it never throws and never waits. */
-  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly projectId?: string }) => void;
+  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly projectId?: string; readonly subject?: string }) => void;
   readonly security?: { report(by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }): Promise<{ itemId: string; held: boolean }> };
   /** Absent when the controller runs without budgets (card R05c). */
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide" | "open" | "raise" | "close" | "aggregate" | "setAggregate">;
@@ -393,7 +393,7 @@ const statusOf = (c: Context): NonNullable<Context["status"]> => c.status ?? una
 const notificationsOf = (c: Context): NonNullable<Context["notifications"]> => c.notifications ?? unavailable("notification settings");
 const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
 /** A task credential named another task (card U11d): a sign that it is used where it was not issued for. Handed to the detectors, which dedupe and bound it; the refusal itself is unchanged. */
-const wrongTask = (c: Context, target: unknown): void => { const scope = c.principal.taskScope; if (scope !== undefined) c.detect?.("credential", { kind: "credential-misused", key: `task:${scope.taskId.slice(0, 80)}>${String(target).slice(0, 80)}`, ...(/^proj-[a-z2-7]{20}$/.test(scope.projectId) ? { projectId: scope.projectId } : {}) }); };
+const wrongTask = (c: Context, target: unknown): void => { const scope = c.principal.taskScope; if (scope !== undefined && typeof target === "string" && target.length > 0) c.detect?.("credential", { kind: "credential-misused", key: `task:${scope.taskId.slice(0, 80)}>${target.slice(0, 80)}`, subject: `task:${scope.taskId}`, ...(/^proj-[a-z2-7]{20}$/.test(scope.projectId) ? { projectId: scope.projectId } : {}) }); };
 /** A task credential acts for its one task: an operation on another task reads as missing. */
 const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) wrongTask(c, taskId); if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) throw new DomainError("not_found", "no such task"); return taskId; };
 const difficultyOf = (c: Context): NonNullable<Context["difficulty"]> => c.difficulty ?? unavailable("difficulty profiles");

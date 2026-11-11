@@ -216,7 +216,7 @@ function within<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 export interface RemoteDeps {
   /** The controller's security detectors (card U11d): a host that names an attempt it never held is a credential used on the wrong host. Never throws, never waits. */
-  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string }) => void;
+  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly subject?: string }) => void;
   /** Where a host's own security report goes (`UrgentWatch.reportSecurityFrom`): the report is the host's, so its allowance, once-per-key rule and collected item apply. Absent: reports are refused as unavailable. */
   readonly reportSecurity?: (by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }) => Promise<{ readonly itemId: string; readonly held: boolean }>;
   /** The dispatcher's own service principal (`service:dispatcher`): it places attempts, reads host status and moves attempts. */
@@ -1168,7 +1168,7 @@ export class RemoteWorkerService {
     if (b.hostId !== host.id) {
       if (b.history.some((h) => h.hostId === host.id)) throw new DomainError("fenced", `attempt ${b.attemptId} is no longer on this host`);
       // A host that never held this attempt names it: its session is used for something it was not given (card U11d). The refusal is unchanged; the detectors are only told.
-      try { this.#deps.detect?.("host-channel", { kind: "credential-misused", key: `host:${host.id.slice(0, 80)}>attempt:${b.attemptId.slice(0, 80)}` }); } catch { /* telling never changes the refusal */ }
+      try { this.#deps.detect?.("host-channel", { kind: "credential-misused", key: `host:${host.id.slice(0, 80)}>attempt:${b.attemptId.slice(0, 80)}`, subject: host.id }); } catch { /* telling never changes the refusal */ }
       throw new DomainError("not_found", "no such attempt");
     }
     if (typeof placement !== "number" || !Number.isSafeInteger(placement)) invalid("placement", "must be a whole number");

@@ -9,8 +9,11 @@ import type { SecurityEvent } from "./urgent.js";
  * card U11c apply, and one noisy detector cannot use up another's allowance.
  *
  * Bounds, so that an attacker who can make a detector fire cannot make the controller work without end: a signal already seen (same source, kind, project and key) is dropped before any work; at most
- * `recentKeys` keys are remembered (oldest forgotten first; the watch still tells one event once, from the notification state); at most `queued` signals wait and at most `parallel` are reported at once, the
- * rest is counted and, when the queue has drained, ONE overflow event per source and hour is reported in their place; a report that failed is forgotten, so the same sign can be tried again.
+ * `recentKeys` keys are remembered (oldest forgotten first; the watch still tells one event once, from the notification state); at most `queued` signals wait, at most `perSource` of them from one source
+ * (so a flood from one detector cannot crowd out another's sign), and at most `parallel` are reported at once; the rest is counted and, when the queue has drained, ONE overflow event per source and hour
+ * is reported in their place (its key is the hour only, so the watch tells it once); a report that failed is forgotten, so the same sign can be tried again.
+ * A signal may name its `subject` (the task credential, the host): one subject raises at most `perSubjectPerHour` distinct events of a source in an hour, and the rest of its burst ONE more, so a single
+ * hostile agent that names task after task cannot use up the detector's hourly allowance and push another agent's real sign out of the Urgent channel.
  * The owner turns all of it off with `securityDetectors: false` (read at each report, through chat: `notifications.configure`); signals are then dropped, the refusals themselves are not affected.
  */
 export interface DetectedSecurity {
@@ -18,9 +21,11 @@ export interface DetectedSecurity {
   /** Up to 200 characters, the same for the same event; never a secret and never a path's content. */
   readonly key: string;
   readonly projectId?: string;
+  /** Who the sign is about (a task credential's task, a host): used only to bound one subject's burst, never reported. */
+  readonly subject?: string;
 }
 
-export const DETECT_LIMITS = { recentKeys: 5000, queued: 200, parallel: 4, keyChars: 200 } as const;
+export const DETECT_LIMITS = { recentKeys: 5000, queued: 200, perSource: 50, parallel: 4, keyChars: 200, perSubjectPerHour: 3, subjects: 5000 } as const;
 
 export interface SecurityDetectorsOptions {
   /** `UrgentWatch.reportSecurityFrom`. */
@@ -39,8 +44,12 @@ const HOUR = 3_600_000;
 export class SecurityDetectors {
   readonly #o: SecurityDetectorsOptions;
   readonly #recent = new Set<string>();
-  readonly #queue: { source: string; event: DetectedSecurity; id: string }[] = [];
+  readonly #queue: { source: string; event: DetectedSecurity; id: string; at?: string }[] = [];
   readonly #overflow = new Map<string, { kind: SecurityEvent; count: number }>();
+  /** Signals waiting per source. */
+  readonly #waiting = new Map<string, number>();
+  /** Distinct events per source and subject in the current hour. */
+  readonly #subjects = new Map<string, { hour: number; count: number }>();
   #running = 0;
   #idle: (() => void)[] = [];
 
@@ -55,16 +64,35 @@ export class SecurityDetectors {
   signal(source: string, event: DetectedSecurity): void {
     try {
       if (!SOURCE.test(source) || typeof event.key !== "string" || event.key.length === 0) return;
-      const key = event.key.length > DETECT_LIMITS.keyChars ? `h:${hash(event.key)}` : event.key;
-      const id = hash(`${source}|${event.kind}|${event.projectId ?? "-"}|${key}`);
+      let key = event.key.length > DETECT_LIMITS.keyChars ? `h:${hash(event.key)}` : event.key;
+      let id = hash(`${source}|${event.kind}|${event.projectId ?? "-"}|${key}`);
       if (this.#recent.has(id)) return;
-      if (this.#queue.length >= DETECT_LIMITS.queued) {
+      let counted: string | undefined;
+      if (typeof event.subject === "string" && event.subject.length > 0) {
+        // One subject's burst: past its share of the hour, the rest is ONE event of that subject (the key holds a digest of the subject, never the subject's text).
+        const hour = this.#hour();
+        const at = `${source}|${event.subject}`;
+        const seen = this.#subjects.get(at);
+        const count = seen === undefined || seen.hour !== hour ? 0 : seen.count;
+        if (count < DETECT_LIMITS.perSubjectPerHour) counted = at;
+        if (count >= DETECT_LIMITS.perSubjectPerHour) {
+          key = `many:${hash(at)}:${hour}`;
+          id = hash(`${source}|${event.kind}|${event.projectId ?? "-"}|${key}`);
+          if (this.#recent.has(id)) return;
+        } else {
+          this.#subjects.delete(at); this.#subjects.set(at, { hour, count: count + 1 });
+          while (this.#subjects.size > DETECT_LIMITS.subjects) this.#subjects.delete(this.#subjects.keys().next().value as string);
+        }
+      }
+      const waiting = this.#waiting.get(source) ?? 0;
+      if (this.#queue.length >= DETECT_LIMITS.queued || waiting >= DETECT_LIMITS.perSource) {
         const o = this.#overflow.get(source);
         if (o === undefined) this.#overflow.set(source, { kind: event.kind, count: 1 }); else o.count += 1;
+        if (counted !== undefined) this.#uncount(counted);
         return;
       }
       this.#remember(id);
-      this.#queue.push({ source, event: { ...event, key }, id });
+      this.#enqueue({ source, event: { kind: event.kind, key, ...(event.projectId === undefined ? {} : { projectId: event.projectId }) }, id, ...(counted === undefined ? {} : { at: counted }) });
       this.#pump();
     } catch { /* a detector never breaks the code that called it */ }
   }
@@ -72,6 +100,19 @@ export class SecurityDetectors {
   /** Resolves when nothing is queued or being reported (tests, and an orderly stop). */
   async settled(): Promise<void> {
     while (this.#running > 0 || this.#queue.length > 0 || this.#overflow.size > 0) await new Promise<void>((resolve) => { this.#idle.push(resolve); this.#pump(); });
+  }
+
+  #hour(): number { return Math.floor((this.#o.now?.() ?? Date.now()) / HOUR); }
+
+  /** A subject's event that was not told (switched off, failed, overflowed) gives its share back. */
+  #uncount(at: string): void {
+    const seen = this.#subjects.get(at);
+    if (seen !== undefined && seen.hour === this.#hour() && seen.count > 0) seen.count -= 1;
+  }
+
+  #enqueue(item: { source: string; event: DetectedSecurity; id: string; at?: string }): void {
+    this.#queue.push(item);
+    this.#waiting.set(item.source, (this.#waiting.get(item.source) ?? 0) + 1);
   }
 
   #remember(id: string): void {
@@ -82,15 +123,21 @@ export class SecurityDetectors {
   #pump(): void {
     while (this.#running < DETECT_LIMITS.parallel && this.#queue.length > 0) {
       const item = this.#queue.shift()!;
+      const left = (this.#waiting.get(item.source) ?? 1) - 1;
+      if (left <= 0) this.#waiting.delete(item.source); else this.#waiting.set(item.source, left);
       this.#running += 1;
       void this.#send(item).finally(() => { this.#running -= 1; this.#pump(); });
     }
     if (this.#queue.length === 0 && this.#running === 0) {
       // The queue has drained: what was dropped while it was full is reported as ONE event per source and hour.
+      // The key is the hour only (not the count), and it is remembered: a second burst in the same hour is not a second event.
       for (const [source, o] of [...this.#overflow]) {
         this.#overflow.delete(source);
-        const hour = Math.floor((this.#o.now?.() ?? Date.now()) / HOUR);
-        this.#queue.push({ source, event: { kind: o.kind, key: `overflow:${hour}:${o.count}` }, id: hash(`overflow|${source}|${hour}`) });
+        const hour = this.#hour();
+        const id = hash(`overflow|${source}|${hour}`);
+        if (this.#recent.has(id)) continue;
+        this.#remember(id);
+        this.#enqueue({ source, event: { kind: o.kind, key: `overflow:${hour}` }, id });
       }
       if (this.#queue.length > 0) { this.#pump(); return; }
       const idle = this.#idle; this.#idle = [];
@@ -98,14 +145,15 @@ export class SecurityDetectors {
     }
   }
 
-  async #send(item: { source: string; event: DetectedSecurity; id: string }): Promise<void> {
+  async #send(item: { source: string; event: DetectedSecurity; id: string; at?: string }): Promise<void> {
     try {
       let on = true;
       try { on = await this.#o.enabled(); } catch { on = true; }
-      if (!on) { this.#recent.delete(item.id); return; }
+      if (!on) { this.#recent.delete(item.id); if (item.at !== undefined) this.#uncount(item.at); return; }
       await this.#o.report(SecurityDetectors.reporter(item.source), item.event);
     } catch (error) {
       this.#recent.delete(item.id);
+      if (item.at !== undefined) this.#uncount(item.at);
       try { this.#o.onError?.(error); } catch { /* ignored */ }
     }
   }
