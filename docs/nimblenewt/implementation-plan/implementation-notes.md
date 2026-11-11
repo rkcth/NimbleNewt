@@ -8531,6 +8531,27 @@ ASSUMPTION: 24 hours for a folder without an owner record, because no test file 
 ASSUMPTION: the sweep runs in every test process before its first server, not in a separate cleanup command, so nobody has to remember to run it.
 ASSUMPTION: splitting the dispatcher file is preferred over cutting test work: the cost was spread over all 97 tests and none waited on long timers.
 
+### Card 19 follow-up, clean-context safety review (Claude agent, 2026-11-11)
+
+Question: can the sweep ever stop or remove a live run's server? Up to 8 agents share `/tmp`. Merged origin/main first (notes: both sides kept). Before the fixes, it could in one setup and on one rule; both are closed now. A report-mode run against the real `/tmp` (296 folders) would have removed 61 folders. All 61 had no record and were more than a day old, and it would have stopped 2 servers, both adopted by init 3 days ago from a deleted agent worktree. No live server was among them.
+
+**Fixed (`storage/postgres/testing/orphans.ts`)**
+- **Pid namespaces.** A pid, and the start time `/proc` shows for it, mean something only inside one pid (and time) namespace. A test run in a sandbox with its own pid namespace that shares the temp directory would look "gone" to a sweep outside it, and the reverse. Its server's pid is also invisible from outside, so the server was judged "stale" and the folder was removed from under it. The record now holds `pidNamespace` and `timeNamespace` (`/proc/self/ns/*`); a record from another namespace is never judged. A Linux record without them, as this branch wrote before the fix, counts as no record (the 24 h rule).
+- **A server whose parent still runs is never stopped.** A server left by a killed test process has been adopted by init (pid 1). A live run's server is the child of its live node process. Before a stop, the server's parent must be pid 1 or gone, whatever the record says. This also closes the 24 h rule's one danger: a folder from an older harness (main writes no record) with an idle server that has run for over a day.
+- **Pid reuse between the command-line check and the stop.** The start time used for the stop was read after the command line was checked. It is now read before and checked again after; a change means "cannot be told" (kept).
+- **EPERM and a hidden `/proc`.** A process the signal check reported as existing (EPERM, another user) is "unknown", not "gone", when `/proc` hides it.
+- **Output.** At most 10 log lines per sweep plus one summary line. Every test process sweeps once, and in report mode the 61 leftovers were repeated in each.
+
+**Tests (`storage/postgres/orphans.test.ts`, 5 new):** another pid or time namespace, and a Linux record without namespaces; a live parent keeps a recorded and an unrecorded day-old server (never signalled); a pid reused between the two checks; EPERM is never "gone"; the log cap. The real-server test accepts "kept" on a machine where a subreaper, not init, adopts orphans. Own mutations (built files, each restored, each failed exactly one test): namespace compare removed; parent guard removed; recheck removed; name pattern loosened; temp-directory check removed; record without namespaces judged by pid; log cap removed. 7 of 7 killed.
+
+**Checked, not changed**
+- Owner record written late or partial: a folder is created and its record written (atomic rename) right after. A concurrent sweep sees a young folder (24 h rule) or a whole record. A corrupt, huge (>4 KiB), linked or FIFO record counts as no record.
+- Concurrent sweeps: before each signal the start time is checked again, ESRCH counts as stopped, and `rm` uses `force`. A failed removal is logged as kept and never thrown (`sweepOnce` catches).
+- Paths: exact mkdtemp names, directly in a root inside `os.tmpdir()`, own uid, never a symlink, inode checked again before `rm`, links inside are unlinked, not followed. The product sandbox (`--tmpfs /tmp`) cannot share folders.
+- Remaining limits: on a machine where a subreaper adopts orphans, servers are kept (a leak, logged), never stopped. `kill()` by pid has a microsecond window between the last start-time check and the signal (Node has no pidfd). A pid would have to be reused within it (pid_max 4194304 here). A first server start can wait up to 20 s per stubborn orphan.
+- Dispatcher split: the suite equals the old file apart from the per-backend wrapper and one drain loop that stops at the first tick that starts nothing (the assertions after it still require all 20 calls). The weights cover every new file; the three shards are 719/701/710 s; `dispatcher-suite.js` is not taken for a test file.
+
+
 ## G09 third pass: a provider change through the composed controller (2026-11-11)
 
 Code: `dispatch/relay.ts` (new `forAttempt` option `onEndpointChanged`), `api/dispatch-compose.ts` (the per-attempt relay records it on the task), `dispatch/dispatcher.ts` (step 5a records why an attempt left its configured route). Tests: `packages/integration/src/g09c-provider-change.test.ts` (3, new), `dispatch/relay.test.ts` (1 new), `api/start-route-calls.test.ts` (one assertion added). Details in `g09-evidence.md` (second addendum).

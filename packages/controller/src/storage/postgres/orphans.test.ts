@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { OWNER_FILE, UNRECORDED_MIN_AGE_MS, processLiveness, sweepOrphanedServers, type OwnerRecord, type SweepEntry } from "./testing/orphans.js";
+import { OWNER_FILE, UNRECORDED_MIN_AGE_MS, ownerRecordForThisProcess, processLiveness, sweepOrphanedServers, type OwnerRecord, type SweepEntry } from "./testing/orphans.js";
 
 // Follow-up of card 19: the sweep of test servers left behind by killed test processes. Every folder and process here is made by this file, in a
 // disposable root of its own (never the temp directory itself), so the real leftovers of other runs are never looked at.
@@ -51,7 +51,8 @@ async function goneProcessRecord(): Promise<OwnerRecord> {
 function recordFor(pid: number, startTime?: string): OwnerRecord {
   const alive = processLiveness(pid);
   assert.equal(alive.state, "alive", `process ${pid} is running`);
-  return { version: 1, pid, startTime: startTime ?? (alive as { startTime: string }).startTime, host: hostname(), createdAt: new Date().toISOString() };
+  // This process's own record (with its boot and namespaces), naming another process.
+  return { ...ownerRecordForThisProcess()!, pid, startTime: startTime ?? (alive as { startTime: string }).startTime, host: hostname() };
 }
 
 function folder(root: string, name: string, owner?: OwnerRecord | string): string {
@@ -203,7 +204,9 @@ test("a running server is stopped only when its pid file and command line say it
     pidFile(hung, stubborn.pid!);
     const command = (pid: number): string[] | undefined => pid === stubborn.pid ? ["/opt/pg/bin/postgres", "-D", join(hung, "data"), "-p", "1"] : pid === bystander.pid ? [process.execPath, "-e", "..."] : undefined;
     const lines: string[] = [];
-    const entries = await sweepOrphanedServers({ root, mode: "remove", log: quiet(lines), command, steps: { graceMs: 300, immediateMs: 300, killMs: 5_000 } });
+    // The stubborn server stands for one left by a killed test process, which init has taken over; the real child of this test would be kept (see the parent test).
+    const liveness = (pid: number) => { const seen = processLiveness(pid); return pid === stubborn.pid && seen.state === "alive" ? { ...seen, ppid: 1 } : seen; };
+    const entries = await sweepOrphanedServers({ root, mode: "remove", log: quiet(lines), command, liveness, steps: { graceMs: 300, immediateMs: 300, killMs: 5_000 } });
     assert.equal(byFolder(entries, reusedPid)?.action, "removed");
     assert.equal(byFolder(entries, reusedPid)?.stoppedPid, undefined);
     assert.equal(existsSync(reusedPid), false);
@@ -253,9 +256,16 @@ test("a real embedded server left by a killed test process is stopped and its fo
     await exited(owner);
     await sleep(200);
     assert.equal(processLiveness(serverPid).state, "alive", "a killed test process leaves its server running (the problem)");
+    const adopter = (processLiveness(serverPid) as { ppid?: number }).ppid;
     const lines: string[] = [];
     const entries = await sweepOrphanedServers({ root, mode: "remove", log: quiet(lines) });
     assert.equal(entries.length, 1, lines.join("\n"));
+    if (adopter !== 1) {
+      // A machine where a subreaper (not init) takes over orphans: the server's parent still runs, so it is kept (never stopped on the record alone).
+      assert.equal(entries[0]!.action, "kept", lines.join("\n"));
+      assert.match(entries[0]!.reason, /still the child of a running process/);
+      return;
+    }
     assert.equal(entries[0]!.action, "removed", lines.join("\n"));
     assert.equal(entries[0]!.stoppedPid, serverPid);
     assert.notEqual(processLiveness(serverPid).state, "alive", "the orphaned server is stopped");
@@ -265,4 +275,98 @@ test("a real embedded server left by a killed test process is stopped and its fo
     if (serverPid !== undefined && processLiveness(serverPid).state === "alive") { try { process.kill(serverPid, "SIGKILL"); } catch { /* gone */ } }
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a record from another pid or time namespace, or a Linux record without one, is never judged by its pid (card 19 follow-up review)", { skip: process.platform !== "linux" }, async () => {
+  // A test run in a sandbox with its own pid namespace that shares the temp directory: its pid means nothing here (gone, or another process).
+  const root = disposableRoot();
+  try {
+    const gone = await goneProcessRecord();
+    assert.match(gone.pidNamespace ?? "", /^pid:\[\d+\]$/, "the record names the owner's pid namespace");
+    const otherPidNs = folder(root, "nn-test-pg-OthPns", { ...gone, pidNamespace: "pid:[1]" });
+    const otherTimeNs = folder(root, "nn-test-pg-OthTns", { ...gone, timeNamespace: "time:[1]" });
+    const { pidNamespace: _p, timeNamespace: _t, ...withoutNs } = gone;
+    void _p; void _t;
+    const legacy = folder(root, "nn-test-pg-Legacy", withoutNs);
+    const control = folder(root, "nn-test-pg-Contrl", gone);
+    const entries = await sweepOrphanedServers({ root, mode: "remove", log: () => undefined, steps: fast });
+    assert.deepEqual(entries.map((e) => [e.folder, e.action]), [[control, "removed"]]);
+    for (const kept of [otherPidNs, otherTimeNs, legacy]) assert.equal(existsSync(kept), true, `${kept} is kept`);
+    // A day later the record from another namespace is still never judged; the record without namespaces counts as no record (the 24 h rule).
+    const later = await sweepOrphanedServers({ root, mode: "report", log: () => undefined, now: Date.now() + UNRECORDED_MIN_AGE_MS + 60_000 });
+    assert.deepEqual(later.map((e) => [e.folder, e.action]), [[legacy, "would-remove"]]);
+    assert.match(later[0]!.reason, /an unreadable owner record/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a running server whose parent process still runs is never stopped, whatever its folder's record says (card 19 follow-up review)", { skip: !supported }, async () => {
+  // The server of a live test process is that process's child; one left by a killed test process has been taken over by init.
+  const root = disposableRoot();
+  const server = sleeper(["SIGINT", "SIGQUIT", "SIGTERM"]);
+  try {
+    await ready(server);
+    const gone = await goneProcessRecord();
+    const misjudged = folder(root, "nn-test-pg-LiveSv", gone);
+    pidFile(misjudged, server.pid!);
+    const unrecorded = folder(root, "nn-test-pg-OldLiv");
+    pidFile(unrecorded, server.pid!);
+    const command = (pid: number): string[] | undefined => pid === server.pid ? ["/opt/pg/bin/postgres", "-D", join(misjudged, "data")] : undefined;
+    const entries = await sweepOrphanedServers({ root, mode: "remove", log: () => undefined, command, steps: fast });
+    assert.equal(byFolder(entries, misjudged)?.action, "kept");
+    assert.match(byFolder(entries, misjudged)!.reason, new RegExp(`still the child of a running process \\(${process.pid}\\)`));
+    assert.equal(existsSync(misjudged), true);
+    // Without a record, even a day-old idle server is kept while its parent runs (an older harness's long-lived server).
+    const unrecordedCommand = (pid: number): string[] | undefined => pid === server.pid ? ["/opt/pg/bin/postgres", "-D", join(unrecorded, "data")] : undefined;
+    const aged = await sweepOrphanedServers({ root, mode: "remove", log: () => undefined, command: unrecordedCommand, steps: fast, now: Date.now() + UNRECORDED_MIN_AGE_MS + 60_000 });
+    assert.equal(byFolder(aged, unrecorded)?.action, "kept");
+    assert.equal(existsSync(unrecorded), true);
+    assert.equal(server.exitCode, null, "the server was never signalled");
+    assert.equal(server.signalCode, null);
+  } finally {
+    server.kill("SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pid reused between the command-line check and the start-time check is not taken for the folder's server (card 19 follow-up review)", { skip: !supported }, async () => {
+  const root = disposableRoot();
+  const bystander = sleeper();
+  try {
+    await ready(bystander);
+    const gone = await goneProcessRecord();
+    const orphan = folder(root, "nn-test-pg-Recycl", gone);
+    pidFile(orphan, bystander.pid!);
+    // The first look sees a postgres that started at "100"; by the second look the pid names a process that started later.
+    let looks = 0;
+    const liveness = (pid: number) => pid === bystander.pid ? { state: "alive" as const, startTime: looks++ === 0 ? "100" : "200", ppid: 1 } : processLiveness(pid);
+    const command = (pid: number): string[] | undefined => pid === bystander.pid ? ["/opt/pg/bin/postgres", "-D", join(orphan, "data")] : undefined;
+    const entries = await sweepOrphanedServers({ root, mode: "remove", log: () => undefined, liveness, command, steps: fast });
+    assert.equal(byFolder(entries, orphan)?.action, "kept");
+    assert.match(byFolder(entries, orphan)!.reason, /cannot be told/);
+    assert.equal(bystander.exitCode, null);
+    assert.equal(bystander.signalCode, null);
+  } finally {
+    bystander.kill("SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a process that exists under another user is not taken for gone when /proc hides it (card 19 follow-up review)", { skip: process.platform !== "linux" }, () => {
+  // pid 1 is excluded by the pid check; any live process this user may not signal answers EPERM. When /proc hides it, the answer is unknown.
+  const other = execFileSync("ps", ["-e", "-o", "pid=,uid="], { encoding: "utf8" }).split("\n").map((l) => l.trim().split(/\s+/)).find(([pid, uid]) => Number(pid) > 1 && uid !== String(process.getuid!()));
+  if (other === undefined) return;
+  const seen = processLiveness(Number(other[0]));
+  assert.notEqual(seen.state, "gone");
+});
+
+test("a sweep logs at most ten lines and one summary, however many folders it decides about (card 19 follow-up review)", { skip: !supported }, async () => {
+  const root = disposableRoot();
+  try {
+    for (let i = 0; i < 25; i++) folder(root, `nn-test-pg-Many${String(i).padStart(2, "0")}`);
+    const lines: string[] = [];
+    const entries = await sweepOrphanedServers({ root, mode: "report", log: quiet(lines), now: Date.now() + UNRECORDED_MIN_AGE_MS + 60_000 });
+    assert.equal(entries.length, 25);
+    assert.equal(lines.length, 11, lines.join("\n"));
+    assert.match(lines[10]!, /and 15 more test server folders \(0 removed, 15 would be removed, 0 kept\)/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

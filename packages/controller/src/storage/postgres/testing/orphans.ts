@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 
@@ -19,6 +19,7 @@ const FOLDER_NAME = /^nn-test-pg-[A-Za-z0-9]{6}$/;
 /** A folder without an owner record (made by an older harness, or by a start killed before it wrote one) is left alone until it is this old. */
 export const UNRECORDED_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_OWNER_BYTES = 4096;
+const MAX_LOG_LINES = 10;
 
 export interface OwnerRecord {
   readonly version: 1;
@@ -27,11 +28,19 @@ export interface OwnerRecord {
   readonly startTime: string;
   /** Linux only: /proc/sys/kernel/random/boot_id. A different boot means the owner is gone. */
   readonly bootId?: string;
+  /**
+   * Linux only: the pid and time namespaces of the owner (`/proc/self/ns/pid`, `/proc/self/ns/time`). A pid, and the start time /proc shows for it,
+   * mean something only inside one pid (and time) namespace: a test run in a sandbox with its own pid namespace that shares the temp directory would
+   * otherwise look gone to a sweep outside it (and the other way round). A record from another namespace is never judged; a Linux record without these
+   * is treated like a folder without a record.
+   */
+  readonly pidNamespace?: string;
+  readonly timeNamespace?: string;
   readonly host: string;
   readonly createdAt: string;
 }
 
-type Liveness = { readonly state: "alive"; readonly startTime: string } | { readonly state: "gone" } | { readonly state: "unknown" };
+type Liveness = { readonly state: "alive"; readonly startTime: string; readonly ppid?: number } | { readonly state: "gone" } | { readonly state: "unknown" };
 
 function readSmall(path: string): string | undefined {
   try { return readFileSync(path, "utf8"); } catch { return undefined; }
@@ -42,29 +51,42 @@ function bootId(): string | undefined {
   return readSmall("/proc/sys/kernel/random/boot_id")?.trim() || undefined;
 }
 
+/** Linux: this process's namespace identity (e.g. `pid:[4026531836]`), or undefined when it cannot be read (or the kernel has no such namespace). */
+function namespaceOf(kind: "pid" | "time"): string | undefined {
+  if (process.platform !== "linux") return undefined;
+  try { return readlinkSync(`/proc/self/ns/${kind}`) || undefined; } catch { return undefined; }
+}
+
 /** Whether a process exists, and when it started. "unknown" whenever that cannot be told for certain (then nothing is removed). */
 export function processLiveness(pid: number): Liveness {
   if (!Number.isSafeInteger(pid) || pid <= 1) return { state: "unknown" };
-  try { process.kill(pid, 0); } catch (error) {
+  let exists = false;
+  try { process.kill(pid, 0); exists = true; } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") return { state: "gone" };
     if (code !== "EPERM") return { state: "unknown" }; // EPERM: it exists, under another user
+    exists = true;
   }
   if (process.platform === "linux") {
     const stat = readSmall(`/proc/${pid}/stat`);
-    if (stat === undefined) return existsProc(pid) ? { state: "unknown" } : { state: "gone" };
+    // The signal said it exists: a /proc that hides it (hidepid) does not make it gone.
+    if (stat === undefined) return exists || existsProc(pid) ? { state: "unknown" } : { state: "gone" };
     // The command name (field 2) can hold spaces and parentheses: the fields after the LAST ')' are fixed. Field 3 is the state, field 22 the start time.
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
     if (fields[0] === "Z" || fields[0] === "X") return { state: "gone" }; // a zombie runs nothing any more
     const start = fields[19];
-    return start !== undefined && /^\d+$/.test(start) ? { state: "alive", startTime: start } : { state: "unknown" };
+    const ppid = Number(fields[1]);
+    return start !== undefined && /^\d+$/.test(start) ? { state: "alive", startTime: start, ...(Number.isSafeInteger(ppid) ? { ppid } : {}) } : { state: "unknown" };
   }
   if (process.platform === "darwin") {
     const run = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
     if (run.error !== undefined || run.status === null) return { state: "unknown" };
     const said = run.stdout.trim();
     if (run.status !== 0 && said === "") return { state: "gone" };
-    return said === "" ? { state: "unknown" } : { state: "alive", startTime: said };
+    if (said === "") return { state: "unknown" };
+    const parent = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
+    const ppid = parent.status === 0 ? Number(parent.stdout.trim()) : NaN;
+    return { state: "alive", startTime: said, ...(Number.isSafeInteger(ppid) && parent.stdout.trim() !== "" ? { ppid } : {}) };
   }
   return { state: "unknown" };
 }
@@ -78,7 +100,13 @@ export function ownerRecordForThisProcess(): OwnerRecord | undefined {
   const self = processLiveness(process.pid);
   if (self.state !== "alive") return undefined;
   const boot = bootId();
-  return { version: 1, pid: process.pid, startTime: self.startTime, ...(boot === undefined ? {} : { bootId: boot }), host: hostname(), createdAt: new Date().toISOString() };
+  const pidNamespace = namespaceOf("pid");
+  const timeNamespace = namespaceOf("time");
+  return {
+    version: 1, pid: process.pid, startTime: self.startTime, ...(boot === undefined ? {} : { bootId: boot }),
+    ...(pidNamespace === undefined ? {} : { pidNamespace }), ...(timeNamespace === undefined ? {} : { timeNamespace }),
+    host: hostname(), createdAt: new Date().toISOString(),
+  };
 }
 
 /** Writes the record into a server folder, atomically (a reader sees no record or a whole one). */
@@ -113,6 +141,8 @@ function parseOwner(text: string | undefined): OwnerRecord | "malformed" | undef
     const value = JSON.parse(text) as Partial<OwnerRecord>;
     if (value.version !== 1 || !Number.isSafeInteger(value.pid) || typeof value.startTime !== "string" || value.startTime === "" || typeof value.host !== "string") return "malformed";
     if (value.bootId !== undefined && typeof value.bootId !== "string") return "malformed";
+    if (value.pidNamespace !== undefined && typeof value.pidNamespace !== "string") return "malformed";
+    if (value.timeNamespace !== undefined && typeof value.timeNamespace !== "string") return "malformed";
     return value as OwnerRecord;
   } catch { return "malformed"; }
 }
@@ -122,6 +152,12 @@ function ownerGone(owner: OwnerRecord, liveness: (pid: number) => Liveness): "go
   if (owner.host !== hostname()) return "unknown"; // a temp folder shared between machines: not ours to judge
   const boot = bootId();
   if (owner.bootId !== undefined && boot !== undefined && owner.bootId !== boot) return "gone";
+  // Another pid (or time) namespace: its pid and start time say nothing here. Either side unreadable: cannot be told.
+  if (process.platform === "linux") {
+    const pidNs = namespaceOf("pid");
+    if (owner.pidNamespace === undefined || pidNs === undefined || owner.pidNamespace !== pidNs) return "unknown";
+    if (owner.timeNamespace !== namespaceOf("time")) return "unknown";
+  }
   const now = liveness(owner.pid);
   if (now.state === "gone") return "gone";
   if (now.state === "unknown") return "unknown";
@@ -148,7 +184,7 @@ function commandLine(pid: number): string[] | undefined {
  * process with that pid is a `postgres` whose `-D` is this data directory. "stale" when the pid file names a process that is gone or is something else
  * (a reused pid): nothing to stop. "unsure" when it cannot be told (then the folder is kept).
  */
-export function folderServer(folder: string, command: (pid: number) => string[] | undefined = commandLine, liveness: (pid: number) => Liveness = processLiveness): { readonly state: "none" | "stale" | "unsure" } | { readonly state: "running"; readonly pid: number } {
+export function folderServer(folder: string, command: (pid: number) => string[] | undefined = commandLine, liveness: (pid: number) => Liveness = processLiveness): { readonly state: "none" | "stale" | "unsure" } | { readonly state: "running"; readonly pid: number; readonly startTime: string; readonly ppid?: number } {
   const dataDirectory = join(folder, "data");
   const pidFile = readOwnFileNoFollow(join(dataDirectory, "postmaster.pid"), 64 * 1024);
   if (pidFile === undefined) {
@@ -164,10 +200,13 @@ export function folderServer(folder: string, command: (pid: number) => string[] 
   if (alive.state === "unknown") return { state: "unsure" };
   const argv = command(pid);
   if (argv === undefined) return { state: "unsure" };
+  // The command line belongs to the process seen before it only if that process is still the same one after (a pid reused in between is not ours).
+  const after = liveness(pid);
+  if (after.state !== "alive" || after.startTime !== alive.startTime) return { state: "unsure" };
   const isPostgres = argv.length > 0 && basename(argv[0]!) === "postgres";
   const dIndex = argv.indexOf("-D");
   const ourData = dIndex >= 0 && argv[dIndex + 1] !== undefined && samePath(argv[dIndex + 1]!, dataDirectory);
-  if (isPostgres && ourData) return { state: "running", pid };
+  if (isPostgres && ourData) return { state: "running", pid, startTime: alive.startTime, ...(alive.ppid === undefined ? {} : { ppid: alive.ppid }) };
   return { state: "stale" }; // the pid now belongs to another program (or another server): the server of this folder is not running
 }
 
@@ -273,7 +312,9 @@ export async function sweepOrphanedServers(options: SweepOptions = {}): Promise<
     let stats: Stats;
     try { stats = lstatSync(folder); } catch { continue; }
     if (!stats.isDirectory() || stats.isSymbolicLink() || !ownedByMe(stats)) continue;
-    const owner = parseOwner(readOwnFileNoFollow(join(folder, OWNER_FILE), MAX_OWNER_BYTES));
+    const read = parseOwner(readOwnFileNoFollow(join(folder, OWNER_FILE), MAX_OWNER_BYTES));
+    // A Linux record without the owner's pid namespace (written before it was recorded) cannot be judged by its pid: like no record.
+    const owner = typeof read === "object" && process.platform === "linux" && read.pidNamespace === undefined ? "malformed" : read;
     let why: string;
     if (owner === undefined || owner === "malformed") {
       const age = now - newestChange(folder);
@@ -288,9 +329,11 @@ export async function sweepOrphanedServers(options: SweepOptions = {}): Promise<
     if (server.state === "unsure") { entries.push({ folder, action: "kept", reason: `${why}, but whether its server still runs cannot be told` }); continue; }
     let serverStart: string | undefined;
     if (server.state === "running") {
-      const alive = liveness(server.pid);
-      if (alive.state !== "alive") { entries.push({ folder, action: "kept", reason: `${why}, but its server ${server.pid} cannot be checked` }); continue; }
-      serverStart = alive.startTime;
+      serverStart = server.startTime;
+      // A server left by a killed test process has been taken over by init (pid 1). One whose parent still runs is someone's live server, whatever
+      // the record says (a misjudged owner never gets it stopped); a parent that cannot be seen cannot be told either.
+      const parent = server.ppid === undefined ? undefined : server.ppid === 1 ? "init" : liveness(server.ppid).state;
+      if (parent !== "init" && parent !== "gone") { entries.push({ folder, action: "kept", reason: `${why}, but its server ${server.pid} is still the child of a running process (${server.ppid ?? "unknown"})` }); continue; }
       if (owner === undefined || owner === "malformed") {
         // Without a record only a server that is itself old: its pid file was written when it started.
         let pidFileAge = 0;
@@ -313,10 +356,13 @@ export async function sweepOrphanedServers(options: SweepOptions = {}): Promise<
       entries.push({ folder, action: "kept", reason: `${why}, but removing it failed: ${error instanceof Error ? error.message : String(error)}` });
     }
   }
-  for (const entry of entries) {
+  // At most this many lines per sweep: every test process sweeps once, and a temp directory full of leftovers would otherwise repeat them all in each.
+  for (const entry of entries.slice(0, MAX_LOG_LINES)) {
     const verb = entry.action === "removed" ? "removed orphaned test server folder" : entry.action === "would-remove" ? "would remove orphaned test server folder (report mode)" : "kept test server folder";
     log(`${verb} ${entry.folder}: ${entry.reason}${entry.stoppedPid !== undefined ? `; ${entry.action === "removed" ? "stopped" : "would stop"} its postgres ${entry.stoppedPid}` : ""}`);
   }
+  const rest = entries.slice(MAX_LOG_LINES);
+  if (rest.length > 0) log(`... and ${rest.length} more test server folders (${rest.filter((e) => e.action === "removed").length} removed, ${rest.filter((e) => e.action === "would-remove").length} would be removed, ${rest.filter((e) => e.action === "kept").length} kept)`);
   return entries;
 }
 
