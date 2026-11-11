@@ -25,14 +25,14 @@ export type CoordinatorRequest =
   | { readonly kind: "decompose"; readonly outcome: string; readonly project: { readonly id: string; readonly name: string; readonly repositories: readonly string[] } };
 
 export interface CoordinatorModel {
-  /** `route` is the provider route to use (the primary first, then the fallbacks in the order the owner listed them). */
-  respond(route: string, request: CoordinatorRequest): Promise<unknown>;
+  /** `route` is the provider route to use (the primary first, then the fallbacks in the order the owner listed them). `meter`, when the model can count, is told the provider's token count of the call. */
+  respond(route: string, request: CoordinatorRequest, meter?: (tokens: { readonly inputTokens: number; readonly outputTokens: number }) => void): Promise<unknown>;
 }
 
 export type CoordinatorState = "running" | "paused" | "stopped";
 
 /** What the owner is told the coordinator is doing: the three it always had, and for a hosted one what the agent controls report besides. */
-export type CoordinatorLifecycleState = CoordinatorState | HostedState;
+export type CoordinatorLifecycleState = CoordinatorState | HostedState | "unknown";
 
 export interface CoordinatorBody {
   /** The coordinator's own principal: an agent with its own grants, which decide what it may do (it holds nothing by being the coordinator). */
@@ -42,8 +42,14 @@ export interface CoordinatorBody {
    * Stop). `state` is then only what the owner last ordered; what decides is the agent's gates. Absent: the controller holds the coordinator's state itself, as before.
    */
   readonly hosted?: { readonly agentId: string; readonly host: "controller" };
-  /** Provider routes in the order to try: the primary, then the fallbacks. */
+  /**
+   * Provider routes in the order to try: the primary, then the fallbacks. For a hosted coordinator set up without routes this is empty and the routes come from the agent's profile (card U03d). The precedence for a hosted
+   * coordinator, first one that gives a route wins: (1) `routes` the owner stated when setting it up (`explicitRoutes`), used as stated; (2) the routes the routing table gives the agent's `defaultProfile`; (3) the routes of the
+   * coordinator role (`CoordinatorDeps.routes`, the routing table); (4) `routes` stored with a record made before U03d. A coordinator that is not hosted: `CoordinatorDeps.routes` if there is one, else `routes`, as before.
+   */
   readonly routes: readonly string[];
+  /** A hosted coordinator whose owner stated routes when setting it up: they override the agent's profile. Absent on records made before U03d, whose stored routes stay the last resort. */
+  readonly explicitRoutes?: boolean;
   readonly state: CoordinatorState;
   readonly createdAt: string;
 }
@@ -82,10 +88,21 @@ export interface CoordinatorDeps {
   readonly principal: () => Promise<Principal>;
   /** The agent controls (pause gates and Stop) a coordinator that is an agent record runs under (card U03c). Absent: a coordinator is never hosted; its state is its own. */
   readonly lifecycle?: AgentLifecyclePort;
+  /** The routes the routing table gives a profile (card U03d), for a hosted coordinator whose agent has a `defaultProfile`. Absent: the profile is not read. */
+  readonly profileRoutes?: (profile: string) => Promise<readonly string[]> | readonly string[];
+  /** Records a hosted coordinator's model call against its agent's budget (card U03d): usage by agent, as any agent's calls are. It records and never refuses; a failure to record is told to `onAttributionFailure` and changes nothing. */
+  readonly attribute?: (by: Principal, principalId: string, use: CoordinatorUse) => Promise<void>;
+  readonly onAttributionFailure?: (error: unknown) => void;
 }
 
-/** The coordinator as the owner reads it: its record, and for a hosted one the lifecycle the agent controls report. */
-export type CoordinatorView = Omit<CoordinatorBody, "state"> & { readonly id: string; readonly revision: number; readonly state: CoordinatorLifecycleState; readonly lifecycle?: HostedLook };
+/** Where a hosted coordinator's routes come from now (see `CoordinatorBody.routes`). */
+export type RouteSource = "owner" | "profile" | "role" | "stored";
+
+/** The coordinator as the owner reads it: its record, and for a hosted one the lifecycle the agent controls report (`state` is `unknown` when they cannot be read: it is not claimed to be stopped). */
+export type CoordinatorView = Omit<CoordinatorBody, "state"> & { readonly id: string; readonly revision: number; readonly state: CoordinatorLifecycleState; readonly lifecycle?: HostedLook; /** Hosted only: where the routes come from now, and the profile when it is the agent's. */ readonly routeSource?: RouteSource; readonly profile?: string };
+
+/** What one model call of a hosted coordinator used, for the agent's budget: wall time of the call and the provider's own token count when it gave one. */
+export interface CoordinatorUse { readonly route: string; readonly computeMs: number; readonly inputTokens?: number; readonly outputTokens?: number; readonly projectId?: string }
 
 const AGENT_RECORD = /^agent:(agt-[a-z2-7]{20})$/;
 
@@ -112,15 +129,18 @@ export class CoordinatorService {
   }
 
   /** Sets up the coordinator (no `expectedRevision`) or changes its principal and routes (with the revision read). It starts `paused`: the owner starts it. */
-  async configure(owner: Principal, command: { commandId: string; principalId: string; routes: readonly string[]; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean }> {
+  async configure(owner: Principal, command: { commandId: string; principalId: string; routes?: readonly string[]; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean }> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "principalId", "routes", "expectedRevision"]);
     if (typeof command.principalId !== "string" || !/^agent:[a-z0-9][a-z0-9-]{0,39}$/.test(command.principalId)) invalid("principalId", "must be an agent principal ID such as agent:coordinator");
-    if (!Array.isArray(command.routes) || command.routes.length < 1 || command.routes.length > CHAT_LIMITS.routes || command.routes.some((r) => typeof r !== "string" || r.length < 1 || r.length > 80)) invalid("routes", `must be 1 to ${CHAT_LIMITS.routes} route names (the primary first)`);
-    const routes = [...new Set(command.routes)];
     // An agent record as the principal makes the coordinator a hosted agent (card U03c): it must be an active agent, and it starts under a pause of its own agent scope unless the coordinator was already running.
     const hostedId = this.#deps.lifecycle === undefined ? undefined : AGENT_RECORD.exec(command.principalId)?.[1];
+    // Routes are stated for a coordinator that is not hosted; a hosted one may leave them to its agent's profile (card U03d).
+    if (command.routes === undefined && hostedId === undefined) invalid("routes", `must be 1 to ${CHAT_LIMITS.routes} route names (the primary first); only a coordinator that is an agent record may leave them to the agent's profile`);
+    if (command.routes !== undefined && (!Array.isArray(command.routes) || command.routes.length < 1 || command.routes.length > CHAT_LIMITS.routes || command.routes.some((r) => typeof r !== "string" || r.length < 1 || r.length > 80))) invalid("routes", `must be 1 to ${CHAT_LIMITS.routes} route names (the primary first)`);
+    const routes = command.routes === undefined ? [] : [...new Set(command.routes)];
     const before = await this.#runner.get("coordinator", COORDINATOR_ID);
+    let ours: string | undefined;
     if (hostedId !== undefined) {
       const look = await this.#deps.lifecycle!.look(owner, hostedId);
       if (look.agent !== "active") invalid("principalId", look.agent === "retired" ? "that agent is retired" : "no such agent");
@@ -128,8 +148,21 @@ export class CoordinatorService {
       const newlyHosted = was?.hosted?.agentId !== hostedId;
       const wouldApply = before === undefined ? command.expectedRevision === undefined : command.expectedRevision === before.revision;
       // The pause comes first, so the record never exists with the agent free to be used before the owner starts it. Repeating the command repeats the same pause by its command ID.
-      if (newlyHosted && wouldApply && (was === undefined || was.hosted !== undefined || was.state !== "running")) await this.#deps.lifecycle!.pause(owner, hostedId, `coord-host-${command.commandId}`.slice(0, 120), "the coordinator is set up as this agent and waits for the owner to start it");
+      if (newlyHosted && wouldApply && (was === undefined || was.hosted !== undefined || was.state !== "running")) ours = (await this.#deps.lifecycle!.pause(owner, hostedId, `coord-host-${command.commandId}`.slice(0, 120), "the coordinator is set up as this agent and waits for the owner to start it")).requestId;
     }
+    try {
+      return await this.#configured(owner, command, routes, hostedId);
+    } catch (error) {
+      // A set-up refused after its pause (a concurrent change took the record meanwhile) must not leave the agent paused for a coordinator that does not exist: the pause this call made is taken back, and only that pause (card U03d).
+      if (ours !== undefined && hostedId !== undefined) {
+        const lifted = await this.#deps.lifecycle!.undoPause(owner, hostedId, `coord-undo-${command.commandId}`.slice(0, 120), ours, "the coordinator's set-up was refused, so the pause it made is lifted").then((l) => l, () => undefined);
+        if (lifted === undefined && error instanceof DomainError) throw new DomainError(error.code, `${error.message} (the pause this set-up made on the agent could not be lifted; resume the agent if it is not wanted)`, { ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }), ...(error.field === undefined ? {} : { field: error.field }) });
+      }
+      throw error;
+    }
+  }
+
+  async #configured(owner: Principal, command: { commandId: string; principalId: string; expectedRevision?: number }, routes: readonly string[], hostedId: string | undefined): Promise<{ id: string; revision: number; replayed: boolean }> {
     return this.#runner.command("coordinator.configure", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: asJson({ principalId: command.principalId, routes, expectedRevision: command.expectedRevision ?? null }),
       build: async () => {
@@ -138,14 +171,14 @@ export class CoordinatorService {
         const hosted = hostedId === undefined ? undefined : ({ agentId: hostedId, host: "controller" } as const);
         if (current === undefined) {
           if (command.expectedRevision !== undefined) throw new DomainError("not_found", "the coordinator is not set up");
-          const body: CoordinatorBody = { principalId: command.principalId, routes, state: "paused", createdAt: this.#runner.now(), ...(hosted === undefined ? {} : { hosted }) };
+          const body: CoordinatorBody = { principalId: command.principalId, routes, state: "paused", createdAt: this.#runner.now(), ...(hosted === undefined ? {} : { hosted }), ...(hosted !== undefined && routes.length > 0 ? { explicitRoutes: true } : {}) };
           return { ref, creates: true, changes: [{ type: "create", ref, body: asJson(body) }], detail: { principalId: command.principalId, hosted: hosted !== undefined } };
         }
         if (command.expectedRevision !== current.revision) throw new DomainError("stale_revision", `the coordinator is at revision ${current.revision}`, { currentRevision: current.revision });
         const old = current.body as unknown as CoordinatorBody;
-        const { hosted: _was, ...rest } = old;
+        const { hosted: _was, explicitRoutes: _explicit, ...rest } = old;
         // A coordinator taken off its agent record has no gates to answer for it: it comes back paused, never as whatever it last was.
-        const next: CoordinatorBody = { ...rest, principalId: command.principalId, routes, ...(old.hosted !== undefined && hosted === undefined ? { state: "paused" as const } : {}), ...(hosted === undefined ? {} : { hosted }) };
+        const next: CoordinatorBody = { ...rest, principalId: command.principalId, routes, ...(old.hosted !== undefined && hosted === undefined ? { state: "paused" as const } : {}), ...(hosted === undefined ? {} : { hosted }), ...(hosted !== undefined && routes.length > 0 ? { explicitRoutes: true } : {}) };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: asJson(next) }], detail: { principalId: command.principalId, hosted: hosted !== undefined } };
       },
     }));
@@ -191,7 +224,7 @@ export class CoordinatorService {
 
   /**
    * The coordinator as the owner reads it. For a hosted one `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` carries the gates that hold it; the order the
-   * owner last gave stays in the record's history. A hosted coordinator whose agent record is gone or retired reads as stopped.
+   * owner last gave stays in the record's history. A hosted coordinator whose agent record is gone or retired reads as stopped, and one whose agent controls cannot be read reads as `unknown`.
    */
   async get(owner: Principal): Promise<CoordinatorView | undefined> {
     this.#requireOwner(owner);
@@ -200,8 +233,16 @@ export class CoordinatorService {
     const plain = view<CoordinatorBody>(found);
     if (plain.hosted === undefined || this.#deps.lifecycle === undefined) return plain;
     const look = await this.#deps.lifecycle.look(owner, plain.hosted.agentId).then((l) => l, () => undefined);
-    if (look === undefined) return { ...plain, state: "stopped" };
-    return { ...plain, state: look.agent !== "active" ? "stopped" : look.state, lifecycle: look };
+    // Controls that cannot be read are not a stopped agent: the owner is told the state is unknown (card U03d).
+    if (look === undefined) return { ...plain, state: "unknown", ...await this.#sourceOf(plain, undefined) };
+    // A pause made directly through the agent's own controls is reported reached by the coordinator when it holds no work (card U03d).
+    await this.#reportReached(owner, plain.hosted.agentId, look);
+    return { ...plain, state: look.agent !== "active" ? "stopped" : look.state, lifecycle: look, ...await this.#sourceOf(plain, look.profile) };
+  }
+
+  async #sourceOf(body: CoordinatorBody, profile: string | undefined): Promise<{ routeSource?: RouteSource; profile?: string }> {
+    const r = await this.#routesOf(body, profile);
+    return { routeSource: r.source, ...(profile === undefined ? {} : { profile }) };
   }
 
   /**
@@ -225,7 +266,7 @@ export class CoordinatorService {
     const found = await this.#deps.retrieval.search(owner, { projectId, query: command.question, limit: 5 });
     if (found.hits.length > 0) {
       const request: CoordinatorRequest = { kind: "answer", question: command.question, records: found.hits.map((h) => ({ source: h.source, ...(h.title === undefined ? {} : { title: h.title }), snippet: h.snippet })) };
-      const reply = await this.#ask(state.body, request);
+      const reply = await this.#ask(owner, state, request, projectId);
       if (reply === undefined) return { kind: "unavailable", reason: "the coordinator could not be reached on any route" };
       const checked = checkAnswer(reply, found.hits.map((h) => h.source));
       if (checked !== undefined) return checked;
@@ -257,7 +298,7 @@ export class CoordinatorService {
     if (project === undefined) throw new DomainError("not_found", "no such project");
     if (project.state !== "active") throw new DomainError("invalid_command", "the project is archived", { field: "projectId" });
     const repositories = project.repositories.map((r) => r.id);
-    const reply = await this.#ask(state.body, { kind: "decompose", outcome: command.outcome, project: { id: projectId, name: project.name, repositories } });
+    const reply = await this.#ask(owner, state, { kind: "decompose", outcome: command.outcome, project: { id: projectId, name: project.name, repositories } }, projectId);
     if (reply === undefined) return { kind: "unavailable", reason: "the coordinator could not be reached on any route" };
     const plan = checkPlan(reply, repositories);
 
@@ -306,7 +347,7 @@ export class CoordinatorService {
     for (const t of all) if ((await this.#deps.assignments.getAssignment(t.id)) === undefined) open.push({ id: t.id, title: t.title, ...(t.repositoryId === undefined ? {} : { repositoryId: t.repositoryId }) });
     const project = await this.#deps.projects.getProject(projectId);
     if (project === undefined) throw new DomainError("not_found", "no such project");
-    const reply = await this.#ask(state.body, { kind: "assign", project: { id: projectId, name: project.name }, tasks: open, agents: await this.#agents() });
+    const reply = await this.#ask(owner, state, { kind: "assign", project: { id: projectId, name: project.name }, tasks: open, agents: await this.#agents() }, projectId);
     if (reply === undefined) return { kind: "unavailable", reason: "the coordinator could not be reached on any route" };
     const picks = checkAssignments(reply, open);
     const skipped = picks.filter((p) => open.find((t) => t.id === p.taskId)?.repositoryId === undefined).map((p) => `${p.taskId}: no repository`);
@@ -338,7 +379,7 @@ export class CoordinatorService {
     if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", "only the owner uses the coordinator");
   }
 
-  async #usable(owner: Principal): Promise<{ kind: "ok"; body: CoordinatorBody; principal: Principal } | { kind: "unavailable"; reason: string }> {
+  async #usable(owner: Principal): Promise<{ kind: "ok"; body: CoordinatorBody; principal: Principal; profile?: string } | { kind: "unavailable"; reason: string }> {
     const found = await this.#runner.get("coordinator", COORDINATOR_ID);
     if (found === undefined) return { kind: "unavailable", reason: "the coordinator is not set up" };
     const body = found.body as unknown as CoordinatorBody;
@@ -358,10 +399,11 @@ export class CoordinatorService {
       if (look === undefined) return { kind: "unavailable", reason: "the coordinator's agent controls could not be read" };
       if (look.agent !== "active") return { kind: "unavailable", reason: "the coordinator's agent is retired" };
       if (look.state !== "running") {
+        await this.#reportReached(owner, body.hosted.agentId, look);
         const outer = look.heldBy.find((h) => h.scope.kind !== "agent");
         return { kind: "unavailable", reason: `the coordinator is ${look.state}${look.heldBy.every((h) => h.scope.kind !== "agent") && outer !== undefined ? ` (held by ${outer.scope.kind} ${outer.scope.id})` : ""}` };
       }
-      return { kind: "ok", body, principal };
+      return { kind: "ok", body, principal, ...(look.profile === undefined ? {} : { profile: look.profile }) };
     }
     return body.state === "running" ? { kind: "ok", body, principal } : { kind: "unavailable", reason: `the coordinator is ${body.state}` };
   }
@@ -380,14 +422,44 @@ export class CoordinatorService {
     await this.#deps.lifecycle?.settled(owner, agentId).catch(() => undefined);
   }
 
-  /** The primary route, then the fallbacks in order, at most four tries; the first usable reply wins and none is a refusal to answer, not an error. */
-  async #ask(body: CoordinatorBody, request: CoordinatorRequest): Promise<unknown> {
-    // A routing table that cannot be read leaves no route to try: the coordinator is unavailable, never an error for the caller.
-    const routes = this.#deps.routes === undefined ? body.routes : await (async () => this.#deps.routes!())().then((r) => r, () => [] as readonly string[]);
+  /** Where the routes come from now and what they are (the precedence is on `CoordinatorBody.routes`). A routing table that cannot be read leaves no route to try: the coordinator is unavailable, never an error for the caller. */
+  async #routesOf(body: CoordinatorBody, profile: string | undefined): Promise<{ routes: readonly string[]; source: RouteSource }> {
+    const read = async (get: () => Promise<readonly string[]> | readonly string[]): Promise<readonly string[]> => (async () => get())().then((r) => r, () => [] as readonly string[]);
+    if (body.hosted !== undefined) {
+      if (body.explicitRoutes === true && body.routes.length > 0) return { routes: body.routes, source: "owner" };
+      if (profile !== undefined && this.#deps.profileRoutes !== undefined) {
+        const fromProfile = await read(() => this.#deps.profileRoutes!(profile));
+        if (fromProfile.length > 0) return { routes: fromProfile, source: "profile" };
+      }
+    }
+    return this.#deps.routes === undefined ? { routes: body.routes, source: "stored" } : { routes: await read(this.#deps.routes), source: "role" };
+  }
+
+  /**
+   * The primary route, then the fallbacks in order, at most four tries; the first usable reply wins and none is a refusal to answer, not an error. A hosted coordinator's calls are recorded against its agent's budget
+   * (usage by agent, as any agent's model calls are); recording never refuses a call and never fails one (card U03d).
+   */
+  async #ask(owner: Principal, state: { readonly body: CoordinatorBody; readonly profile?: string }, request: CoordinatorRequest, projectId?: string): Promise<unknown> {
+    const { body } = state;
+    const { routes } = await this.#routesOf(body, state.profile);
     for (const route of routes.slice(0, MAX_ROUTES)) {
-      try { return await this.#deps.model.respond(route, request); } catch { /* try the next route */ }
+      let tokens: { inputTokens: number; outputTokens: number } | undefined;
+      const began = Date.now();
+      let reply: unknown;
+      try { reply = await this.#deps.model.respond(route, request, (t) => { tokens = t; }); } catch { continue; /* try the next route */ }
+      if (body.hosted !== undefined && this.#deps.attribute !== undefined) {
+        await this.#deps.attribute(owner, body.principalId, { route, computeMs: Math.max(0, Date.now() - began), ...(tokens === undefined ? {} : tokens), ...(projectId === undefined ? {} : { projectId }) }).catch((error: unknown) => { try { this.#deps.onAttributionFailure?.(error); } catch { /* a report that fails changes nothing */ } });
+      }
+      return reply;
     }
     return undefined;
+  }
+
+  /** A pause made through the agent's own controls (not by the coordinator's order) is reported to its gate as reached once the coordinator holds no work; the order path already does so. */
+  async #reportReached(owner: Principal, agentId: string, look: HostedLook): Promise<void> {
+    const mine = look.heldBy.find((h) => h.scope.kind === "agent" && h.scope.id === agentId);
+    if (mine === undefined || (mine.observed !== undefined && ["paused", "stopped", "suspended", "stopping"].includes(mine.observed))) return;
+    await this.#reportIfIdle(owner, agentId);
   }
 
   async #busy<T>(work: () => Promise<T>): Promise<T> {

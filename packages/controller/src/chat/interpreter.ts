@@ -110,8 +110,8 @@ export function checkIntents(raw: unknown): Intent[] {
         if (entry["projectName"] !== undefined && entry["projectId"] !== undefined) return invalid(f, "needs at most one of projectName and projectId");
         const routes = entry["routes"];
         if (routes !== undefined && (!Array.isArray(routes) || routes.length > 4)) return invalid(`${f}.routes`, "must be a list of at most 4 routes");
-        const want: readonly string[] = { answer: ["question"], decompose: ["outcome"], assign: [], configure: ["routes"], start: [], pause: [], stop: [] }[action];
-        for (const key of ["question", "outcome", "principalId", "agentName", "routes"]) if (entry[key] !== undefined && !want.includes(key) && !(action === "configure" && (key === "principalId" || key === "agentName"))) return invalid(`${f}.${key}`, `is not used by ${action}`);
+        const want: readonly string[] = { answer: ["question"], decompose: ["outcome"], assign: [], configure: [], start: [], pause: [], stop: [] }[action];
+        for (const key of ["question", "outcome", "principalId", "agentName", "routes"]) if (entry[key] !== undefined && !want.includes(key) && !(action === "configure" && (key === "principalId" || key === "agentName" || key === "routes"))) return invalid(`${f}.${key}`, `is not used by ${action}`);
         for (const key of want) if (entry[key] === undefined) return invalid(`${f}.${key}`, `is needed by ${action}`);
         // Setting the coordinator up names the agent either by its principal or, in the owner's words, by name (card U03c): exactly one.
         if (action === "configure" && (entry["principalId"] === undefined) === (entry["agentName"] === undefined)) return invalid(f, "configure needs exactly one of principalId and agentName");

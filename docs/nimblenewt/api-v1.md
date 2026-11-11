@@ -242,13 +242,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `coordinator.get`
 
-The coordinator, as the owner reads it (owner only): its principal, its model routes in the order tried (the primary first, then the fallbacks), the order the owner last gave and, when the principal is an agent record (a hosted coordinator, card U03c), the agent it runs as and where (`hosted: { agentId, host }`). For a hosted coordinator `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` lists the pause gates that hold it (its own, a team's, the installation's) with what each reported; pausing, stopping or resuming the agent, or a team above it, therefore changes this at once. Its grants are the agent's grants (`grant.list` with its principal) and are revoked like any agent's. `item` is null when no coordinator is set up.
+The coordinator, as the owner reads it (owner only): its principal, its model routes in the order tried (the primary first, then the fallbacks), the order the owner last gave and, when the principal is an agent record (a hosted coordinator, card U03c), the agent it runs as and where (`hosted: { agentId, host }`). For a hosted coordinator `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` lists the pause gates that hold it (its own, a team's, the installation's) with what each reported (`state` is `unknown`, with no `lifecycle`, when the agent controls cannot be read: it is not claimed to be stopped; a pause made through the agent's own controls is reported reached by the coordinator when this is read); `routeSource` says where its routes come from now (`owner`, `profile`, `role` or `stored`, see `coordinator.configure`) and `profile` the agent's; pausing, stopping or resuming the agent, or a team above it, therefore changes this at once. Its grants are the agent's grants (`grant.list` with its principal) and are revoked like any agent's. `item` is null when no coordinator is set up.
 
 Arguments:
 
 - none
 
-Result: `{ item }`: `id`, `revision`, `principalId`, `routes`, `state`, `hosted?`, `lifecycle?: { agent, state, heldBy: [{ scope, observed?, reason?, by? }] }`.
+Result: `{ item }`: `id`, `revision`, `principalId`, `routes`, `explicitRoutes?`, `state` (also `unknown`), `hosted?`, `routeSource?`, `profile?`, `lifecycle?: { agent, state, profile?, heldBy: [{ scope, observed?, reason?, by? }] }`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1614,17 +1614,17 @@ Result: `{ item }`.
 
 #### `agent.get`
 
-One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`.
+One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`. When the owner asks and the agent is the hosted coordinator (card U03c), the record carries a `coordinator` field (see `agent.list`).
 
 Arguments:
 
 - `agentId`: the agent's ID
 
-Result: `{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision.
+Result: `{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision, and for the hosted coordinator, to the owner only, `coordinator`.
 
 #### `agent.list`
 
-Agent records (needs `agent.read` or `agent.manage`).
+Agent records (needs `agent.read` or `agent.manage`). To the owner the agent that is the hosted coordinator (card U03c) is marked: its record carries `coordinator: { state, heldBy?, routeSource?, profile? }`, where `state` is what the agent controls say now (running, paused, stopping, suspended, stopped, or `unknown` when they cannot be read) and `heldBy` the pause gates holding it (scope, what was reported, reason, who). No other caller sees the field.
 
 Arguments:
 
@@ -1633,7 +1633,7 @@ Arguments:
 - `limit` (optional): 1 to 100, default 20
 - `after` (optional): the `next` of the previous page
 
-Result: `{ items, next? }`.
+Result: `{ items, next? }`: each agent as `agent.get` shows it.
 
 #### `team.list`
 
@@ -2423,6 +2423,33 @@ Arguments:
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `coordinator.configure`
+
+Owner only: sets the coordinator up (without `expectedRevision`) or changes its principal and routes (with the revision `coordinator.get` showed). The chat does the same in free words. A `principalId` that is an agent record (`agent:agt-...`, an active agent) makes the coordinator a hosted agent (card U03c): it starts paused under the agent's own pause gate, which only the owner lifts (`coordinator.state` or the agent controls), and it gains no right by this. Its routes (up to four, the primary first) are optional for a hosted coordinator. The precedence for a hosted coordinator, the first that gives a route winning: the `routes` stated here, the routing table's routes for the agent's `defaultProfile`, the routes of the coordinator role, then routes stored by an earlier set-up; `coordinator.get` says which applies (`routeSource`). Its model calls are recorded as usage of the agent (shared overhead under the rule `the coordinator's own model calls (hosted agent)`; `budget.usage` by agent), and record without ever refusing a call. To take it off its agent, set it up again with a `principalId` that is not an agent record (such as `agent:coordinator`) and `routes`: it comes back paused and held by the controller as before. A set-up refused after its pause (a concurrent change) lifts the pause it made.
+
+Arguments:
+
+- `principalId`: the coordinator's principal: `agent:agt-...` for a hosted agent, else an agent principal such as `agent:coordinator`
+- `routes` (optional): up to 4 provider route names in the order to try; needed unless the principal is an agent record
+- `expectedRevision` (optional): the revision you read; leave out to set it up the first time
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `coordinator.state`
+
+Owner only: starts (`running`), pauses (`paused`) or stops (`stopped`) the coordinator, on the revision `coordinator.get` showed. A hosted coordinator (card U03c) is started, paused and stopped through its agent's own pause gate and Stop, as for any agent; starting it lifts only its own gate, and `stillHeldBy` lists a team or the installation that still holds it. A stopped coordinator can only be started. The coordinator cannot do this for itself: it holds no right to its own agent scope.
+
+Arguments:
+
+- `to`: `running`, `paused` or `stopped`
+- `expectedRevision`: the revision you read
+
+Result: `{ id, revision, replayed, stillHeldBy? }`.
 
 Completion: finished when accepted (`completed: true`).
 
