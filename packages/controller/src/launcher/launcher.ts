@@ -12,6 +12,7 @@ import { PolicyService } from "../policy/policy.js";
 import { RoutingService } from "../routing/service.js";
 import { makeToken, newSecret } from "../security/credentials.js";
 import { principalIdOf } from "../security/principals.js";
+import { redactText } from "../security/redact.js";
 
 /**
  * The launcher (card U14): starts the controller from a configuration document, makes the owner once, and keeps the owner's credential in the operating system's secret store, never in a file the
@@ -207,7 +208,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
       else {
         // A builder that throws (a package that cannot be loaded, a folder that cannot be made) is a reason the host was not started, never a reason the owner has no controller.
         let made: LocalHostPlan | { readonly problem: string };
-        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${String((error as Error)?.message ?? error).slice(0, 300)}` }; }
+        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}` }; }
         if ("problem" in made) notes.push(`You turned on the worker host for this computer, but it was not started: ${made.problem}`);
         else {
           await controller.close();

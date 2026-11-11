@@ -5,7 +5,10 @@ import { onlyKnown, revision as checkRevision } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import { REDACTED, redactText } from "../security/redact.js";
+import { cleanUntrusted } from "../security/clean.js";
+import { CREDENTIAL_PATTERNS } from "../security/credential-patterns.js";
+import { REDACTED } from "../security/redact.js";
+
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { ThinkingBlock, ThinkingSource } from "./thinking.js";
 
@@ -52,19 +55,17 @@ export interface ThinkingRecordBody {
 }
 export interface ThinkingCollectionBody { readonly enabled: boolean; readonly updatedBy: string; readonly updatedAt: string }
 
-/**
- * Code point ranges removed from model text: C0 controls except tab and newline, DEL and C1, soft hyphen, combining grapheme joiner, Hangul and Khmer fillers, bidirectional and invisible formatting, line and paragraph separators,
- * variation selectors, annotation marks, shorthand format controls, musical formatting, and the tag characters (invisible copies of ASCII that can carry hidden text or split a credential so the redaction does not see it).
- */
-const HIDDEN: readonly (readonly [number, number])[] = [[0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c], [0x180e, 0x180e], [0x200b, 0x200f], [0x2028, 0x2029], [0x202a, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff], [0xfff9, 0xfffb], [0x34f, 0x34f], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xffa0, 0xffa0], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe007f], [0xe0100, 0xe01ef]];
-const withoutHidden = (text: string): string => { let out = ""; for (const ch of text) { const cp = ch.codePointAt(0)!; if (!HIDDEN.some(([a, b]) => cp >= a && cp <= b)) out += ch; } return out; };
+const PRIVATE_KEY_BLOCK = new RegExp(CREDENTIAL_PATTERNS.find((p) => p.name === "private key block")!.pattern.source, "g");
 
 /** What untrusted thinking text becomes before it is kept: bounded input, control and invisible characters gone, credential shapes replaced, cut to size at a character boundary. */
 export function cleanThinking(raw: string): { text: string; truncated: boolean; redacted: boolean } {
   const capped = raw.length > THINKING_COLLECT.inputChars ? raw.slice(0, THINKING_COLLECT.inputChars) : raw;
-  const stripped = withoutHidden(capped.replace(/\r\n?/g, "\n")).normalize("NFC");
-  // A private key whose BEGIN line was in an earlier block (the model split its thinking there) is still a key: after the redaction any END line left has no BEGIN before it in this block, so everything up to it goes.
-  const hidden = redactText(stripped).replace(/^[\s\S]*-----END [A-Z ]*PRIVATE KEY-----/, REDACTED);
+  // The shared pipeline (security/clean.ts): redact, NFC (the model's own characters stay for the owner), strip controls and invisible characters (line breaks and tabs kept), redact again.
+  // A private key whose BEGIN line was in an earlier block (the model split its thinking there) is still a key: once the whole blocks are gone any END line left has no BEGIN before it in this block, so
+  // everything up to it goes. (An END hidden by invisible characters is still found by the pipeline's own orphan-END rule, with the base64 lines above it.)
+  const keyFree = capped.replace(PRIVATE_KEY_BLOCK, REDACTED).replace(/^[\s\S]*-----END [A-Z ]*PRIVATE KEY-----/, REDACTED);
+  const clean = cleanUntrusted(keyFree, { lines: "keep", form: "NFC" });
+  const hidden = clean.text;
   let text = hidden;
   let truncated = raw.length > capped.length;
   if (text.length > THINKING_COLLECT.blockChars) {
@@ -74,7 +75,7 @@ export function cleanThinking(raw: string): { text: string; truncated: boolean; 
     text = text.slice(0, end);
     truncated = true;
   }
-  return { text, truncated, redacted: hidden !== stripped };
+  return { text, truncated, redacted: clean.redacted || keyFree !== capped };
 }
 
 const recordIdOf = (taskId: string): string => derivedId("tkr", `record\0${taskId}`);

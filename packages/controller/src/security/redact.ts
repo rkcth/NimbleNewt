@@ -3,6 +3,7 @@
  * says "secret" are replaced whole, and anything shaped like a NimbleNewt token or a common bearer or API key is replaced wherever it appears in text.
  */
 import { CREDENTIAL_PATTERNS } from "./credential-patterns.js";
+import { replaceSpans, scanSecrets } from "./secret-scan.js";
 
 export const REDACTED = "[redacted]";
 
@@ -15,10 +16,18 @@ function sensitiveName(name: string): boolean {
   const last = words[words.length - 1];
   return last !== undefined && last !== "key" && SENSITIVE_LAST_WORD.has(last);
 }
+/**
+ * Text with every credential shape replaced by `[redacted]`: a whole private key block as written becomes one mark, then every shape found by `scanSecrets` in its folded views (fullwidth or mixed-case
+ * prefixes, invisible characters inside a token, a token split over lines, an orphan key END, long high-entropy hex or base64 runs), replaced in the original text line by line so no two lines are joined.
+ * Idempotent: the result redacts to itself.
+ */
+const PRIVATE_KEY_BLOCK = new RegExp(CREDENTIAL_PATTERNS.find((p) => p.name === "private key block")!.pattern.source, "g");
 export function redactText(text: string): string {
-  let out = text;
-  for (const { pattern: shape } of CREDENTIAL_PATTERNS) out = out.replace(shape, (m) => (/^[a-z][a-z0-9+.-]{0,30}:\/\//i.test(m) ? m.replace(/:[^:@/]*@$/, `:${REDACTED}@`) : REDACTED));
-  return out;
+  // A caller's `error.message` can be anything at run time: never throw while hiding a secret.
+  if (typeof text !== "string") text = String(text ?? "");
+  // A whole private key block written as such is one mark (as before); every other shape is found by the scan, which matches all of CREDENTIAL_PATTERNS through its folded views (a URL keeps its scheme, user and host).
+  const out = text.replace(PRIVATE_KEY_BLOCK, REDACTED);
+  return replaceSpans(out, scanSecrets(out), REDACTED);
 }
 
 /** A copy of a JSON value with sensitive fields and secret-shaped strings replaced. Depth-limited so a hostile value cannot exhaust the stack. */
