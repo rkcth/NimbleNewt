@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { after, test } from "node:test";
@@ -62,6 +62,70 @@ test("card A05b follow-up: a detached HEAD reads as its commit; an empty reposit
   assert.equal(await over(d).read({ kind: "branch", id: "main" }, "t") !== first, true);
 });
 
+test("card A05b follow-up review: a branch or ref is matched by its full name exactly, never by Git's short-name rules, so a decoy ref cannot stand in for one that is gone", async () => {
+  const d = repo();
+  const c = commit(d);
+  const { read } = over(d);
+  // Each of these is what `rev-parse refs/heads/x` would fall back to when refs/heads/x is not there.
+  for (const decoy of ["refs/tags/refs/heads/x", "refs/refs/heads/x", "refs/heads/refs/heads/x", "refs/remotes/refs/heads/x"]) {
+    git(d, "update-ref", decoy, c);
+    assert.equal(await read({ kind: "branch", id: "x" }, "t"), "absent", decoy);
+    assert.equal(await read({ kind: "ref", id: "refs/heads/x" }, "t"), "absent", decoy);
+    git(d, "update-ref", "-d", decoy);
+  }
+  git(d, "update-ref", "refs/heads/x/y", c);
+  assert.equal(await read({ kind: "branch", id: "x" }, "t"), "absent", "a longer name below it is not the branch");
+  assert.equal(await read({ kind: "branch", id: "x/y" }, "t"), c);
+  // An unborn HEAD is absent even beside a branch called HEAD (short-name rules would read refs/heads/HEAD).
+  git(d, "symbolic-ref", "HEAD", "refs/heads/unborn");
+  git(d, "update-ref", "refs/heads/HEAD", c);
+  assert.equal(await read({ kind: "ref", id: "HEAD" }, "t"), "absent");
+  git(d, "symbolic-ref", "HEAD", "refs/heads/main");
+  assert.equal(await read({ kind: "ref", id: "HEAD" }, "t"), c);
+  git(d, "pack-refs", "--all");
+  assert.equal(await read({ kind: "branch", id: "main" }, "t"), c, "a packed ref reads the same");
+  assert.equal(await read({ kind: "branch", id: "x" }, "t"), "absent");
+});
+
+test("card A05b follow-up review: a ref to an object that is not there is an error, not absent", async () => {
+  const d = repo();
+  const c = commit(d);
+  const missing = "1".repeat(40);
+  writeFileSync(join(d, ".git", "refs", "heads", "bad"), `${missing}\n`);
+  await refused(over(d).read({ kind: "branch", id: "bad" }, "t"), "unreadable");
+  await refused(over(d).read({ kind: "ref", id: "refs/heads/bad" }, "t"), "unreadable");
+  writeFileSync(join(d, ".git", "HEAD"), `${missing}\n`);
+  await refused(over(d).read({ kind: "ref", id: "HEAD" }, "t"), "unreadable");
+  writeFileSync(join(d, ".git", "HEAD"), "ref: refs/heads/bad\n");
+  await refused(over(d).read({ kind: "ref", id: "HEAD" }, "t"), "unreadable");
+  writeFileSync(join(d, ".git", "HEAD"), `${c}\n`);
+  assert.equal(await over(d).read({ kind: "ref", id: "HEAD" }, "t"), c);
+});
+
+test("card A05b follow-up review: no more git processes run at once than the cap, and a reading waiting its turn still ends in time", async () => {
+  const d = repo();
+  commit(d);
+  const box = temp();
+  const counter = join(temp(), "count.sh");
+  writeFileSync(counter, `#!/bin/sh\nmkdir ${box}/$$\nls ${box} | wc -l >> ${box}.log\nsleep 0.3\nrmdir ${box}/$$\n`);
+  chmodSync(counter, 0o755);
+  scratch.push(`${box}.log`);
+  const { read } = over(d, [], { git: counter, gitProcesses: 2 });
+  const all = await Promise.all(Array.from({ length: 8 }, () => read({ kind: "branch", id: "main" }, "t")));
+  assert.deepEqual(all, Array(8).fill("absent"), "an empty answer of git is 'not there'");
+  const seen = readFileSync(`${box}.log`, "utf8").trim().split("\n").map(Number);
+  assert.equal(seen.length, 8);
+  assert.ok(Math.max(...seen) <= 2, `at most two at once, saw ${seen.join(",")}`);
+  const slow = join(temp(), "slow.sh");
+  writeFileSync(slow, "#!/bin/sh\nsleep 5\n");
+  chmodSync(slow, 0o755);
+  const queued = over(d, [], { git: slow, gitProcesses: 1, totalMs: 400, gitMs: 60_000 });
+  const t0 = Date.now();
+  const results = await Promise.allSettled(Array.from({ length: 3 }, () => queued.read({ kind: "branch", id: "main" }, "t")));
+  assert.ok(results.every((r) => r.status === "rejected" && r.reason instanceof TargetVersionError && r.reason.code === "timeout"));
+  assert.ok(Date.now() - t0 < 3_000, "waiting for a turn is bounded by the reading's own time");
+});
+
 test("card A05b follow-up: a bare repository is read the same way", async () => {
   const d = repo();
   const c = commit(d);
@@ -83,7 +147,9 @@ test("card A05b follow-up: names that are not branches are refused before git is
 test("card A05b follow-up: a checkout that is not a readable repository is an error (fail closed), never absent", async () => {
   const plain = temp();
   await refused(over(plain).read({ kind: "branch", id: "main" }, "t"), "unreadable");
-  await refused(over(undefined).read({ kind: "branch", id: "main" }, "t"), "unreadable");
+  assert.equal(await over(undefined).read({ kind: "branch", id: "main" }, "t"), undefined, "no bound repository: nothing on this host to read, bound by name as before");
+  assert.equal(await over(undefined).read({ kind: "ref", id: "HEAD" }, "t"), undefined);
+  assert.equal(await over(undefined).read({ kind: "file", id: "a.txt" }, "t"), undefined);
   await refused(over(join(plain, "missing")).read({ kind: "branch", id: "main" }, "t"), "unreadable");
   await refused(over("relative/dir").read({ kind: "branch", id: "main" }, "t"), "unreadable");
   const here = repo();
@@ -183,6 +249,30 @@ test("card A05b follow-up: links are never followed: a symlink to a file, a dire
   assert.equal(await over(viaLink).read({ kind: "file", id: "real/f" }, "t"), sha("in"));
 });
 
+test("card A05b follow-up review: a directory on the way swapped for a link while the file is read never yields a file outside the checkout", async () => {
+  const outer = temp();
+  const d = join(outer, "ws");
+  mkdirSync(join(d, "sub"), { recursive: true });
+  mkdirSync(join(outer, "elsewhere"));
+  writeFileSync(join(d, "sub", "f"), "inside");
+  writeFileSync(join(outer, "elsewhere", "f"), "outside");
+  symlinkSync(join(outer, "elsewhere"), join(d, "link"));
+  // Another process swaps sub and the link back and forth as fast as it can.
+  const swapper = spawn(process.execPath, ["-e", `const fs=require("fs");const p=require("path");const d=${JSON.stringify(d)};const end=Date.now()+20000;for(;Date.now()<end;){try{fs.renameSync(p.join(d,"sub"),p.join(d,"sub.real"));fs.renameSync(p.join(d,"link"),p.join(d,"sub"));fs.renameSync(p.join(d,"sub"),p.join(d,"link"));fs.renameSync(p.join(d,"sub.real"),p.join(d,"sub"));}catch{}}`], { stdio: "ignore" });
+  try {
+    const { read } = over(d);
+    const outside = sha("outside");
+    let inside = 0;
+    const end = Date.now() + 4_000;
+    while (Date.now() < end) {
+      const got = await read({ kind: "file", id: "sub/f" }, "t").catch(() => "error");
+      assert.notEqual(got, outside, "the file outside was read through a swapped directory");
+      if (got === sha("inside")) inside++;
+    }
+    assert.ok(inside > 0, "the file inside is read when nothing is swapped at that moment");
+  } finally { swapper.kill("SIGKILL"); }
+});
+
 test("card A05b follow-up: a pipe, a directory and a too large file are refused, not read; a file at the cap is read; a huge sparse file is refused without being read", async () => {
   const d = temp();
   mkdirSync(join(d, "dir"));
@@ -241,6 +331,11 @@ test("card A05b follow-up: any other kind has no version and does not even look 
   const { read, located } = over(undefined);
   for (const kind of ["repository", "workspace", "service", "branch-x", "files", "Task", "run-script", ""]) assert.equal(await read({ kind, id: "main" }, "t"), undefined, kind);
   assert.equal(located(), 0);
+  // Names an object has of its own are not record kinds: nothing is looked up for them.
+  let looked = 0;
+  const records = createTargetVersions({ storage: { getAggregate: async () => { looked++; return undefined; } }, location: async () => undefined });
+  for (const kind of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf", "isPrototypeOf", "__defineGetter__"]) assert.equal(await records({ kind, id: "x" }, "t"), undefined, kind);
+  assert.equal(looked, 0);
 });
 
 for (const backend of backends) {
@@ -297,6 +392,7 @@ for (const backend of backends) {
     assert.equal(await read({ kind: "file", id: "a.txt" }, taskId), sha("one"));
     await refused(read({ kind: "file", id: "b.txt" }, taskId), "refused");
     const noRepo = (await c.task("t2", ann)).taskId;
-    await refused(read({ kind: "branch", id: "main" }, noRepo), "unreadable");
+    assert.equal(await read({ kind: "branch", id: "main" }, noRepo), undefined, "a task with no bound repository is bound by name, as before");
+    assert.equal(await read({ kind: "file", id: "a.txt" }, noRepo), undefined);
   });
 }
