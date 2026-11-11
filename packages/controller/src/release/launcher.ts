@@ -53,7 +53,7 @@ export interface LauncherNotice {
   readonly closedBy?: "acknowledged" | "confirmed";
   readonly settledAt?: string;
 }
-export interface LauncherLogEntry { readonly at: string; readonly kind: "expected" | "started" | "confirmed" | "failed" | "fell_back" | "blocked"; readonly release?: string; readonly to?: string; readonly reason?: string }
+export interface LauncherLogEntry { readonly at: string; readonly kind: "expected" | "started" | "confirmed" | "failed" | "fell_back" | "blocked" | "stopped"; readonly release?: string; readonly to?: string; readonly reason?: string }
 export interface LauncherState {
   readonly v: 1;
   /** The release the controller said may be run next, with the digest of its manifest. */
@@ -223,6 +223,35 @@ export class Launcher {
       // What was told before this start is over, and so is a late-start notice about this very start (it did confirm after all).
       await this.#write({ ...s, attempt: { ...a, confirmedAt: at }, known, failed: s.failed.filter((f) => f.id !== releaseId), notices: closing(s, (n) => n.at <= a.startedAt || n.release === releaseId, "confirmed", at) }, { at, kind: "confirmed", release: releaseId });
       return true;
+    });
+  }
+
+  /**
+   * The launcher program stopped the release it started before that start was confirmed (the launcher itself was told to stop: a service restart, a reboot), so the start was interrupted, not failed: the open attempt is
+   * closed and the next launch starts the release afresh with a full window. Without this, the next launch would find the start unconfirmed and quarantine the release, and a first release with nothing to fall back
+   * to (a slow first migration interrupted by a reboot) would block the installation for good. A start already confirmed or already judged failed is left as it is. Returns whether anything changed.
+   */
+  interrupted(releaseId: string): Promise<boolean> {
+    return this.#serial(async () => {
+      const s = await this.#load();
+      const a = s.attempt;
+      if (a === undefined || a.id !== releaseId || a.confirmedAt !== undefined || s.failed.some((f) => f.id === releaseId)) return false;
+      const { attempt: _a, ...rest } = s; void _a;
+      await this.#write(rest, { at: this.#now(), kind: "stopped", release: releaseId, reason: "the launcher was stopped before the start was confirmed; the next launch starts it afresh" });
+      return true;
+    });
+  }
+
+  /**
+   * The launcher program gave up on a release that kept ending soon after it started (a crash loop; the last known good is never quarantined, so restarting is all there was). The owner is told (a failed-start notice
+   * with no fall-back, so Urgent), at the next start that delivers notices, and the log says so. One open notice per release, as for any other finding.
+   */
+  noteCrashLoop(releaseId: string, reason: string): Promise<void> {
+    return this.#serial(async () => {
+      const s = await this.#load();
+      const at = this.#now();
+      const text = `it ended ${reason} and the launcher gave up restarting it`.slice(0, 200);
+      await this.#write({ ...s, notices: withNotice(s, { kind: "failed_start", release: releaseId, fallback: false, reason: text, at }) }, { at, kind: "failed", release: releaseId, reason: text });
     });
   }
 
