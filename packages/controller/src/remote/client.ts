@@ -230,6 +230,14 @@ export class RemoteAttempt implements ToolGateway {
     return await this.#post("accept", {}) as never;
   }
   async begin(request: ToolCallRequest): ReturnType<ToolGateway["begin"]> { await this.watchdog?.assertProductive(); return await this.#post("begin", { request: request as unknown as Json }) as never; }
+  /**
+   * An effect call the controller runs for this worker (card H12a): the call and what it wants done go over the wire, the controller judges and records the call, applies the effect through its own bridge for `kind` and
+   * answers with the result. The call ID makes a message sent again (after a lost answer) the same call. Nothing here runs the effect or holds a credential for it.
+   */
+  async effect(request: ToolCallRequest, effect: { readonly kind: string; readonly target: string; readonly input: { readonly [key: string]: Json } }): Promise<ToolResult> {
+    await this.watchdog?.assertProductive();
+    return await this.#post("effect", { request: request as unknown as Json, effect: effect as unknown as Json }) as never;
+  }
   async report(operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> { return await this.#post("report", { operationId, outcome: outcome as unknown as Json }) as never; }
   async usage(usage: TurnUsage): Promise<void> { await this.#post("usage", { usage: usage as unknown as Json }); }
   async heartbeat(): Promise<{ readonly until: string; readonly leaseMs?: number }> {
@@ -340,7 +348,8 @@ export class RemoteAttempt implements ToolGateway {
 
   /** The split form run for a local executor: the controller decides and records, this runs it, the controller records how it ended. */
   async call(request: ToolCallRequest, executor: ToolExecutor): Promise<ToolResult> {
-    if (executor.kind !== "local") throw new Error("a call that goes through the controller's effect ledger cannot be run from a remote worker");
+    // An effect goes through the controller's ledger and bridge; the worker names the kind, target and input and never holds the bridge (the executor's own `bridge` stays here, unused).
+    if (executor.kind === "effect") return await this.effect(request, { kind: executor.effectKind, target: executor.target, input: executor.input as { readonly [key: string]: Json } });
     const begun = await this.begin(request);
     if (!begun.run) return begun.result;
     const controller = new AbortController();

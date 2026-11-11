@@ -6,6 +6,7 @@ import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
+import type { EffectBridge } from "../domain/effects.js";
 import { derivedId } from "../domain/ids.js";
 import { mergeChanges } from "../domain/changes.js";
 import { commandId as checkCommandId, onlyKnown, text } from "../domain/model.js";
@@ -29,6 +30,8 @@ export const PLACEMENT_KIND = "remote-placement";
 export const STORE_KIND = "remote-store";
 export const RECONCILE_KIND = "remote-reconcile";
 
+/** The most a worker may send as the input of one controller-run effect call. */
+export const EFFECT_INPUT_BYTES = 64 * 1024;
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 const HOST = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -236,6 +239,11 @@ export interface RemoteDeps {
    * `streamStart`, `streamEvents` and `streamEnd`, each checked against the placement like every other message. Absent: a worker's streams are not recorded (its calls are answered `recorded: false`).
    */
   readonly streams?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number }) => ModelStreamTap;
+  /**
+   * The bridge for each effect kind (card H12a): the only code the controller runs for a remote worker's effect call. A worker names a kind; the controller looks it up here and never takes code, a target
+   * address or a credential from the worker. Absent or empty: every effect call from a remote worker is refused. The composed controller passes the dispatcher's own `bridges`.
+   */
+  readonly bridges?: Readonly<Record<string, EffectBridge>>;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
   readonly recordLaunch?: (record: { readonly attemptId: string; readonly agentId: string; readonly outcome: "started" | "refused"; readonly requested: JsonObject; readonly bestEffort: boolean; readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[]; readonly wallTimeMs: number; readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[]; readonly reason?: string }) => Promise<void>;
 }
@@ -1198,6 +1206,28 @@ export class RemoteWorkerService {
     const b = await this.#running(host, sessionId, attemptId, placement);
     this.#needsConfirmation(b, "any tool call");
     return (await this.#deps.dispatch.gateway(b.attemptId)).begin(request);
+  }
+
+  /**
+   * The controller-run form of an effect call (card H12a). The worker cannot hold the controller's ledger or a bridge, so it sends the call and what it wants done (`kind`, `target`, `input`); the controller judges the call
+   * exactly as it does a local one (placement, confirmation, generation fence, pauses, decisions, policy, approval), writes it on the S05 ledger and runs its own bridge for that kind. The call ID makes a repeated or delayed
+   * message the same call: it is answered from the record and never applied twice, and an effect that had started when the link was lost is settled from the ledger and the target, not by asking the worker again.
+   */
+  async effect(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, request: ToolCallRequest, effect: { readonly kind: unknown; readonly target: unknown; readonly input: unknown }): Promise<ToolResult> {
+    if (request === null || typeof request !== "object" || Array.isArray(request)) invalid("request", "must be a tool call request");
+    if (effect === null || typeof effect !== "object" || Array.isArray(effect)) invalid("effect", "must be an object");
+    onlyKnown(effect, ["kind", "target", "input"]);
+    const kind = typeof effect.kind === "string" && effect.kind.length >= 1 && effect.kind.length <= 100 ? effect.kind : invalid("effect.kind", "must be an effect kind of 1 to 100 characters");
+    const target = typeof effect.target === "string" && effect.target.length >= 1 && effect.target.length <= 500 ? effect.target : invalid("effect.target", "must be a target of 1 to 500 characters");
+    const input = effect.input !== null && typeof effect.input === "object" && !Array.isArray(effect.input) ? effect.input as JsonObject : invalid("effect.input", "must be an object");
+    if (Buffer.byteLength(JSON.stringify(input)) > EFFECT_INPUT_BYTES) invalid("effect.input", `must be at most ${EFFECT_INPUT_BYTES} bytes`);
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any tool call");
+    const bridges = this.#deps.bridges;
+    // Own properties only: a kind such as "constructor" is no bridge.
+    const bridge = bridges !== undefined && Object.hasOwn(bridges, kind) ? bridges[kind] : undefined;
+    if (bridge === undefined) throw new DomainError("invalid_command", `the controller has no bridge for effect kind ${kind}; nothing was recorded or done`, { field: "effect.kind" });
+    return (await this.#deps.dispatch.gateway(b.attemptId)).call(request, { kind: "effect", effectKind: kind, target, input, bridge });
   }
 
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {
