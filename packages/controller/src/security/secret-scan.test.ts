@@ -142,7 +142,7 @@ test("private keys: a header hidden by invisible or fullwidth characters, and a 
   // The first text has the BEGIN and is cut there; the second carries the rest.
   assert.equal(redactText("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN"), "[redacted]");
   const second = `${body.slice(1).join("\n")}\n-----END PRIVATE KEY-----\nthen run the tests`;
-  assert.equal(redactText(second), "[redacted]\n[redacted]\n[redacted]\nthen run the tests");
+  assert.equal(redactText(second), "[redacted]\n[redacted]\n-----END PRIVATE KEY-----\nthen run the tests", "the body lines go; the END line (no secret) stays for readers that look for it");
   assert.deepEqual(findCredentialShapes(second), ["private key block"]);
   assert.equal(cleanThinking(second).text, "[redacted]\nthen run the tests", "the thinking store still hides everything up to an orphan END");
   const split = cleanThinking(`${body[1]}\n-----END PRIV\u200bATE KEY-----\nthen`);

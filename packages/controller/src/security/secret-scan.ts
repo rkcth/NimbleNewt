@@ -8,7 +8,7 @@
  * Found in the view:
  * - every shape of `CREDENTIAL_PATTERNS`; the key prefixes (`sk-`, `ghp_`, `github_pat_`, `AKIA`, `xox`, `npm_`) in any letter case;
  * - the prefixed tokens again in a second view where a line break between two token characters is removed (a key wrapped or split over lines);
- * - a private key's END line with no BEGIN before it, together with the base64 lines just above it (the rest of a key split over two blocks);
+ * - the base64 lines just above a private key's END line with no BEGIN before it (the rest of a key split over two blocks; the END line itself stays);
  * - a long high-entropy hex or base64 run with no known prefix (`highEntropy`), with a conservative threshold and exemptions for the digests and IDs the product shows.
  * A match that covers a line break is redacted line by line, so redaction never joins two lines (cutNote counts lines).
  */
@@ -81,8 +81,11 @@ export const JOINABLE = new Set(["NimbleNewt token", "API key (sk-)", "GitHub to
 let folded: { name: string; pattern: RegExp; joinable: boolean; url: boolean }[] | undefined;
 /** Compiled on first use: `credential-patterns.ts` imports this module, so the list is not read while the modules load. */
 const FOLDED = (): { name: string; pattern: RegExp; joinable: boolean; url: boolean }[] => (folded ??= CREDENTIAL_PATTERNS.map(({ name, pattern }) => ({ name, pattern: new RegExp(pattern.source, CASE_FREE.has(name) && !pattern.flags.includes("i") ? `${pattern.flags}i` : pattern.flags), joinable: JOINABLE.has(name), url: name === "URL with embedded password" })));
-/** A private key's END line with no BEGIN in this text, with the base64 lines right above it. */
-const ORPHAN_END = /(?:^[ \t]*[A-Za-z0-9+/=]{4,}[ \t]*\r?\n)*^[ \t]*-----END [A-Z ]*PRIVATE KEY-----/gm;
+/**
+ * The base64 lines right above a private key's END line that has no BEGIN in this text (the rest of a key split over two texts). The END line itself is not secret and stays: readers such as the
+ * job output store look for it to know a key block that began in an earlier piece has ended.
+ */
+const ORPHAN_END = /(?:^[ \t]*[A-Za-z0-9+/=]{4,}[ \t]*\r?\n)+(?=[ \t]*-----END [A-Z ]*PRIVATE KEY-----)/gm;
 
 /** A run of hex or base64 characters, not part of a longer one and not a sealed cursor (`~` + base64url). */
 const RUN = /(?<![A-Za-z0-9+/_=~-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])/g;
