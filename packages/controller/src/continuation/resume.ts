@@ -18,7 +18,11 @@ export type ResumePhase = "collecting" | "verifying" | "reviewing" | "ready" | "
 const TERMINAL: readonly ResumePhase[] = ["done", "cancelled"];
 const LIVE: readonly ResumePhase[] = ["collecting", "verifying", "reviewing", "ready", "blocked", "executing"];
 
-export interface ResumeVerdict { readonly relevant: boolean; readonly rationale: string; /** The status and detail the verdict was given for: a verdict is reused only while the change is still this one. */ readonly digest: string }
+export interface ResumeVerdict {
+  readonly relevant: boolean; readonly rationale: string; /** The status and detail the verdict was given for: a verdict is reused only while the change is still this one. */ readonly digest: string;
+  /** Set when no reviewer judged this change (`ReviewNotRun`, card L04d wiring): why. Kept with the verdict, so a check started over keeps saying it of this change whatever later rounds did. */
+  readonly notReviewed?: string;
+}
 export interface DeltaItem { readonly id: string; readonly kind: string; readonly key: string; readonly status: string; readonly detail: string }
 
 /** What a checked resume reads from the rest of the system. Every call must be repeatable. */
@@ -388,7 +392,7 @@ export class ResumeCheckService {
             // No reviewer could be asked: recorded as not run, never as reviewed, and every open change is the owner's to accept (the rule from before a reviewer existed).
             const reason = short(error.reason.trim() === "" ? "no reviewer could be asked" : error.reason);
             const held: Record<string, ResumeVerdict> = { ...b.verdicts };
-            for (const item of open) held[item.id] = { relevant: true, rationale: short(`not reviewed: ${reason}; so the owner decides whether it matters`), digest: digestOf(item) };
+            for (const item of open) held[item.id] = { relevant: true, rationale: short(`not reviewed: ${reason}; so the owner decides whether it matters`), digest: digestOf(item), notReviewed: reason };
             await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts: held, review: { state: "not-run", reason, at: this.#runner.now() }, history: this.#push(x, "ready", by.id, `${open.length} change(s) not reviewed (${reason}); the owner decides`) }), ["reviewing"]);
             continue;
           }
@@ -456,9 +460,9 @@ export class ResumeCheckService {
    * The checks that wait for the owner (card L04c), with the task's title: each task's current check when it is ready, holds changes judged to matter and (for a dispatcher's check) its attempt is still the task's active one. Owner only (anyone else: none). Read through the tasks' check pointers,
    * at most `limit` found and 2000 pointers looked at; `truncated` says there may be more.
    */
-  async held(by: Principal, limit: number): Promise<{ items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[]; notReviewed?: string }[]; truncated: boolean }> {
+  async held(by: Principal, limit: number): Promise<{ items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[]; notReviewed?: string; notReviewedCount?: number }[]; truncated: boolean }> {
     if (by.kind !== "owner") return { items: [], truncated: false };
-    const items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[]; notReviewed?: string }[] = [];
+    const items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[]; notReviewed?: string; notReviewedCount?: number }[] = [];
     let seen = 0;
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list(ACTIVE, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
@@ -471,7 +475,7 @@ export class ResumeCheckService {
         if (found === undefined || b === undefined || b.phase !== "ready") continue;
         const changes = relevantChanges(b);
         // The owner is shown the task's title, never only its ID (an unreadable task reads as its ID).
-        if (changes.length > 0 && await this.#forCurrentAttempt(b)) items.push({ checkId: found.id, taskId: b.taskId, title: ((await this.#runner.get("task", b.taskId))?.body as unknown as TaskBody | undefined)?.title ?? b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes, ...(b.review?.state === "not-run" ? { notReviewed: b.review.reason ?? "no reviewer could be asked" } : {}) });
+        if (changes.length > 0 && await this.#forCurrentAttempt(b)) items.push({ checkId: found.id, taskId: b.taskId, title: ((await this.#runner.get("task", b.taskId))?.body as unknown as TaskBody | undefined)?.title ?? b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes, ...notReviewedOf(b, changes) });
       }
       if (page.length < 200) return { items, truncated: false };
     }
@@ -615,6 +619,11 @@ export class ResumeCheckService {
 }
 
 const digestOf = (item: DeltaItem): string => sha(`${item.status}\0${item.detail}`);
+/** Which of the held changes no reviewer judged (each verdict says so itself; a check started over keeps verdicts from earlier rounds), with the first one's reason. Empty when every one was judged. */
+const notReviewedOf = (b: Pick<ResumeCheckBody, "verdicts">, changes: readonly DeltaItem[]): { notReviewed?: string; notReviewedCount?: number } => {
+  const reasons = changes.map((c) => b.verdicts[c.id]?.notReviewed).filter((r): r is string => r !== undefined);
+  return reasons.length === 0 ? {} : { notReviewed: reasons[0]!, notReviewedCount: reasons.length };
+};
 /** The changes of a check that were judged to matter to the work: while there are any, only the owner commits it. */
 export const relevantChanges = (b: Pick<ResumeCheckBody, "delta" | "verdicts">): DeltaItem[] => (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id]?.relevant === true);
 

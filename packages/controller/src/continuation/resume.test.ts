@@ -144,7 +144,7 @@ for (const backend of backends) {
     assert.match(s.verdicts["dep-2"]?.rationale ?? "", /^not reviewed: no resume reviewer route is set; so the owner decides/);
     assert.deepEqual(f.blockers, [], "no blocker is opened");
     const held = await svc.held(owner, 10);
-    assert.deepEqual(held.items.map((h) => [h.taskId, h.notReviewed, h.changes.map((c) => c.id)]), [[task, "no resume reviewer route is set", ["dep-2"]]]);
+    assert.deepEqual(held.items.map((h) => [h.taskId, h.notReviewed, h.notReviewedCount, h.changes.map((c) => c.id)]), [[task, "no resume reviewer route is set", 1, ["dep-2"]]]);
     assert.match(s.history.at(-1)?.note ?? "", /not reviewed \(no resume reviewer route is set\); the owner decides/);
     // Only the owner lets it go on.
     assert.equal((await svc.approve(owner, { commandId: cid("a"), taskId: task })).phase, "done");
@@ -158,6 +158,32 @@ for (const backend of backends) {
     const ok = await svc.retry(owner, { checkId: b.id });
     assert.deepEqual([ok.phase, ok.review?.state, ok.review?.reason], ["ready", "ran", undefined]);
     assert.equal((await svc.held(owner, 10)).items[0]?.notReviewed, undefined, "a real verdict is not said to be unreviewed");
+  });
+
+  suite("what is said not reviewed is per change, not the last review's: a verdict kept from a round the reviewer could not run stays unreviewed after a later round that ran, and the reverse (card L04d wiring review)", async ({ f, svc, task, owner }) => {
+    const real = f.ports.review;
+    f.ports.review = async () => { throw new ReviewNotRun("the model was down"); };
+    const s = await svc.start(owner, { commandId: cid("s"), taskId: task, model, after: "restart" });
+    assert.equal(s.review?.state, "not-run");
+    // dep-1 changes too; the owner's commit starts the check over, dep-2's not-run verdict is kept (its change is the same), dep-1 goes to a reviewer that answers.
+    f.statuses["dep-1"] = "changed";
+    f.ports.review = real;
+    const again = await svc.commit(owner, { commandId: cid("c"), checkId: s.id });
+    assert.deepEqual([again.phase, again.round, again.review?.state], ["ready", 1, "ran"]);
+    const held = (await svc.held(owner, 10)).items[0]!;
+    assert.deepEqual([held.changes.map((c) => c.id).sort(), held.notReviewed, held.notReviewedCount], [["dep-1", "dep-2"], "the model was down", 1], "dep-2 was never judged, although the last review ran");
+    await svc.cancel(owner, { checkId: s.id });
+    // The reverse: a real verdict kept while the next round's review cannot run is still a judgement.
+    f.statuses = { "dep-1": "unchanged", "dep-2": "changed" };
+    const t = await svc.start(owner, { commandId: cid("s"), taskId: task, model, after: "restart" });
+    assert.equal(t.review?.state, "ran");
+    f.statuses["dep-1"] = "changed";
+    f.ports.review = async () => { throw new ReviewNotRun("no resume reviewer route is set"); };
+    const t2 = await svc.commit(owner, { commandId: cid("c"), checkId: t.id });
+    assert.deepEqual([t2.phase, t2.review?.state], ["ready", "not-run"]);
+    const h2 = (await svc.held(owner, 10)).items[0]!;
+    assert.deepEqual([h2.notReviewed, h2.notReviewedCount], ["no resume reviewer route is set", 1], "dep-2 was judged by a reviewer; only dep-1 was not");
+    f.ports.review = real;
   });
 
   suite("with nothing recorded nothing is called unchanged; a crash while executing is finished once", async ({ f, svc, reopen, task, owner }) => {

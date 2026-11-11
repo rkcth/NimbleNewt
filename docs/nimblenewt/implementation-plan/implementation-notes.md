@@ -8394,5 +8394,23 @@ ASSUMPTION: a not-run verdict is reused like any other while the change stays th
 **Not done (L04d stays planned)**
 - Not tried against a real model (no model calls in this work; the reviewer is an offline fixture).
 - The shipped reviewer uses W10's bounds: a user prompt cut at 24,000 characters and a reply over 20,000 characters read as no verdict. A 40-change piece with long rationales could hit the reply bound; it then fails closed (not run, the owner decides) rather than passing. The per-call size is not tuned for this client.
-- The dispatcher's own notice text for a held check (`dispatch/dispatcher.ts` "holds N change(s) judged to matter") does not yet say "not reviewed"; the needs-you line and the check record do.
+- (Done in the review below: the dispatcher's own notice and wait reason now say "not reviewed" too.)
 - Everything on the earlier L04d lists is unchanged: a real Pi process through capture and resume, the compaction lineage in production, pending effects and scratch records in host captures, the per-tick prerequisite cache, `search`/`external`/`mcp-resource` observation, the probe reading the task's own worker checkout, a reviewer that reads diffs, a state-API operation for the daily cap, and the second review's follow-ups (the check using the latest complete continuation rather than the attempt's `resumeFrom`, identity of an incomplete earlier continuation, pruning).
+
+### L04d wiring, clean-context review (Claude agent, 2026-11-11)
+
+Merged origin/main (PostgreSQL hardening) first; no conflicts. Hunted fail-open, disclosure, shared-slot and state-machine faults. No path was found where a missing, failed, garbled, over-long, capped or disabled-route reviewer yields `ran` or lets an agent commit: every such case reaches `ReviewNotRun` (relevant, owner decides). A verdict needs a JSON boolean for the exact id, so prose ("doesn't matter"), two objects, a lookalike token, `__proto__` or a 20,000+ character reply is no verdict. Paths, notes, title and next step are redacted, cut to 200 and quoted as JSON with invisible and bidi characters escaped; no content is sent.
+
+**Fixed**
+- **Not reviewed is now per change (`continuation/resume.ts`, `status/status.ts`).** The needs-you line took "not reviewed" from the check's last review, but verdicts carry over when a check starts over. Round 1 not run (change A), round 2 ran (change B): A was said to be "judged to matter". The reverse: A judged, B not run, both said not reviewed. Each not-run verdict now carries `notReviewed: <why>`. `held()` gives `notReviewed` and `notReviewedCount` from the verdicts. The line says "judged to matter", "not reviewed by a second agent (why)", or "need you: N judged to matter and M not reviewed (why)".
+- **The dispatcher's notice and wait reason (`dispatch/dispatcher.ts`)** say "had no second-agent review" or "need you (M not reviewed)" instead of "matter to it" for unjudged changes. Within the 200-character notice, the room for names is never negative.
+- **The prompt always fits the shared client (`continuation/resume-reviewer.ts`).** Pieces were 40 changes with no size check. Quoting (backslashes, `\uXXXX` escapes) could push a prompt past the 24,000 characters `BoundedReviewerModel` keeps. Its cut dropped the closing id list and could leave a change line half shown with its id visible. Pieces are now also made smaller to fit `RESUME_REVIEW_LIMITS.prompt` (24,000).
+
+**Tests:** `resume.test.ts` (per-change not reviewed, both directions, 4 backends); `status.test.ts` (mixed and all-unreviewed wording); `dispatch/resume-hold.test.ts` (the notice and wait reason for a not-run check, 4 backends); `resume-reviewer.test.ts` (40 heavily escaped changes: every prompt at most 24,000, more than one piece, every shown id in the closing list). Own mutations, each failed its test: per-verdict marker dropped; mixed wording treated as all unreviewed; dispatcher unreviewed count forced to 0; the size check removed. 4 of 4 killed.
+
+**Seen, not changed**
+- The shipped reviewer runs inside the dispatcher's tick (`#resumeCheck` awaits `resumes.start`), as an explicit `resumeReview` did before. With a route set, a resuming attempt holds the tick for at most one slot wait (45 s) plus the host client's bound (60 s) per piece, once per check.
+- Two `advance` calls on the same `reviewing` check at once would both call the model and both count spend; only one verdict is written. Not reachable from the single dispatcher loop.
+- A file that changes again after the review keeps the same status and note ("the content differs"), so neither the verdict nor the commit's staleness check sees it. This predates L04d (L04b's digest). The reviewer never sees content, so its verdict would not differ.
+- The owner naming a route allows cloud data (`data: "cloud-allowed"`, paid allowed), the same consent rule as `report.reviewerRoute` (W10). There is no per-task local-only flag to respect.
+
