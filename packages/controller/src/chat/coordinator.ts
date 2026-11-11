@@ -180,7 +180,8 @@ export class CoordinatorService {
       build: async () => {
         const current = await this.#runner.existing("coordinator", COORDINATOR_ID, command.expectedRevision);
         const body = current.body as unknown as CoordinatorBody;
-        if (body.state === "stopped" && command.to === "paused") throw new DomainError("invalid_command", "a stopped coordinator can only be started", { field: "to" });
+        // A hosted coordinator was checked against its agent's gates before they were touched; the order recorded last is not what decides (the agent may have been started through its own controls since).
+        if (body.hosted === undefined && body.state === "stopped" && command.to === "paused") throw new DomainError("invalid_command", "a stopped coordinator can only be started", { field: "to" });
         const ref: AggregateRef = { kind: "coordinator", id: COORDINATOR_ID };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: asJson({ ...body, state: command.to }) }], detail: { from: body.state, to: command.to } };
       },
@@ -207,7 +208,11 @@ export class CoordinatorService {
    * Answers from the project's records. The model sees only the records the owner may read and must cite them; an answer that cites nothing it was shown is not an answer. When records do not
    * answer and a task is named, an inquiry to the owner is opened (once per command ID); with no task there is nowhere to ask, and the owner is told the records are not enough.
    */
-  async answer(owner: Principal, command: { commandId: string; projectId: string; question: string; taskId?: string; to?: string }): Promise<Answer> {
+  answer(owner: Principal, command: { commandId: string; projectId: string; question: string; taskId?: string; to?: string }): Promise<Answer> {
+    return this.#busy(() => this.#answer(owner, command));
+  }
+
+  async #answer(owner: Principal, command: { commandId: string; projectId: string; question: string; taskId?: string; to?: string }): Promise<Answer> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "projectId", "question", "taskId", "to"]);
     if (command.to !== undefined && (typeof command.to !== "string" || !/^agent:[a-z0-9][a-z0-9-]{0,39}$/.test(command.to))) invalid("to", "must be an agent principal ID");
@@ -236,7 +241,11 @@ export class CoordinatorService {
   }
 
   /** Breaks an outcome into tasks with dependencies, saved as a proposal. Nothing exists until the owner applies it. */
-  async decompose(owner: Principal, command: { commandId: string; projectId: string; outcome: string }): Promise<Decomposition | { kind: "unavailable"; reason: string }> {
+  decompose(owner: Principal, command: { commandId: string; projectId: string; outcome: string }): Promise<Decomposition | { kind: "unavailable"; reason: string }> {
+    return this.#busy(() => this.#decompose(owner, command));
+  }
+
+  async #decompose(owner: Principal, command: { commandId: string; projectId: string; outcome: string }): Promise<Decomposition | { kind: "unavailable"; reason: string }> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "projectId", "outcome"]);
     const projectId = checkProjectId(command.projectId);
@@ -282,7 +291,11 @@ export class CoordinatorService {
    * `assignment.manage` for the project makes the assignments itself under its own credential, each with the reason recorded; without the grant they are saved as a proposal for the owner.
    * Only assignments are made without the owner's apply: a plan with anything else in it (task creation, dependencies) waits for the owner.
    */
-  async assign(owner: Principal, command: { commandId: string; projectId: string }): Promise<{ kind: "unavailable"; reason: string } | { kind: "made"; assigned: { taskId: string; owner: string; reason: string }[]; skipped: string[] } | { kind: "proposed"; proposalId: string; skipped: string[] }> {
+  assign(owner: Principal, command: { commandId: string; projectId: string }): Promise<{ kind: "unavailable"; reason: string } | { kind: "made"; assigned: { taskId: string; owner: string; reason: string }[]; skipped: string[] } | { kind: "proposed"; proposalId: string; skipped: string[] }> {
+    return this.#busy(() => this.#assign(owner, command));
+  }
+
+  async #assign(owner: Principal, command: { commandId: string; projectId: string }): Promise<{ kind: "unavailable"; reason: string } | { kind: "made"; assigned: { taskId: string; owner: string; reason: string }[]; skipped: string[] } | { kind: "proposed"; proposalId: string; skipped: string[] }> {
     this.#requireOwner(owner);
     onlyKnown(command, ["commandId", "projectId"]);
     const projectId = checkProjectId(command.projectId);
@@ -353,7 +366,11 @@ export class CoordinatorService {
     return body.state === "running" ? { kind: "ok", body, principal } : { kind: "unavailable", reason: `the coordinator is ${body.state}` };
   }
 
-  /** Calls in flight, so a pause is reported as reached only when none is (a pause never cuts a model call that has begun: it ends, and its answer is still the owner's to read). */
+  /**
+   * Operations in flight (an answer, a draft, an assignment round, from the availability check to its last write), so a pause is reported as reached only when none is: a pause never cuts an operation that has
+   * begun (its model call ends and its answer is still the owner's to read, its assignments are made), and the safe boundary is claimed only after it (review: counting only the model call let a pause be reported
+   * between the availability check and the call, or before an assignment round made its assignments).
+   */
   #inflight = 0;
   #reportWhenIdle: { readonly owner: Principal; readonly agentId: string } | undefined;
 
@@ -367,13 +384,15 @@ export class CoordinatorService {
   async #ask(body: CoordinatorBody, request: CoordinatorRequest): Promise<unknown> {
     // A routing table that cannot be read leaves no route to try: the coordinator is unavailable, never an error for the caller.
     const routes = this.#deps.routes === undefined ? body.routes : await (async () => this.#deps.routes!())().then((r) => r, () => [] as readonly string[]);
+    for (const route of routes.slice(0, MAX_ROUTES)) {
+      try { return await this.#deps.model.respond(route, request); } catch { /* try the next route */ }
+    }
+    return undefined;
+  }
+
+  async #busy<T>(work: () => Promise<T>): Promise<T> {
     this.#inflight++;
-    try {
-      for (const route of routes.slice(0, MAX_ROUTES)) {
-        try { return await this.#deps.model.respond(route, request); } catch { /* try the next route */ }
-      }
-      return undefined;
-    } finally {
+    try { return await work(); } finally {
       this.#inflight--;
       const waiting = this.#reportWhenIdle;
       if (this.#inflight === 0 && waiting !== undefined) await this.#reportIfIdle(waiting.owner, waiting.agentId);

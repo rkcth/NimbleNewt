@@ -228,3 +228,55 @@ test("hosting the coordinator is checked and safe to repeat: no such or retired 
     assert.ok(back.revision > paused.revision);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("review: a hosted coordinator stopped by order but started again through its agent's own resume can be paused by order (the gate decides, not the order recorded last), and a pause is reported reached only after a whole assignment round, not merely its model call (card U03c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-host-"));
+  let held: string | undefined;
+  let blockToken = false;
+  let release: (() => void) | undefined;
+  let entered: (() => void) | undefined;
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [],
+    chat: {
+      interpreter: new ScriptedInterpreter({}),
+      coordinator: {
+        // The coordinator's credential is read again after the model call of an assignment round, before its assignments are made: holding that read holds the round past its model call.
+        token: async () => { if (blockToken) { blockToken = false; await new Promise<void>((resolve) => { release = resolve; entered?.(); }); } return held; },
+        routes: () => ["llama/local"],
+        model: { respond: async (_route, request) => { if (request.kind === "assign") { blockToken = true; return { assignments: [] }; } return {}; } },
+      },
+    },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const gateOf = async (id: string) => (await call("lifecycle.status", { scope: { kind: "agent", id } })).result.item;
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden", repositories: [{ id: "main", location: join(d, "garden") }] })).id;
+    const made = await c.services.agents.create(rob, { commandId: "ag-ada", friendlyName: "Ada" });
+    held = (await c.services.principals.issueCredential(rob, `agent:${made.id}`)).token;
+    const cfg = await c.coordinator!.configure(rob, { commandId: "c1", principalId: `agent:${made.id}`, routes: ["llama/local"] });
+    const run1 = await c.coordinator!.setState(rob, { commandId: "s1", expectedRevision: cfg.revision, to: "running" });
+    const stop = await c.coordinator!.setState(rob, { commandId: "s2", expectedRevision: run1.revision, to: "stopped" });
+    assert.equal((await c.coordinator!.get(rob))!.state, "stopped");
+    // Started again through the agent controls, as any agent is: the coordinator runs, though the order recorded last says stopped.
+    assert.equal((await call("lifecycle.resume", { scope: { kind: "agent", id: made.id }, reason: "back" }, "re1")).ok, true);
+    assert.equal((await c.coordinator!.get(rob))!.state, "running");
+    // The owner's pause is then an ordinary pause: applied, not refused after the gate was already paused.
+    await c.coordinator!.setState(rob, { commandId: "s3", expectedRevision: stop.revision, to: "paused" });
+    assert.equal((await gateOf(made.id)).intent, "pause");
+    assert.equal((await c.coordinator!.get(rob))!.state, "paused");
+
+    // A pause that lands after the model call of an assignment round, before the round has made its assignments: held at once, reported reached only once the round ends.
+    const now = (await c.coordinator!.get(rob))!;
+    const run2 = await c.coordinator!.setState(rob, { commandId: "s4", expectedRevision: now.revision, to: "running" });
+    const inRound = new Promise<void>((resolve) => { entered = resolve; });
+    const round = c.coordinator!.assign(rob, { commandId: "a1", projectId: project });
+    await inRound;
+    await c.coordinator!.setState(rob, { commandId: "s5", expectedRevision: run2.revision, to: "paused" });
+    assert.equal((await gateOf(made.id)).observed.state, "pausing", "the round has not ended: no safe boundary yet");
+    release!();
+    assert.equal((await round).kind, "made");
+    assert.equal((await gateOf(made.id)).observed.state, "paused");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

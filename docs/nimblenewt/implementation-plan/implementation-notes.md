@@ -6742,6 +6742,14 @@ Code: `chat/coordinator-host.ts` (new: `AgentLifecyclePort`, `agentLifecycle`), 
 
 **ASSUMPTION:** "host" is the controller itself (`hosted.host = "controller"`): the coordinator makes only controller-side model calls, so it needs no worker host or sandbox. Running it on a remote host with its own tools is not built.
 **ASSUMPTION:** an agent record with the standing `agent.manage` right (a supervisor, a manager) can pause, stop and resume the coordinator like any agent: that is what "the same controls as other agents" means, and it widens nobody's authority.
+
+**Review fixes (clean-context review, 2026-11-11).**
+- A pause was reported reached (`observe paused`, boundary finished) while the coordinator could still act: only the model call counted as in flight, so a pause landing between the availability check and the call was reported at once and the call then started, and a pause landing after an assignment round's model call was reported before the round made its assignments under the coordinator's credential. Now the whole operation (`answer`, `decompose`, `assign`, from the availability check to the last write) counts as in flight.
+- A hosted coordinator stopped by order and then started again through its agent's own resume (the same controls as any agent) could not be paused by order: the gate was paused first and the record then refused the order as "a stopped coordinator can only be started", a refusal with the side effect already made. For a hosted coordinator that check is made against the gates (before they are touched) and no longer against the order recorded last.
+- The coordinator's principal is again `principals.authenticate` alone: it already returns the grant records and restrictions as of the call, so a revoked right stops counting at the next use with no change; the extra `grants.effective` wrapper listed every grant record twice and dropped the principal's `credentialId`. The behaviour of a coordinator that is not hosted is therefore unchanged by U03c.
+- Test: `api/start-coordinator-host.test.ts` third test (both cases fail on the code before the fix). Mutations tried: dropping the stale-revision check before the gates, and pausing on every set-up, are each caught by the second test.
+- Left as it is: `coordinator.get` shows a hosted coordinator whose agent controls cannot be read as `stopped` (without `lifecycle`); `#usable` gives the precise reason. A pause made through the agent controls directly (not by the coordinator order) is not reported reached by the coordinator; it reads as `paused` all the same.
+
 **ASSUMPTION:** the fallback list stays the coordinator's `routes` (and the routing table through `chatRoutes`); the agent's `defaultProfile` is not read for it yet.
 
 **Not done (follow-up).**

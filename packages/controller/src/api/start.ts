@@ -1002,8 +1002,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         coordinator = CoordinatorService.withEpoch(storage, epoch, {
           chat, retrieval, inquiries, projects, assignments, api, token: c.token, model: c.model, ...(c.routes === undefined ? {} : { routes: c.routes }),
           agents: async () => { const who = await principals.authenticate((await c.token())!); return (await agents.list(who, { state: "active", limit: 100 })).items.map((a) => ({ id: a.id, name: a.friendlyName, roles: a.roles })); },
-          // The coordinator acts with the rights the owner has granted its principal now (its own record and the grant records), so a revoked right stops counting at once, as for any agent.
-          principal: async () => { const t = await c.token(); if (t === undefined) throw new DomainError("unavailable", "the coordinator has no credential"); const p = await principals.authenticate(t); return (await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal; },
+          // Authentication already returns the principal with its grant records and restrictions as of now, so a revoked right stops counting at the coordinator's next use, as for any agent.
+          principal: async () => { const t = await c.token(); if (t === undefined) throw new DomainError("unavailable", "the coordinator has no credential"); return principals.authenticate(t); },
           // A coordinator that is an agent record is paused, stopped and started through the same pause gates and Stop as any agent (card U03c).
           lifecycle: agentLifecycle({ agents, pauses, stops }),
         });
