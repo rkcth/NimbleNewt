@@ -10,7 +10,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 
-import { Launcher, LAUNCHER_FILE, ReleaseActivationService, ReleaseService, SimulatedCrash, parseCompat, type ActivationOptions } from "./index.js";
+import { Launcher, LAUNCHER_FILE, PointerSwitcher, ReleaseActivationService, ReleaseService, SimulatedCrash, SymlinkSwitcher, parseCompat, type ActivationOptions } from "./index.js";
 
 after(stopServer);
 const options = { clock: () => "2026-10-31T12:00:00.000Z", pause: async () => undefined };
@@ -82,7 +82,7 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
       const bad = await c.candidate({ "nn.js": `bad ${text}`, "compat.json": text });
       await refuses("invalid_command", () => act.stage(c.owner, { commandId: cid("st"), candidateId: bad }), /compat\.json/);
     }
-    for (const name of ["launcher", "launcher/run.js", "updater.js", "Updater/x", "LAUNCHER.exe"]) {
+    for (const name of ["launcher", "launcher/run.js", "updater.js", "Updater/x", "LAUNCHER.exe", "launcher.tar.gz", "updater..", "Launcher.d.ts"]) {
       const id = await c.candidate({ [name]: "replacement", "compat.json": compat(1) });
       await refuses("invalid_command", () => act.stage(c.owner, { commandId: cid("st"), candidateId: id }), /launcher and the updater/);
     }
@@ -143,6 +143,17 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
     assert.equal((await right.launcher.prepare()).action, "run");
     assert.equal((await c.make({ compat: workers(1), runningRelease: b.id }).confirmStartup()).confirmed, true);
     assert.equal((await right.status(c.owner)).lastKnownGood?.id, b.id);
+    // Two more switches without a confirmed start: b is neither current nor previous any more, only the last known good, and still cannot be removed or pruned.
+    const d = await staged(c, right, "d");
+    const e = await staged(c, right, "e");
+    await activate(c, right, d);
+    await activate(c, right, e);
+    st = await right.status(c.owner);
+    assert.deepEqual([st.current?.id, st.previous?.id, st.lastKnownGood?.id], [e.id, d.id, b.id]);
+    await refuses("invalid_transition", () => right.remove(c.owner, { commandId: cid("rm"), candidateId: b.id }), /cannot be removed/);
+    await right.setSettings(c.owner, { commandId: cid("set"), keepStaged: 1 });
+    await staged(c, right, "f");
+    assert.ok(existsSync(join(c.root, "releases", b.id)), "pruning spares the last known good");
   });
 
   suite("a release that fails to start is quarantined and the launcher falls back to the last known good; the record catches up on the next start and the failed release cannot be activated again", async (c) => {
@@ -255,6 +266,50 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
     assert.equal(sw, b.id);
     assert.equal(run2.action, "run", "the launcher falls back to the last known good rather than run an unannounced release");
     assert.equal((run2 as { releaseId: string }).releaseId, b.id);
+  });
+
+  suite("a switch interrupted between the announcement and the pointer write leaves the old release runnable even with no last known good; the last known good is never quarantined for files that do not verify; a crash right after a fall-back moved the pointer still leaves the failed release quarantined", async (c) => {
+    const act = c.make({ compat: workers(1) });
+    const a = await staged(c, act, "a");
+    const b = await staged(c, act, "b");
+    const d = await staged(c, act, "d");
+    await activate(c, act, a);
+    // a was never started by the launcher, so nothing is known good yet. The switch to b dies after b was announced, before the pointer moved.
+    await assert.rejects(() => activate(c, c.make({ compat: workers(1), hook: (p) => { if (p === "afterAnnounce") throw new SimulatedCrash(p); } }), b), SimulatedCrash);
+    assert.equal(pointer(c.root), a.id);
+    const first = await act.launcher.prepare();
+    assert.deepEqual([first.action, (first as { releaseId?: string }).releaseId], ["run", a.id], "the release the pointer still names was announced before; it is run, not refused as unannounced");
+    const back = c.make({ compat: workers(1), runningRelease: a.id });
+    assert.equal((await back.recover()).resolved, "aborted");
+    assert.deepEqual(await back.confirmStartup(), { confirmed: true });
+    // The last known good's files stop verifying (here: changed; it could be a passing read error): it is not run, but not quarantined either, and it runs again once its files are right.
+    const file = join(c.root, "releases", a.id, "nn.js");
+    unlockAll(join(c.root, "releases", a.id));
+    chmodSync(file, 0o644);
+    writeFileSync(file, "EVIL");
+    const blocked = await act.launcher.prepare();
+    assert.equal(blocked.action, "blocked");
+    assert.match((blocked as { reason: string }).reason, /last known good itself/);
+    writeFileSync(file, "release a");
+    const again = await act.launcher.prepare();
+    assert.deepEqual([again.action, (again as { releaseId?: string }).releaseId], ["run", a.id], "a restored last known good runs again");
+    assert.deepEqual((await act.launcher.read()).failed, []);
+    // d is activated and fails to start; the launcher moves the pointer back to a and dies before it records anything more.
+    await activate(c, back, d);
+    assert.equal((await act.launcher.prepare()).action, "run");
+    const real = switcher === "symlink" ? new SymlinkSwitcher(c.root) : new PointerSwitcher(c.root);
+    const state = join(c.root, LAUNCHER_FILE);
+    let saved = "";
+    const dying = new Launcher({ root: c.root, workers: { min: 1, max: 1 }, switcher: { read: () => real.read(), clear: () => real.clear(), write: async (id) => { await real.write(id); saved = readFileSync(state, "utf8"); rmSync(state); mkdirSync(join(state, "x"), { recursive: true }); } } });
+    await assert.rejects(() => dying.prepare());
+    rmSync(state, { recursive: true }); writeFileSync(state, saved);
+    assert.equal(pointer(c.root), a.id);
+    assert.deepEqual((await act.launcher.read()).failed.map((f) => f.id), [d.id], "the quarantine was written before the pointer moved");
+    const next = await act.launcher.prepare();
+    assert.deepEqual([next.action, (next as { releaseId?: string }).releaseId], ["run", a.id]);
+    const later = c.make({ compat: workers(1), runningRelease: a.id });
+    assert.equal((await later.recover()).resolved, "fell_back", "the record catches up");
+    await refuses("invalid_transition", () => activate(c, later, d), /failed to start on this installation/);
   });
 
   suite("the owner confirms the current release by hand: verified first, only the owner, only the current release, with the revision guarded", async (c) => {

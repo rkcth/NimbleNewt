@@ -35,6 +35,11 @@ export interface LauncherState {
   readonly v: 1;
   /** The release the controller said may be run next, with the digest of its manifest. */
   readonly expected?: { readonly id: string; readonly digest: string; readonly protocol?: VersionRange };
+  /**
+   * The announced release the pointer named when `expected` was announced. It stays runnable: the announcement is written just before the pointer moves, so a crash or a failed pointer write in between leaves
+   * the pointer on this release, which must not then count as unannounced (with no last known good that would leave nothing to start).
+   */
+  readonly prior?: { readonly id: string; readonly digest: string; readonly protocol?: VersionRange };
   readonly known?: KnownGood;
   readonly attempt?: LaunchAttempt;
   readonly failed: readonly FailedRelease[];
@@ -62,6 +67,7 @@ function checkState(value: unknown): LauncherState {
     if (r["protocol"] !== undefined) { try { checkRange(r["protocol"], "protocol"); } catch { bad(`${what}.protocol`); } }
   };
   if (s["expected"] !== undefined) rel(s["expected"], "expected", ["digest"]);
+  if (s["prior"] !== undefined) rel(s["prior"], "prior", ["digest"]);
   if (s["known"] !== undefined) rel(s["known"], "known", ["digest"]);
   if (s["attempt"] !== undefined) rel(s["attempt"], "attempt", ["digest"]);
   if (!Array.isArray(s["failed"]) || !Array.isArray(s["log"])) bad("failed and log must be lists");
@@ -112,7 +118,12 @@ export class Launcher {
   expect(release: { id: string; digest: string; protocol?: VersionRange }): Promise<void> {
     return this.#serial(async () => {
       const s = await this.read();
-      await this.#write({ ...s, expected: { id: release.id, digest: release.digest, ...(release.protocol === undefined ? {} : { protocol: release.protocol }) } }, { at: this.#now(), kind: "expected", release: release.id });
+      // The release the pointer names now (if it was announced) stays runnable until the pointer has moved: see `prior`.
+      let now: string | undefined | "invalid";
+      try { now = await this.#o.switcher.read(); } catch { now = undefined; }
+      const held = now === undefined || now === "invalid" || now === release.id ? undefined : announcedIn(s, now);
+      const { prior: _p, ...rest } = s; void _p;
+      await this.#write({ ...rest, ...(held === undefined ? {} : { prior: { id: held.id, digest: held.digest, ...(held.protocol === undefined ? {} : { protocol: held.protocol }) } }), expected: { id: release.id, digest: release.digest, ...(release.protocol === undefined ? {} : { protocol: release.protocol }) } }, { at: this.#now(), kind: "expected", release: release.id });
     });
   }
 
@@ -150,7 +161,7 @@ export class Launcher {
       let s: LauncherState;
       try { s = await this.read(); } catch (error) { return { action: "blocked", reason: error instanceof LauncherStateError ? error.message : `${LAUNCHER_FILE} cannot be read` } as const; }
 
-      const announced = s.expected?.id === pointer ? s.expected : s.known?.id === pointer ? s.known : undefined;
+      const announced = announcedIn(s, pointer);
       let trouble: string | undefined;
       if (announced === undefined) trouble = "the pointer names a release the controller never announced";
       else if (s.failed.some((f) => f.id === pointer)) trouble = "that release failed to start before and is not run again";
@@ -161,15 +172,19 @@ export class Launcher {
       }
       if (trouble === undefined) {
         const at = this.#now();
-        const protocol = (s.expected?.id === pointer ? s.expected.protocol : s.known?.protocol);
+        const protocol = announced!.protocol;
         // A start of the very release that is already the last known good keeps its standing; any other release must be confirmed afresh.
-        await this.#write({ ...s, attempt: { id: pointer, digest: announced!.digest, startedAt: at, ...(s.known?.id === pointer ? { confirmedAt: s.known.confirmedAt } : {}), ...(protocol === undefined ? {} : { protocol }) } }, { at, kind: "started", release: pointer });
+        // Once the pointer names the announced release, the one before it no longer needs to stay runnable.
+        const { prior: _p, ...kept } = s; void _p;
+        await this.#write({ ...(s.expected?.id === pointer ? kept : s), attempt: { id: pointer, digest: announced!.digest, startedAt: at, ...(s.known?.id === pointer ? { confirmedAt: s.known.confirmedAt } : {}), ...(protocol === undefined ? {} : { protocol }) } }, { at, kind: "started", release: pointer });
         return { action: "run", releaseId: pointer, digest: announced!.digest, dir: this.#dir(pointer) } as const;
       }
 
-      // Trouble. An announced release that failed is quarantined; an unannounced pointer is not blamed on any release (it is simply not run).
+      // Trouble. An announced release that failed is quarantined; an unannounced pointer is not blamed on any release (it is simply not run). The last known good itself is never quarantined: its only trouble
+      // can be files that do not verify now (perhaps a passing read error), it is then not run (blocked), and once its files are right again it runs; a quarantine would leave nothing to start for good, since only
+      // a running controller can vouch for a release.
       const at = this.#now();
-      const failed = announced === undefined ? s.failed : [...s.failed.filter((f) => f.id !== pointer), { id: pointer, at, reason: trouble }];
+      const failed = announced === undefined || s.known?.id === pointer ? s.failed : [...s.failed.filter((f) => f.id !== pointer), { id: pointer, at, reason: trouble }];
       const k = s.known;
       let why: string | undefined;
       if (k === undefined) why = "there is no last known good release to fall back to";
@@ -184,12 +199,21 @@ export class Launcher {
         await this.#write({ ...s, failed }, { at, kind: "blocked", release: pointer, reason: `${trouble}; ${why ?? ""}`.slice(0, 300) });
         return { action: "blocked", reason: `${trouble}; ${why}` } as const;
       }
+      // The quarantine is written before the pointer moves: a crash in between then repeats this fall-back at the next launch, instead of leaving the failed release unrecorded with the pointer already back (the
+      // controller's record could not catch up and the failed release could be activated again).
+      if (failed !== s.failed) await this.#write({ ...s, failed });
       try { await this.#o.switcher.write(k.id); } catch { await this.#write({ ...s, failed }, { at, kind: "blocked", release: pointer, reason: "the pointer could not be moved back" }); return { action: "blocked", reason: `${trouble}; the pointer could not be moved back to the last known good` } as const; }
-      await this.#write({ ...s, failed, expected: { id: k.id, digest: k.digest, ...(k.protocol === undefined ? {} : { protocol: k.protocol }) }, attempt: { id: k.id, digest: k.digest, startedAt: at, confirmedAt: k.confirmedAt, ...(k.protocol === undefined ? {} : { protocol: k.protocol }) } },
+      const { prior: _p, ...kept } = s; void _p;
+      await this.#write({ ...kept, failed, expected: { id: k.id, digest: k.digest, ...(k.protocol === undefined ? {} : { protocol: k.protocol }) }, attempt: { id: k.id, digest: k.digest, startedAt: at, confirmedAt: k.confirmedAt, ...(k.protocol === undefined ? {} : { protocol: k.protocol }) } },
         { at, kind: "fell_back", release: pointer, to: k.id, reason: trouble.slice(0, 200) });
       return { action: "run", releaseId: k.id, digest: k.digest, dir: this.#dir(k.id), fellBack: { from: pointer, reason: trouble } } as const;
     });
   }
+}
+
+/** The announcement that lets the launcher run `id`: the release the controller announced, the one the pointer named before that announcement, or the last known good. */
+function announcedIn(s: LauncherState, id: string): { readonly id: string; readonly digest: string; readonly protocol?: VersionRange } | undefined {
+  return s.expected?.id === id ? s.expected : s.known?.id === id ? s.known : s.prior?.id === id ? s.prior : undefined;
 }
 
 /** Reads the protocol range of a staged release's `compat.json` text; throws a plain Error naming what is wrong. */

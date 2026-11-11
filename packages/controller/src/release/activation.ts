@@ -170,7 +170,7 @@ export interface ActivationOptions {
   /** The platform this installation runs on, instead of reading the process (tests). */
   readonly platform?: Pick<Cell, "os" | "arch">;
   /** Tests only: called at named points; throwing `SimulatedCrash` stops the operation there as a dying process would. */
-  readonly hook?: (point: "afterBegin" | "afterVerify" | "afterSwitch") => void | Promise<void>;
+  readonly hook?: (point: "afterBegin" | "afterVerify" | "afterAnnounce" | "afterSwitch") => void | Promise<void>;
   readonly runner?: RunnerOptions;
   /** Where the build leaves artifacts (`<incoming>/<candidate>/<artifact>`). Default: `incoming` under the root; better a folder outside it, owned by the build's uid. Never trusted: files are copied and re-hashed. */
   readonly incoming?: string;
@@ -364,7 +364,8 @@ export class ReleaseActivationService {
       if (n.length > 128 || n.includes("\\") || parts.some((p) => p === "" || p === "." || p === "..")) bad("candidateId", `${n.slice(0, 40)} is not a safe artifact name`);
       if (n.toLowerCase() === MANIFEST_FILE.toLowerCase()) bad("candidateId", `${MANIFEST_FILE} is reserved`);
       // The launcher and the updater are not part of a release: a routine release cannot replace them, so no artifact may be placed under their names.
-      if (RESERVED_ROOTS.has(parts[0]!.toLowerCase().replace(/\.[^.]*$/, ""))) bad("candidateId", `${n.slice(0, 40)}: the launcher and the updater are not part of a release`);
+      // Everything from the first dot on is ignored, so `launcher.tar.gz` or `launcher..` (Windows drops trailing dots) is refused as well as `launcher.exe`.
+      if (RESERVED_ROOTS.has(parts[0]!.toLowerCase().split(".")[0]!)) bad("candidateId", `${n.slice(0, 40)}: the launcher and the updater are not part of a release`);
       const low = n.toLowerCase();
       if (seen.has(low)) bad("candidateId", `${n.slice(0, 40)} collides with another artifact on a case-insensitive file system`);
       seen.add(low);
@@ -511,7 +512,12 @@ export class ReleaseActivationService {
     const problems = await this.#verify(journal.to.id, journal.to.digest);
     if (problems.length > 0) { await this.#abort(by, state!.revision, body, `verification failed: ${problems[0]}`).catch(() => undefined); throw new DomainError("invalid_transition", `the release was not switched to: ${problems[0]}`); }
     await this.#o.hook?.("afterVerify");
-    try { await this.#announce(journal.to); await this.#sw.write(journal.to.id); } catch (error) {
+    try { await this.#announce(journal.to); } catch (error) {
+      await this.#abort(by, state!.revision, body, "the switch failed").catch(() => undefined);
+      throw new DomainError("unavailable", `the release could not be switched: ${(error as Error).message.slice(0, 120)}`);
+    }
+    await this.#o.hook?.("afterAnnounce");
+    try { await this.#sw.write(journal.to.id); } catch (error) {
       await this.#abort(by, state!.revision, body, "the switch failed").catch(() => undefined);
       throw new DomainError("unavailable", `the release could not be switched: ${(error as Error).message.slice(0, 120)}`);
     }
