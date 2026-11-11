@@ -34,3 +34,16 @@ Branch entries written into the parent's history (4 fail); update dedupe removed
 - Reconstruction is shown by a fixture that rebuilds a prompt from mirrored history; no production reconstruction exists, and Pi has no portable export. The label is the host's statement; the host rule used here (checkpoint verified on the reopened storage means native restore) is the fixture's.
 - `useModel` moves one conversation; branches keep the model they were created with. No audit event is emitted for it yet.
 - Hashes of the code under test are the working tree; no commit exists yet.
+
+## Addendum (2026-11-10): the cut and the late call with the real worker process
+
+`packages/integration/src/g09b-real-stream.test.ts` (2 tests, composed controller, bubblewrap, the worker process running Pi Durable, scripted OpenAI-style endpoint, the relay of L05b). It closes the first point of "What this proof does not show": the stream that is cut is the one the worker really received through `ModelRelay`, not a stand-in chunk.
+
+| Acceptance text | Test | What is asserted |
+|---|---|---|
+| Stream interruption and partial tool calls cannot admit stale actions | "a stream cut in the middle of a work.end call" | The endpoint sends the first half of a `work.end` call's arguments and waits; L05 records the call `partial`; the owner corrects (revision 1 to 2); the endpoint then sends the rest. The first run is `interrupted/corrected`, no call is `admitted` or `complete`, no effect ID exists, the tail is not in the run. The task ends only through the second generation (revision 2), whose request carries the correction; the stale words are in no later request and not in the attempt's record. |
+| same | "a complete work.end call that arrives after the owner's correction" | A complete `work.end` call that arrives after the correction is recorded as late (`tool_call`/`completion`), never admitted; the task does not end with its report; the stale text is in nothing the model is shown later. |
+
+Mutation check: with the relay's "reply held back" throw removed, both tests fail (the stale call reaches the worker). Restored afterwards.
+
+Still not shown: a real model (none was used; one connection only was available and the benchmark has it), a worker killed in the middle of a call, and continuity across a provider change or a restart through the composed controller (those stay shown at the adapter and service level above).

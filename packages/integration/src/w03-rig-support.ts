@@ -19,7 +19,7 @@ const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignor
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 
 /** One scripted reply: a text (a natural stop), a tool call, or thinking only with no visible text (card W04). */
-export interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object }; readonly thinking?: string; /** Run before the reply is sent (the call is open meanwhile). */ readonly before?: () => Promise<void>; /** The text reply is cut off at the output limit (`finish_reason: length`, card W07). */ readonly length?: boolean }
+export interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object }; readonly thinking?: string; /** Run before the reply is sent (the call is open meanwhile). */ readonly before?: () => Promise<void>; /** The text reply is cut off at the output limit (`finish_reason: length`, card W07). */ readonly length?: boolean; /** The reply is held open after its first bytes until this is released (card G09: the owner acts while the model is still writing). */ readonly hold?: Promise<void>; /** A tool call whose arguments arrive in two parts: `head` at once, `tail` and the end only after `hold` (card G09). A reader that has gone away is not answered. */ readonly partial?: { readonly name: string; readonly head: string; readonly tail: string; readonly hold: Promise<void> } }
 async function model(steps: Step[]): Promise<{ server: Server; url: string; seen: string[]; bodies: Record<string, unknown>[] }> {
   const seen: string[] = [];
   // Every request body as the provider received it (card W07 checks the route's budget here, at the far side of the relay).
@@ -35,8 +35,20 @@ async function model(steps: Step[]): Promise<{ server: Server; url: string; seen
       const step = steps[Math.min(at++, steps.length - 1)]!;
       await step.before?.();
       res.writeHead(200, { "content-type": "text/event-stream" });
+      let gone = false;
+      res.on("close", () => { gone = true; });
       res.write(sse({ role: "assistant", content: "" }, null));
       const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
+      if (step.partial !== undefined) {
+        res.write(sse({ tool_calls: [{ index: 0, id: `call_${at}`, type: "function", function: { name: step.partial.name, arguments: step.partial.head } }] }, null));
+        await step.partial.hold;
+        if (gone) return;
+        res.write(sse({ tool_calls: [{ index: 0, function: { arguments: step.partial.tail } }] }, null));
+        res.write(sse({}, "tool_calls", usage));
+        res.end("data: [DONE]\n\n");
+        return;
+      }
+      if (step.hold !== undefined) { await step.hold; if (gone) return; }
       if (step.call !== undefined) { res.write(sse({ tool_calls: [{ index: 0, id: `call_${at}`, type: "function", function: { name: step.call.name, arguments: JSON.stringify(step.call.args) } }] }, null)); res.write(sse({}, "tool_calls", usage)); }
       else if (step.thinking !== undefined) { res.write(sse({ reasoning_content: step.thinking }, null)); res.write(sse({}, "stop", usage)); }
       else { res.write(sse({ content: `${step.text ?? "done"}` }, null)); res.write(sse({}, step.length === true ? "length" : "stop", usage)); }
