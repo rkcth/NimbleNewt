@@ -10,7 +10,7 @@ import { CacheEndpoints } from "../inference-cache/index.js";
 import { LlamaSim, simulatedFetch } from "../inference-cache/simulators.js";
 import { CachePolicies } from "./cache.js";
 import { operationKind, type ToolOperationBody } from "./model.js";
-import type { ToolResult } from "./ports.js";
+import { StartRefused, type ToolResult } from "./ports.js";
 import { ScriptedWorker, buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "./testing/world.js";
 
 after(stopServer);
@@ -2227,6 +2227,92 @@ for (const backend of backends) {
     assert.ok(r.started.includes(attemptId!), "tried, not refused");
     assert.ok(faults.length > 0, "the fault is reported");
     await d2.idle();
+  });
+
+  suite("a host that refuses the attempt at its start is passed over: nothing was given to it, the attempt waits holding nothing, starts on the next host, is never offered to the refusing host again, and the record says why (card H07b)", async (c) => {
+    const { w2, d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId, attemptId } = await c.task("t", ann);
+    c.worker.failToStart = new StartRefused("host:w1", attemptId!, ["the data-location policy does not list host:w1"], true);
+    const first = await d.tick();
+    assert.deepEqual(first.started, []);
+    assert.deepEqual(first.failures, []);
+    assert.match(first.skipped.find((x) => x.attemptId === attemptId)?.reason ?? "", /^host:w1 cannot take attempt .*policy does not list host:w1; nothing was given to it, and the attempt is tried on another host .*refusal 1 of at most 3/);
+    const waiting = (await d.get(c.owner, attemptId!))!;
+    assert.deepEqual([waiting.state, waiting.lease, waiting.requestId, waiting.startedAt, waiting.hostChoice], ["waiting", undefined, undefined, undefined, undefined]);
+    assert.deepEqual(waiting.startRefusals?.map((r) => [r.hostId, r.reason, r.lasting]), [["host:w1", "the data-location policy does not list host:w1", true]]);
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "active", "the attempt did not fail");
+    assert.equal((await c.admission.snapshot()).running.length, 0, "the place was given back");
+    assert.equal(await d.placedHostOf(c.owner, taskId), undefined, "the task was never placed on the refusing host");
+    // The credential issued for that start reached nobody and was ended.
+    assert.ok((await c.credentials.list(c.owner, taskId)).every((x) => x.state !== "active"), JSON.stringify(await c.credentials.list(c.owner, taskId)));
+    // w1 would take it now, but it refused this attempt once: the next tick starts it on w2.
+    c.worker.failToStart = undefined;
+    const second = await d.tick();
+    assert.deepEqual(second.started, [attemptId], JSON.stringify(second.skipped));
+    await d.idle();
+    assert.equal(c.worker.starts.length, 0);
+    assert.equal(w2.starts.length, 1);
+    const ran = (await d.get(c.owner, attemptId!))!;
+    assert.equal(ran.hostId, "host:w2");
+    assert.deepEqual(ran.hostChoice?.passedOver.map((p) => p.hostId), ["host:w1"]);
+    assert.match(ran.hostChoice!.passedOver[0]!.reason, /refused this attempt at its start \(the data-location policy does not list host:w1\) and is not tried again/);
+    assert.equal(ran.startRefusals?.length, 1, "the refusal stays on the record");
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "succeeded");
+    assert.equal(await d.placedHostOf(c.owner, taskId), "host:w2");
+  });
+
+  suite("refusals at the start are bounded: when every host has refused the attempt it fails with each host's reason, and with startTries 1 the first refusal fails it at once (card H07b)", async (c) => {
+    const { w2, d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    c.worker.failToStart = new StartRefused("host:w1", attemptId!, ["w1 says no"], true);
+    w2.failToStart = new StartRefused("host:w2", attemptId!, ["w2 already has 64 offers that are not accepted"], false, "unavailable");
+    assert.deepEqual((await d.tick()).started, []);
+    assert.equal((await d.get(c.owner, attemptId!))!.state, "waiting");
+    assert.deepEqual((await d.tick()).started, []);
+    const ended = (await d.get(c.owner, attemptId!))!;
+    assert.equal(ended.state, "finished");
+    assert.match(ended.outcome!.summary, /the worker did not start: every worker host refused it \(host:w1: w1 says no; host:w2: w2 already has 64 offers/);
+    assert.deepEqual(ended.startRefusals?.map((r) => [r.hostId, r.lasting]), [["host:w1", true], ["host:w2", false]]);
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "failed");
+    assert.equal((await c.admission.snapshot()).running.length, 0);
+    // One try only: the first refusal fails the next attempt, with the host's own message, and w2 is never asked.
+    c.worker.failToStart = undefined; w2.failToStart = undefined;
+    const bob = await c.agent("bob", workGrants(c.project, ["read-file"]));
+    const { attemptId: other } = await c.task("u", bob);
+    const d1 = c.restart({ workers: [c.worker, w2] }, { startTries: 1 });
+    c.worker.failToStart = new StartRefused("host:w1", other!, ["w1 says no"], true);
+    const r = await d1.tick();
+    assert.match(r.skipped.find((x) => x.attemptId === other)?.reason ?? "", /^the worker did not start: host:w1 cannot take attempt .*w1 says no$/);
+    assert.equal((await d1.get(c.owner, other!))!.state, "finished");
+    assert.equal(w2.starts.length, 0);
+    // Any other failure to start is not a refusal: it fails the attempt at once, as before.
+    c.worker.failToStart = new Error("the sandbox could not be made");
+    const cat = await c.agent("cat", workGrants(c.project, ["read-file"]));
+    const { attemptId: third } = await c.task("v", cat);
+    const r3 = await d.tick();
+    assert.match(r3.skipped.find((x) => x.attemptId === third)?.reason ?? "", /^the worker did not start: the sandbox could not be made$/);
+    assert.equal((await d.get(c.owner, third!))!.startRefusals, undefined);
+    assert.equal(w2.starts.length, 0);
+  });
+
+  suite("an attempt pinned to a host that refuses it at its start is not moved to another host: it fails with the reason (card H07b)", async (c) => {
+    const { w2, d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>();
+    c.worker.script = async () => { await hold.promise; return { status: "completed" }; };
+    // Started on w1, then moved to w2 (pinned there); w2 refuses the start.
+    assert.deepEqual((await d.tick()).started, [attemptId]);
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w2", note: "moved" });
+    w2.failToStart = new StartRefused("host:w2", attemptId!, ["w2 says no"], true);
+    const r = await d.tick();
+    assert.match(r.skipped.find((x) => x.attemptId === attemptId)?.reason ?? "", /^the worker did not start: host:w2 cannot take attempt/);
+    assert.equal((await d.get(c.owner, attemptId!))!.state, "finished");
+    assert.equal(c.worker.starts.length, 1, "w1 was not asked again");
+    hold.resolve();
+    await d.idle();
   });
 
   suite("moving an attempt to the host it already runs on, or is pinned to, does nothing", async (c) => {

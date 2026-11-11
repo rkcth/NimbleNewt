@@ -1,6 +1,7 @@
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { EffectBridge } from "../domain/effects.js";
 import type { JsonObject } from "../storage/types.js";
+import { DomainError } from "../domain/errors.js";
 
 /**
  * The dispatch contract (card H12). The dispatcher hands a worker host one `WorkOrder` and gets back a `WorkerHandle`; every tool call the worker makes goes through the `ToolGateway` it is given.
@@ -188,6 +189,16 @@ export interface DoneCheckReport {
 
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
 export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
+
+/**
+ * A host refused the attempt at its start before anything was given to it (card H07b): no offer was made, so neither the order nor the task credential in it left the controller, and the attempt can be tried on
+ * another host. `lasting` says whether the reasons stay until something is changed (policy, what the host can do) or pass by themselves (not connected, too many offers waiting). Any other start failure is not this.
+ */
+export class StartRefused extends DomainError {
+  constructor(readonly hostId: string, attemptId: string, readonly reasons: readonly string[], readonly lasting: boolean, code: "invalid_command" | "unavailable" = "invalid_command") {
+    super(code, `${hostId} cannot take attempt ${attemptId}: ${reasons.join("; ")}`, { field: "hostId" });
+  }
+}
 
 export interface HostLocalWork {
   readonly processes: readonly { readonly attemptId?: string; readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[];

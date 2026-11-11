@@ -250,6 +250,16 @@ for (const backend of backends) {
     assert.equal(report.started.includes(attemptId!), false);
     assert.match(report.skipped.find((x) => x.attemptId === attemptId)?.reason ?? "", /host:a cannot take attempt .*credential may not be given to host:a; .*data is local-only/);
     assert.deepEqual(await a.client.offers(), [], "the credential was not put in an offer for a host the policy does not allow");
+    // Card H07b: the refusal did not fail the attempt; the next tick starts it on b, a is not offered it, and the record names a with its reason.
+    assert.equal((await c.current.get(c.owner, attemptId!))!.state, "waiting");
+    const next = await c.tick();
+    assert.ok(next.started.includes(attemptId!), JSON.stringify(next.skipped));
+    assert.equal((await c.remote.placement(c.owner, attemptId!))!.hostId, b.id);
+    assert.deepEqual(await a.client.offers(), []);
+    const rec = (await c.current.get(c.owner, attemptId!))!;
+    assert.deepEqual(rec.startRefusals?.map((r) => [r.hostId, r.lasting]), [[a.id, true]]);
+    assert.match(rec.startRefusals![0]!.reason, /credential may not be given to host:a/);
+    assert.equal(rec.hostChoice?.passedOver[0]?.hostId, a.id);
   }, { placement: async () => ({ credentialHosts: ["host:b", "host:d"], dataHosts: ["host:b"], repositoryHosts: ["host:a", "host:b"] }) });
 
   if (backend === backends[0]) {

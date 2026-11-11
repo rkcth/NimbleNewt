@@ -77,6 +77,13 @@ export interface DispatchBody {
   readonly hostId: string;
   /** The attempt may start only on this host (card H02: it was relocated there, or parked on the host that owns its native store). Cleared when it starts. */
   readonly pinnedHost?: string;
+  /**
+   * Hosts that refused this attempt at its start before anything was given to them (card H07b), oldest first and at most `DISPATCH_LIMITS.startRefusals`: none of them is chosen again for this attempt, and once
+   * `startTries` hosts have refused it (or no other host is left) the attempt fails with every reason. Kept after a later host takes it, so the owner can read where it was refused.
+   */
+  readonly startRefusals?: readonly { readonly hostId: string; readonly reason: string; readonly lasting: boolean; readonly at: string }[];
+  /** How the host of the last start was chosen (card H07b): the hosts passed over before it, each with why (at most `DISPATCH_LIMITS.passedOver`); absent when the first candidate took it. */
+  readonly hostChoice?: { readonly hostId: string; readonly at: string; readonly passedOver: readonly { readonly hostId: string; readonly reason: string }[] };
   /** The H03 request that holds the attempt's place (absent while the attempt holds none, and before the first request), and how many requests were made for it. */
   readonly requestId?: string;
   readonly requests?: number;
@@ -357,7 +364,7 @@ export interface TaskAttemptsBody { readonly taskId: string; readonly attempts: 
 /** The per-task count of those readmits (one record per task). Card W11 counts the job wakes of the task in the same record (`wakes`, `wakeTimes`, `noticeTimes`), so the two together are bounded. */
 export const STOPPED_EARLY_KIND = "dispatch-stopped-early";
 
-export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300, slotSpans: 64 } as const;
+export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300, slotSpans: 64, startRefusals: 8, passedOver: 20, hostReason: 300 } as const;
 export const DISPATCHER_ACTOR = "dispatcher";
 
 /**

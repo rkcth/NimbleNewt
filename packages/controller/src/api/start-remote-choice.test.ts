@@ -118,3 +118,68 @@ test("a host that is only not connected yet is waited for: the attempt is skippe
     assert.deepEqual(fresh.started, [attemptId], "connected: it starts");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a host that refuses the attempt when it is placed (the policy changed after it was chosen) offers nothing; the attempt waits, starts on the next host on the next tick, and its record says why the first host was passed over (card H07b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-choice-"));
+  // Both hosts are listed, except that the placement on r1 of the first attempt is refused once: the policy is read again at the place, after the dispatcher chose r1.
+  let refuseOnce = true;
+  let who: { id: string } | undefined;
+  let svc: Awaited<ReturnType<typeof startController>> | undefined;
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: {
+      timer: new ManualTimer(), manual: true,
+      route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "local-only", paidAuthorized: false } }),
+      remote: {
+        blobDirectory: join(d, "blobs"),
+        placementPolicy: async (q) => {
+          const rec = q.attemptId === undefined || who === undefined ? undefined : await svc!.dispatch!.dispatcher.get(who as never, q.attemptId);
+          if (refuseOnce && rec?.state === "running" && rec.hostId === "host:r1") { refuseOnce = false; return { dataHosts: ["host:r2"] }; }
+          return { dataHosts: ["host:r1", "host:r2"] };
+        },
+        hosts: ["r1", "r2"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "local-only" as const, harness: "pi" }) })),
+      },
+    },
+  });
+  svc = c;
+  try {
+    assert.ok(c.dispatch?.workerUrl !== undefined, c.dispatchProblem);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    who = rob;
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: AGENT, grants: workGrants(project, ["read-file"]) });
+    const clients = new Map<string, RemoteWorkerClient>();
+    for (const n of ["r1", "r2"]) {
+      await c.services.principals.enroll(rob, { commandId: `e-${n}`, kind: "host", name: n, grants: [] });
+      const token = (await c.services.principals.issueCredential(rob, `host:${n}`)).token;
+      await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: `cap-${n}`, actor: rob.id, host: `host:${n}`, capacity: { cpus: 8, memoryMb: 16_384 } });
+      const client = new RemoteWorkerClient({ url: c.dispatch.workerUrl, token, workerVersion: "worker-9.1.0" });
+      await client.connect(CAPS as never);
+      await client.heartbeat(1);
+      clients.set(`host:${n}`, client);
+    }
+    const taskId = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Order seeds" })).id;
+    await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId, owner: { kind: "agent", id: AGENT } });
+    const a = (await c.services.assignments.getAssignment(taskId))!;
+    const attemptId = (await c.services.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: AGENT }, harness: "pi" })).id;
+    // r1 comes first and says beforehand it would take it, then refuses at the place: nothing is offered, the attempt waits (it did not fail), and the plan says so.
+    const first = await c.dispatch!.dispatcher.tick();
+    assert.deepEqual(first.started, [], JSON.stringify(first));
+    assert.equal(refuseOnce, false, "the place on r1 was asked and refused");
+    assert.match(first.skipped.find((s) => s.attemptId === attemptId)?.reason ?? "", /^host:r1 cannot take attempt .*does not list host:r1.*nothing was given to it, and the attempt is tried on another host/);
+    assert.equal(await c.dispatch!.remote!.placement(rob, attemptId), undefined, "nothing was placed");
+    assert.equal((await clients.get("host:r1")!.offers()).length, 0, "the refusing host was offered nothing");
+    assert.equal((await c.services.assignments.getAttempt(attemptId))!.state, "active");
+    // The next tick: r1 would take it now, but it refused this attempt once, so r2 gets it.
+    const second = await c.dispatch!.dispatcher.tick();
+    assert.deepEqual(second.started, [attemptId], JSON.stringify(second));
+    assert.equal((await c.dispatch!.remote!.placement(rob, attemptId))!.hostId, "host:r2");
+    assert.equal((await clients.get("host:r1")!.offers()).length, 0);
+    assert.equal((await clients.get("host:r2")!.offers()).length, 1);
+    const rec = (await c.dispatch!.dispatcher.get(rob, attemptId))!;
+    assert.deepEqual([rec.hostId, rec.hostChoice?.passedOver.map((p) => p.hostId), rec.startRefusals?.map((r) => [r.hostId, r.lasting])], ["host:r2", ["host:r1"], [["host:r1", true]]]);
+    assert.match(rec.hostChoice!.passedOver[0]!.reason, /refused this attempt at its start .*does not list host:r1/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
