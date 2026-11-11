@@ -2,11 +2,12 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer as createHttp, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttps } from "node:https";
 import { isIP } from "node:net";
-import type { ApplyResult, TurnResult } from "../chat/index.js";
+import type { ApplyResult, CallOptions, TurnResult } from "../chat/index.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal } from "../security/index.js";
 import { redactText } from "../security/redact.js";
 import { checkBinding, remoteAllowed, type WebNetwork } from "./binding.js";
+import { bucketOfAddress, checkTrustedProxy, clientAddress, type ResolvedProxy, type TrustedProxy } from "./proxy.js";
 import { DEFAULT_SESSION_LIMITS, WebSessionStore, type WebSession, type WebSessionLimits } from "./sessions.js";
 
 /** A file the door serves without a session: the page and its script and style. */
@@ -17,9 +18,9 @@ export type WebAssets = Readonly<Record<string, WebAsset>>;
 /** What the door needs of the controller: the same services the in-process chat uses, nothing wider. */
 export interface WebChatBackend {
   authenticate(token: string): Promise<Principal>;
-  submit(token: string, message: { messageId: string; text: string }): Promise<TurnResult>;
-  applyProposal(token: string, request: { commandId: string; proposalId: string }): Promise<ApplyResult>;
-  discardProposal(token: string, request: { commandId: string; proposalId: string }): Promise<{ proposalId: string; replayed: boolean }>;
+  submit(token: string, message: { messageId: string; text: string }, options?: CallOptions): Promise<TurnResult>;
+  applyProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<ApplyResult>;
+  discardProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<{ proposalId: string; replayed: boolean }>;
   /** The state API's read operations only; the door sends nothing but the fixed view queries below. */
   query(token: string, op: string, args: Record<string, unknown>): Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }>;
 }
@@ -28,10 +29,15 @@ export interface WebChatLimits {
   readonly bodyBytes: number;
   /** Requests one session may make per minute. */
   readonly perSessionPerMinute: number;
-  /** Failed sign-ins from one network address per minute. */
+  /** Failed sign-ins from one client address per minute (an IPv6 client counts as its /64). */
   readonly failedLoginsPerAddressPerMinute: number;
+  /** Failed sign-ins from ALL addresses together per minute: the ceiling that stops a flood from many addresses (or from behind a proxy that hides them). Generous, so a few strangers cannot reach it. */
+  readonly failedLoginsGlobalPerMinute: number;
+  /** Sign-in bodies being read at once, from one client address and in all. */
+  readonly loginsReadingPerAddress: number;
+  readonly loginsReadingGlobal: number;
 }
-export const DEFAULT_WEB_LIMITS: WebChatLimits = { bodyBytes: 16 * 1024, perSessionPerMinute: 300, failedLoginsPerAddressPerMinute: 10 };
+export const DEFAULT_WEB_LIMITS: WebChatLimits = { bodyBytes: 16 * 1024, perSessionPerMinute: 300, failedLoginsPerAddressPerMinute: 10, failedLoginsGlobalPerMinute: 100, loginsReadingPerAddress: 8, loginsReadingGlobal: 64 };
 
 export interface WebChatOptions {
   readonly backend: WebChatBackend;
@@ -46,10 +52,33 @@ export interface WebChatOptions {
   readonly behindTlsProxy?: boolean;
   /** The host names clients use (`newt.tailnet-name.ts.net`). A request for any other host name is refused, which defeats DNS rebinding. */
   readonly publicHosts?: readonly string[];
+  /** OFF unless given. A proxy in front of the listener (`tailscale serve`, Caddy, nginx) makes every client look like the proxy; naming it here lets the door take the client's address from ONE forwarded header, but only on connections that come from the proxy itself. */
+  readonly trustedProxy?: TrustedProxy;
   readonly limits?: Partial<WebChatLimits>;
   readonly session?: Partial<WebSessionLimits>;
   /** Milliseconds; for tests. */
   readonly clock?: () => number;
+}
+
+/** The counter key of the ceiling over all addresses. */
+const GLOBAL_LOGIN = "global:login";
+/** The counter key of pairing-code attempts over all addresses: a valid code skips GLOBAL_LOGIN, but no code is ever tried past this one. */
+const GLOBAL_CODE = "global:code";
+
+export interface WebBrowser { readonly handle: string; readonly label: string; readonly current: boolean; readonly createdAt: string; readonly lastSeen: string }
+export interface WebSettings {
+  readonly url: string; readonly host: string; readonly port: number; readonly network: WebNetwork; readonly tls: boolean; readonly behindTlsProxy: boolean; readonly publicHosts: readonly string[];
+  readonly trustedProxy: { readonly enabled: false } | { readonly enabled: true; readonly addresses: readonly string[]; readonly header: string };
+  readonly limits: WebChatLimits; readonly session: WebSessionLimits;
+}
+
+/** A short name for a browser from its User-Agent ("Safari on iPhone"), so the owner can name it in words. Nothing else of the header is kept. */
+export function deviceLabel(userAgent: string): string {
+  const ua = userAgent.slice(0, 400);
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Macintosh|Mac OS X/.test(ua) ? "Mac" : /CrOS/.test(ua) ? "Chromebook" : /Linux|X11/.test(ua) ? "Linux" : undefined;
+  const app = /Edg(?:e|A|iOS)?\//.test(ua) ? "Edge" : /OPR\/|Opera/.test(ua) ? "Opera" : /Firefox\/|FxiOS\//.test(ua) ? "Firefox" : /Chrome\/|CriOS\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : undefined;
+  if (app === undefined && os === undefined) return "browser";
+  return app === undefined ? `browser on ${os}` : os === undefined ? app : `${app} on ${os}`;
 }
 
 class HttpError extends Error {
@@ -93,6 +122,10 @@ export class WebChatDoor {
   readonly #sessions: WebSessionStore;
   readonly #windows = new Map<string, { start: number; count: number }>();
   readonly #inflight = new Map<string, Promise<TurnResult>>();
+  readonly #proxy: ResolvedProxy | undefined;
+  readonly #reading = new Map<string, number>();
+  readonly #revoked = new Map<string, { payload: string; result: { readonly revoked: number; readonly labels: readonly string[] } }>();
+  #readingAll = 0;
   readonly #secure: boolean;
   readonly #cookieName: string;
   readonly #now: () => number;
@@ -102,6 +135,7 @@ export class WebChatDoor {
   private constructor(server: Server, o: WebChatOptions, limits: WebChatLimits, secure: boolean, url: string, port: number) {
     this.#server = server; this.#o = o; this.#limits = limits; this.#secure = secure; this.url = url; this.port = port;
     this.#now = o.clock ?? Date.now;
+    this.#proxy = checkTrustedProxy(o.trustedProxy, o.network);
     this.#sessions = new WebSessionStore({ ...DEFAULT_SESSION_LIMITS, ...(o.session ?? {}) }, this.#now);
     this.#cookieName = secure ? "__Host-nn_session" : "nn_session";
   }
@@ -109,6 +143,7 @@ export class WebChatDoor {
   static async listen(o: WebChatOptions): Promise<WebChatDoor> {
     const publicHosts = o.publicHosts ?? [];
     checkBinding({ host: o.host, network: o.network, tls: o.tls !== undefined, behindTlsProxy: o.behindTlsProxy === true, publicHosts });
+    checkTrustedProxy(o.trustedProxy, o.network);
     if (o.assets["/"] === undefined) throw new DomainError("invalid_command", "assets must include the page at \"/\"", { field: "assets" });
     const limits = { ...DEFAULT_WEB_LIMITS, ...(o.limits ?? {}) };
     const secure = o.tls !== undefined || o.behindTlsProxy === true;
@@ -168,31 +203,11 @@ export class WebChatDoor {
     const parts = url.pathname.split("/").filter(Boolean).slice(1);
     const [a, b, c] = parts;
     const allowed = (...m: string[]): void => { if (!m.includes(method)) throw new HttpError(405, "method_not_allowed", `use ${m.join(" or ")}`, { allow: m.join(", ") }); };
-    const addr = `addr:${req.socket.remoteAddress ?? "?"}`;
     if (method !== "GET") this.#sameOrigin(req);
 
     if (a === "login" && parts.length === 1) {
       allowed("POST");
-      this.#over(addr, this.#limits.failedLoginsPerAddressPerMinute);
-      // The attempt is counted before anything is awaited and given back only when it succeeds: attempts sent all at once cannot pass the check together.
-      this.#count(addr);
-      const body = await this.#body(req);
-      let token: string;
-      if (typeof body["code"] === "string") {
-        const paired = this.#sessions.redeem(body["code"]);
-        if (paired === undefined) throw new HttpError(401, "unauthenticated", "the code was not accepted");
-        token = paired.token;
-      } else if (typeof body["token"] === "string") token = body["token"];
-      else throw new HttpError(400, "invalid_command", "send a token or a pairing code");
-      const who = await this.#authenticate(token);
-      // Only the owner signs in: any other credential gets no session and no CSRF token, and the attempt stays counted.
-      if (who.kind !== "owner") throw new HttpError(403, "forbidden", "the web chat is the owner's");
-      this.#refund(addr);
-      // A browser that signs in again does not leave its old session behind.
-      this.#sessions.revokeCookie(this.#cookie(req));
-      const label = String(req.headers["user-agent"] ?? "browser").replace(/[^\x20-\x7e]/g, "").slice(0, 60) || "browser";
-      const { cookie, session } = this.#sessions.create(who.id, token, label);
-      return this.#reply(res, 200, this.#sessionBody(session, who), { "set-cookie": this.#setCookie(cookie, Math.floor((this.#sessions.endsAt(session) - this.#now()) / 1000)) });
+      return this.#login(req, res);
     }
 
     const cookie = this.#cookie(req);
@@ -212,7 +227,12 @@ export class WebChatDoor {
     if (a === "logout" && parts.length === 1) { allowed("POST"); this.#sessions.revokeHandle(session.principalId, session.handle); return this.#reply(res, 200, { ok: true }, { "set-cookie": this.#setCookie("", 0) }); }
     if (a === "sessions" && b === undefined) {
       allowed("GET");
-      return this.#reply(res, 200, { sessions: this.#sessions.list(who.id).map((s) => ({ handle: s.handle, label: s.label, current: s.handle === session.handle, createdAt: new Date(s.createdAt).toISOString(), lastSeen: new Date(s.lastSeen).toISOString() })) });
+      return this.#reply(res, 200, { sessions: this.browsers(who.id, session.handle) });
+    }
+    if (a === "settings" && parts.length === 1) {
+      allowed("GET");
+      const mine = this.#client(req);
+      return this.#reply(res, 200, { ...this.settings(), yourAddress: mine.address, addressFromProxy: mine.viaProxy, browsers: this.#sessions.list(who.id).length });
     }
     if (a === "sessions" && b === "revoke" && c === undefined) {
       allowed("POST");
@@ -238,7 +258,7 @@ export class WebChatDoor {
       // The same message sent twice at once (a retry while the first is still running) is one run.
       const key = `${who.id}\u0000${messageId}`;
       let run = this.#inflight.get(key);
-      if (run === undefined) { run = this.#o.backend.submit(session.token, { messageId, text }).finally(() => { this.#inflight.delete(key); }); this.#inflight.set(key, run); }
+      if (run === undefined) { run = this.#o.backend.submit(session.token, { messageId, text }, { stillAllowed: this.#stillLive(session) }).finally(() => { this.#inflight.delete(key); }); this.#inflight.set(key, run); }
       const turn = await run;
       return this.#reply(res, turn.replayed ? 200 : 201, { turnId: turn.turnId, replayed: turn.replayed, reply: turn.reply, outcomes: turn.outcomes });
     }
@@ -247,7 +267,8 @@ export class WebChatDoor {
       const commandId = req.headers["idempotency-key"];
       if (typeof commandId !== "string" || !MESSAGE_ID.test(commandId)) throw new HttpError(400, "idempotency_key_required", "an approval needs an Idempotency-Key header (1 to 100 letters, digits, dots, dashes or underscores), so a retry applies once");
       await this.#body(req);
-      const result = c === "apply" ? await this.#o.backend.applyProposal(session.token, { commandId, proposalId: b }) : await this.#o.backend.discardProposal(session.token, { commandId, proposalId: b });
+      const options = { stillAllowed: this.#stillLive(session) };
+      const result = c === "apply" ? await this.#o.backend.applyProposal(session.token, { commandId, proposalId: b }, options) : await this.#o.backend.discardProposal(session.token, { commandId, proposalId: b }, options);
       return this.#reply(res, 200, result);
     }
     if (a === "views" && b !== undefined && c === undefined) {
@@ -262,6 +283,129 @@ export class WebChatDoor {
       return this.#reply(res, 200, { view: b, observedAt: new Date(this.#now()).toISOString(), parts: parts2 });
     }
     throw new HttpError(404, "not_found", "no such route");
+  }
+
+  /**
+   * Sign-in (card U07, U07b). The limiter is two-level: failures count against the client's own address (an IPv6 client against its /64) AND against a generous ceiling over all addresses, so one peer
+   * cannot hold the owner out and a flood from many addresses (or from behind a proxy that hides them) still cannot guess without bound. A pairing code (50 bits, once, five minutes) is only looked at
+   * while its sender is inside its own allowance and code attempts over all addresses are under ten times the ceiling; inside those, a valid one signs in although wrong credentials have filled the
+   * ordinary ceiling: the owner's way in survives a flood of wrong credentials. The owner's credential is the path that a full ceiling closes; the terminal chat is a different door and is never affected.
+   */
+  async #login(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const client = this.#client(req);
+    const addr = `addr:${bucketOfAddress(client.address)}`;
+    // Reading a body is bounded per address and overall, so a flood (or a slow sender) cannot hold every reader.
+    if ((this.#reading.get(addr) ?? 0) >= this.#limits.loginsReadingPerAddress || this.#readingAll >= this.#limits.loginsReadingGlobal) throw new HttpError(429, "rate_limited", "too many sign-in attempts at once; wait a minute", { "retry-after": "5" });
+    this.#reading.set(addr, (this.#reading.get(addr) ?? 0) + 1); this.#readingAll += 1;
+    let body: Record<string, unknown>;
+    try { body = await this.#body(req); } finally {
+      this.#readingAll -= 1;
+      const left = (this.#reading.get(addr) ?? 1) - 1;
+      if (left <= 0) this.#reading.delete(addr); else this.#reading.set(addr, left);
+    }
+    // From here to the credential check nothing is awaited between the check and the count: attempts sent all at once cannot pass the limit together.
+    let token: string | undefined;
+    let free = false;
+    if (typeof body["code"] === "string") {
+      // A code is looked at only inside the limits: the client's own allowance, and a hard ceiling on code attempts over all addresses (ten times the failure ceiling). Without this a client past
+      // every limit still had each guess tried (a wrong one answered 429, the right one signed in), so the limiter did nothing against guessing. A valid code skips only the ordinary ceiling, which
+      // a flood of wrong credentials fills; a code that is checked here is never used up by the refusal, so the owner can use it once the minute has passed.
+      const codeCeiling = this.#limits.failedLoginsGlobalPerMinute * 10;
+      this.#over(addr, this.#limits.failedLoginsPerAddressPerMinute);
+      this.#over(GLOBAL_CODE, codeCeiling);
+      this.#count(addr); this.#count(GLOBAL_CODE);
+      const paired = this.#sessions.redeem(body["code"]);
+      if (paired !== undefined) { token = paired.token; free = true; this.#refund(addr); this.#refund(GLOBAL_CODE); }
+      else {
+        // A wrong code is a failed sign-in like any other: it stays counted against the address and the code ceiling, and against the ordinary ceiling too.
+        this.#over(GLOBAL_LOGIN, this.#limits.failedLoginsGlobalPerMinute);
+        this.#count(GLOBAL_LOGIN);
+        throw new HttpError(401, "unauthenticated", "the code was not accepted");
+      }
+    }
+    if (!free) {
+      this.#over(addr, this.#limits.failedLoginsPerAddressPerMinute);
+      this.#over(GLOBAL_LOGIN, this.#limits.failedLoginsGlobalPerMinute);
+      // The attempt is counted before anything is awaited and given back only when it succeeds.
+      this.#count(addr); this.#count(GLOBAL_LOGIN);
+      if (typeof body["token"] === "string") token = body["token"];
+      else throw new HttpError(400, "invalid_command", "send a token or a pairing code");
+    }
+    let who: Principal;
+    try { who = await this.#authenticate(token!); } catch (error) {
+      if (free) { this.#count(addr); this.#count(GLOBAL_LOGIN); }
+      throw error;
+    }
+    // Only the owner signs in: any other credential gets no session and no CSRF token, and the attempt stays counted.
+    if (who.kind !== "owner") { if (free) { this.#count(addr); this.#count(GLOBAL_LOGIN); } throw new HttpError(403, "forbidden", "the web chat is the owner's"); }
+    if (!free) { this.#refund(addr); this.#refund(GLOBAL_LOGIN); }
+    // A browser that signs in again does not leave its old session behind.
+    this.#sessions.revokeCookie(this.#cookie(req));
+    const { cookie, session } = this.#sessions.create(who.id, token!, deviceLabel(String(req.headers["user-agent"] ?? "")));
+    return this.#reply(res, 200, this.#sessionBody(session, who), { "set-cookie": this.#setCookie(cookie, Math.floor((this.#sessions.endsAt(session) - this.#now()) / 1000)) });
+  }
+
+  /** The client address of a request: the peer, or (only from a trusted proxy's own address) the one forwarded header's rightmost untrusted entry. */
+  #client(req: IncomingMessage): { readonly address: string; readonly viaProxy: boolean } { return clientAddress(req.socket.remoteAddress, req.headers, this.#proxy); }
+
+  /** Whether a long request's browser session is still the owner's: asked again before the state-changing steps of a chat request. */
+  #stillLive(session: WebSession): () => Promise<void> {
+    return async () => {
+      const ended = (): HttpError => new HttpError(401, "unauthenticated", "the session ended while the request ran; nothing further was applied", { "set-cookie": this.#setCookie("", 0) });
+      if (!this.#sessions.isLive(session.handle)) throw ended();
+      let who: Principal;
+      try { who = await this.#authenticate(session.token); } catch (error) { if (error instanceof HttpError && error.status === 401) throw ended(); throw error; }
+      if (who.kind !== "owner" || !this.#sessions.isLive(session.handle)) throw ended();
+    };
+  }
+
+  // ---- for the owner's chat and the settings view ----------------------------------------------------------------------------------
+
+  /** What the web chat is set to (nothing secret): the owner reads it on the Settings view and in chat. */
+  settings(): WebSettings {
+    const o = this.#o;
+    return {
+      url: this.url, host: o.host, port: this.port, network: o.network, tls: o.tls !== undefined, behindTlsProxy: o.behindTlsProxy === true, publicHosts: [...(o.publicHosts ?? [])],
+      trustedProxy: this.#proxy === undefined ? { enabled: false } : { enabled: true, addresses: [...this.#proxy.addresses], header: this.#proxy.header },
+      limits: { ...this.#limits }, session: { ...DEFAULT_SESSION_LIMITS, ...(o.session ?? {}) },
+    };
+  }
+
+  /** The signed-in browsers of the owner, newest first. */
+  browsers(ownerId: string, currentHandle?: string): readonly WebBrowser[] {
+    return this.#sessions.list(ownerId).map((s) => ({ handle: s.handle, label: s.label, current: s.handle === currentHandle, createdAt: new Date(s.createdAt).toISOString(), lastSeen: new Date(s.lastSeen).toISOString() }));
+  }
+
+  /**
+   * Signs browsers out in the owner's own words: `all` (every one, and the unused pairing codes), or the one whose label or handle holds `browser` (case does not matter). No match is not_found; several matches are
+   * refused with their labels and last use, so the owner says which. `exceptHandle` keeps the browser that asked (the page's "all other browsers").
+   */
+  revokeBrowsers(ownerId: string, want: { readonly browser?: string; readonly all?: boolean }, exceptHandle?: string, commandId?: string): { readonly revoked: number; readonly labels: readonly string[]; readonly replayed?: boolean } {
+    // The same command ID again returns the first answer and signs nobody else out (a browser that signed in since must not be ended by a repeat).
+    const memoKey = commandId === undefined ? undefined : `${ownerId}\u0000${commandId}`;
+    const payload = JSON.stringify([want.browser ?? null, want.all === true]);
+    if (memoKey !== undefined) {
+      const seen = this.#revoked.get(memoKey);
+      if (seen !== undefined) {
+        if (seen.payload !== payload) throw new DomainError("command_conflict", "that command ID was used for a different sign-out");
+        return { ...seen.result, replayed: true };
+      }
+    }
+    const result = this.#revokeBrowsers(ownerId, want, exceptHandle);
+    if (memoKey !== undefined) { this.#revoked.set(memoKey, { payload, result }); if (this.#revoked.size > 200) this.#revoked.delete(this.#revoked.keys().next().value as string); }
+    return result;
+  }
+
+  #revokeBrowsers(ownerId: string, want: { readonly browser?: string; readonly all?: boolean }, exceptHandle?: string): { readonly revoked: number; readonly labels: readonly string[] } {
+    const all = this.browsers(ownerId, exceptHandle);
+    if (want.all === true) { const labels = all.filter((b) => !b.current).map((b) => b.label); return { revoked: this.#sessions.revokeAll(ownerId, exceptHandle), labels }; }
+    const words = typeof want.browser === "string" ? want.browser.trim().toLowerCase() : "";
+    if (words.length === 0) throw new DomainError("invalid_command", "say which browser to sign out (a word from its name, such as iPhone), or all of them", { field: "browser" });
+    const found = all.filter((b) => b.handle === want.browser!.trim() || b.label.toLowerCase().includes(words));
+    if (found.length === 0) throw new DomainError("not_found", `no signed-in browser matches "${words.slice(0, 60)}"`, { field: "browser" });
+    if (found.length > 1) throw new DomainError("invalid_command", `${found.length} browsers match "${words.slice(0, 60)}": ${found.slice(0, 6).map((b) => `${b.label} ${b.handle} (last used ${b.lastSeen})`).join("; ")}. Say which one (its ws- name), or sign them all out`, { field: "browser" });
+    this.#sessions.revokeHandle(ownerId, found[0]!.handle);
+    return { revoked: 1, labels: [found[0]!.label] };
   }
 
   // ---- pieces --------------------------------------------------------------------------------------------------------------

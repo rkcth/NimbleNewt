@@ -223,6 +223,14 @@ const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { f
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
 
+/** What a caller may pass to a chat call: `stillAllowed` is asked again before each state-changing step and throws when the caller's authority has ended (a revoked browser session); the call then stops with that error. */
+export interface CallOptions { readonly stillAllowed?: () => void | Promise<void> }
+type Guard = () => Promise<void>;
+/** The guard's error, wrapped so that it is not mistaken for a DomainError (which a step turns into a refused outcome): it ends the whole call. */
+class CallEnded extends Error { constructor(readonly original: unknown) { super("the caller's authority ended"); } }
+const guardOf = (o: CallOptions): Guard | undefined => o.stillAllowed === undefined ? undefined : async () => { try { await o.stillAllowed!(); } catch (e) { throw new CallEnded(e); } };
+async function endedOf<T>(run: () => Promise<T>): Promise<T> { try { return await run(); } catch (e) { throw e instanceof CallEnded ? e.original : e; } }
+
 export class ChatService {
   readonly #runner: CommandRunner;
   readonly #deps: ChatDeps;
@@ -243,7 +251,11 @@ export class ChatService {
   // ---- the message -----------------------------------------------------------------------------------------------------------
 
   /** Handles one message from the owner. `messageId` is the owner's idempotency key for the message: sending it again returns the first turn. */
-  async submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: ChatChannel = {}): Promise<TurnResult> {
+  async submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: CallOptions & ChatChannel = {}): Promise<TurnResult> {
+    return endedOf(() => this.#submit(token, message, options, guardOf(options)));
+  }
+
+  async #submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: ChatChannel, guard: Guard | undefined): Promise<TurnResult> {
     const owner = await this.#owner(token);
     const tok = token as string;
     onlyKnown(message, ["messageId", "text", "quoted"]);
@@ -280,6 +292,8 @@ export class ChatService {
         ? { items: [{ i: 0, kind: "refused", code: "interpreter_invalid", message: interpreted.problem } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
         : await this.#plan(owner, tok, turnId, split.text, interpreted.intents, focus, context.focusProjectId, safeQuoted.length > 0);
       const body: TurnBody = { ownerId: owner.id, messageId, text: split.text, quotedCount: quoted.length, ...(planned.projectId === undefined ? {} : { projectId: planned.projectId }), ...(planned.held === undefined ? {} : { held: planned.held }), ...(planned.resumes === undefined ? {} : { resumes: planned.resumes }), status: "planned", plan: planned.items, createdAt: this.#runner.now() };
+      // A long interpretation may have outlived the browser session that asked: nothing is recorded for a session that ended meanwhile.
+      await guard?.();
       try {
         await this.#createTurn(owner, turnId, body);
         turn = await this.#turn(turnId);
@@ -293,7 +307,7 @@ export class ChatService {
     }
     if (turn === undefined) throw new DomainError("unavailable", "the turn could not be recorded");
     let finished: TurnBody;
-    try { finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn); } catch (error) { this.#revealed.delete(turnId); throw error; } finally { this.#noSecrets.delete(turnId); }
+    try { finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn, guard); } catch (error) { this.#revealed.delete(turnId); throw error; } finally { this.#noSecrets.delete(turnId); }
     const secrets = this.#revealed.get(turnId);
     this.#revealed.delete(turnId);
     const reply = replyOf(finished.outcomes ?? []);
@@ -347,16 +361,18 @@ export class ChatService {
    * The explicit request that applies a proposal: its steps are sent to the state API in order, each under its fixed command ID and the credential it names. A proposal that was applied is
    * answered with its recorded results (`replayed`); one whose step is refused stays open, with the steps that did apply recorded by the API, and applying it again carries on.
    */
-  async applyProposal(token: unknown, request: { commandId: string; proposalId: string }, options: ChatChannel = {}): Promise<ApplyResult> {
+  async applyProposal(token: unknown, request: { commandId: string; proposalId: string }, options: CallOptions & ChatChannel = {}): Promise<ApplyResult> {
     const owner = await this.#owner(token);
     onlyKnown(request, ["commandId", "proposalId"]);
-    return this.#apply(owner, token as string, request.proposalId, request.commandId, undefined, options.secrets !== false);
+    const guard = guardOf(options);
+    return endedOf(() => this.#apply(owner, token as string, request.proposalId, request.commandId, undefined, options.secrets !== false, guard));
   }
 
-  async discardProposal(token: unknown, request: { commandId: string; proposalId: string }): Promise<{ proposalId: string; replayed: boolean }> {
+  async discardProposal(token: unknown, request: { commandId: string; proposalId: string }, options: CallOptions = {}): Promise<{ proposalId: string; replayed: boolean }> {
     const owner = await this.#owner(token);
     onlyKnown(request, ["commandId", "proposalId"]);
-    return this.#discard(owner, request.proposalId, request.commandId, undefined);
+    const guard = guardOf(options);
+    return endedOf(async () => { await guard?.(); return this.#discard(owner, request.proposalId, request.commandId, undefined); });
   }
 
   // ---- per-project conversation context ----------------------------------------------------------------------------------------
@@ -1857,9 +1873,10 @@ export class ChatService {
 
   // ---- doing -----------------------------------------------------------------------------------------------------------------
 
-  async #execute(owner: Principal, token: string, turnId: string, turn: TurnBody): Promise<TurnBody> {
+  async #execute(owner: Principal, token: string, turnId: string, turn: TurnBody, guard?: Guard): Promise<TurnBody> {
     const outcomes: Outcome[] = [];
-    for (const item of turn.plan) outcomes.push(await this.#do(owner, token, turnId, item, turn.text));
+    // Before each part of the plan (the state-changing step) the caller's own authority is looked at again: a request whose browser session was revoked while it ran stops here.
+    for (const item of turn.plan) { await guard?.(); outcomes.push(await this.#do(owner, token, turnId, item, turn.text, guard)); }
     const done: TurnBody = fitAnswers({ ...turn, status: "done", outcomes, completedAt: this.#runner.now() });
     try {
       await this.#finishTurn(owner, turnId, done);
@@ -1932,7 +1949,7 @@ export class ChatService {
     return { i: item.i, status: "refused", code: status === "failed" ? String((r["error"] as { code?: string } | undefined)?.code ?? "failed") : status, message: `${String(why ?? "that command could not be run")}${options}` };
   }
 
-  async #do(owner: Principal, token: string, turnId: string, item: PlanItem, words: string): Promise<Outcome> {
+  async #do(owner: Principal, token: string, turnId: string, item: PlanItem, words: string, guard?: Guard): Promise<Outcome> {
     switch (item.kind) {
       case "asked": return { i: item.i, status: "asked", question: item.question, options: item.options };
       case "held": return { i: item.i, status: "held", message: `Not done yet: ${item.preview}. It waits for the answer to the question.` };
@@ -2021,7 +2038,7 @@ export class ChatService {
           } catch (error) { return refusal(item.i, error); }
         }
         try {
-          const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId, !this.#noSecrets.has(turnId));
+          const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId, !this.#noSecrets.has(turnId), guard);
           for (const secret of result.secrets ?? []) this.#reveal(turnId, secret);
           return result.applied ? { i: item.i, status: "applied", proposalId: item.proposalId, results: result.results, accepted: true, completed: result.results.every((r) => r.completed) } : { i: item.i, status: "refused", proposalId: item.proposalId, code: result.failure?.code ?? "invalid_command", message: result.failure?.message ?? "not applied", results: result.results };
         } catch (error) { return refusal(item.i, error); }
@@ -2091,7 +2108,7 @@ export class ChatService {
     }));
   }
 
-  async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined, allowSecrets = true): Promise<ApplyResult> {
+  async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined, allowSecrets = true, guard?: Guard): Promise<ApplyResult> {
     let found = PROPOSAL_ID.test(proposalId) ? await this.#runner.get("chat-proposal", proposalId) : undefined;
     let body = found?.body as unknown as ChatProposalBody | undefined;
     if (found === undefined || body === undefined || body.ownerId !== owner.id) throw new DomainError("not_found", "no such proposal");
@@ -2120,6 +2137,7 @@ export class ChatService {
     const secretStep = allowSecrets ? -1 : body.steps.findIndex((s) => SECRET_OPS.has(s.op));
     if (secretStep >= 0) return { proposalId, applied: false, replayed: false, results, failure: { step: secretStep, code: "unavailable", message: NO_SECRET_CHANNEL } };
     for (const [index, step] of body.steps.entries()) {
+      await guard?.();
       const args = substitute(step.args, results);
       const using = step.as === "coordinator" ? coordinatorToken : token;
       if (using === undefined) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } });

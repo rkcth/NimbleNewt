@@ -146,6 +146,7 @@ export const APP_JS = String.raw`(function (root) {
       },
       view: function (name) { return call('GET', '/web/views/' + encodeURIComponent(name)); },
       sessions: function () { return call('GET', '/web/sessions'); },
+      settings: function () { return call('GET', '/web/settings'); },
       revoke: function (arg) { return call('POST', '/web/sessions/revoke', arg); },
       pair: function () { return call('POST', '/web/pairings', {}); },
       /** After the page comes back to the front or the network returns. */
@@ -277,11 +278,33 @@ export const APP_JS = String.raw`(function (root) {
     box.appendChild(card);
   }
 
+  function settingsCard(st) {
+      if (st.status !== 200 || !st.body) return null;
+      var b = st.body;
+      var card = el('div', 'card');
+      card.appendChild(el('div', 'card-title', 'How this web chat is set up'));
+      var proxy = b.trustedProxy && b.trustedProxy.enabled ? 'trusted proxy ' + (b.trustedProxy.addresses || []).join(', ') + ' (client address from ' + b.trustedProxy.header + ')' : 'no trusted proxy: every client is the connection\'s own address';
+      [
+        'Listens on ' + b.host + ':' + b.port + ' (' + (b.network === 'loopback' ? 'this machine only' : 'your private network') + ')',
+        b.tls ? 'TLS of its own' : b.behindTlsProxy ? 'Behind a TLS proxy on this machine' : 'Plain HTTP',
+        'Host names: ' + ((b.publicHosts || []).join(', ') || 'none'),
+        proxy,
+        'Your connection arrives as ' + b.yourAddress + (b.addressFromProxy ? ' (from the proxy header)' : ''),
+        'Sign-in limits: ' + b.limits.failedLoginsPerAddressPerMinute + ' failures a minute per address, ' + b.limits.failedLoginsGlobalPerMinute + ' in all',
+        'The address, the network and the proxy are set when the controller starts.'
+      ].forEach(function (l) { card.appendChild(el('div', 'card-line', l)); });
+      return card;
+  }
+
   function renderSessions() {
     var box = $('view');
     clear(box);
-    client.sessions().then(function (r) {
+    Promise.all([client.settings(), client.sessions()]).then(function (both) {
+      var r = both[1];
       clear(box);
+      box.appendChild(el('h2', null, 'Settings'));
+      var sc = settingsCard(both[0]);
+      if (sc) box.appendChild(sc);
       box.appendChild(el('h2', null, 'Signed-in browsers'));
       ((r.body && r.body.sessions) || []).forEach(function (s) {
         var card = el('div', 'card');
@@ -313,7 +336,7 @@ export const APP_JS = String.raw`(function (root) {
 
   function build() {
     var tabs = $('tabs');
-    var names = [['chat', 'Chat']].concat(Object.keys(VIEW_TABS).map(function (k) { return [k, VIEW_TABS[k]]; })).concat([['sessions', 'Browsers']]);
+    var names = [['chat', 'Chat']].concat(Object.keys(VIEW_TABS).map(function (k) { return [k, VIEW_TABS[k]]; })).concat([['sessions', 'Settings']]);
     names.forEach(function (n) {
       var b = el('button', 'tab', n[1]); b.type = 'button'; b.setAttribute('role', 'tab'); b.setAttribute('data-tab', n[0]);
       b.addEventListener('click', function () { show(n[0]); });
