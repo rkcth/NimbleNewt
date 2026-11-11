@@ -230,7 +230,8 @@ export class ToolExecutionService {
   constructor(deps: ToolExecutionDeps) {
     this.#deps = deps;
     // The listener never rejects: a failure while cancelling must not become an unhandled rejection that ends the process.
-    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls, owner) => { this.#markApplied(`${name}|${version}`); this.#revoked(name, version, runningCalls, owner).catch(() => undefined); });
+    // A revocation the store check already applied (its timer can read the record between the revoke's commit and this listener, or a replayed revoke command calls listeners again) is not applied a second time.
+    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls, owner) => { const key = `${name}|${version}`; if (this.#applied.has(key)) return; this.#markApplied(key); this.#revoked(name, version, runningCalls, owner).catch(() => undefined); });
   }
 
   /** Stops listening for revocations. The service subscribes in its constructor, so whoever builds it once also disposes it once. */

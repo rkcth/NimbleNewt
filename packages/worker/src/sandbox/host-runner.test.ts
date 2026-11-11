@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -83,6 +83,12 @@ describe("the host's script runner (card T02d)", () => {
     strict = "throws";
     await assert.rejects(host.runner.run(run("1", { program: "python3", interpreterVersion: "3.12.1" }), new AbortController().signal), /could not be read, so the script was not started/);
     assert.equal(asked.length, 2, "nothing was launched when the setting could not be read");
+    // The launcher enforces only on exactly `true`: an answer that is not a boolean is not read as lenient, it refuses the run.
+    for (const odd of [1, "true", "false", null, undefined, {}] as unknown[]) {
+      strict = odd as boolean;
+      await assert.rejects(host.runner.run(run("1", { program: "python3", interpreterVersion: "3.12.1" }), new AbortController().signal), /could not be read, so the script was not started/);
+    }
+    assert.equal(asked.length, 2, "nothing was launched on an answer that is not a boolean");
     assert.deepEqual((await host.facts()).interpreters["python3"], "3.12.1");
   });
 
@@ -95,6 +101,29 @@ describe("the host's script runner (card T02d)", () => {
     await assert.rejects(hostScriptRunner({ launcher: fakeLauncher(true), base: join(root, "ok"), interpreters: [{ name: "sh -c x", version: "1", root: "/opt/x", executable: "bin/x" }] }), /plain program name/);
     await assert.rejects(hostScriptRunner({ launcher: fakeLauncher(true), base: join(root, "ok2"), interpreters: [{ name: "node", version: "1", root: "relative", executable: "bin/x" }] }), /absolute install directory/);
     assert.equal(existsSync(join(root, "ok")), true);
+  });
+
+  test("a base directory inside (or holding) a protected path is refused when the runner is made, before anything is created there; hostScriptBase sits beside the data directory", async () => {
+    const data = join(root, "data7");
+    mkdirSync(data);
+    assert.equal(hostScriptBase(data), join(root, "data7.script-runs"));
+    await assert.rejects(hostScriptRunner({ launcher: fakeLauncher(true), base: join(data, "script-runs"), protectedPaths: [data] }), /overlaps the protected path/);
+    assert.equal(existsSync(join(data, "script-runs")), false, "nothing was made inside the protected path");
+    await assert.rejects(hostScriptRunner({ launcher: fakeLauncher(true), base: root, protectedPaths: [data] }), /overlaps the protected path/);
+    await assert.rejects(hostScriptRunner({ launcher: fakeLauncher(true), base: data, protectedPaths: [data] }), /overlaps the protected path/);
+    const ok = await hostScriptRunner({ launcher: fakeLauncher(true), base: hostScriptBase(data), protectedPaths: [data] });
+    assert.equal(ok.problem() === undefined || /no interpreter/.test(ok.problem()!), true);
+  });
+
+  test("with its own launcher and the data directory protected, a script runs from hostScriptBase(data)", async (t) => {
+    if (!usable) return t.skip("bubblewrap or a node install it can mount is unusable");
+    const data = join(root, "data8");
+    mkdirSync(data);
+    const host = await hostScriptRunner({ base: hostScriptBase(data), protectedPaths: [data], requireEnforced: false });
+    try {
+      const out = await host.runner.run(run(`process.stdout.write("ran")`), new AbortController().signal);
+      assert.equal(out.text, "ran");
+    } finally { await host.stop(); }
   });
 
   test("a Node.js in a system directory is not offered (mounting /usr would show the whole system), and the host says it has no interpreter", async () => {

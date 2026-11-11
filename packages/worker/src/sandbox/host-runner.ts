@@ -1,6 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { arch, cpus, platform, totalmem } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun } from "./script.js";
 
@@ -71,7 +71,18 @@ function privateBase(path: string): string {
  * Wire it with `startController({ tools: { runner: x.runner, facts: x.facts, isLocalHost } })`.
  */
 export async function hostScriptRunner(options: HostScriptRunnerOptions): Promise<HostScriptRunner> {
+  // A run's directories are mounted into its sandbox, and the launcher refuses any mount that overlaps a protected path: a base inside (or holding) one would make every script fail while `problem()` said all was well.
+  // Checked before the directory is made (nothing is created inside a protected path) and again on its real path.
+  const guardBase = (candidate: string): void => {
+    for (const guarded of options.protectedPaths ?? []) {
+      let real = guarded;
+      try { real = realpathSync(guarded); } catch { /* compared as given */ }
+      for (const p of [real, guarded]) if (candidate === p || candidate.startsWith(p + sep) || p.startsWith(candidate + sep)) throw new Error(`the script base directory ${candidate} overlaps the protected path ${guarded}; put it outside (hostScriptBase gives a directory beside the data directory)`);
+    }
+  };
+  if (typeof options.base === "string" && isAbsolute(options.base)) guardBase(resolve(options.base));
   const base = privateBase(options.base);
+  guardBase(base);
   const made = options.launcher === undefined;
   const launcher = options.launcher ?? await SandboxLauncher.create({ protectedPaths: options.protectedPaths ?? [], audit: options.audit ?? ((): void => undefined) });
   const list: HostInterpreter[] = [...(options.interpreters ?? [])];
@@ -79,13 +90,17 @@ export async function hostScriptRunner(options: HostScriptRunnerOptions): Promis
   if (own !== undefined && !list.some((i) => i.name === "node" && i.version === process.versions.node)) list.push({ name: "node", version: process.versions.node, ...own });
   for (const i of list) if (!/^[a-z][a-z0-9._-]{0,63}$/.test(i.name) || !isAbsolute(i.root)) throw new Error(`interpreter ${String(i.name).slice(0, 40)}: needs a plain program name and an absolute install directory`);
   const find = (name: string, version: string): InterpreterInstall | undefined => { const i = list.find((x) => x.name === name && x.version === version); return i === undefined ? undefined : { root: i.root, executable: i.executable }; };
-  const strict = async (): Promise<boolean> => typeof options.requireEnforced === "function" ? options.requireEnforced() : options.requireEnforced ?? true;
+  const strict = async (): Promise<unknown> => typeof options.requireEnforced === "function" ? options.requireEnforced() : options.requireEnforced ?? true;
   return {
     runner: {
       async run(launch, signal) {
         // Asked at every run: a setting changed by the owner applies to the next script. An unreadable one refuses the run (the safe side).
         let requireEnforced: boolean;
-        try { requireEnforced = await strict(); } catch { throw new Error("the sandbox policy for scripts could not be read, so the script was not started"); }
+        // Only a boolean is an answer: the launcher enforces only on exactly `true`, so a truthy non-boolean (1, "true") would otherwise run best-effort.
+        let answer: unknown;
+        try { answer = await strict(); } catch { answer = undefined; }
+        if (typeof answer !== "boolean") throw new Error("the sandbox policy for scripts could not be read, so the script was not started");
+        requireEnforced = answer;
         if (!launcher.capacity.available) throw new Error(`this host cannot confine scripts, so none is run: ${launcher.capacity.reason ?? "no sandbox"}`);
         return scriptRunner({ launcher, interpreters: find, base, requireEnforced, ...(options.onLeftover === undefined ? {} : { onLeftover: options.onLeftover }) }).run(launch, signal);
       },
@@ -100,4 +115,5 @@ export async function hostScriptRunner(options: HostScriptRunnerOptions): Promis
   };
 }
 
-export const hostScriptBase = (dataDirectory: string): string => join(dataDirectory, "script-runs");
+/** Where a host's script runs go: a directory BESIDE the controller's data directory (`<data>.script-runs`), never inside it, since the data directory is a protected path no sandbox mount may reach. */
+export const hostScriptBase = (dataDirectory: string): string => join(dirname(dataDirectory), `${basename(dataDirectory)}.script-runs`);

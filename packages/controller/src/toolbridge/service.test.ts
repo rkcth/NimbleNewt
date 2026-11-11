@@ -518,6 +518,95 @@ for (const backend of backends) {
     other.dispose();
   });
 
+  suite("T02d: the store check's timer asks only while a call runs: it stops when the last call ends and when the service is disposed", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    let reads = 0;
+    const gates: (() => void)[] = [];
+    let startedCount = 0;
+    const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+    const view = { get: c.catalog.get.bind(c.catalog), list: c.catalog.list.bind(c.catalog), register: c.catalog.register.bind(c.catalog), content: c.catalog.content.bind(c.catalog), authorizeRun: c.catalog.authorizeRun.bind(c.catalog), revocationOf: async (n: string, v: string) => { reads++; return c.catalog.revocationOf(n, v); } };
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) }, assignments: c.assignments,
+      catalog: view, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, facts: async () => hostFacts, isLocalHost: () => true, revocationWatchMs: 10,
+      runner: { run: async () => { startedCount++; await new Promise<void>((r) => { gates.push(r); }); return { text: '{"ok":true}', cpuMs: 1 }; } },
+    });
+    const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const until = async (cond: () => boolean) => { const end = Date.now() + 5000; while (!cond() && Date.now() < end) await settle(5); assert.ok(cond()); };
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const name = await c.install(s, "slow", "1.0.0");
+      const args = { tool: name, version: "1.0.0", input: { url: "u" } };
+      await c.clear(s, args, "watch-call-a");
+      const first = svc.handle(s.token, s.gateway, { op: "tool.invoke", callId: "watch-call-a", args });
+      await until(() => startedCount === 1);
+      await until(() => reads >= 2);
+      gates.shift()!();
+      out["first"] = await first;
+      await settle(30);
+      const idle = reads;
+      await settle(80);
+      assert.equal(reads, idle, "no call runs: the store is not asked");
+      await c.clear(s, args, "watch-call-b");
+      const second = svc.handle(s.token, s.gateway, { op: "tool.invoke", callId: "watch-call-b", args });
+      await until(() => startedCount === 2);
+      await until(() => reads > idle);
+      svc.dispose();
+      await settle(30);
+      const disposed = reads;
+      await settle(80);
+      assert.equal(reads, disposed, "disposed: the store is not asked, even with a call still running");
+      gates.shift()!();
+      out["second"] = await second;
+    });
+    await c.tick();
+    assert.equal(good(out["first"]!)["state"], "confirmed");
+    assert.equal(good(out["second"]!)["state"], "confirmed");
+  });
+
+  suite("T02d: a revocation the store check already applied is not applied again when the in-process listener fires after it (or a replayed revoke calls it again)", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    let policyReads = 0;
+    let notices = 0;
+    let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    const listeners: ((name: string, version: string, runningCalls: "finish" | "cancel" | "pause" | undefined, owner: typeof c.owner) => void)[] = [];
+    const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+    const view = { get: c.catalog.get.bind(c.catalog), list: c.catalog.list.bind(c.catalog), register: c.catalog.register.bind(c.catalog), content: c.catalog.content.bind(c.catalog), authorizeRun: c.catalog.authorizeRun.bind(c.catalog), revocationOf: c.catalog.revocationOf.bind(c.catalog), onRevoked: (l: (typeof listeners)[number]) => { listeners.push(l); return () => undefined; } };
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) }, assignments: c.assignments,
+      catalog: view, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, facts: async () => hostFacts, isLocalHost: () => true, revocationWatchMs: 0,
+      // The call outlives the abort (a script slow to die), so a second application would find it still running and act on it again.
+      runner: { run: async () => { started(); await gate; return { text: '{"ok":true}', cpuMs: 1 }; } },
+      revocationPolicy: () => { policyReads++; return "pause"; },
+      notice: async () => { notices++; },
+    });
+    const out: Record<string, BridgeResponse> = {};
+    try {
+      c.worker.script = c.session(async (s) => {
+        const name = await c.install(s, "slow", "1.0.0");
+        const args = { tool: name, version: "1.0.0", input: { url: "u" } };
+        await c.clear(s, args, "long-call");
+        const running = svc.handle(s.token, s.gateway, { op: "tool.invoke", callId: "long-call", args });
+        await hasStarted;
+        await c.catalog.revoke(c.owner, { commandId: uid("rv"), name, version: "1.0.0", reason: "bad" });
+        assert.deepEqual(await svc.checkRevocations(), [`${name}|1.0.0`]);
+        assert.equal(policyReads, 1);
+        assert.equal(notices, 1, "no owner could be had for the pause: the owner is told once");
+        assert.equal(svc.runningTotal(name, "1.0.0"), 1, "still running");
+        for (const l of listeners) l(name, "1.0.0", undefined, c.owner);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.equal(policyReads, 1, "the listener did not apply it a second time");
+        assert.equal(notices, 1);
+        release();
+        out["running"] = await running;
+      });
+      await c.tick();
+      assert.equal(good(out["running"]!)["state"], "failed");
+    } finally { svc.dispose(); }
+  });
+
   suite("the credential decides who is asking: another agent's, a wrong, an ended or another attempt's credential is refused; a caller cannot name a principal, actor, project or task", async (c) => {
     const ann = await c.agentFor("ann");
     const ben = await c.agentFor("ben");
