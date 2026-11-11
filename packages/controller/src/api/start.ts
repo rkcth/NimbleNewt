@@ -39,7 +39,7 @@ import { EffectService } from "../domain/effects.js";
 import { DecisionService } from "../decisions/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
-import { ReleaseActivationService, ReleaseService, notificationSink, type ActivationOptions } from "../release/index.js";
+import { HEARTBEAT_ENV, HeartbeatWriter, ReleaseActivationService, ReleaseService, notificationSink, type ActivationOptions } from "../release/index.js";
 import { SwarmLimitsService, SwarmService } from "../swarm/index.js";
 import { CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
@@ -154,6 +154,11 @@ export interface StartOptions {
     readonly restart?: { readonly run: (event: RestartEvent) => void | Promise<void>; readonly delayMs?: number } };
   /** Where releases are staged and activated (card K02): off unless given. The release root holds `incoming`, `releases` and the activation pointer; the launcher reads the pointer. */
   readonly releases?: Omit<ActivationOptions, "runner">;
+  /**
+   * Liveness heartbeat (card K02): when this controller runs under the launcher, a timer writes a counter to a launcher-owned file so the launcher can tell a hung controller from a working one. Default: on when `env.NIMBLENEWT_HEARTBEAT_FILE`
+   * (with `NIMBLENEWT_HEARTBEAT_TOKEN` and optionally `NIMBLENEWT_HEARTBEAT_INTERVAL_MS`) is set by the supervisor, off otherwise; `false` turns it off. An unsafe path or token only turns it off (told once).
+   */
+  readonly heartbeat?: false | { readonly file: string; readonly token: string; readonly intervalMs?: number };
   /** The command line and environment of the process: the operator's override is read from them (`--allow-unsupported-environment`, `NIMBLENEWT_ALLOW_UNSUPPORTED_ENVIRONMENT=1`). */
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -1164,6 +1169,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
     // The maintenance loop: settings changes and lease expiries are looked at here, a bounded number per round, never inside the settings write.
     // The loop period is the owner's setting (maintenance.settings.set tickSeconds), read before each round; a start option overrides it for tests.
+    let heartbeat: HeartbeatWriter | undefined;
     let maintenanceStopped = false;
     let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
     const maintenanceRound = (): void => {
@@ -1172,6 +1178,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       void (options.maintenance?.tickMs !== undefined ? Promise.resolve(options.maintenance.tickMs) : maintenance.tickMs()).catch(() => 30_000).then((ms) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, ms); maintenanceTimer.unref(); } });
     };
     void maintenance.tickMs().catch(() => 30_000).then((first) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, options.maintenance?.tickMs ?? first); maintenanceTimer.unref(); } });
+    // Liveness heartbeat (card K02): under the launcher, a timer beats into the file the launcher named, so it can tell a hung controller from a working one. Before the confirmation below, so the first beat precedes it. Never stops the start.
+    const heartbeatFile = options.heartbeat === false ? undefined : options.heartbeat?.file ?? options.env[HEARTBEAT_ENV.file];
+    if (heartbeatFile !== undefined && heartbeatFile !== "") {
+      const hbSay = options.print ?? ((l: string) => process.stderr.write(`${l}\n`));
+      const token = options.heartbeat === false ? undefined : options.heartbeat?.token ?? options.env[HEARTBEAT_ENV.token];
+      const requested = options.heartbeat === false ? undefined : options.heartbeat?.intervalMs ?? Number(options.env[HEARTBEAT_ENV.intervalMs] ?? "");
+      try { heartbeat = await HeartbeatWriter.start({ file: heartbeatFile, token: token ?? "", ...(requested === undefined || !Number.isFinite(requested) ? {} : { intervalMs: requested }), onProblem: hbSay }); } catch (error) { hbSay(`liveness heartbeat is off: ${(error as Error).message.slice(0, 160)}`); }
+    }
     // Everything is up: a controller started by the launcher from the release the record names as current says so, and that release becomes the last known good (card K02). A failure here never stops the controller.
     if (activation !== undefined) {
       const say = options.print ?? ((l: string) => process.stderr.write(`${l}\n`));
@@ -1185,7 +1199,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }), ...(webChat === undefined ? {} : { webChat }),
-      close: async () => { maintenanceStopped = true; transferLive?.dispose(); if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await webChat?.close(); await backups?.finish(); await storage.close(); },
+      close: async () => { maintenanceStopped = true; await heartbeat?.stop().catch(() => undefined); transferLive?.dispose(); if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await webChat?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     toolsLive?.dispose();

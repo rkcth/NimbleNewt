@@ -317,6 +317,19 @@ export class Launcher {
     }
   }
 
+  /**
+   * A running release stopped answering (the liveness heartbeat, card K02) and the launcher stopped it to start it again. Tells the owner (K02f) in the same file; never touches the last known good or the
+   * quarantine list (a hang is no proof the release is bad: it is restarted through the crash-loop backoff). The notice is of kind `failed_start` with `fallback: true` (something is still there to run).
+   */
+  noteHung(releaseId: string, reason: string): Promise<void> {
+    return this.#serial(async () => {
+      const s = await this.#load();
+      const at = this.#now();
+      const text = `it stopped responding (${reason}) and the launcher restarted it`.slice(0, 200);
+      await this.#write({ ...s, notices: withNotice(s, { kind: "failed_start", release: releaseId, fallback: true, reason: text, at }) }, { at, kind: "failed", release: releaseId, reason: text });
+    });
+  }
+
   /** The owner acknowledges (or a later confirmation closes) the notices that match; nothing else changes. Returns how many were closed. */
   closeNotices(match: (n: LauncherNotice) => boolean, by: "acknowledged" | "confirmed"): Promise<number> {
     return this.#serial(async () => {
