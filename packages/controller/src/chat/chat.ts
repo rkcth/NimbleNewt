@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { wholeWord, platformsNamed, platformChoices, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { wholeWord, platformsNamed, platformChoices, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -573,7 +573,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started; the chat will not pick a time that could cancel work early. How long may it go on?" }); continue; }
@@ -679,6 +679,61 @@ export class ChatService {
   }
 
   /** Turns one command intent into steps: checks the operation and its arguments, names things from records, fills in revisions, decides apply or propose. */
+  /**
+   * Finds what a meeting control acts on (card M02h). The model gives the owner's words (`motionTopic`, `meetingTopic` or `decisionTopic`); the candidates are the records the owner may act on (`meeting.owner-controls`) that the operation can
+   * still do something to, narrowed to the project in focus. Every significant word must fit, else at least one; several fits ask which, none refuses. An ID the owner did not say or pick from the question is the model's own: with
+   * several candidates the owner is asked. The version of the motion a vote is opened on is read here, never said. Returns a refusal or question, or nothing when `args` now holds what the operation takes.
+   */
+  async #resolveMeetingControl(token: string, op: string, args: Record<string, unknown>, labels: Record<string, string>, projectId: string | undefined, words: string): Promise<(Resolved & { ok: false }) | undefined> {
+    const wordsKey = op === "meeting.record.finish" ? "meetingTopic" : op === "meeting.record.apply" ? "decisionTopic" : "motionTopic";
+    const idKey = op === "meeting.record.finish" ? "recordId" : op === "meeting.record.apply" ? "decisionId" : "motionId";
+    const named = args[wordsKey];
+    delete args[wordsKey];
+    if (named !== undefined && typeof named !== "string") return refuse("invalid_command", `${wordsKey} must be text`);
+    if (named !== undefined && args[idKey] !== undefined) return refuse("invalid_command", `${idKey === "motionId" ? "the motion" : idKey === "recordId" ? "the meeting" : "the meeting decision"} is named twice over, as ${idKey} and as ${wordsKey}; which one is meant has to be settled.`);
+    if (op === "meeting.record.finish" && args["interrupted"] !== undefined && typeof args["interrupted"] !== "boolean") return refuse("invalid_command", "interrupted must be true or false");
+    delete args["expectedVersion"];
+    const listed = await this.#get(token, "meeting.owner-controls", {});
+    const cut = listed?.["truncated"] === true;
+    type Candidate = { id: string; projectId: string; text: string; label: string; version?: number };
+    const meetings = (listed?.["meetings"] as { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; topic?: string; state: string; version: number }[] }[] | undefined) ?? [];
+    const unfinished = (listed?.["unfinished"] as { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[] | undefined) ?? [];
+    const states = op === "meeting.record.open-vote" ? ["proposed"] : op === "meeting.record.close-vote" ? ["voting"] : ["proposed", "voting"];
+    const all: Candidate[] = op === "meeting.record.finish"
+      ? meetings.map((m) => ({ id: m.id, projectId: m.projectId, text: m.title, label: m.title.slice(0, 80) }))
+      : op === "meeting.record.apply"
+        ? unfinished.map((d) => ({ id: d.id, projectId: d.projectId, text: `${d.text} ${d.topic ?? ""}`, label: `${d.text.slice(0, 80)}; ${d.left} change${d.left === 1 ? "" : "s"} left to carry out` }))
+        : meetings.flatMap((m) => m.motions.filter((x) => states.includes(x.state)).map((x) => ({ id: x.id, projectId: m.projectId, text: `${x.text} ${x.topic ?? ""} ${m.title}`, label: `motion ${x.number} in ${m.title.slice(0, 40)}: ${x.text.slice(0, 60)}`, version: x.version })));
+    const what = op === "meeting.record.finish" ? "open meeting" : op === "meeting.record.apply" ? "meeting decision with changes left to carry out" : op === "meeting.record.open-vote" ? "motion waiting for a vote" : op === "meeting.record.close-vote" ? "motion with a vote open" : "motion that is open";
+    const candidates = projectId === undefined ? all : all.filter((c) => c.projectId === projectId);
+    const tooMany = `More records exist than could be read at once, and the words do not say which one. Which ${what} is it?`;
+    if (candidates.length === 0) return refuse("not_found", cut ? `More records exist than could be read at once, and none of those read is a ${what}; which one is meant cannot be told from the words.` : all.length > 0 ? `no ${what} in that project` : `there is no ${what}`);
+    const names = new Map<string, string>();
+    if (new Set(candidates.map((c) => c.projectId)).size > 1) for (const id of new Set(candidates.map((c) => c.projectId))) names.set(id, ((await this.#get(token, "project.get", { projectId: id }))?.["name"] as string | undefined)?.slice(0, 40) ?? id);
+    const pick = (c: Candidate): string => `${c.id} (${c.label.slice(0, 80)}${names.has(c.projectId) ? `, in ${names.get(c.projectId)}` : ""})`;
+    const ask = (list: Candidate[]): Resolved & { ok: false } => ({ ok: false, kind: "ask", question: `Which ${what} do you mean?`, options: list.slice(0, CHAT_LIMITS.options).map(pick), field: idKey, choices: list.slice(0, CHAT_LIMITS.options).map((c) => c.id) });
+    let chosen: Candidate | undefined;
+    if (typeof args[idKey] === "string") {
+      chosen = candidates.find((c) => c.id === args[idKey]);
+      if (chosen === undefined) return refuse("not_found", cut ? tooMany : `that is not a ${what}`);
+      // An ID the owner did not say or pick from the question is the model's own: with several candidates the owner is asked.
+      if (candidates.length > 1 && !words.includes(chosen.id)) return ask(candidates);
+    } else {
+      const typed = typeof named === "string" ? named : "";
+      let matches = candidates.filter((c) => decisionWordsMatch(typed, c.text, true));
+      if (matches.length === 0) matches = candidates.filter((c) => decisionWordsMatch(typed, c.text, false));
+      if (matches.length === 0) return refuse("not_found", cut ? tooMany : `no ${what} is about ${quotedText(typed, 80)}`);
+      if (matches.length > 1) return ask(matches);
+      chosen = matches[0]!;
+      args[idKey] = chosen.id;
+    }
+    labels[chosen.id] = chosen.label;
+    if (op === "meeting.record.open-vote") args["expectedVersion"] = chosen.version;
+    // A motion is tabled for a reason: the owner's own words when they gave one, else their message.
+    if (op === "meeting.record.table" && (typeof args["reason"] !== "string" || args["reason"].trim() === "")) args["reason"] = words.trim().slice(0, 500);
+    return undefined;
+  }
+
   async #resolve(token: string, intent: Extract<Intent, { kind: "command" }>, focus: { projectId?: string; projectName?: string }, pending: ReadonlyMap<string, number>, profile: string, words: string, quoted: boolean): Promise<Resolved> {
     const spec = CHAT_OPS[intent.op];
     // Names that stand for the target of a move besides the labelled arguments, and a reason to show the command first that the resolution found.
@@ -1101,6 +1156,11 @@ export class ChatService {
       }
       // A brief belongs to its stand-up, and the operation takes the brief alone; the occurrence only served to find it.
       if (isNote) delete args["occurrenceId"];
+    }
+    // The owner's other meeting controls (card M02h): the motion, meeting or decision is found among those the records list for the owner, by the owner's words.
+    if (MEETING_CONTROLS.has(intent.op)) {
+      const refused = await this.#resolveMeetingControl(token, intent.op, args, labels, projectId, words);
+      if (refused !== undefined) return refused;
     }
     // A meeting named by its words (the one planned meeting of the project whose title contains them, or the only one) and an agent named by its name: both are resolved from the records, and anything unclear asks.
     if (intent.op === "meeting.invite-direct") {

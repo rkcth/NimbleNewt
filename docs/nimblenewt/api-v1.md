@@ -961,6 +961,16 @@ Arguments:
 
 Result: `{ item: { items: [{ id, revision, projectId, since, left, applied, applying, text, topic? }], truncated } }`.
 
+#### `meeting.owner-controls`
+
+What the owner can act on in meetings (card M02h): the motions still open in meetings that are open (each with its state and version, for opening or closing a vote or tabling it), and the adopted decisions with agreed changes not yet carried out although nothing waits for the owner's answer (for carrying them out again); owner only (not a task-scoped credential). `truncated: true` means more exist than were read.
+
+Arguments:
+
+- `limit` (optional): 1 to 50, default 50
+
+Result: `{ item: { meetings: [{ id, projectId, title, chair?, motions: [{ id, number, text, topic?, state, version }] }], unfinished: [{ id, projectId, text, topic?, left, applying }], truncated } }`.
+
 #### `meeting.record.plan`
 
 The project's latest plan from a meeting.
