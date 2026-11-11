@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { totalmem, availableParallelism } from "node:os";
+import { totalmem, availableParallelism, tmpdir } from "node:os";
 import { promisify } from "node:util";
 import type { SpawnPlan } from "./backend.js";
 import { SandboxError } from "./errors.js";
+import { CPU_BURST_SECONDS, measureDirs, psSampler, type WatchLimits } from "./resource-watch.js";
 
 const run = promisify(execFile);
 
@@ -41,6 +42,10 @@ export interface LimitCapabilities {
   readonly escapeDollar: boolean;
   readonly prlimit: boolean;
   readonly taskset: boolean;
+  /** `ps` lists the run's process tree, so a sampling monitor can end a run past its memory or process limit and pause one past its CPU share (macOS; card A08c). Found by trying. Absent: no. */
+  readonly processSampler?: boolean;
+  /** The directories the agent writes can be measured from the host, so a sampling monitor can end a run past its disk limit (macOS and Windows; card A08c). Found by trying. Absent: no. */
+  readonly diskSampler?: boolean;
   /** Environment names a user systemd needs to reach its manager. */
   readonly passEnv: Readonly<Record<string, string>>;
 }
@@ -77,7 +82,12 @@ async function works(file: string, args: string[], env: NodeJS.ProcessEnv): Prom
 
 /** Finds out, by trying, what limits this host can apply. */
 export async function detectLimitCapabilities(platform: NodeJS.Platform = process.platform): Promise<LimitCapabilities> {
-  if (platform !== "linux") return { platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, passEnv: {} };
+  if (platform !== "linux") {
+    // Card A08c: no kernel group limit is available to a worker here, so the sampling monitor is the mechanism, and it is claimed only where it is seen to work on this very host. `ps` exists on macOS only (not on Windows).
+    const processSampler = platform === "darwin" && process.platform === platform ? await psSampler()(process.pid).then((u) => u !== undefined && u.processes >= 1 && u.rssMb > 0, () => false) : false;
+    const diskSampler = process.platform === platform ? await measureDirs([tmpdir()], 2000).then((m) => m.bytes >= 0, () => false) : false;
+    return { platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, processSampler, diskSampler, passEnv: {} };
+  }
   const passEnv: Record<string, string> = {};
   for (const name of ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) { const v = process.env[name]; if (v !== undefined) passEnv[name] = v; }
   const cgroupScope = await works("systemd-run", ["--user", "--scope", "--quiet", "--collect", "-p", "TasksMax=100", "-p", "MemoryMax=64M", "--", "/bin/true"], { ...passEnv, PATH: "/usr/bin:/bin" });
@@ -95,7 +105,44 @@ export async function detectLimitCapabilities(platform: NodeJS.Platform = proces
   return { platform, cgroupScope: usable, escapeDollar, prlimit: await works("prlimit", ["--nofile=64", "--", "/bin/true"], { PATH: "/usr/bin:/bin" }), taskset: await works("taskset", ["-c", "0", "/bin/true"], { PATH: "/usr/bin:/bin" }), passEnv };
 }
 
-export interface LimitedPlan { readonly plan: SpawnPlan; readonly report: readonly LimitEnforcement[] }
+export interface LimitedPlan {
+  readonly plan: SpawnPlan;
+  readonly report: readonly LimitEnforcement[];
+  /** The limits a sampling monitor must hold while the run goes (card A08c); absent when none. The launcher starts it. */
+  readonly watch?: WatchLimits;
+}
+
+const SAMPLED = "sampling monitor";
+/** The limits other systems hold by sampling (card A08c); each entry says exactly what the sampling misses. */
+function sampledLimits(names: readonly LimitName[], limits: ResourceLimits, caps: LimitCapabilities): { report: LimitEnforcement[]; watch: WatchLimits } {
+  const report: LimitEnforcement[] = [];
+  const watch: { memoryMb?: number; processes?: number; cpus?: number; diskMb?: number } = {};
+  const none = (limit: LimitName, why: string): void => { report.push({ limit, value: limits[limit]!, enforced: "none", detail: why }); };
+  for (const limit of names) {
+    const value = limits[limit]!;
+    const ps = caps.processSampler === true && caps.platform !== "win32";
+    switch (limit) {
+      case "memoryMb":
+        if (ps) { watch.memoryMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when the resident memory of its process tree passes the limit at a look; a burst between two looks can pass it first, and memory the system has compressed or swapped out is not counted" }); }
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host, and a Job Object on the host side does not bound a virtual machine" : "ps could not list the process tree here"}`);
+        break;
+      case "processes":
+        if (ps) { watch.processes = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when its process tree holds more processes than the limit at a look; threads are not counted, and a fork storm can pass the limit between two looks" }); }
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host" : "ps could not list the process tree here"}`);
+        break;
+      case "cpus":
+        if (ps) { watch.cpus = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (SIGSTOP/SIGCONT)`, detail: `the process tree is paused whenever its average use passes ${value} core(s) (a burst of ${CPU_BURST_SECONDS_TEXT} is allowed); CPU time of processes that exited between two looks is not seen, and a process that continues itself escapes a pause until the next look` }); }
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host" : "ps could not list the process tree here"}`);
+        break;
+      case "diskMb":
+        if (caps.diskSampler === true) { watch.diskMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (directory walk every 5 s)`, detail: "the run is ended when the files under its checkout, home and scratch have grown by more than the limit since the run began; deleting files offsets writing, a fast writer can pass the limit between two looks, and a directory tree larger than 500000 entries is measured only in part" }); }
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: the directories could not be measured from the host`);
+        break;
+    }
+  }
+  return { report, watch };
+}
+const CPU_BURST_SECONDS_TEXT = `${CPU_BURST_SECONDS} seconds`;
 
 let coreRotor = 0;
 /** The first core to pin the next process to, rotating by the number of cores each pin uses, so agents spread over the machine instead of all sharing cores 0..n-1. */
@@ -124,8 +171,9 @@ export function limitedPlan(plan: SpawnPlan, limits: ResourceLimits, caps: Limit
   const names = (Object.keys(limits) as LimitName[]).filter((k) => limits[k] !== undefined && k !== "wallTimeMs").sort();
   if (names.length === 0) return { plan, report };
   if (caps.platform !== "linux") {
-    for (const limit of names) report.push({ limit, value: limits[limit]!, enforced: "none", detail: `no way to limit ${limit} is wired in for ${caps.platform} yet` });
-    return { plan, report };
+    // Card A08c: macOS and Windows hold a limit by sampling where the host proved it can, and say `none` (with the reason) for the rest. The plan itself is never changed.
+    const sampled = sampledLimits(names, limits, caps);
+    return { plan, report: sampled.report, ...(Object.keys(sampled.watch).length === 0 ? {} : { watch: sampled.watch }) };
   }
   const scope: string[] = [];
   const prl: string[] = [];

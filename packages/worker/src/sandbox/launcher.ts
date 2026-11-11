@@ -5,6 +5,7 @@ import type { GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { bubblewrapBackend } from "./linux.js";
 import { seatbeltBackend } from "./seatbelt.js";
 import { SandboxError } from "./errors.js";
+import { ResourceWatch, measureDirs, psSampler, type LimitExceeded, type UsageSampler, type WatchLimits } from "./resource-watch.js";
 import { DEFAULT_HEADROOM, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, nextCoreOffset, type Headroom, type LimitCapabilities, type LimitEnforcement, type ResourceLimits } from "./limits.js";
 import { canonical, normalizeRecipe, protectedPathsFor, sha256, type NormalizedRecipe, type SandboxMode, type SandboxRecipe } from "./recipe.js";
 import { linuxProcessTree, linuxStillRunning, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";
@@ -54,6 +55,10 @@ export interface LauncherConfig {
   readonly headroom?: Headroom;
   /** What this host can enforce. Default: found by trying (at creation and on `recheck`). */
   readonly limitCapabilities?: LimitCapabilities;
+  /** How the sampling monitor looks at a run's process tree (card A08c; default: `ps`). Injectable for tests. */
+  readonly usageSampler?: UsageSampler;
+  /** How often the sampling monitor looks at the process tree and at the directories (defaults: 250 ms and 5 s). */
+  readonly sampling?: { readonly intervalMs?: number; readonly diskEveryMs?: number };
 }
 
 export interface LaunchRequest {
@@ -90,6 +95,10 @@ export interface RunResult {
   /** Which stream was cut: `truncated` is true when either was. */
   readonly stdoutTruncated: boolean;
   readonly durationMs: number;
+  /** Set when the sampling monitor (card A08c) ended the run because it passed a memory, process-count or disk limit: which limit, its value and what was seen. Numbers only. */
+  readonly limitExceeded?: LimitExceeded;
+  /** How many times the sampling monitor paused the run to hold its CPU share. Absent when no CPU limit was watched. */
+  readonly cpuPauses?: number;
   /** Set when the backend could not clean up after the run (for the Windows backend: a sandbox, an access-list change or a job folder left behind). The owner must act on it. */
   readonly releaseProblem?: string;
 }
@@ -243,10 +252,13 @@ export class SandboxLauncher {
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps, pin).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream, limited.report);
+    // The disk figure the sampling monitor starts from, taken before the process exists so that nothing it writes is in it.
+    const dirs = [recipe.workdir, recipe.home, recipe.scratch];
+    const watch = limited.watch === undefined ? undefined : { limits: limited.watch, dirs, baselineBytes: limited.watch.diskMb === undefined ? 0 : (await measureDirs(dirs)).bytes };
+    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps, pin).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream, limited.report, watch);
   }
 
-  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined, stream: LaunchRequest["stream"], enforcement: readonly LimitEnforcement[]): SandboxRun {
+  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined, stream: LaunchRequest["stream"], enforcement: readonly LimitEnforcement[], watched?: { readonly limits: WatchLimits; readonly dirs: readonly string[]; readonly baselineBytes: number }): SandboxRun {
     const started = Date.now();
     const child = spawn(plan.file, [...plan.args], { env: { ...plan.env }, ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }), stdio: ["pipe", "pipe", "pipe"], detached: true, windowsHide: true });
     // The program's input is the request's `stdin` (none: it reads end-of-file at once). A program that exits without reading it closes the pipe: that is its answer, not an error of the launcher.
@@ -297,6 +309,15 @@ export class SandboxLauncher {
       void track().then(sweep).catch(() => undefined).finally(finalKill);
     };
     const timer = setTimeout(() => { timedOut = true; killTree(); }, timeoutMs);
+    // Card A08c: where the host has no kernel limit, a sampling monitor ends a run past its memory, process or disk limit and paces one past its CPU share.
+    let exceeded: LimitExceeded | undefined;
+    const watch = watched === undefined || child.pid === undefined ? undefined : new ResourceWatch({
+      limits: watched.limits, rootPid: child.pid, sample: this.#config.usageSampler ?? psSampler(),
+      ...(watched.limits.diskMb === undefined ? {} : { disk: { dirs: watched.dirs, baselineBytes: watched.baselineBytes } }),
+      ...(this.#config.sampling?.intervalMs === undefined ? {} : { intervalMs: this.#config.sampling.intervalMs }), ...(this.#config.sampling?.diskEveryMs === undefined ? {} : { diskEveryMs: this.#config.sampling.diskEveryMs }),
+      onExceeded: (e) => { exceeded = e; killTree(); },
+    });
+    watch?.start();
 
     const result = new Promise<RunResult>((resolve) => {
       let settled = false;
@@ -305,17 +326,18 @@ export class SandboxLauncher {
         settled = true;
         ended = true;
         clearTimeout(timer);
+        watch?.stop();
         if (poller !== undefined) clearInterval(poller);
         // Nothing the run started is left running after it; the result is given once that is done.
         // A process that outlived the run may still hold the output pipes; closing our ends lets the launcher's own process exit instead of waiting on it for ever.
         child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
         let releaseProblem: string | undefined;
-        void sweep().catch(() => undefined).then(async () => { try { await backend?.release?.(plan); } catch (error) { releaseProblem = (error as Error).message; } }).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated: cut.out || cut.err, stdoutTruncated: cut.out, durationMs: Date.now() - started, ...(releaseProblem === undefined ? {} : { releaseProblem }) }));
+        void sweep().catch(() => undefined).then(async () => { try { await backend?.release?.(plan); } catch (error) { releaseProblem = (error as Error).message; } }).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated: cut.out || cut.err, stdoutTruncated: cut.out, durationMs: Date.now() - started, ...(exceeded === undefined ? {} : { limitExceeded: exceeded }), ...(watch === undefined || watched?.limits.cpus === undefined ? {} : { cpuPauses: watch.pauses }), ...(releaseProblem === undefined ? {} : { releaseProblem }) }));
       };
       child.once("close", finish);
       // A trusted-host child that started its own session can outlive its parent and keep the output pipes open; after a short drain the result is given anyway.
       child.once("exit", (code, signal) => { setTimeout(() => finish(code, signal), EXIT_DRAIN_MS).unref(); });
-      child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, stdoutTruncated: false, durationMs: Date.now() - started }); });
+      child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); watch?.stop(); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, stdoutTruncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
     // Every process a look found (card L02d), so one that outlives the run is still found and can still be ended. Bounded: the oldest entries go first.
