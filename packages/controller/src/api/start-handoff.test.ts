@@ -10,10 +10,9 @@ import { PI } from "../dispatch/testing/world.js";
 import { DomainError } from "../domain/errors.js";
 import { NotificationService } from "../notifications/index.js";
 import { describeReassigned, responsibilityHandover } from "../lifecycle/index.js";
-import { startController } from "./index.js";
+import { LOCKS_NONE, startController } from "./start.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
-const UNTRACKED = "integrator lease and workspace holds: not tracked by this installation yet, so any the sender holds are missing from this section, not absent";
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
 test("a task is handed to another agent through the state API: prepared, package from the contract, incomplete until the gap is accepted, then moved once (card L03b)", async () => {
@@ -132,7 +131,7 @@ test("the package carries the sender's shared drafts on the task and the respons
     assert.ok(!/Private thought|do not share|Other task draft|Accepted note/.test(sections.drafts), sections.drafts);
     assert.match(sections.responsibilities, /Keep the compost turned/);
     assert.ok(!/Someone else's/.test(sections.responsibilities));
-    assert.equal(sections.locks, UNTRACKED, "no hold is known, but the two kinds nobody keeps yet are named as a gap and not claimed absent");
+    assert.equal(sections.locks, LOCKS_NONE, "every kind of hold was read and none is held: said so, not left a gap (card L03j)");
     // Someone who only controls the task does not see the sender's drafts or responsibilities; the owner and the sender do.
     await c.services.grants.grant(rob, { commandId: "g-mgr", grantee: `agent:${b}`, action: "lifecycle.pause", project, source: "direct", basis: "test" });
     const bToken = (await c.services.principals.issueCredential(rob, `agent:${b}`)).token;
@@ -182,10 +181,10 @@ test("the real hand-off locks source: checkout holds whoever started them, claim
     // Claim match with a recipient who may read both: named. The refresh is over, so no checkout line. A malformed managed entry skips only itself.
     await corrupt();
     const full = await sections(t2, sees, "h2");
-    assert.equal(full["locks"], `resource claims: 1 managed entry of the sender's responsibilities could not be checked and is missing from this section\nresource ${res.id}: claimed by responsibility ${duty.id}; the claim stays with ${duty.id} until it is reassigned\n${UNTRACKED}`);
+    assert.equal(full["locks"], `resource claims: 1 managed entry of the sender's responsibilities could not be checked and is missing from this section\nresource ${res.id}: claimed by responsibility ${duty.id}; the claim stays with ${duty.id} until it is reassigned`);
     // Gap versus none: a sender who cannot read responsibilities is reported as unknown; one who can and holds nothing leaves the section empty.
     assert.match((await sections(t3, sees, "h3"))["locks"] ?? "", /not known; the sender may not read/);
-    assert.equal((await sections(t4, sees, "h4"))["locks"], UNTRACKED, "nothing held, but the two kinds of lock nobody keeps yet are named as a gap");
+    assert.equal((await sections(t4, sees, "h4"))["locks"], LOCKS_NONE, "nothing held of any kind: a known none (card L03j)");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

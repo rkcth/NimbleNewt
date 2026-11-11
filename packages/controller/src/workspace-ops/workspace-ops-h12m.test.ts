@@ -158,9 +158,13 @@ for (const backend of backends) {
       assert.match(blocker!.summary, /could not be released/);
       assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "still frozen");
       assert.ok(await svc.openFor(r.taskId) === undefined || true);
+      // The hold a hand-off names (card L03j): the request ended but still holds the attempt frozen, and only it lifts that.
+      const kept = await svc.heldFor(r.taskId);
+      assert.deepEqual([kept?.requestId, kept?.operation, kept?.held], [a.id, "refresh", [r.attemptId]]);
       failRelease = false;
       assert.equal((await svc.recover(r.w.owner)).length, 1, "the recovery finds it through the record");
       assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "and lifts it");
+      assert.equal(await svc.heldFor(r.taskId), undefined, "no hold left to name once the recovery lifted it");
       r.turn.end!(); await r.d.idle();
     } finally { await r.store.close(); }
   });

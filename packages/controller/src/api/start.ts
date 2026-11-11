@@ -95,6 +95,7 @@ import { MaintenanceService, EnvironmentChangeApplier, StorageJournal, type Envi
 import { EnvironmentService } from "../environments/index.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
+import { IntegratorLeaseService, describeLeases, integratorLeaseHandover } from "../landing/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
@@ -313,6 +314,8 @@ export interface Controller {
   /** What each prerequisite probe found. */
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
+    /** The integrator lease of each landing branch (card L03j, the first part of P10): for the code that composes the landing; a hand-off releases or (owner's choice) moves the sender's. */
+    readonly integratorLeases: IntegratorLeaseService;
     /** Retention, quotas, archive, export and deletion, and their settings (card K06). */
     readonly retention: RetentionService; readonly retentionSettings: RetentionSettingsService;
     readonly backups?: BackupService;
@@ -381,7 +384,9 @@ async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<st
  * 4. Build the services and the state API on that epoch.
  * Nothing else about behaviour changes under the override.
  */
-const UNTRACKED_LOCKS = "integrator lease and workspace holds: not tracked by this installation yet, so any the sender holds are missing from this section, not absent";
+
+/** The locks section of a hand-off when every kind of hold was read and none is held (card L03j). */
+export const LOCKS_NONE = "none: the sender holds no integrator lease for this task, no workspace operation or freeze is on its checkout, and the sender's responsibilities hold no resource claims";
 
 export async function startController(options: StartOptions): Promise<Controller> {
   const dir = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
@@ -810,7 +815,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const fallback = FallbackService.withEpoch(storage, epoch, routing, {}, cutover.gate());
     cutover.bind(fallback);
     wakeHost = MeetingWakeHost.withEpoch(storage, epoch, { rest: (agentId) => stops.agentRest(agentId), holds: (agentId) => pauses.agentHolds(agentId) });
-    const handoffs = HandoffService.withEpoch(storage, epoch, { asker: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); }, onReturnGivenUp: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-ret-${createHash("sha256").update(e.reason).digest("hex").slice(0, 12)}`, taskId: e.taskId, kind: "ownership", summary: `The temporary reassignment was not returned: ${e.reason}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, onTransferred: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-act`, taskId: e.taskId, kind: "ownership", summary: `Handed over from ${e.from.kind} ${e.from.id} to ${e.to.kind} ${e.to.id}.${describeReassigned(e.reassigned)}`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, pauses, stops, assignments, responsibilities: responsibilityHandover({
+    const integratorLeases = IntegratorLeaseService.withEpoch(storage, epoch);
+    const handoffs = HandoffService.withEpoch(storage, epoch, { leases: integratorLeaseHandover(integratorLeases), asker: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); }, onReturnGivenUp: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-ret-${createHash("sha256").update(e.reason).digest("hex").slice(0, 12)}`, taskId: e.taskId, kind: "ownership", summary: `The temporary reassignment was not returned: ${e.reason}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, onTransferred: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-act`, taskId: e.taskId, kind: "ownership", summary: `Handed over from ${e.from.kind} ${e.from.id} to ${e.to.kind} ${e.to.id}.${describeReassigned(e.reassigned)}${describeLeases(e.leases)}`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, pauses, stops, assignments, responsibilities: responsibilityHandover({
         responsibilities, projectOf: async (taskId) => (await projects.getTask(taskId))?.projectId,
         activeAgent: async (to) => { const p = await principals.get(`agent:${to.id}`); return p !== undefined && p.kind === "agent" && p.state === "active"; },
         // A duty moved at once; a new holder without the rights for it is reported to the owner, naming what is missing (owner decision 2026-10-30). Provisional set: read and write the duty, and work in the project.
@@ -820,10 +826,19 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       // The sender's own shared drafts and the responsibilities it answers for travel with the task (card L03g), read as the sender.
       drafts: async ({ taskId, projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); const all: Awaited<ReturnType<typeof desks.list>>["items"] = []; for (let after: string | undefined, i = 0; i < 20; i++) { const page = await desks.list(eff as never, { ownerId: p.id, projectId, limit: 200, ...(after === undefined ? {} : { afterId: after }) }); all.push(...page.items); after = page.next; if (after === undefined) break; } return all.filter((r) => r.taskId === taskId && r.status === "draft" && r.visibility === "shared").map((r) => ({ id: r.id, title: r.title, body: r.body, updatedAt: r.updatedAt })); },
       responsibilities: async ({ projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ((await responsibilities.list(eff as never, projectId, { state: "active" })) ?? []).filter((r) => r.ownerId === p.id).map((r) => ({ id: r.id, title: r.title, desiredCondition: r.desiredCondition, state: r.state, updatedAt: r.updatedAt })); },
-      // Two kinds of hold are not kept anywhere yet (the integrator lease of landing and workspace holds); the section says so rather than read as complete (card L03i, remaining: L03j).
+      // Every kind of hold the controller keeps (card L03j): the checkout's workspace operation and any freeze it could not lift, the sender's integrator leases for the task, and the claims of the sender's responsibilities.
       locks: async ({ taskId, projectId, from, to }) => {
         const p = await principals.get(`agent:${from.id}`); if (p === undefined) return [];
         const out: string[] = [];
+        // The sender's integrator leases for this task: released when the task moves, unless the owner moves them with the hand-off. A failing read is a gap, said so.
+        try {
+          for (const l of (await integratorLeases.forTask(taskId)).filter((x) => x.holder === from.id)) out.push(`integrator lease on branch ${l.branch}: held by ${from.id} (the sender, fence ${l.fence}, until ${l.expiresAt}); released when the task moves, unless the owner moves it to the recipient on completing the hand-off (moveIntegratorLease)`);
+        } catch { out.push("integrator leases: could not be read just now, so any the sender holds are missing from this section, not absent"); }
+        // A workspace operation that ended but could not lift its freeze: only it (through the recovery loop) lifts those attempts, never the hand-off.
+        try {
+          const kept = await workspaceOps.heldFor(taskId);
+          if (kept !== undefined) out.push(`checkout of ${taskId}: ${kept.operation} request ${kept.requestId} ended but still holds ${kept.held.length} attempt(s) frozen; the recovery loop lifts them, the hand-off does not`);
+        } catch { out.push("workspace holds: could not be read just now, so any on the checkout are missing from this section, not absent"); }
         const rightsOf = async (x: { id: string; kind: never; name: string; grants: never }) => grants.effective(x as never, new Date().toISOString());
         // A workspace operation open on the task's checkout, whoever started it (the owner or the dispatcher as well as the sender): the checkout is frozen for the recipient too until it ends, so it is named with who started it.
         const op = await workspaceOps.openFor(taskId);
@@ -832,7 +847,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         const eff = await rightsOf(p as never);
         const mine = await responsibilities.list(eff as never, projectId, { state: "active" });
         // The sender being unable to read responsibilities is a gap in what is known, not the absence of claims: say so rather than show only the checkout line as if complete.
-        if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return [...out, UNTRACKED_LOCKS]; }
+        if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return out; }
         const claims: { resourceId: string; responsibilityId: string }[] = [];
         let unchecked = 0;
         for (const r of mine) {
@@ -854,7 +869,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
         }
         if (hidden > 0) out.push(`resource claims: ${hidden} held by the sender's responsibilities (${[...kinds].map(([k, n]) => `${k} x${n}`).join(", ")}); details withheld, the recipient may not read them`);
-        return [...out, UNTRACKED_LOCKS];
+        // Every kind of hold was read: none is a known answer, not a gap.
+        return out.length === 0 ? [LOCKS_NONE] : out;
       },
       agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state, canWork: async (agentId, projectId) => { const p = await principals.get(`agent:${agentId}`); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId); } }) });
     const continuations = ContinuationService.withEpoch(storage, epoch);
@@ -1277,7 +1293,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       try { await activation.deliverStartNotices(); } catch (error) { say(`release activation: telling the owner about the launcher's notices failed (they stay pending): ${(error as Error).message.slice(0, 160)}`); }
     }
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, setupProviders, localHost, environments, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
+      api, storage, epoch, check, filesystems, prerequisites, services: { integratorLeases, maintenance, setupProviders, localHost, environments, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }), ...(webChat === undefined ? {} : { webChat }),
