@@ -1009,6 +1009,46 @@ export class ChatService {
       if (found === undefined) return refuse("not_found", "no such agenda item");
       labels[String(args["itemId"])] = String(found["topic"]);
     }
+    // Ongoing responsibilities (card P04): a responsibility is named by its title, a managed resource by its label, an incident by the responsibility's title and, when it has several, the words of its signature. Exactly one match, else the owner is asked.
+    if (intent.op === "responsibility.update" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
+      const pick = (what: string, field: string, words: string, items: { id: string; name: string }[]): { id: string } | ReturnType<typeof refuse> | { ok: false; kind: "ask"; question: string; options: string[]; field: string; choices: string[] } => {
+        const matches = items.filter((i) => words === "" || i.name.toLowerCase().includes(words));
+        if (matches.length === 0) return refuse("not_found", words === "" ? `there is no ${what} in that project` : `no ${what} in that project is called ${quotedText(words, 80)}`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: `Which ${what} do you mean?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.name.slice(0, 60)})`), field, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+        return { id: matches[0]!.id };
+      };
+      const words = (key: string): string | undefined | ReturnType<typeof refuse> => {
+        const v = args[key];
+        delete args[key];
+        if (v !== undefined && typeof v !== "string") return refuse("invalid_command", `${key} must be text`);
+        return v?.trim().toLowerCase();
+      };
+      const dutyTitle = intent.op === "responsibility.update" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
+      const resourceLabel = intent.op.startsWith("lease.") ? words("resourceLabel") : undefined;
+      const signature = intent.op === "incident.resolve" ? words("incidentSignature") : undefined;
+      for (const w of [dutyTitle, resourceLabel, signature]) if (typeof w === "object") return w;
+      if (intent.op === "responsibility.update" && args["responsibilityId"] === undefined) {
+        const listed = await this.#plainItems(token, "responsibility.list", { projectId });
+        const r = pick("responsibility", "responsibilityId", (dutyTitle as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["title"]) })));
+        if (!("id" in r)) return r;
+        args["responsibilityId"] = r.id;
+      } else if (intent.op === "incident.resolve" && args["incidentId"] === undefined) {
+        const listed = await this.#plainItems(token, "responsibility.incidents", { projectId, open: true });
+        const duties = dutyTitle === undefined ? undefined : await this.#plainItems(token, "responsibility.list", { projectId });
+        const ids = duties === undefined ? undefined : new Set(duties.filter((d) => String(d["title"]).toLowerCase().includes(dutyTitle as string)).map((d) => String(d["id"])));
+        const own = listed.filter((i) => ids === undefined || ids.has(String(i["responsibilityId"])));
+        const r = pick("open incident", "incidentId", (signature as string | undefined) ?? "", own.map((i) => ({ id: String(i["id"]), name: String(i["signature"]) })));
+        if (!("id" in r)) return r;
+        args["incidentId"] = r.id;
+      } else if (intent.op.startsWith("lease.") && args["resourceId"] === undefined) {
+        const listed = await this.#plainItems(token, "resource.list", { projectId, state: "bound" });
+        const r = pick("resource", "resourceId", (resourceLabel as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["label"]) })));
+        if (!("id" in r)) return r;
+        args["resourceId"] = r.id;
+      } else if (dutyTitle !== undefined || resourceLabel !== undefined || signature !== undefined) {
+        return refuse("invalid_command", "the message names the same thing twice over, as an ID and in words; which one is meant has to be settled.");
+      }
+    }
     // A stand-up named by its title (or the only one of the project): exactly one whose title contains the words, else the owner is asked.
     if (intent.op === "standup.update") {
       const named = args["standupTitle"];
@@ -1558,6 +1598,11 @@ export class ChatService {
         // A task never assigned has no assignment revision to expect (that is how a first assignment is asked for).
         return item === undefined ? { ok: true } : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "responsibility": {
+        const item = typeof args["responsibilityId"] === "string" ? await this.#get(token, "responsibility.get", { responsibilityId: args["responsibilityId"] }) : undefined;
+        const revision = (item?.["item"] as { revision?: number } | undefined)?.revision ?? (item?.["revision"] as number | undefined);
+        return revision === undefined ? refuse("not_found", "no such responsibility") : { ok: true, name: "expectedRevision", value: revision + ahead(`responsibility:${args["responsibilityId"] as string}`) };
+      }
       case "agenda": {
         const item = typeof args["itemId"] === "string" ? await this.#get(token, "agenda.get", { itemId: args["itemId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
@@ -1721,6 +1766,13 @@ export class ChatService {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args: {} });
     if (!response.ok) { if (response.error.code === "forbidden" || response.error.code === "not_found") return []; throw new DomainError("unavailable", response.error.message); }
     return (response.result["items"] ?? []) as Record<string, unknown>[];
+  }
+
+  /** The `items` of a query that takes no paging arguments (the responsibility, incident and resource lists). */
+  async #plainItems(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+    const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args });
+    if (response.ok) return (response.result["items"] as Record<string, unknown>[] | undefined) ?? [];
+    throw new DomainError(response.error.code === "unauthenticated" ? "unauthenticated" : "unavailable", response.error.message);
   }
 
   /** Every item of a list operation, bounded (five pages). */
