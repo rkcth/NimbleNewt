@@ -78,6 +78,22 @@ for (const backend of backends) {
       // Without fixedIntents nothing changes: the assistant still reads a message, and words that merely look like the button are not trusted as its meaning.
       const plain = await chat.submit(w.ownerToken, { messageId: "btn-5", text: acc.text });
       assert.notEqual(plain.outcomes[0]?.status, "proposed", "the words alone carry no meaning without the assistant");
+
+      // A page drawn before the proposal was accepted (review): a second Accept under a new key shows the proposal's state in its line, and applying it grants nothing more; a Dismiss of it
+      // is refused with that state, not done silently.
+      const acc2 = approvalIntent(commit.id, "accept", { days: 30 });
+      const stale = await chat.submit(w.ownerToken, { messageId: "btn-6", text: acc2.text }, { fixedIntents: [acc2.intent] });
+      assert.match(JSON.stringify(stale.outcomes[0]!.preview ?? stale.outcomes[0]), /accepted/);
+      if (stale.outcomes[0]!.proposalId !== undefined) {
+        const ap = await chat.applyProposal(w.ownerToken, { commandId: "btn-apply-2", proposalId: stale.outcomes[0]!.proposalId });
+        assert.equal(ap.applied, false);
+        assert.match(JSON.stringify(ap), /is accepted/);
+      }
+      const dis2 = approvalIntent(commit.id, "dismiss", {});
+      const staleD = await chat.submit(w.ownerToken, { messageId: "btn-7", text: dis2.text }, { fixedIntents: [dis2.intent] });
+      assert.equal(staleD.outcomes[0]!.status, "refused");
+      assert.match(staleD.reply.join(" "), /is accepted/);
+      assert.equal((await grantsApi.list(w.owner, {} as never)).items.length, 1, "no second grant");
     } finally { await w.close(); }
   });
 }

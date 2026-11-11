@@ -201,14 +201,14 @@ test("no routing table and no profiles are states, not failures", async () => {
   assert.doesNotMatch(text(view), /Could not load/);
 });
 
-test("the tabs name the new pages and the page offers no control the chat lacks: the only changes it sends are decisions on standing-rule proposals", async () => {
+test("the tabs name the new pages and the page offers no control the chat lacks: the only changes it sends are decisions on standing-rule proposals and the thinking switch", async () => {
   const page = boot({});
   await settle();
   const names = page.doc.body.find((e) => e.getAttribute("role") === "tab").map((e) => e.textContent);
   assert.deepEqual(names, ["Chat", "Status", "Needs you", "Approvals", "Models", "Blockers", "Cost", "Recovery", "Settings"]);
   // Each POST route the script uses; the new one is the approvals route, and its two actions are chat commands of the same names.
   const posts = [...APP_JS.matchAll(/call\('POST', '([^']+)'/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(posts)].sort(), ["/web/approvals/", "/web/chat", "/web/login", "/web/logout", "/web/pairings", "/web/proposals/", "/web/sessions/revoke"]);
+  assert.deepEqual([...new Set(posts)].sort(), ["/web/approvals/", "/web/chat", "/web/login", "/web/logout", "/web/pairings", "/web/proposals/", "/web/sessions/revoke", "/web/thinking/collection"]);
 });
 
 test("only the lengths the controller accepts become buttons, whatever a record says", async () => {
@@ -216,4 +216,47 @@ test("only the lengths the controller accepts become buttons, whatever a record 
   (parts.proposals.items[0] as any).lengthOptions = [3650, 0, "7", 7, -1, 1.5, 30, null];
   const view = await open(boot({ approvals: parts }), "approvals");
   assert.deepEqual(view.buttons().map((b) => b.textContent), ["Accept for 7 days (suggested)", "Accept for 30 days", "Dismiss"]);
+});
+
+test("provider names that are also names of an object's own fields are counted as names (review)", async () => {
+  const page = boot({ models: { routes: { revision: 1, routes: [{ route: "constructor/a" }, { route: "constructor/b" }, { route: "__proto__/c" }, { route: "toString/d" }] }, controls: { controls: { entries: [] } }, state: { item: { lines: [] } }, difficulty: { error: { code: "not_found", message: "none" } } } });
+  const view = await open(page, "models");
+  const providers = view.find((e) => e.tag === "table")[0]!;
+  const rows = providers.find((e) => e.tag === "tr").slice(1).map((r) => r.children.map((c) => c.textContent));
+  assert.deepEqual(rows, [["__proto__", "1"], ["constructor", "2"], ["toString", "1"]]);
+  assert.doesNotMatch(text(view), /native code/);
+});
+
+test("a bidirectional override or an invisible character in a record is shown as its code, so it cannot turn the rest of a line around (review)", async () => {
+  const page = boot({ approvals: approvalParts((s) => (s === "commit" ? "commit‮" : s === "git-commit" ? "git​-commit⁦" : s)) });
+  const view = await open(page, "approvals");
+  const t = text(view);
+  assert.match(t, /commit\\u202e for agent:ann in project proj-1/);
+  assert.match(t, /git\\u200b-commit\\u2066/);
+  assert.doesNotMatch(t, /[‪-‮⁦-⁩​]/);
+  for (const b of view.buttons()) assert.doesNotMatch(b.getAttribute("aria-label")!, /[‪-‮⁦-⁩]/);
+});
+
+test("the thinking switch shows the setting, asks first, and sends one fixed decision under one key; an unwired store is a state, not a button (card U09b)", async () => {
+  const done = { turnId: "t", replayed: false, text: "Turn collecting the model's thinking off", reply: ["Done."], outcomes: [{ status: "applied" }] };
+  const base = { routes: { revision: 1, routes: [] }, controls: { controls: { entries: [] } }, state: { item: { lines: [] } }, difficulty: { error: { code: "not_found", message: "none" } } };
+  const page = boot({ models: { ...base, thinking: { item: { enabled: true, revision: 2 } } } }, [(c) => (c.path === "/web/thinking/collection" ? { status: 201, body: done } : undefined)], () => false);
+  const view = await open(page, "models");
+  assert.match(text(view), /Collected: the thinking of agents that work is kept/);
+  const button = () => view.buttons().find((b) => b.textContent === "Stop collecting the thinking")!;
+  assert.equal(button().type, "button"); assert.ok(button().getAttribute("aria-label")!.length > 0);
+  button().click(); await settle();
+  assert.equal(page.calls.filter((c) => c.method === "POST").length, 0, "declined: nothing sent");
+  page.confirmWith(() => true);
+  button().click(); await settle();
+  const sent = page.calls.filter((c) => c.method === "POST");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.path, "/web/thinking/collection"); assert.deepEqual(sent[0]!.body, { enabled: false });
+  assert.match(sent[0]!.headers["idempotency-key"]!, /^m[0-9a-f]{24}$/); assert.equal(sent[0]!.headers["x-nn-csrf"], "csrf-1");
+  assert.match(text(page.doc.byId.get("log")!), /Turn collecting the model's thinking off/);
+  const offPage = boot({ models: { ...base, thinking: { item: { enabled: false, revision: 3 } } } });
+  assert.ok((await open(offPage, "models")).buttons().some((b) => b.textContent === "Collect the thinking again"));
+  const unwired = boot({ models: { ...base, thinking: { error: { code: "unavailable", message: "collected thinking is unavailable" } } } });
+  const uv = await open(unwired, "models");
+  assert.match(text(uv), /runs without the store/); assert.deepEqual(uv.buttons(), []); assert.doesNotMatch(text(uv), /Could not load/);
 });

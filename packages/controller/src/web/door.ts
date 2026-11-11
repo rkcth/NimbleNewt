@@ -97,7 +97,7 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
   // The approval load, the standing-rule proposals still open and the derived-profile question (cards A07b, A07c, U08): all owner only.
   approvals: [{ key: "load", op: "approval.load", args: { days: 7 } }, { key: "proposals", op: "approval.proposals", args: { state: "open" } }, { key: "suggestion", op: "approval.suggestion", args: {} }],
   // Which model routes there are, with their reply limits and where each value comes from, what is switched off, and how difficulty maps to a way of running (cards R01, R06, U08b).
-  models: [{ key: "routes", op: "routing.budgets", args: {} }, { key: "controls", op: "routing.controls", args: {} }, { key: "state", op: "status.ask", args: { request: { kind: "model_routes" } } }, { key: "difficulty", op: "difficulty.profiles", args: {} }],
+  models: [{ key: "routes", op: "routing.budgets", args: {} }, { key: "controls", op: "routing.controls", args: {} }, { key: "state", op: "status.ask", args: { request: { kind: "model_routes" } } }, { key: "difficulty", op: "difficulty.profiles", args: {} }, { key: "thinking", op: "thinking.collection.get", args: {} }],
   recovery: [{ key: "attention", op: "status.attention", args: { limit: 20 } }, { key: "jobs", op: "status.ask", args: { request: { kind: "jobs", limit: 20 } } }, { key: "reconnect", op: "status.ask", args: { request: { kind: "reconnect", limit: 20 } } }],
 };
 export const WEB_VIEWS: readonly string[] = Object.keys(VIEWS);
@@ -121,6 +121,17 @@ export function approvalIntent(proposalId: string, action: "accept" | "dismiss",
   if (days !== undefined && days !== 1 && days !== 7 && days !== 30 && days !== 90) throw new HttpError(400, "invalid_command", "days must be 1, 7, 30 or 90");
   const text = `Accept standing-rule proposal ${proposalId}${days === undefined ? " for the suggested length" : ` for ${days} ${days === 1 ? "day" : "days"}`}`;
   return { text, intent: { kind: "command", op: "approval.proposal.accept", args: { proposalId, ...(days === undefined ? {} : { days }) }, evidence: text, basis: "owner" } };
+}
+/**
+ * What the switch for collecting the model's thinking on the models page stands for (card U09b, after U08b): the sentence and the one intent it means, `enabled` true or false and nothing else. The chat
+ * applies it at once, as it does for the same words typed (`thinking.collection.set` is an `apply` command); what was kept stays until retention removes it.
+ */
+export function thinkingIntent(body: Record<string, unknown>): { text: string; intent: Record<string, unknown> } {
+  for (const k of Object.keys(body)) if (k !== "enabled") throw new HttpError(400, "invalid_command", `${k} is not accepted here`);
+  const enabled = body["enabled"];
+  if (enabled !== true && enabled !== false) throw new HttpError(400, "invalid_command", "enabled must be true or false");
+  const text = enabled ? "Turn collecting the model's thinking on" : "Turn collecting the model's thinking off";
+  return { text, intent: { kind: "command", op: "thinking.collection.set", args: { enabled }, evidence: text, basis: "owner" } };
 }
 const SECURITY_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "cross-origin-opener-policy": "same-origin", "cross-origin-resource-policy": "same-origin",
@@ -296,13 +307,15 @@ export class WebChatDoor {
       const result = c === "apply" ? await this.#o.backend.applyProposal(session.token, { commandId, proposalId: b }, options) : await this.#o.backend.discardProposal(session.token, { commandId, proposalId: b }, options);
       return this.#reply(res, 200, result);
     }
-    if (a === "approvals" && b !== undefined && (c === "accept" || c === "dismiss") && parts.length === 3) {
+    const approval = a === "approvals" && b !== undefined && (c === "accept" || c === "dismiss") && parts.length === 3;
+    const thinking = a === "thinking" && b === "collection" && parts.length === 2;
+    if (approval || thinking) {
       allowed("POST");
       const commandId = req.headers["idempotency-key"];
       if (typeof commandId !== "string" || !MESSAGE_ID.test(commandId)) throw new HttpError(400, "idempotency_key_required", "a decision needs an Idempotency-Key header (1 to 100 letters, digits, dots, dashes or underscores), so a retry runs once");
-      if (!PROPOSAL_ID.test(b)) throw new HttpError(400, "invalid_command", "that is not a proposal ID");
+      if (approval && !PROPOSAL_ID.test(b)) throw new HttpError(400, "invalid_command", "that is not a proposal ID");
       const body = await this.#body(req);
-      const { text, intent } = approvalIntent(b, c, body);
+      const { text, intent } = approval ? approvalIntent(b, c as "accept" | "dismiss", body) : thinkingIntent(body);
       const key = `${who.id}\u0000${commandId}`;
       let run = this.#inflight.get(key);
       if (run === undefined) { run = this.#o.backend.decide(session.token, { messageId: commandId, text, intents: [intent] }, { stillAllowed: this.#stillLive(session) }).finally(() => { this.#inflight.delete(key); }); this.#inflight.set(key, run); }

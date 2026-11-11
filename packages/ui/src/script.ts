@@ -93,6 +93,7 @@ export const APP_JS = String.raw`(function (root) {
 
     function sendItem(item) {
       if (item.kind === 'message') return call('POST', '/web/chat', { messageId: item.id, text: item.text });
+      if (item.kind === 'thinking') return call('POST', '/web/thinking/collection', { enabled: item.enabled === true }, { 'idempotency-key': item.id });
       if (item.kind === 'approval') return call('POST', '/web/approvals/' + encodeURIComponent(item.proposalId) + '/' + item.action, item.days === undefined ? {} : { days: item.days }, { 'idempotency-key': item.id });
       return call('POST', '/web/proposals/' + encodeURIComponent(item.proposalId) + '/' + item.decision, {}, { 'idempotency-key': item.id });
     }
@@ -125,6 +126,13 @@ export const APP_JS = String.raw`(function (root) {
        */
       approval: function (proposalId, action, days, label) {
         var item = outbox.add({ id: (deps.newId || function () { return randomId(root.crypto); })(), kind: 'approval', proposalId: proposalId, action: action, days: days, text: label, at: (deps.now || Date.now)(), state: 'pending' });
+        emit();
+        client.flush();
+        return item;
+      },
+      /** The switch for collecting the model's thinking (card U09b): one outbox item, sent under its id as the Idempotency-Key, run as the chat turn for the same words, which applies it at once. */
+      thinking: function (enabled, label) {
+        var item = outbox.add({ id: (deps.newId || function () { return randomId(root.crypto); })(), kind: 'thinking', enabled: enabled === true, text: label, at: (deps.now || Date.now)(), state: 'pending' });
         emit();
         client.flush();
         return item;
@@ -217,8 +225,8 @@ export const APP_JS = String.raw`(function (root) {
     var stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
     clear(list);
     client.outbox.items().forEach(function (item) {
-      if (item.kind === 'message' || item.kind === 'approval') {
-        list.appendChild(el('div', 'msg me', item.kind === 'approval' && item.result && typeof item.result.text === 'string' ? item.result.text : item.text));
+      if (item.kind === 'message' || item.kind === 'approval' || item.kind === 'thinking') {
+        list.appendChild(el('div', 'msg me', item.kind !== 'message' && item.result && typeof item.result.text === 'string' ? item.result.text : item.text));
         var meta = el('div', 'meta', item.state === 'done' ? '' : item.state === 'failed' ? 'Not sent: ' + (item.error || 'refused') : item.state === 'sending' ? 'Sending...' : 'Waiting to send');
         if (meta.textContent) list.appendChild(meta);
         if (item.state === 'done' && item.result) {
@@ -259,7 +267,11 @@ export const APP_JS = String.raw`(function (root) {
   // Every field is named here, so a field the controller adds later (a key, a credential name) is not drawn by accident, and every value is text: the strings in these records come from agents
   // and from the owner's own settings, and are never markup. A secret is not on any of these records and has no field here: secrets are written in the secret store on the machine, never read back.
   var uid = 0;
-  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); return t.length > n ? t.slice(0, n - 3) + '...' : t; }
+  // Control characters, bidirectional overrides and isolates and zero-width characters are shown as their code (review): an unclosed right-to-left override in an agent's text would
+  // otherwise turn the rest of a line around ("... for <agent> in project <id>"), so the owner would read something other than what the record says.
+  var UNSEEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+  function unseen(c) { return '\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4); }
+  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); t = t.length > n ? t.slice(0, n - 3) + '...' : t; return t.replace(UNSEEN, unseen); }
   function isNum(v) { return typeof v === 'number' && isFinite(v); }
   function obj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null; }
   function list(v, max) { return Array.isArray(v) ? v.slice(0, max || 200) : []; }
@@ -374,7 +386,7 @@ export const APP_JS = String.raw`(function (root) {
       var sec = region(box, 'Providers and routes (' + rows.length + ')');
       if (!rows.length) note(sec, 'No routing table has been set up yet. Ask the chat to set up the model providers.');
       else {
-        var perProvider = {};
+        var perProvider = Object.create(null); // provider names such as constructor or __proto__ are names, not the object's own fields (review)
         rows.forEach(function (r) { var name = clip(r.route, 200).split('/')[0]; perProvider[name] = (perProvider[name] || 0) + 1; });
         table(sec, 'Providers', ['Provider', 'Routes'], Object.keys(perProvider).sort().map(function (k) { return [k, String(perProvider[k])]; }));
         table(sec, 'Routes with their effective values and where each comes from', ['Route', 'Context window', 'Reply limit', 'Reasoning cap'], rows.map(function (r) {
@@ -409,6 +421,26 @@ export const APP_JS = String.raw`(function (root) {
         }));
         var map = obj(dp.mapping) || {};
         table(dsec, 'Which profile each difficulty uses', ['Difficulty', 'Profile'], Object.keys(map).sort().slice(0, 20).map(function (k) { return [clip(k, 40), clip(map[k], 80)]; }));
+      }
+    }
+    // The switch for collecting the model's thinking (card U09b). Shown only when the controller answered the part; it changes nothing until the owner agrees, and then it is the chat's own command.
+    if (parts.thinking !== undefined) {
+      var unwired = obj(parts.thinking.error) && parts.thinking.error.code === 'unavailable';
+      if (unwired) { note(region(box, 'The model\'s thinking'), 'This controller runs without the store for the model\'s thinking, so nothing is collected.'); }
+      else if (!failed(box, 'The model\'s thinking', parts.thinking)) {
+        var th = itemOf(parts.thinking);
+        var tsec = region(box, 'The model\'s thinking');
+        if (!th || typeof th.enabled !== 'boolean') note(tsec, 'Not known.');
+        else {
+          var on = th.enabled === true;
+          tsec.appendChild(el('div', 'card-line', on ? 'Collected: the thinking of agents that work is kept, readable only by you, with credentials hidden, until the retention rule removes it.' : 'Not collected: nothing more is kept from the agents\' work. What was kept stays until the retention rule removes it.'));
+          var trow = el('div', 'row');
+          var tlabel = on ? 'Stop collecting the thinking' : 'Collect the thinking again';
+          approvalButton(trow, tlabel, tlabel + ' of the agents\' models', false, function () {
+            if (root.confirm(on ? 'Stop collecting the model\'s thinking? What was kept stays until retention removes it.' : 'Collect the model\'s thinking again from now on?')) { client.thinking(!on, on ? 'Turn collecting the model\'s thinking off' : 'Turn collecting the model\'s thinking on'); show('chat'); }
+          });
+          tsec.appendChild(trow);
+        }
       }
     }
   }

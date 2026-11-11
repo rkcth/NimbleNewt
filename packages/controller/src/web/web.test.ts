@@ -396,7 +396,8 @@ test("the approvals and models views read the owner's records, and every part is
     assert.deepEqual(approvals.body.parts.proposals.items, []);
     const models = await w.call("GET", "/web/views/models", { cookie: s.cookie });
     assert.equal(models.status, 200, models.text);
-    assert.deepEqual(Object.keys(models.body.parts), ["routes", "controls", "state", "difficulty"]);
+    assert.deepEqual(Object.keys(models.body.parts), ["routes", "controls", "state", "difficulty", "thinking"]);
+    assert.equal(models.body.parts.thinking.item.enabled, true, "collecting the thinking is on by default");
     // No secret is part of any record the page reads.
     assert.doesNotMatch(models.text + approvals.text, /sk-|secret|password|api[_-]?key/i);
     assert.equal((await w.call("GET", "/web/views/models", {})).status, 401);
@@ -436,6 +437,39 @@ test("the Accept and Dismiss buttons run as the chat's own turn for their words:
     assert.equal(read, 0, "the assistant was never asked: the meaning is fixed by the page's code");
     // Every owner control of the page is also a chat command (nothing is reachable only by a button).
     for (const op of ["approval.proposal.accept", "approval.proposal.dismiss"]) assert.ok(CHAT_OPS[op] !== undefined, op);
+  } finally { await w.c.close(); }
+});
+
+test("the switch for collecting the model's thinking is the chat's own command with a fixed meaning: signed in, CSRF, one key, only enabled true or false (card U09b on the U08b page)", async () => {
+  let read = 0;
+  const interpreter = new ScriptedInterpreter(() => { read += 1; return []; });
+  const w = await world({}, interpreter);
+  try {
+    const s = await w.signIn();
+    const go = (o: { body?: unknown; key?: string | null; csrf?: boolean; method?: string; path?: string } = {}) =>
+      w.call(o.method ?? "POST", o.path ?? "/web/thinking/collection", { cookie: s.cookie, ...(o.csrf === false ? {} : { csrf: s.csrf }), body: o.body ?? { enabled: false }, headers: o.key === null ? {} : { "idempotency-key": o.key ?? "t-1" } });
+    assert.equal((await go({ csrf: false })).status, 403);
+    assert.equal((await go({ key: null })).status, 400);
+    assert.equal((await go({ method: "GET" })).status, 405);
+    assert.equal((await go({ body: { enabled: "false" } })).status, 400);
+    assert.equal((await go({ body: {} })).status, 400);
+    assert.equal((await go({ body: { enabled: false, expectedRevision: 1 } })).status, 400, "the page says nothing but on or off");
+    assert.equal((await go({ path: "/web/thinking/collection/x" })).status, 404);
+    assert.equal((await go({ path: "/web/thinking" })).status, 404);
+    const off = await go({ key: "t-2" });
+    assert.equal(off.status, 201, off.text);
+    assert.equal(off.body.text, "Turn collecting the model's thinking off");
+    assert.equal(off.body.outcomes[0].status, "applied", off.text);
+    const seen = await w.call("GET", "/web/views/models", { cookie: s.cookie });
+    assert.equal(seen.body.parts.thinking.item.enabled, false);
+    // The same key again is the same turn: nothing runs twice, even after the setting was changed back.
+    const on = await go({ key: "t-3", body: { enabled: true } });
+    assert.equal(on.body.outcomes[0].status, "applied", on.text);
+    const again = await go({ key: "t-2" });
+    assert.equal(again.status, 200); assert.equal(again.body.replayed, true);
+    assert.equal((await w.call("GET", "/web/views/models", { cookie: s.cookie })).body.parts.thinking.item.enabled, true, "the replay did not switch it off again");
+    assert.equal(read, 0, "the assistant was never asked");
+    assert.ok(CHAT_OPS["thinking.collection.set"] !== undefined, "the switch is also a chat command");
   } finally { await w.c.close(); }
 });
 
