@@ -1,7 +1,7 @@
 name: Exhaustive tests
 
 # The exhaustive tier (card X11): every backend, the long qualification runs, three operating systems and two Node versions, the controller's tests split into three shards
-# so that no job runs longer than about half an hour. It is run by hand (Actions > Exhaustive tests > Run workflow) and on version tags, for milestones and releases and as the
+# so that no job runs much longer than half an hour on Linux (Windows runners are slower; see timeout-minutes). It is run by hand (Actions > Exhaustive tests > Run workflow) and on version tags, for milestones and releases and as the
 # evidence for card status changes. The typical tier that every push runs is ci.yml.
 on:
   workflow_dispatch:
@@ -15,7 +15,8 @@ jobs:
   test:
     name: ${{ matrix.os }} / node ${{ matrix.node }} / shard ${{ matrix.shard }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    # 75: the suite grew, and Windows jobs took 45-50 minutes in run 43086209106 (one was cancelled at 50 while its tests were still passing).
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
