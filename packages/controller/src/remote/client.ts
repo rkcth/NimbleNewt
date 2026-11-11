@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
-import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
 
 /** One stream-events message carries at most this many events and about this many bytes of JSON (the controller refuses more; its body limit is 1 MB). */
 const STREAM_MESSAGE_EVENTS = 400;
@@ -245,6 +245,15 @@ export class RemoteAttempt implements ToolGateway {
   async effect(request: ToolCallRequest, effect: { readonly kind: string; readonly target: string; readonly input: { readonly [key: string]: Json } }): Promise<ToolResult> {
     await this.watchdog?.assertProductive();
     return await this.#post("effect", { request: request as unknown as Json, effect: effect as unknown as Json }) as never;
+  }
+  /**
+   * A tool request of the agent's process, carried to the controller's tool bridge (card L05e): `token` is the task credential the process presented to this machine's bridge and `request` what its tool extension asked. The call ID makes a
+   * request sent again (a lost answer) the same request: the controller answers it from its ledger and never runs a write twice. The answer is the bridge's own (`ok: false` with a code for a refusal). A request the controller refuses
+   * outright (a stale placement or session: `fenced`) throws `WorkerRequestError`. The credential is sent only in the body of this one request and is not kept.
+   */
+  async toolBridge(token: string, request: ToolBridgeRequest, key?: string): Promise<ToolBridgeAnswer> {
+    await this.watchdog?.assertProductive();
+    return await this.#post("tool", { token, request: request as unknown as Json }, key ?? `tool:${request.callId}:${createHash("sha256").update(JSON.stringify([request.op, request.args ?? {}])).digest("hex").slice(0, 16)}`) as never;
   }
   async report(operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> { return await this.#post("report", { operationId, outcome: outcome as unknown as Json }) as never; }
   async usage(usage: TurnUsage): Promise<void> { await this.#post("usage", { usage: usage as unknown as Json }); }

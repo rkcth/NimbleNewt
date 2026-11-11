@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ArtifactService } from "../artifacts/index.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
@@ -22,7 +22,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
-import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 /** The latest events message of a model call: its number, a digest of its content and its (possibly still pending) answer. */
 interface LastMessage { readonly n: number; readonly digest: string; readonly answer: Promise<{ readonly held?: string }> }
@@ -82,6 +82,8 @@ export interface PlacementBody {
   readonly projectId: string;
   readonly agentId: string;
   readonly generation: number;
+  /** The model route of the order (card L05e), kept for the monitor's route and speed reading; absent from a placement made before it. */
+  readonly route?: string;
   /** The host that holds the attempt now, and the number of this holding: every move, restart or re-offer raises it, and every worker message names it. */
   readonly hostId: string;
   readonly placement: number;
@@ -254,7 +256,12 @@ export interface RemoteDeps {
    * What the controller tells stall detection about a remote worker's model calls (card L05d): the same `RelayMonitor` a local relay reports to. The worker's calls are not seen by the controller's relay, so the start of a call, its first
    * output, its end and the time the controller itself spends waiting on its store while it records the reply (not the model's time) are reported from the stream messages. Absent: nothing is reported (as before).
    */
-  readonly monitor?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number }) => RelayMonitor;
+  readonly monitor?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number; readonly route?: string; readonly hostId: string }) => RelayMonitor;
+  /**
+   * The controller's tool bridge (card L05e), for a remote worker's tool requests: `handle` is `ToolExecutionService.handle`, called with the worker's task credential and a gateway bound to the attempt. The request is admitted through the
+   * same generation check and effect ledger as a local worker's. Absent: every bridge request from a remote worker is answered `unavailable`.
+   */
+  readonly toolBridge?: { readonly handle: (token: string, gateway: { readonly attemptId: string; readonly call: ToolGateway["call"] }, request: ToolBridgeRequest) => Promise<ToolBridgeAnswer> };
   /** How often, at most, the output received so far of a remote model call is reported to `monitor` while it streams (ms, default 15,000, as for a local relay; 0 = with every message that carries output). */
   readonly monitorProgressMs?: number;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
@@ -335,6 +342,8 @@ export class RemoteWorkerService {
   readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; /** What stall detection is told about this call (card L05d). */ readonly watch?: CallMonitor | undefined; seenOutput?: boolean; outputChars?: number; progressAt?: number; last?: LastMessage | undefined }>();
   /** One monitor per attempt, like the local relay's: its reports are numbered in order. */
   readonly #monitors = new Map<string, RelayMonitor>();
+  /** The tool bridge requests being handled now, by attempt, call ID and placement (card L05e). */
+  readonly #bridging = new Map<string, { readonly request: string; readonly answer: Promise<ToolBridgeAnswer> }>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
   readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
 
@@ -659,7 +668,7 @@ export class RemoteWorkerService {
       }
       let next: PlacementBody;
       if (current === undefined) {
-        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [], contract };
+        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, ...(order.route === "" ? {} : { route: order.route }), hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [], contract };
       } else {
         const b = current.body;
         if (b.hostId !== hostId) throw new DomainError("invalid_transition", `attempt ${attemptId} is placed on ${b.hostId}; it moves to ${hostId} only through relocate`, { field: "hostId" });
@@ -667,7 +676,7 @@ export class RemoteWorkerService {
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
         const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, ...rest } = b; void _s; void _a; void _r; void _c;
-        next = { ...rest, contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
+        next = { ...rest, ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
       const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
@@ -1270,6 +1279,44 @@ export class RemoteWorkerService {
     return (await this.#deps.dispatch.gateway(b.attemptId)).call(request, { kind: "effect", effectKind: kind, target, input, bridge });
   }
 
+  /**
+   * A remote worker's tool bridge request (card L05e): what its tool extension asked the machine's bridge, carried to the controller's own bridge. The session, the attempt, the placement and the host are checked like every message
+   * about an attempt (another host's attempt, a stale placement or session is `fenced`, an unknown attempt `not_found`); the worker has confirmed its dispatch contract; then the task credential and the request go to the tool execution
+   * service bound to THIS attempt, which judges the credential against the attempt, the generation against the task's current one and the call against the generation that recorded it, and admits a write as an effect of that generation
+   * on the ledger. Asking again with the same call ID is the same request: copies that overlap share one answer, and a repeat is answered from the ledger (a parked call is asked again to go on) and never runs twice. A refusal by the bridge is
+   * an answer (`ok: false` with a code), as for a local worker. The credential is never logged, kept or put in an error.
+   */
+  async toolBridge(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, token: unknown, request: unknown): Promise<ToolBridgeAnswer> {
+    if (typeof token !== "string" || token.length < 1 || token.length > REMOTE_LIMITS.toolTokenChars) invalid("credential", `must be the task credential (1 to ${REMOTE_LIMITS.toolTokenChars} characters)`);
+    if (request === null || typeof request !== "object" || Array.isArray(request)) invalid("request", "must be a bridge request");
+    const r = request as { op?: unknown; callId?: unknown; args?: unknown };
+    onlyKnown(r as object, ["op", "callId", "args"]);
+    if (typeof r.op !== "string" || r.op.length < 1 || r.op.length > 40) invalid("request.op", "must be an operation name of 1 to 40 characters");
+    if (typeof r.callId !== "string" || !/^[A-Za-z0-9._:-]{1,120}$/.test(r.callId)) invalid("request.callId", "must be 1 to 120 letters, digits or . _ : -");
+    if (r.args !== undefined && (r.args === null || typeof r.args !== "object" || Array.isArray(r.args))) invalid("request.args", "must be an object");
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any tool request");
+    const bridge = this.#deps.toolBridge;
+    if (bridge === undefined) return { ok: false, code: "unavailable", message: "the tool bridge is not available on this controller" };
+    const callId = r.callId as string;
+    // The credential is part of what makes two copies the same request (a digest, never the credential itself): a copy with another credential is judged by the bridge on its own and never handed the answer of a copy whose credential was accepted.
+    const key = `${b.attemptId}\0${callId}\0${b.placement}\0${createHash("sha256").update(token as string).digest("hex")}`;
+    let canonical: string;
+    try { canonical = canonicalJson({ op: r.op as string, args: (r.args ?? {}) as JsonObject }); } catch { return invalid("request.args", "must be plain JSON"); }
+    const gateway = await this.#deps.dispatch.gateway(b.attemptId);
+    // From here to the entry being kept nothing is awaited, so copies of one request that overlap cannot both pass the check.
+    const open = this.#bridging.get(key);
+    if (open !== undefined) {
+      // Copies of one request that overlap (a retry after a timeout) share the first one's answer; the same call ID with other content is not the same request.
+      if (open.request !== canonical) return { ok: false, code: "invalid_command", message: `callId: ${callId.slice(0, 40)} was already used in this attempt for a different request; use a new call ID` };
+      return await open.answer;
+    }
+    const answer = bridge.handle(token as string, { attemptId: b.attemptId, call: gateway.call.bind(gateway) }, { op: r.op as string, callId, ...(r.args === undefined ? {} : { args: r.args as JsonObject }) });
+    this.#bridging.set(key, { request: canonical, answer });
+    while (this.#bridging.size > 256) this.#bridging.delete(this.#bridging.keys().next().value as string);
+    try { return await answer; } finally { if (this.#bridging.get(key)?.answer === answer) this.#bridging.delete(key); }
+  }
+
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {
     if (typeof operationId !== "string") invalid("operationId", "must be an operation ID");
     return (await this.#gateway(host, sessionId, attemptId, placement, "any report")).report(operationId, outcome);
@@ -1319,7 +1366,7 @@ export class RemoteWorkerService {
     if (this.#deps.monitor !== undefined) {
       try {
         let monitor = this.#monitors.get(b.attemptId);
-        if (monitor === undefined) { monitor = this.#deps.monitor({ attemptId: b.attemptId, taskId: b.taskId, generation: b.generation }); this.#monitors.set(b.attemptId, monitor); while (this.#monitors.size > 256) this.#monitors.delete(this.#monitors.keys().next().value as string); }
+        if (monitor === undefined) { monitor = this.#deps.monitor({ attemptId: b.attemptId, taskId: b.taskId, generation: b.generation, ...(b.route === undefined ? {} : { route: b.route }), hostId: b.hostId }); this.#monitors.set(b.attemptId, monitor); while (this.#monitors.size > 256) this.#monitors.delete(this.#monitors.keys().next().value as string); }
         watch = monitor.started({ requestChars: call.requestChars });
         const w = watch;
         // The controller's waits on its own store while it records this call's reply are not the model's time (the remote counterpart of the local relay's `onWait`).

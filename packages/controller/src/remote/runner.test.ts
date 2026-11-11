@@ -119,3 +119,59 @@ test("a stream event's alias is kept when it is a tool call ID the bridge could 
   assert.deepEqual(checkStreamEvents(tool(undefined)).map((e) => "alias" in e), [false]);
   for (const bad of ["has space", "", "x".repeat(121), 7]) assert.throws(() => checkStreamEvents(tool(bad)), /alias/, String(bad));
 });
+
+test("the machine's tool bridge sends the process's request through the attempt and answers refusals and lost connections as answers; an attempt that is not running is refused without a request (card L05e)", async () => {
+  const f = fake();
+  const sent: unknown[] = [];
+  const answers: (() => Promise<unknown>)[] = [];
+  const attempt = (f.client as unknown as { attempt: (id: string, p: number) => Record<string, unknown> }).attempt("att-1", 3);
+  attempt["toolBridge"] = async (token: string, request: unknown) => { sent.push({ token, request }); return answers.shift()!(); };
+  const release: { open?: () => void } = {};
+  const running = new Promise<void>((r) => { release.open = r; });
+  const runner = new RemoteOfferRunner({ ...base, client: f.client, host: { start: async () => handle({ run: async () => { await running; return { status: "completed" } as never; } }) } });
+  const req = { op: "task.get", callId: "c1", args: {} };
+  assert.deepEqual(await runner.bridge("att-1", "tok", req), { ok: false, code: "fenced", message: "attempt att-1 is not running on this worker; the request is not sent" });
+  assert.deepEqual(sent, []);
+  const done = runner.run(offer);
+  try {
+  while (!f.log.calls.includes("accept")) await new Promise((r) => setTimeout(r, 5));
+  answers.push(async () => ({ ok: true, result: { a: 1 } }));
+  assert.deepEqual(await runner.bridge("att-1", "tok", req), { ok: true, result: { a: 1 } });
+  assert.deepEqual(sent, [{ token: "tok", request: req }]);
+  answers.push(async () => { throw new WorkerRequestError(409, "fenced", "placement 3 is not the current one"); });
+  const fenced = await runner.bridge("att-1", "tok", req);
+  assert.ok(!fenced.ok && fenced.code === "fenced");
+  for (const lost of [new WorkerRequestError(0, "network", "connection reset"), new WorkerRequestError(503, "unavailable", "busy"), new Error("socket hang up")]) {
+    answers.push(async () => { throw lost; });
+    const a = await runner.bridge("att-1", "tok", req);
+    assert.ok(!a.ok && a.code === "unavailable", JSON.stringify(a));
+    assert.equal(JSON.stringify(a).includes("tok"), false);
+  }
+  answers.push(async () => { throw new WorkerRequestError(400, "invalid_command", "request.op: must be an operation name"); });
+  assert.deepEqual(await runner.bridge("att-1", "tok", req), { ok: false, code: "invalid_command", message: "request.op: must be an operation name" });
+  } finally { release.open!(); }
+  assert.equal(await done, "completed");
+  assert.equal((await runner.bridge("att-1", "tok", req)).ok, false, "after the attempt ended nothing is sent");
+  assert.equal(sent.length, 6);
+});
+
+test("the controller's verdicts after a reconnect: stop ends the sandbox, reaccept takes the attempt up again, the others change nothing (card L05e)", async () => {
+  const f = fake();
+  const stopped: string[] = [];
+  const release: { open?: () => void } = {};
+  const running = new Promise<void>((r) => { release.open = r; });
+  const runner = new RemoteOfferRunner({ ...base, client: f.client, host: { start: async () => handle({ stop: async () => { stopped.push("stop"); }, run: async () => { await running; return { status: "completed" } as never; } }) } });
+  const done = runner.run(offer);
+  try {
+  while (!f.log.calls.includes("accept") || runner.running.length === 0) await new Promise((r) => setTimeout(r, 5));
+  await new Promise((r) => setTimeout(r, 20));
+  for (const v of ["hold", "pending", "unknown"] as const) await runner.verdict("att-1", v);
+  await runner.verdict("att-9", "stop");
+  assert.deepEqual(stopped, []);
+  const before = f.log.calls.filter((c) => c === "accept").length;
+  await runner.verdict("att-1", "reaccept");
+  assert.equal(f.log.calls.filter((c) => c === "accept").length, before + 1);
+  await runner.verdict("att-1", "stop");
+  assert.deepEqual(stopped, ["stop"]);
+  } finally { release.open!(); await done; }
+});
