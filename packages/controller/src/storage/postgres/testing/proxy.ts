@@ -7,8 +7,10 @@ export interface ProxyFault {
    * `before`: close both sides without forwarding the message, so the server never sees it.
    * `after`: forward the whole statement, let the server process it, then close the client side without delivering the answer, so
    * the client cannot tell whether the statement took effect.
+   * `silent`: forward the whole statement, let the server process it, then deliver nothing more on that connection while keeping it open: a server,
+   * or a network path, that has stopped answering (a paused or hung host). Only the client's own deadline ends the wait.
    */
-  readonly when: "before" | "after";
+  readonly when: "before" | "after" | "silent";
 }
 
 /** Cut the connection at the Nth statement (counted from `arm`): see `ProxyFault.when` for the two modes. */
@@ -62,11 +64,13 @@ export class FaultProxy {
     let inPrepared = false;
     let dropAnswer = false;
     let pendingAfter = false;
+    let pendingSilent = false;
+    let silent = false;
     const closeBoth = () => { client.destroy(); upstream.destroy(); };
     client.on("error", closeBoth);
-    upstream.on("error", closeBoth);
+    upstream.on("error", () => { if (silent) upstream.destroy(); else closeBoth(); });
     client.on("close", () => upstream.destroy());
-    upstream.on("close", () => client.destroy());
+    upstream.on("close", () => { if (!silent) client.destroy(); }); // a silent server's goodbye is not heard either
 
     client.on("data", (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
@@ -99,16 +103,18 @@ export class FaultProxy {
           this.#faults.shift();
           this.fired += 1;
           if (next.when === "before") return closeBoth();
-          pendingAfter = true;
+          if (next.when === "silent") pendingSilent = true; else pendingAfter = true;
         }
         upstream.write(message);
         if (endsStatement) {
           inPrepared = false;
           if (pendingAfter) { pendingAfter = false; dropAnswer = true; }
+          if (pendingSilent) { pendingSilent = false; silent = true; }
         }
       }
     });
     upstream.on("data", (chunk: Buffer) => {
+      if (silent) return; // the server answered; the client never hears from it again
       if (dropAnswer) {
         // The statement ran; the client never learns the result.
         dropAnswer = false;

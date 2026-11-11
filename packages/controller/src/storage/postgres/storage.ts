@@ -92,6 +92,15 @@ export function serverVersionProblem(versionNum: number, version: string, floor:
 type Row = Record<string, unknown>;
 interface Tx { q(sql: string, params?: unknown[]): Promise<Row[]> }
 
+/**
+ * How much longer than the server's own statement timeout the client waits for any answer before it gives up on the connection (card 19).
+ * The server bounds every statement it runs; this bounds what it cannot: a server, or a network path to it, that has stopped answering at all
+ * (a paused or hung host, a silent network). Without it a call on an already open connection waits until the operating system gives up on the
+ * socket (many minutes on a dead network, for ever on a paused server), and `close()` waits with it. A statement that is not answered in time is
+ * `retryable`, or `uncertain_commit` if it was the COMMIT, and its connection is discarded. The migration phase is exempt (it may run long).
+ */
+export const REPLY_MARGIN_MS = 10_000;
+
 const optional = <K extends string, V>(name: K, value: V | undefined | null): { [P in K]?: V } => (value === undefined || value === null ? {} : ({ [name]: value } as { [P in K]?: V }));
 const plus = (at: Timestamp, ms: number): Timestamp => new Date(Date.parse(at) + ms).toISOString();
 const text = (row: Row, key: string): string => row[key] as string;
@@ -204,6 +213,7 @@ export class PostgresStorage implements ControllerStorage {
       max: resolved.maxConnections,
       connectionTimeoutMillis: resolved.connectTimeoutMs,
       idleTimeoutMillis: resolved.idleTimeoutMs,
+      keepAlive: true, // an idle pooled connection to a host that vanished is found dead by the operating system instead of only at its next use
       application_name: CONTROLLER_APPLICATION,
       types,
       // Session settings applied to every connection by the server at startup: our schema, durable commits, bounded waits.
@@ -211,7 +221,7 @@ export class PostgresStorage implements ControllerStorage {
     });
     const store = new PostgresStorage(pool, resolved, { allowUnsupported: options.allowUnsupportedServer === true, minimum: options.minimumServerVersionNum });
     store.#liveClient = () => new pg.Client({ connectionString: withControllerApplication(options.connectionString), application_name: CONTROLLER_APPLICATION, connectionTimeoutMillis: resolved.connectTimeoutMs, keepAlive: true,
-      options: `-c statement_timeout=${resolved.statementTimeoutMs}` });
+      query_timeout: resolved.statementTimeoutMs + REPLY_MARGIN_MS, options: `-c statement_timeout=${resolved.statementTimeoutMs}` });
     try {
       // Before anything touches the schema: from here until close, a restore is never swapped into (or out of) it (second review of card K01i). The server check only reads, so it is made
       // meanwhile on the pool (an open costs one connection's setup, not two in a row); a failure of either ends the other (`#dropLive` waits for the lock's connection).
@@ -432,16 +442,16 @@ export class PostgresStorage implements ControllerStorage {
 
   /** The server and session settings in force, read back from the database. */
   async settings(options: { skipSchema?: boolean } = {}): Promise<PostgresSettings> {
-    const show = async (client: pg.PoolClient, name: string): Promise<string> => String((await client.query(`SHOW ${name}`)).rows[0]![name]);
+    const show = async (client: pg.PoolClient, name: string): Promise<string> => String((await this.#ask(client, `SHOW ${name}`)).rows[0]![name]);
     let client: pg.PoolClient;
     try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
     const ignore = () => undefined; // a dropped connection also emits an error event; the failing query reports it
     client.on("error", ignore);
     let broken = false;
     try {
-      const version = options.skipSchema === true ? 0 : count((await client.query("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'", [])).rows[0] as Row, "v");
+      const version = options.skipSchema === true ? 0 : count((await this.#ask(client, "SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'", [])).rows[0] as Row, "v");
       return {
-        serverVersion: await show(client, "server_version"), serverVersionNum: Number(await show(client, "server_version_num")), encoding: String((await client.query("SELECT pg_encoding_to_char(encoding) AS e FROM pg_database WHERE datname = current_database()")).rows[0]!.e), schema: this.#options.schema, schemaVersion: version,
+        serverVersion: await show(client, "server_version"), serverVersionNum: Number(await show(client, "server_version_num")), encoding: String((await this.#ask(client, "SELECT pg_encoding_to_char(encoding) AS e FROM pg_database WHERE datname = current_database()")).rows[0]!.e), schema: this.#options.schema, schemaVersion: version,
         synchronousCommit: await show(client, "synchronous_commit"), fsync: await show(client, "fsync"), fullPageWrites: await show(client, "full_page_writes"),
         isolation: await show(client, "default_transaction_isolation"), maxConnections: this.#options.maxConnections, lockTimeoutMs: this.#options.lockTimeoutMs, statementTimeoutMs: this.#options.statementTimeoutMs,
       };
@@ -461,6 +471,11 @@ export class PostgresStorage implements ControllerStorage {
     if (this.#replaced !== undefined) throw this.#replaced;
   }
 
+  /** One statement with the client's reply deadline (`REPLY_MARGIN_MS`). The driver types `query_timeout` only for a whole connection, but reads it per query too. */
+  #ask(client: pg.ClientBase, text: string, values?: unknown[]): Promise<pg.QueryResult> {
+    return client.query({ text, values, query_timeout: this.#options.statementTimeoutMs + REPLY_MARGIN_MS } as pg.QueryConfig);
+  }
+
   async #read<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
     await this.#ready();
     let client: pg.PoolClient;
@@ -469,7 +484,7 @@ export class PostgresStorage implements ControllerStorage {
     client.on("error", ignore);
     let broken = false;
     try {
-      return await fn({ q: async (sql, params) => (await client.query(sql, params as unknown[] | undefined)).rows as Row[] });
+      return await fn({ q: async (sql, params) => (await this.#ask(client, sql, params as unknown[] | undefined)).rows as Row[] });
     } catch (error) {
       broken = isConnectionLoss(error);
       throw classify(error);
@@ -493,24 +508,24 @@ export class PostgresStorage implements ControllerStorage {
     let broken = false;
     try {
       try {
-        await client.query("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE");
+        await this.#ask(client, "BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE");
       } catch (error) {
         broken = isConnectionLoss(error);
         throw classify(error);
       }
       let result: T;
       try {
-        result = await fn({ q: async (sql, params) => (await client.query(sql, params as unknown[] | undefined)).rows as Row[] });
+        result = await fn({ q: async (sql, params) => (await this.#ask(client, sql, params as unknown[] | undefined)).rows as Row[] });
       } catch (error) {
         broken = isConnectionLoss(error);
-        if (!broken) await client.query("ROLLBACK").catch(() => { broken = true; });
+        if (!broken) await this.#ask(client, "ROLLBACK").catch(() => { broken = true; });
         throw classify(error);
       }
       try {
-        await client.query("COMMIT");
+        await this.#ask(client, "COMMIT");
       } catch (error) {
         broken = isConnectionLoss(error);
-        if (!broken) await client.query("ROLLBACK").catch(() => { broken = true; });
+        if (!broken) await this.#ask(client, "ROLLBACK").catch(() => { broken = true; });
         throw classify(error, "commit", onUnknownCommit);
       }
       return result;
@@ -885,8 +900,8 @@ export class PostgresStorage implements ControllerStorage {
     let broken = false;
     let schemaVersion: number;
     try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      schemaVersion = count((await client.query("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'")).rows[0] as Row, "v");
+      await this.#ask(client, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      schemaVersion = count((await this.#ask(client, "SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'")).rows[0] as Row, "v");
     } catch (error) {
       broken = isConnectionLoss(error);
       client.off("error", ignore);
@@ -901,20 +916,20 @@ export class PostgresStorage implements ControllerStorage {
         if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > SNAPSHOT_PAGE_MAX) throw new StorageError("invalid_input", `limit: must be a whole number from 1 to ${SNAPSHOT_PAGE_MAX}`, { path: "limit" });
         const spec = TABLE_SPECS[table];
         try {
-          if (table === "state") return (await client.query("SELECT s.epoch, s.holder, c.audit_seq, c.delivery_seq FROM state s, counters c WHERE s.singleton = 1 AND c.singleton = 1")).rows as SnapshotRow[];
+          if (table === "state") return (await this.#ask(client, "SELECT s.epoch, s.holder, c.audit_seq, c.delivery_seq FROM state s, counters c WHERE s.singleton = 1 AND c.singleton = 1")).rows as SnapshotRow[];
           const key = spec.key.join(", ");
           const params: unknown[] = [];
           let where = "";
           if (page.after !== undefined) { where = ` WHERE (${key}) > (${spec.key.map((_, i) => `$${i + 1}`).join(", ")})`; for (const k of spec.key) params.push(page.after[k]); }
           // Only the columns this database has: one from an older schema (read before an upgrade) lacks the newer ones, which come out absent.
-          const have = new Set(((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2", [this.#options.schema, table])).rows as { column_name: string }[]).map((c) => c.column_name));
-          return (await client.query(`SELECT ${spec.columns.filter((c) => have.has(c)).join(", ")} FROM ${table}${where} ORDER BY ${key} LIMIT ${page.limit}`, params)).rows as SnapshotRow[];
-        } catch (error) { throw classify(error); }
+          const have = new Set(((await this.#ask(client, "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2", [this.#options.schema, table])).rows as { column_name: string }[]).map((c) => c.column_name));
+          return (await this.#ask(client, `SELECT ${spec.columns.filter((c) => have.has(c)).join(", ")} FROM ${table}${where} ORDER BY ${key} LIMIT ${page.limit}`, params)).rows as SnapshotRow[];
+        } catch (error) { if (isConnectionLoss(error)) broken = true; throw classify(error); }
       },
       close: async (): Promise<void> => {
         if (closed) return;
         closed = true;
-        await client.query("ROLLBACK").catch(() => { broken = true; });
+        if (!broken) await this.#ask(client, "ROLLBACK").catch(() => { broken = true; });
         client.off("error", ignore);
         client.release(broken);
       },

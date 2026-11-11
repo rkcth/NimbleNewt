@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { after } from "node:test";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import net from "node:net";
 import pg from "pg";
 import { commitOperation, isStorageError, runStorageConformance, type OperationInput } from "../index.js";
 import { classify, isConnectionLoss } from "./errors.js";
 import { LATEST_VERSION, PostgresStorage } from "./index.js";
+import { REPLY_MARGIN_MS } from "./storage.js";
 import { registry } from "../qualification/migration-registry.js";
 import { FaultProxy } from "./testing/proxy.js";
 import { startEmbeddedServer, startTestServer, withClient, type TestServer } from "./testing/server.js";
@@ -170,6 +172,15 @@ test("driver errors are classified, never leaked", () => {
     assert.equal(kinds(lost, "commit"), "uncertain_commit");
     assert.equal(kinds(lost, "commit", "retryable"), "retryable");
   }
+  // no answer at all within the client's deadline (card 19): the connection is discarded; before COMMIT nothing committed, during COMMIT the outcome is unknown
+  const noReply = new Error("Query read timeout");
+  assert.ok(isConnectionLoss(noReply), "a statement that was never answered leaves the connection unusable");
+  assert.equal(kinds(noReply, "work"), "retryable");
+  assert.match(classify(noReply).message, /did not answer in time/);
+  assert.equal(kinds(noReply, "commit"), "uncertain_commit");
+  assert.match(classify(noReply, "commit", "uncertain_commit").message, /did not answer the commit in time.*outcome is unknown/);
+  assert.equal(kinds(noReply, "commit", "retryable"), "retryable");
+  assert.ok(!isConnectionLoss(withCode("57014", "Query read timeout")), "a server's own answer is never a missing reply");
   // a server error while committing is a definite rollback, not an unknown outcome
   assert.equal(kinds(withCode("40001"), "commit"), "retryable");
   assert.equal(kinds(withCode("23505"), "commit"), "unavailable");
@@ -241,6 +252,39 @@ test("a connection cut in the middle of a transaction rolls it back and is retry
     // the pool replaced the broken connections: ordinary work continues
     await rig.storage.applyOperation(op("after", { audit: [{ type: "y", detail: {} }] }));
   } finally { await rig.close(); }
+});
+
+test("a server that stops answering (a paused host, a silent network) fails each call within a bound, says why, loses nothing and admits once (card 19)", async () => {
+  // The server bounds its own statements; nothing on the server can bound a server that has stopped. Before card 19 these calls waited for ever.
+  const statementTimeoutMs = 1000;
+  const rig = await throughProxy({ statementTimeoutMs, connectTimeoutMs: 2000 });
+  if (rig === undefined) return;
+  const bound = statementTimeoutMs + REPLY_MARGIN_MS;
+  const within = async <T>(what: string, call: Promise<T>): Promise<T> => {
+    let timer: NodeJS.Timeout | undefined;
+    const t0 = Date.now();
+    try {
+      return await Promise.race([call, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what}: still waiting after ${Date.now() - t0} ms (the bound is ${bound} ms)`)), bound + 15_000); })]);
+    } finally { clearTimeout(timer); }
+  };
+  try {
+    // The server runs the COMMIT and the answer never comes: the outcome is unknown, the operation is found by its ID and admitted exactly once.
+    const command = op("silent-commit", { changes: [create("task", "t1")], audit: [{ type: "x", detail: {} }] });
+    rig.proxy.inject({ match: COMMIT_MESSAGE, when: "silent" });
+    await within("a COMMIT the server never answered", assert.rejects(rig.storage.applyOperation(command), (e) => isStorageError(e, "uncertain_commit") && /did not answer the commit in time/.test((e as Error).message)));
+    assert.equal(rig.proxy.fired, 1);
+    assert.equal((await rig.direct.getOperation("silent-commit")) !== undefined, true, "the server did commit it");
+    assert.equal((await commitOperation(rig.storage, command)).replayed, true, "the caller's retry finds it by operation ID");
+    // A statement in the middle of a transaction is never answered: retryable, and nothing of it survives once the connection is dropped.
+    const mid = op("silent-mid", { changes: [create("task", "t2")], audit: [{ type: "y", detail: {} }] });
+    rig.proxy.inject({ match: /INSERT INTO audit/, when: "silent" });
+    await within("a statement the server never answered", assert.rejects(rig.storage.applyOperation(mid), (e) => isStorageError(e, "retryable") && /did not answer in time/.test((e as Error).message)));
+    assert.equal(await rig.direct.getOperation("silent-mid"), undefined, "a half-finished transaction survived");
+    assert.equal((await commitOperation(rig.storage, mid)).replayed, false);
+    assert.deepEqual((await rig.direct.listAudit({ afterSeq: 0, limit: 10 })).map((a) => a.type), ["x", "y"], "each operation admitted exactly once");
+    // The silent connections were discarded, not handed out again: the store works, and closes without waiting on them.
+    assert.equal((await rig.storage.getAggregate({ kind: "task", id: "t2" }))?.revision, 1);
+  } finally { await rig.proxy.stop(); await within("close", rig.close()); }
 });
 
 test("a claim whose answer was lost is safe to repeat once its lease ends", async () => {
@@ -601,4 +645,30 @@ test("a server killed by an immediate shutdown while the store is connected and 
     await storage.close().catch(() => undefined);
     await s.stop();
   }
+});
+
+test("the embedded test server starts on another port when its port is taken first, and stopping a server that already died returns (card 19)", async () => {
+  // Another process takes the probed port before the server binds it (parallel test files, outgoing connections): the server must still come up.
+  const squatter = net.createServer();
+  await new Promise<void>((resolve) => squatter.listen(0, "127.0.0.1", () => resolve()));
+  const taken = (squatter.address() as net.AddressInfo).port;
+  let s: TestServer | undefined;
+  try {
+    s = await startEmbeddedServer([], undefined, { firstPort: taken });
+    assert.notEqual(Number(new URL(s.url()).port), taken, "it moved to a free port");
+    assert.match(await s.version(), /^\d+/);
+  } finally { squatter.close(); }
+  // A server that ended by itself (crashed, killed): stop() used to wait for an exit event that had already happened, with nothing keeping the
+  // event loop alive, and node:test cancelled every test still pending in the file.
+  if (s.kill === undefined) { await s.stop(); return; }
+  const url = s.url();
+  s.kill();
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+    if (await withClient(url, async () => false).catch(() => true)) break;
+    await sleep(100);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const settled = await Promise.race([s.stop().then(() => "stopped"), new Promise<string>((resolve) => { timer = setTimeout(() => resolve("still waiting"), 20_000); })]);
+  clearTimeout(timer);
+  assert.equal(settled, "stopped");
 });
