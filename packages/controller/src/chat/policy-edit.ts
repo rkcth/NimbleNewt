@@ -826,12 +826,14 @@ export class PolicyEditService {
       }
       case "setting": {
         const target = { layer: op.layer as never, ...(op.scopeId === undefined ? {} : { scopeId: op.scopeId }) };
-        const staged = await d.configuration.stage(owner, { commandId: `${id}-st`, ...target, ...(op.expectedRevision === undefined ? {} : { expectedRevision: op.expectedRevision }), ...(op.remove === true ? { remove: [op.key] } : { set: { [op.key]: op.value } }) });
-        await note({ kind: "config-layer", id: op.layer === "installation" ? "installation" : `${op.layer}.${op.scopeId as string}`, revision: staged.revision });
-        const result = await d.configuration.apply(owner, { commandId: `${id}-ap`, ...target, expectedRevision: staged.revision });
-        if (!result.applied) {
-          await d.configuration.discard(owner, { commandId: `${id}-dc`, ...target, expectedRevision: result.revision });
-          throw new DomainError("invalid_command", `the configuration check refused it: ${result.problems.join("; ")}. Nothing is in force.`);
+        // One write (set and in force together, at the revision the owner was shown; 0 when the layer did not exist yet): a stop can leave nothing staged, and nothing staged in the layer goes into
+        // force with it (review of card F04m, third slice: the earlier stage-then-apply was two writes and applied the layer's whole draft).
+        let result: { revision: number; takesEffect: Record<string, string> };
+        try {
+          result = await d.configuration.change(owner, { commandId: `${id}-ch`, ...target, expectedRevision: op.expectedRevision ?? 0, ...(op.remove === true ? { remove: [op.key] } : { set: { [op.key]: op.value } }) });
+        } catch (error) {
+          if (error instanceof DomainError && error.code === "invalid_command" && error.message.startsWith("the configuration check refused it")) throw new DomainError("invalid_command", `${error.message}. Nothing is in force.`);
+          throw error;
         }
         const effect = result.takesEffect[op.key];
         return { applied: [{ kind: "config-layer", id: op.layer === "installation" ? "installation" : `${op.layer}.${op.scopeId as string}`, revision: result.revision }], ...(effect === undefined ? {} : { takesEffect: EFFECT_WORDS[effect] ?? effect }) };

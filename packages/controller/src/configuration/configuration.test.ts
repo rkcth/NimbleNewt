@@ -9,6 +9,7 @@ import { RoutingService } from "../routing/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { landingPolicyFrom } from "../api/landing-policy.js";
 import { ConfigurationService, type LayerKind, type SettingDefinition } from "./index.js";
+import type { ControllerStorage, OperationInput } from "../storage/types.js";
 
 after(stopServer);
 
@@ -20,6 +21,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 };
 
 interface Ctx {
+  storage: ControllerStorage; epoch: number;
   config: ConfigurationService; routing: RoutingService; owner: Principal; grants: GrantService; assignments: AssignmentService; projects: ProjectService;
   later: (settings: readonly SettingDefinition[]) => ConfigurationService;
   team: string; agentA: string; agentB: string; task: string; project: string;
@@ -46,6 +48,7 @@ async function open(backend: Backend, body: (c: Ctx) => Promise<void>): Promise<
     const as = async (id: string) => principals.authenticate((await principals.issueCredential(owner, `agent:${id}`)).token);
     await body({
       later: (settings) => ConfigurationService.withEpoch(world.storage, projects.epoch, { ...options, routing, settings }),
+      storage: world.storage, epoch: projects.epoch,
       config, routing, owner, grants, assignments, projects, team, agentA, agentB, task, project,
       writer: await plain("writer", [{ action: "config.write", project: "*" }]), routingWriter: await plain("rw", [{ action: "routing.write", project: "*" }]),
       broad: await plain("broad", [{ action: "*", project: "*" }]), nobody: await plain("nobody", []), agentPrincipal: await as(agentA), otherAgentPrincipal: await as(agentB),
@@ -434,6 +437,96 @@ for (const backend of backends) {
       const got = (await value_(c, key, c.agentA))!;
       if (got.lockedBy !== undefined) assert.equal(got.source.layer === "agent", false, `${key} came from the agent layer under a lock`);
     }
+  });
+
+  // Review of card F04m (third slice): the controller's own setting changes are one write, so a stop cannot leave a half-made change staged, and nothing staged goes into force with them.
+  suite("change: sets and puts in force in one write; a draft in the layer is neither applied nor touched; revision checked; a refused combination writes nothing; a repeat is answered from its record", async (c) => {
+    // A new layer: 0 means it must not exist yet.
+    const first = await c.config.change(c.owner, { commandId: "ch-1", layer: "installation", expectedRevision: 0, set: { "grants.maxDays": 30 } });
+    assert.deepEqual([first.revision, first.replayed, first.takesEffect], [1, false, { "grants.maxDays": "next-request" }]);
+    assert.equal((await value(c, "grants.maxDays"))!.value, 30);
+    await refuses("stale_revision", () => c.config.change(c.owner, { commandId: "ch-0", layer: "installation", expectedRevision: 0, set: { "grants.maxDays": 31 } }));
+    // Something staged and not applied (what a stop between the old stage and apply left behind).
+    const staged = await c.config.stage(c.owner, { commandId: cid("st"), layer: "installation", expectedRevision: first.revision, set: { "grants.defaultDays": 3, "conversation.mcp.enabled": false } });
+    const draft = (await c.config.layer(c.owner, "installation"))!.draft;
+    const second = await c.config.change(c.owner, { commandId: "ch-2", layer: "installation", expectedRevision: staged.revision, set: { "grants.maxDays": 40 } });
+    assert.equal(second.revision, staged.revision + 1);
+    const layer = (await c.config.layer(c.owner, "installation"))!;
+    assert.deepEqual(layer.draft, draft, "the draft is kept exactly as it was");
+    assert.deepEqual([(await value(c, "grants.maxDays"))!.value, (await value(c, "grants.defaultDays"))?.source.layer ?? "default", (await value(c, "conversation.mcp.enabled"))!.value], [40, "default", true], "only the change's own key went into force");
+    assert.deepEqual(layer.history.at(-1)!.set, ["grants.maxDays"]);
+    // Stale: refused, nothing written.
+    await refuses("stale_revision", () => c.config.change(c.owner, { commandId: "ch-3", layer: "installation", expectedRevision: staged.revision, set: { "grants.maxDays": 50 } }));
+    assert.equal((await c.config.layer(c.owner, "installation"))!.revision, second.revision);
+    // A combination that does not fit is refused and writes nothing (no failure record, no draft).
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: "ch-4", layer: "installation", set: { "workClass.pcFloor": 80, "workClass.pcCeiling": 60 } }), (e) => assert.match(e.message, /^the configuration check refused it: .*pcFloor \(80\) is above workClass.pcCeiling \(60\)/));
+    const after = (await c.config.layer(c.owner, "installation"))!;
+    assert.deepEqual([after.revision, after.lastFailure, after.draft], [second.revision, undefined, draft]);
+    // A repeat of the same command is answered from what it recorded, even after the layer moved on without a revision given.
+    const free = await c.config.change(c.owner, { commandId: "ch-5", layer: "installation", set: { "workClass.pcFloor": 5 } });
+    await c.config.change(c.owner, { commandId: "ch-6", layer: "installation", set: { "workClass.pcCeiling": 90 } });
+    const again = await c.config.change(c.owner, { commandId: "ch-5", layer: "installation", set: { "workClass.pcFloor": 5 } });
+    assert.deepEqual([again.revision, again.replayed, again.takesEffect], [free.revision, true, { "workClass.pcFloor": "next-request" }]);
+    await refuses("command_conflict", () => c.config.change(c.owner, { commandId: "ch-5", layer: "installation", set: { "workClass.pcFloor": 6 } }));
+    // Remove: only a key that is in force here; a key both set and removed is refused; a value check still applies.
+    const now = (await c.config.layer(c.owner, "installation"))!.revision;
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: "ch-7", layer: "installation", expectedRevision: now, remove: ["grants.defaultDays"] }), (e) => assert.match(e.message, /not set in this layer/));
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: "ch-8", layer: "installation", expectedRevision: now, set: { "grants.maxDays": 1 }, remove: ["grants.maxDays"] }));
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: "ch-9", layer: "installation", expectedRevision: now, set: { "grants.maxDays": 0 } }));
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: "ch-10", layer: "installation", expectedRevision: -1, set: { "grants.maxDays": 2 } }));
+    const removed = await c.config.change(c.owner, { commandId: "ch-11", layer: "installation", expectedRevision: now, remove: ["grants.maxDays"] });
+    assert.equal((await value(c, "grants.maxDays"))?.source.layer ?? "default", "default");
+    assert.deepEqual((await c.config.layer(c.owner, "installation"))!.history.at(-1)!.removed, ["grants.maxDays"]);
+    void removed;
+    // Rights as for stage: the installation layer is the owner's; a writer may change a task layer, never wider than above.
+    await refuses("forbidden", () => c.config.change(c.writer, { commandId: "ch-12", layer: "installation", set: { "grants.maxDays": 3 } }));
+    await c.config.change(c.owner, { commandId: "ch-13", layer: "installation", set: { "time.maxMinutes": 60 } });
+    await refuses("invalid_command", () => c.config.change(c.writer, { commandId: "ch-14", layer: "task", scopeId: c.task, set: { "time.maxMinutes": 120 } }), (e) => assert.match(e.message, /wider than the layers above allow/));
+    await c.config.change(c.writer, { commandId: "ch-15", layer: "task", scopeId: c.task, expectedRevision: 0, set: { "time.maxMinutes": 30 } });
+    assert.equal((await value(c, "time.maxMinutes", { taskId: c.task }))!.value, 30);
+    // The draft is still there, still out of force, after all of it.
+    assert.deepEqual((await c.config.layer(c.owner, "installation"))!.draft, draft);
+  });
+
+  // Clean-context review of the one-write change: what the change keeps and refuses beyond the first suite.
+  suite("change: a lock in the layer stays (a later change does not unlock it); a value locked above is refused; a layer of something that does not exist is not_found and writes nothing", async (c) => {
+    await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 100 }, { lock: ["time.maxMinutes"] });
+    const before = (await c.config.layer(c.owner, "installation"))!;
+    await c.config.change(c.owner, { commandId: cid("ch"), layer: "installation", expectedRevision: before.revision, set: { "time.maxMinutes": 90 } });
+    const layer = (await c.config.layer(c.owner, "installation"))!;
+    assert.deepEqual(layer.applied["time.maxMinutes"], { value: 90, locked: true }, "the owner's lock is kept by a change of the value");
+    assert.deepEqual(layer.history.at(-1)!.unlocked, []);
+    assert.equal((await value(c, "time.maxMinutes", { agentId: c.agentA }))!.lockedBy?.layer, "installation");
+    await refuses("invalid_command", () => c.config.change(c.writer, { commandId: cid("ch"), layer: "agent", scopeId: c.agentA, set: { "time.maxMinutes": 30 } }), (e) => assert.match(e.message, /locked by the installation layer/));
+    await refuses("invalid_command", () => c.config.change(c.owner, { commandId: cid("ch"), layer: "task", scopeId: c.task, set: { "time.maxMinutes": 30 } }), (e) => assert.match(e.message, /locked by the installation layer/));
+    assert.equal(await c.config.layer(c.owner, "agent", c.agentA), undefined);
+    await refuses("not_found", () => c.config.change(c.owner, { commandId: cid("ch"), layer: "team", scopeId: "team-aaaaaaaaaaaaaaaaaaaa", set: { "workClass.pcFloor": 1 } }));
+    await refuses("not_found", () => c.config.change(c.owner, { commandId: cid("ch"), layer: "agent", scopeId: "agt-aaaaaaaaaaaaaaaaaaaa", expectedRevision: 0, set: { "workClass.pcFloor": 1 } }));
+    assert.equal(await c.config.layer(c.owner, "team", "team-aaaaaaaaaaaaaaaaaaaa"), undefined);
+    assert.equal(await c.config.layer(c.owner, "agent", "agt-aaaaaaaaaaaaaaaaaaaa"), undefined);
+  });
+
+  suite("change: a lock above that lands while a change below is being written makes the change below stale; it never goes into force under the lock", async (c) => {
+    // The storage the agent-layer change commits through runs the owner's installation lock first, between the change's read of the layers above and its own write.
+    let race: (() => Promise<void>) | undefined;
+    const racing = new Proxy(c.storage, { get(target, prop, receiver) {
+      if (prop === "applyOperation") return async (input: OperationInput) => { const go = race; race = undefined; if (go !== undefined && input.audit[0]?.type === "config.change") await go(); return target.applyOperation(input); };
+      const v = Reflect.get(target, prop, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } });
+    const below = ConfigurationService.withEpoch(racing, c.epoch, { ...options, routing: c.routing });
+    await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 100 });
+    race = async () => { await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 100 }, { lock: ["time.maxMinutes"] }); };
+    await refuses("stale_revision", () => below.change(c.owner, { commandId: cid("ch"), layer: "agent", scopeId: c.agentA, expectedRevision: 0, set: { "time.maxMinutes": 40 } }));
+    assert.equal(race, undefined, "the lock ran in between");
+    assert.equal(await c.config.layer(c.owner, "agent", c.agentA), undefined);
+    const got = (await value(c, "time.maxMinutes", { agentId: c.agentA }))!;
+    assert.deepEqual([got.value, got.source.layer, got.lockedBy?.layer], [100, "installation", "installation"]);
+    // Two changes creating the same layer at once: one goes in, the other is told the layer moved (not that its command ID was used by something else).
+    const both = await Promise.allSettled([1, 2].map((v) => c.config.change(c.owner, { commandId: cid("ch"), layer: "team", scopeId: c.team, expectedRevision: 0, set: { "workClass.pcFloor": v } })));
+    assert.equal(both.filter((r) => r.status === "fulfilled").length, 1);
+    const lost = both.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.ok(lost.reason instanceof DomainError && lost.reason.code === "stale_revision", String(lost.reason));
+    assert.equal((await c.config.history(c.owner, "team", c.team))!.length, 1);
   });
 }
 
