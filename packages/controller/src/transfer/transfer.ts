@@ -883,7 +883,12 @@ export class DatabaseTransferService {
         }
         if (late !== undefined) {
           // Take the epoch back with the holder it had; this controller's services still hold the old epoch, so they are deposed and a restart follows.
-          await this.#o.storage.acquireEpoch({ holder: originalHolder ?? "controller", at: this.#now() });
+          try { await this.#o.storage.acquireEpoch({ holder: originalHolder ?? "controller", at: this.#now() }); } catch {
+            if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== (originalHolder ?? "controller")) {
+              // Card F04n: the journal still says `copying` and the source stays fenced; the next start abandons the transfer and the source is authoritative.
+              throw new DomainError("unavailable", `the source changed between the last check and the fence (${late}); nothing was switched. The fence on the source could not be lifted; the source stays the authoritative database: restart the controller and it starts on the source again.`);
+            }
+          }
           fenced = false; deposed = true;
           throw new Error(`the source changed between the last check and the fence (${late}); nothing was switched. The fence was lifted and the controller must be restarted`);
         }
@@ -967,10 +972,20 @@ export class DatabaseTransferService {
       const after = await this.#mark(this.#o.storage);
       const lateTables = mark.digests === undefined ? [] : await this.#changedSince(mark.digests);
       if (after.auditSeq !== mark.auditSeq || after.deliverySeq !== mark.deliverySeq || lateTables.length > 0) {
-        await this.#o.storage.acquireEpoch({ holder: holder ?? "controller", at: this.#now() });
-        await this.#journal(rolling, { phase: "switched" });
+        const what = "work was recorded on the new database while the rollback was being made, so it was not rolled back";
+        // The journal goes back to `switched` FIRST (card F04n): a restart on a journal that still says `rolling-back` finishes the rollback onto the previous database and drops this work without a word. With `switched` and the
+        // authority file naming this database, a restart on it is allowed even if the fence cannot be lifted. If the journal cannot be written nothing else is touched: the fence stays and the owner is told not to restart.
+        try { await this.#journal(rolling, { phase: "switched" }); } catch {
+          throw new DomainError("unavailable", `${what}. The record of the move could not be written back (the disk or the state folder refused it), so nothing else was changed: the new database stays fenced and the record still says the rollback was under way. Do NOT restart the controller until the state folder can be written again and the record says the move stands; a restart now would finish the rollback and drop that work.`);
+        }
+        try { await this.#o.storage.acquireEpoch({ holder: holder ?? "controller", at: this.#now() }); } catch {
+          // The commit may have happened and the answer been lost: the database itself says whether the fence is gone.
+          if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== (holder ?? "controller")) {
+            throw new DomainError("unavailable", `${what}. The record says the move stands, but the fence on the new database could not be lifted. Nothing was lost: restart the controller and it starts on the new database with that work.`);
+          }
+        }
         fenced = false;
-        throw new DomainError("invalid_transition", "work was recorded on the new database while the rollback was being made, so it was not rolled back. The fence was lifted and the controller must be restarted");
+        throw new DomainError("invalid_transition", `${what}. The fence was lifted and the controller must be restarted`);
       }
       await writeJson(join(this.#o.stateDirectory, AUTHORITY_FILE), { format: 1, generation: authority.generation + 1, active: journal.from, previous: journal.to, transferId: journal.id, since: this.#now() } satisfies StorageAuthority);
       await this.#at("rollback:authority");
