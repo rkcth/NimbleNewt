@@ -4509,7 +4509,7 @@ Arguments:
 
 - `channel` (optional): inbox or external
 - `channelName` (optional): the name of the external channel (needed for external; it must be a channel adapter registered in this installation, otherwise the change is refused)
-- `digestTimes` (optional): 1 to 8 UTC times such as 09:00
+- `digestTimes` (optional): 1 to 8 UTC times such as 09:00; until you name times yourself the plain 09:00 digest gives way to scheduled stand-ups only when every decision it would list belongs to a project whose stand-up carries it, naming them (even 09:00) always sends the digest
 - `quietHours` (optional): { start, end } times in your time zone setting (UTC when none is set), or null to remove them
 - `levelByKind` (optional): { kind: notice | needs-you | urgent } for blocker, review-request, owner-question, maintenance, presence, safety-stop; null puts a kind back to its default (a safety stop stays urgent)
 - `noticeRetentionDays` (optional): whole days (1 to 365) a Notice stays in the inbox before it is closed (default 7)
@@ -4526,6 +4526,7 @@ Arguments:
 - `hostDownAfterMinutes` (optional): whole minutes (1 to 1440) a host may stay silent before the controller raises an Urgent item (default 10); null turns it off
 - `deniedThreshold` (optional): refusals of one agent (2 to 10000) within deniedWindowMinutes that raise an Urgent item; not set or null: off
 - `deniedWindowMinutes` (optional): whole minutes (1 to 1440) the refusals are counted in (default 60)
+- `stoppedWorkAfterMinutes` (optional): whole minutes (1 to 10080) a decision waiting for you may hold up a project that has nothing else to do before the controller raises it to Urgent (default 30); null turns it off and puts what it raised back to Needs you
 - `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
 
 Result: `{ revision }`.

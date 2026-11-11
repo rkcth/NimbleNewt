@@ -3,7 +3,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import type { Principal } from "../security/index.js";
 import {
-  DEFAULT_BACKUP_MAX_AGE_HOURS, DEFAULT_DENIED_ALERTS_PER_HOUR, DEFAULT_DENIED_WINDOW_MINUTES, DEFAULT_HOST_DOWN_AFTER_MINUTES, DEFAULT_SECURITY_REPORTS_PER_HOUR, DEFAULT_SWEEP_SECONDS, type NotificationService,
+  DEFAULT_BACKUP_MAX_AGE_HOURS, DEFAULT_DENIED_ALERTS_PER_HOUR, DEFAULT_DENIED_WINDOW_MINUTES, DEFAULT_HOST_DOWN_AFTER_MINUTES, DEFAULT_SECURITY_REPORTS_PER_HOUR, DEFAULT_STOPPED_WORK_AFTER_MINUTES, DEFAULT_SWEEP_SECONDS, type NotificationService,
 } from "./notifications.js";
 
 /** What the watch needs from the backup service (card K01): the newest good backup by the scheduler's own rule, the folder being unreadable, and the last failed run. */
@@ -13,8 +13,15 @@ export interface HostSource {
   list(by: Principal, page: { afterId?: string; limit?: number }): Promise<{ readonly items: readonly { readonly hostId: string; readonly identity: "active" | "revoked"; readonly freshness: "fresh" | "stale" | "unknown"; readonly lastSeenAt?: string }[]; readonly next?: string }>;
 }
 
+/**
+ * What the stopped-work trigger needs to know about a project (card U11d, H12's view of available work): whether it has nothing else to do. `true`: no task of the project can go on; `false`: some can;
+ * `undefined`: not known (too much to read, a failing read), which decides nothing. Reads only; never throws on purpose.
+ */
+export interface WorkSource { idle(projectId: string): Promise<boolean | undefined> }
+
 export interface UrgentWatchOptions {
   readonly notifications: NotificationService;
+  readonly work?: WorkSource;
   readonly backups?: BackupSource;
   readonly hosts?: HostSource;
   /** Test clock; the production clock is the system's. */
@@ -24,7 +31,7 @@ export interface UrgentWatchOptions {
 }
 
 /** Bounds: hosts examined per sweep (the rest on the next sweeps, from a cursor), hosts remembered in one pass, agents whose denials are counted at once. */
-export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200 } as const;
+export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200, waitingPerSweep: 100, raisesPerSweep: 20, projectsCounted: 1000 } as const;
 
 export type SecurityEvent = "sandbox-escape-attempt" | "credential-misused" | "protected-path-touched" | "integrity-check-failed";
 const SECURITY_TEXT: Readonly<Record<SecurityEvent, string>> = {
@@ -67,6 +74,9 @@ export class UrgentWatch {
   #hostCursor: string | undefined;
   #hostsSeen = new Set<string>();
   #hostsSeenFull = false;
+  #stopCursor: string | undefined;
+  /** When each project was first seen with nothing to do (this episode); a project that is seen with work is forgotten. Memory only: a restart starts the count again, which only delays a page. */
+  readonly #idleSince = new Map<string, number>();
 
   constructor(options: UrgentWatchOptions) {
     this.#n = options.notifications; this.#o = options;
@@ -91,8 +101,52 @@ export class UrgentWatch {
     let failure: unknown;
     try { if (this.#o.backups !== undefined) await this.#backupCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.hosts !== undefined) failure ??= await this.#hostCheck(by, settings, raised, cleared); } catch (error) { failure ??= error; }
+    try { if (this.#o.work !== undefined) await this.#stoppedCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     if (failure !== undefined) { this.#nextSweepAt = 0; throw failure; }
     return { raised, cleared };
+  }
+
+  /**
+   * Stopped work (card U11d): a decision that waits on the owner (a blocker, a review, a question) while its project has nothing else to do is raised to Urgent with its reason, once per episode, after the
+   * owner's `stoppedWorkAfterMinutes` (default 30, `null` off). The wait is measured from the later of the item's creation and the first sweep that saw the project idle, so a project that has only just run dry
+   * is not paged. When work has resumed (or the trigger was turned off) the item is put back to Needs you and nothing is sent. The messages are an Urgent trigger like the U11c ones: inside the hourly
+   * Urgent limit and the gap per record, and only the item's label (IDs), the kind and the project's ID leave. Bounded: `waitingPerSweep` items from a cursor, `raisesPerSweep` raises, one read of work per
+   * project per sweep. A project whose work cannot be read decides nothing. One item failing does not stop the rest; the first failure is raised after the others were tried.
+   */
+  async #stoppedCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[], cleared: string[]): Promise<void> {
+    const limitM = settings.stoppedWorkAfterMinutes === undefined ? DEFAULT_STOPPED_WORK_AFTER_MINUTES : settings.stoppedWorkAfterMinutes;
+    const nowMs = Date.parse(this.#now());
+    const page = await this.#n.waitingOnOwner({ ...(this.#stopCursor === undefined ? {} : { after: this.#stopCursor }), limit: URGENT_LIMITS.waitingPerSweep });
+    this.#stopCursor = page.next;
+    const idle = new Map<string, boolean | undefined>();
+    let failure: unknown; let made = 0;
+    for (const item of page.items) {
+      try {
+        if (limitM === null) {
+          // Turned off: what it raised is put back.
+          if (item.stopped && (await this.#n.lowerStopped(item.id))) cleared.push(`work:${item.id}`);
+          continue;
+        }
+        if (!idle.has(item.projectId)) {
+          let v: boolean | undefined;
+          try { v = await within(this.#o.work!.idle(item.projectId), this.#stepMs, "reading the project's work"); } catch { v = undefined; }
+          idle.set(item.projectId, v);
+          if (v === false) this.#idleSince.delete(item.projectId);
+          else if (v === true && !this.#idleSince.has(item.projectId)) {
+            this.#idleSince.set(item.projectId, nowMs);
+            while (this.#idleSince.size > URGENT_LIMITS.projectsCounted) this.#idleSince.delete(this.#idleSince.keys().next().value as string);
+          }
+        }
+        const v = idle.get(item.projectId);
+        if (v === undefined) continue;
+        if (!v) { if (item.stopped && (await this.#n.lowerStopped(item.id))) cleared.push(`work:${item.id}`); continue; }
+        if (item.stopped || made >= URGENT_LIMITS.raisesPerSweep) continue;
+        const since = Math.max(Date.parse(item.firstAt), this.#idleSince.get(item.projectId) ?? nowMs);
+        if (!Number.isFinite(since) || nowMs - since < limitM * 60_000) continue;
+        if (await this.#n.raiseStopped(item.id, { minutes: Math.floor((nowMs - since) / 60_000), limit: limitM })) { made++; raised.push(`work:${item.id}`); }
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
   }
 
   async #backupCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[], cleared: string[]): Promise<void> {
