@@ -53,6 +53,8 @@ export interface NotificationSettings {
   readonly urgentMinGapMinutes?: number | null;
   /** How many agents' repeated denials may page the owner in one hour; the rest wait in the inbox as Needs you; default 5, `null` turns it off (card U11c). */
   readonly deniedAlertsPerHour?: number | null;
+  /** How many security reports one host or service may raise as their own items in an hour (card U11c); the rest are collected in ONE item for that reporter. Default 20, `null` turns it off. */
+  readonly securityReportsPerHour?: number | null;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
   readonly levelByKind?: Readonly<Partial<Record<NotificationKind, NotificationLevel>>>;
 }
@@ -67,6 +69,7 @@ export const DEFAULT_HOST_DOWN_AFTER_MINUTES = 10;
 export const DEFAULT_DENIED_WINDOW_MINUTES = 60;
 export const DEFAULT_URGENT_MIN_GAP_MINUTES = 30;
 export const DEFAULT_DENIED_ALERTS_PER_HOUR = 5;
+export const DEFAULT_SECURITY_REPORTS_PER_HOUR = 20;
 /** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
 /** Record kinds a controller-side notice may point at that the retention rules can remove (cards K06b, K06d, K06e): an item whose record is gone says so instead of leading to a not-found. */
 const REMOVABLE_REFS: ReadonlySet<string> = new Set(["responsibility-incident", "stall-concern", "responsibility-check"]);
@@ -231,9 +234,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -277,7 +280,7 @@ export class NotificationService {
       next = { ...next, urgentInterruptsQuietHours: command.urgentInterruptsQuietHours };
     }
     // The Urgent triggers of card U11c: a number sets one, null turns it off (and a number turns it on again).
-    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"]] as const) {
+    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"], ["securityReportsPerHour", 1, 1000, "reports"]] as const) {
       const v = command[field];
       if (v === null) next = { ...next, [field]: null };
       else if (v !== undefined) next = { ...next, [field]: whole(v, field, lo, hi, unit) };
