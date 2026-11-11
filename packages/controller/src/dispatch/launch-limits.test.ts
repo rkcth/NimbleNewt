@@ -95,7 +95,13 @@ for (const backend of backends) {
     const t = await c.task("unreadable", dan);
     await c.run();
     assert.equal(c.worker.starts.length, before);
-    assert.match((await c.blockers.openFor("dispatch_blocked", { kind: "task", id: t.taskId }))?.summary ?? "", /the setting is damaged/);
+    const blocker = await c.blockers.openFor("dispatch_blocked", { kind: "task", id: t.taskId });
+    assert.match(blocker?.summary ?? "", /the setting is damaged/);
+    // The refusal does not loop: later passes start nothing for the refused task and open no second blocker (no further attempt starts by itself).
+    for (let i = 0; i < 3; i++) assert.deepEqual((await c.run()).started, []);
+    assert.equal(c.worker.starts.length, before);
+    assert.equal((await c.blockers.openFor("dispatch_blocked", { kind: "task", id: t.taskId }))?.id, blocker?.id);
+    assert.equal((await c.dispatcher.get(c.owner, t.attemptId!))!.state, "finished");
   });
 
   suite("a manifest figure outside what a launch can carry refuses the attempt", async (c) => {
