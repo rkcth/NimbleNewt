@@ -13,3 +13,4 @@ export { ModelStreamDecoder, ModelStreamRefused, type ModelStreamCall, type Mode
 export { ModelRelay, type AttemptRelay, type ModelEndpoint, type ModelRelayOptions, type RelayRequest, type RelayResponse } from "./relay.js";
 export { controllerGuards, estimatedFirstCall, unknownWindowReason, usableWindow, type GuardBinding } from "./runtime-guards.js";
 export { QuiesceCoordinator, QuiesceRefused, type Quiet, type QuiesceDeps, type QuiesceOperation } from "./quiesce.js";
+export { createTargetVersions, TargetVersionError, TARGET_VERSION_LIMITS, ABSENT_VERSION, type TargetVersionDeps, type TargetVersionOptions } from "./target-versions.js";
