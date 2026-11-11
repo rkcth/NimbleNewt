@@ -443,7 +443,9 @@ for (const backend of backends) {
     // The run's own time budget: once it is used, no further send is started.
     calls = 0;
     minutes(2);
-    const tight = c.other({ channels: { pager: { send: () => { calls++; return new Promise<void>(() => undefined); } } }, sendTimeoutMs: 60, runBudgetMs: 100 });
+    // The budget counts from the start of the run, storage reads included: on a loaded PostgreSQL those alone took over 100 ms, so a 100 ms budget was used up
+    // before the first send (calls 0). A budget of two hung sends leaves 4 s for the reads and still stops well before the five a run may try.
+    const tight = c.other({ channels: { pager: { send: () => { calls++; return new Promise<void>(() => undefined); } } }, sendTimeoutMs: 2000, runBudgetMs: 4000 });
     await tight.runDue();
     assert.ok(calls >= 1 && calls < NOTIFICATION_LIMITS.deliveriesPerRun, `the budget stopped the run after ${calls} sends`);
     // A send that is in flight sees no transaction: reading and writing the store from inside the adapter works (it would deadlock or conflict inside one).

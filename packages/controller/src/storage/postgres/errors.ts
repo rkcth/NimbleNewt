@@ -4,10 +4,21 @@ interface PgLikeError extends Error { code?: string; severity?: string; detail?:
 
 const CONNECTION_CODES = new Set(["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED", "ENETRESET", "ENETUNREACH", "EHOSTUNREACH"]);
 const CONNECTION_MESSAGE = /connection terminated|connection (?:closed|ended|lost)|client has encountered a connection error|socket hang up|read ECONNRESET|write EPIPE|server closed the connection|terminating connection/i;
+/** The driver's own reply deadline (`query_timeout`): the server did not answer at all, so the connection is unusable (the statement may still be on it). */
+const NO_REPLY_MESSAGE = /^Query read timeout$/;
 
-/** True if the failure means the connection itself was lost (as opposed to the server answering with an error). */
+/** True if the server sent no answer within the client's reply deadline (a paused or hung server, or a silent network). */
+export function isNoReply(error: unknown): boolean {
+  return error instanceof Error && (error as PgLikeError).code === undefined && NO_REPLY_MESSAGE.test(error.message);
+}
+
+/**
+ * True if the failure means the connection itself was lost (as opposed to the server answering with an error). A statement the server
+ * never answered counts: the connection must be discarded, and the transaction on it can no longer commit.
+ */
 export function isConnectionLoss(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  if (isNoReply(error)) return true;
   const code = (error as PgLikeError).code;
   if (code !== undefined) {
     if (CONNECTION_CODES.has(code)) return true;
@@ -32,15 +43,21 @@ export function classify(error: unknown, phase: "work" | "commit" = "work", onUn
   if (error instanceof StorageError) return error;
   const e = error as PgLikeError;
   const code = e?.code;
+  if (phase === "commit" && isNoReply(error)) {
+    return new StorageError(onUnknownCommit, `the database server did not answer the commit in time (it may be paused, overloaded or unreachable), so the outcome is unknown; the connection was dropped: ${e.message}`, { cause: error });
+  }
   if (phase === "commit" && isConnectionLoss(error)) {
     return new StorageError(onUnknownCommit, `the connection was lost while committing, so the outcome is unknown: ${e.message}`, { cause: error });
+  }
+  if (isNoReply(error)) {
+    return new StorageError("retryable", `the database server did not answer in time (it may be paused, overloaded or unreachable); the connection was dropped and nothing was committed: ${e.message}`, { cause: error });
   }
   if (code === "40P01" || code === "40001" || code === "55P03" || code === "57014" || code === "53300") {
     const why = ({ "40P01": "deadlock detected", "40001": "serialization failure", "55P03": "lock wait timed out", "57014": "statement timed out", "53300": "too many connections" } as Record<string, string>)[code]!;
     return new StorageError("retryable", `${why}; the transaction was rolled back: ${e.message}`, { cause: error });
   }
   if (e instanceof Error && /timeout exceeded when trying to connect|pool is exhausted|timed out waiting for a connection/i.test(e.message)) {
-    return new StorageError("retryable", `no database connection became available in time (pool pressure): ${e.message}`, { cause: error });
+    return new StorageError("retryable", `no database connection became available in time (every pooled connection was busy, or the server did not answer a new connection): ${e.message}`, { cause: error });
   }
   if (isConnectionLoss(error)) return new StorageError("retryable", `the connection was lost before the transaction committed: ${e.message}`, { cause: error });
   if (code === "42501") return new StorageError("unavailable", `permission denied: the database user needs CREATE on the database to create the controller's schema, and full rights on that schema afterwards: ${e.message}`, { cause: error });
