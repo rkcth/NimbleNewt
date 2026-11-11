@@ -4,3 +4,5 @@ export * from "./launcher.js";
 export * from "./start-notices.js";
 export * from "./heartbeat.js";
 export * from "./supervisor.js";
+export * from "./service-units.js";
+export * from "./updater.js";
