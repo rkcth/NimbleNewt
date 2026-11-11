@@ -1882,7 +1882,11 @@ export class DispatcherService {
         held.push(`${r}: ${why.join("; ")}`);
       }
       if (open === undefined) return skip("route", `every route allowed for the task is closed to new work: ${held.join(" | ")}`.slice(0, 800));
-      if (open !== configured.route) chosen = { ...configured, route: open };
+      if (open !== configured.route) {
+        chosen = { ...configured, route: open };
+        // The task's routing decision names the configured route; the owner reads here why this attempt goes elsewhere (card G09: after a provider change, the views follow the route the attempt really takes). Once per attempt and move, so a reason whose words change between ticks is not repeated.
+        await this.#stepOf(attemptId, `route-closed:${createHash("sha256").update(`${configured.route}>${open}`).digest("hex").slice(0, 24)}`, "model-selected", `The task's configured route ${configured.route} is closed to new work, so attempt ${attemptId} goes to the next open route ${open} (${held.join(" | ")}).`, [{ kind: "dispatch", id: attemptId }]);
+      }
     }
     const recovery = await this.#deps.contracts.recoveryOf(taskId);
     const gap = this.#deps.harnesses.checkAttempt(recovery, chosen.harness);

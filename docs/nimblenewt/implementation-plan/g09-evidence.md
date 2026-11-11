@@ -49,3 +49,17 @@ Mutation check: with the relay's "reply held back" throw removed, both tests fai
 The first pass's code under test is commit `80b7ce54` (the "lead appends the hash" note above was not filled in); this addendum's is the commit that adds it, on top of `970c46ed`.
 
 Still not shown: a real model (none was used; one connection only was available and the benchmark has it), a worker killed in the middle of a call, and continuity across a provider change or a restart through the composed controller (those stay shown at the adapter and service level above).
+
+## Second addendum (2026-11-11): a provider change through the composed controller
+
+`packages/integration/src/g09c-provider-change.test.ts` (3 tests): the launcher, the worker host it builds from the owner's records (`scripts/local-host.mjs`), bubblewrap, the worker process running Pi Durable, the controller's relay; each route's address read from the provider records and its key from the secret store by name at each call; four scripted OpenAI-compatible servers behind an injected fetch, told apart by address. Reproduce: `npx tsc --build`, then `NIMBLENEWT_REQUIRE_SANDBOX=1 node --import ./scripts/offline-guard.mjs --test --test-timeout=600000 packages/integration/dist/g09c-provider-change.test.js`.
+
+| Promise | Test | What is asserted |
+|---|---|---|
+| A running attempt is not switched silently | "a route change while an attempt runs ...", "the address of a running attempt's provider is changed ..." | The owner adds a server and disables the old provider while the attempt's first call is held: both its calls go to its own server with its own key and model. The owner changes the address and key name of the provider the attempt is on: the next call goes to the new address with the new key, carries the whole conversation so far, and the task's activity says so in one step (new, see below). |
+| New attempts use the new route | first and third tests | The next attempt runs on `fresh/fresh-z` (its address, model and key only), or at the changed address. |
+| Status views follow | first test | `attempt_endings` names each attempt's real route; `model_routes` shows the control; the moved attempt's activity says its configured route is closed and why (new); `routing.decisions` keeps the configuration's choice. |
+| Nothing leaks the old key | all three | Every call carries exactly its server's key; no key in what the model was sent, in an activity step, a view or a refusal; no file the installation leaves holds a key. |
+| A failed change leaves the old route working | "a refused provider change ..." | Stale revision, a key where its name goes, credentials in the address, a non-http address: all refused, the routing table and provider records unchanged, the running attempt and the next one run on the route in force with its key. |
+
+Fixed on the way: a running attempt moved to a changed address silently (now a `model-selected` step from the relay's new `onEndpointChanged`), and an attempt sent past its configured route by the owner's controls had nothing saying why (now one step per attempt and move from the dispatcher). Mutation checks: each fix removed fails its test; a launcher that reads one fixed key for every provider fails two tests. Not shown: cost after a change (the launcher-built host records no usage for free local routes), a key-name-only change (not told), a provider whose secret is missing (accepted, fails only at the first call).

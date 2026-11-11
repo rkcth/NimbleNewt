@@ -113,6 +113,12 @@ test("model calls of the running controller go through the fallback service: a d
     const two = await task(c, owner, project, 2);
     await tick();
     assert.equal(first.routes.get(two.attemptId), "gpu2/qwen", "the next attempt went past the draining service");
+    // Card G09: the task's activity says why it is not on its configured route (its routing decision names that one); the running attempt has nothing of the kind.
+    const why = async (taskId: string): Promise<string[]> => (await c.services.activity.steps(owner, taskId)).steps.map((s) => ("summary" in s ? String(s.summary) : "")).filter((s) => /closed to new work/.test(s));
+    const told = await why(two.taskId);
+    assert.equal(told.length, 1, JSON.stringify(told));
+    assert.equal(told[0], `The task's configured route strata/qwen is closed to new work, so attempt ${two.attemptId} goes to the next open route gpu2/qwen (strata/qwen: service strata-svc is draining (no new work): swap the disk).`);
+    assert.deepEqual(await why(one.taskId), []);
     assert.equal((await c.dispatch!.dispatcher.get(owner, one.attemptId))!.state, "running", "a drain leaves the running attempt alone");
     assert.equal(first.worker.handles.find((h) => h.order.attemptId === one.attemptId)!.stopped, 0);
 

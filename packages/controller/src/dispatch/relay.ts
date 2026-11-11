@@ -68,6 +68,11 @@ const PATHS = new Set(["chat/completions", "messages", "messages/count_tokens"])
 const KEEP = new Set(["content-type", "retry-after", "retry-after-ms", "x-should-retry", "request-id", "x-request-id"]);
 const ALIAS = "m0";
 
+/** Host and path of an endpoint address, for the owner to read (no query, no fragment, no credentials). */
+function addressOf(url: string): string {
+  try { const u = new URL(url); return `${u.host}${u.pathname.replace(/\/+$/, "")}`.slice(0, 200); } catch { return "an address that cannot be read"; }
+}
+
 export class ModelRelay {
   readonly #options: ModelRelayOptions;
   readonly #base: string;
@@ -97,6 +102,11 @@ export class ModelRelay {
     readonly kind?: string | (() => Promise<string | undefined> | string | undefined);
     /** Told what of the budget each call carried and what was not sent, with why. Must return at once; a throw is ignored. */
     readonly onBudget?: (applied: BudgetApplied) => void;
+    /**
+     * Told when a call of this attempt goes to another address than the attempt's previous call did (card G09: the owner changed the route's provider record while the attempt ran; the endpoint is read at each call, so the
+     * change applies from this call on). `from` and `to` are host and path only (no query, no credentials). Told before the call is sent, once per change. Must return at once; a throw is ignored.
+     */
+    readonly onEndpointChanged?: (change: { readonly from: string; readonly to: string }) => void;
   }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
     const route = attempt.route;
     const maxBody = this.#options.maxBodyBytes ?? 8 * 1024 * 1024;
@@ -104,6 +114,8 @@ export class ModelRelay {
     let firstCall = attempt.onFirstUsage !== undefined;
     // Set once the provider refused a reasoning field the relay added (card W07: vLLM without a reasoning parser); later calls of the attempt are sent without it.
     let reasoningRefused = false;
+    // The address the attempt's previous call went to (card G09).
+    let lastBase: string | undefined;
     const refuse = (why: string): never => { throw new Error(`the model relay refused the call: ${why}`); };
     return {
       alias: ALIAS, relayBase: this.#base,
@@ -189,6 +201,10 @@ export class ModelRelay {
             refuse("the request was built before the owner's correction and cannot carry it; it is not sent");
           }
         }
+        // A call that goes to another address than the attempt's previous one is told, so a running attempt is never moved to another server silently (card G09).
+        const base = endpoint!.url.replace(/\/+$/, "");
+        if (lastBase !== undefined && lastBase !== base) { const from = lastBase; tell(() => attempt.onEndpointChanged?.({ from: addressOf(from), to: addressOf(base) })); }
+        lastBase = base;
         let call: CallMonitor | undefined;
         if (monitor !== undefined) { try { call = monitor.started({ requestChars: body?.length ?? 0 }); } catch { /* the call is not affected */ } }
         if (feed !== undefined && call !== undefined) { const c = call; feed.onWait = (on) => tell(() => c.waiting?.(on)); }

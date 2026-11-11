@@ -236,3 +236,29 @@ test("a model stream is relayed as it arrives, not buffered whole: the first pie
     assert.equal(tail, "data: second\n\n");
   }
 });
+
+test("a call of an attempt that goes to another address than its previous call is told once per change, with host and path only, before it is sent; a call to the same address, a refused call and a throwing listener tell nothing or change nothing (card G09)", async () => {
+  const calls: string[] = [];
+  let url = "http://old.internal:8080/v1/";
+  const fetch: typeof globalThis.fetch = async (input) => { calls.push(String(input)); return new Response("data: a\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }); };
+  const relay = new ModelRelay({ endpoint: () => ({ url, headers: () => ({ authorization: "Bearer sk-x" }) }), fetch });
+  const told: { from: string; to: string; sentBefore: number }[] = [];
+  const attempt = relay.forAttempt({ route: "llama/local", onEndpointChanged: (change) => { told.push({ ...change, sentBefore: calls.length }); } });
+  await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  assert.deepEqual(told, [], "the first call and a call to the same address tell nothing");
+  url = "http://new.internal:9090/v2?token=abc";
+  await assert.rejects(attempt.relay(req("http://relay.invalid/m0/files")), /refused the call/);
+  assert.deepEqual(told, [], "a refused call is never sent, so nothing moved");
+  await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  assert.deepEqual(told, [{ from: "old.internal:8080/v1", to: "new.internal:9090/v2", sentBefore: 2 }], "told before the moved call was sent; no query in the words");
+  await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  assert.equal(told.length, 1, "once per change");
+  // Each attempt has its own: another attempt's first call is not a change. A listener that throws does not stop the call.
+  const other = relay.forAttempt({ route: "llama/local", onEndpointChanged: () => { throw new Error("listener down"); } });
+  await other.relay(req("http://relay.invalid/m0/chat/completions"));
+  url = "http://third.internal/v1";
+  const r = await other.relay(req("http://relay.invalid/m0/chat/completions"));
+  assert.equal(r.status, 200);
+  assert.equal(calls.at(-1), "http://third.internal/v1/chat/completions");
+});
