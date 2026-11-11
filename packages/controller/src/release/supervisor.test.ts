@@ -91,6 +91,12 @@ interface World {
   pidsOf(r: { id: string }, ext?: string): number[];
 }
 
+/**
+ * Windows has no process groups and no SIGTERM a process can catch or ignore: the supervisor ends the child's whole tree at once with `taskkill /T /F` and has nothing to drain after it (supervisor.ts, the stop
+ * ladder and `leftovers` are POSIX only). The tests of the group ladder (a SIGTERM ignored, members left after the leader, a crashed leader's group) therefore run on POSIX only.
+ */
+const POSIX_GROUPS = process.platform === "win32" && "Windows has no process groups or catchable SIGTERM; the supervisor ends the tree with taskkill /T /F (supervisor.ts)";
+
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 async function world(body: (w: World) => Promise<void>): Promise<void> {
@@ -145,7 +151,8 @@ async function world(body: (w: World) => Promise<void>): Promise<void> {
     for (const s of stops) s();
     for (const f of readdirSync(pids)) for (const p of readFileSync(join(pids, f), "utf8").split("\n").filter(Boolean).map(Number)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
     for (const c of running) c.kill("SIGKILL");
-    rmSync(root, { recursive: true, force: true });
+    // On Windows a process killed a moment ago can still hold its working directory (a release folder) for a little while.
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
 const kinds = (w: World): string[] => w.events.map((e) => (e.kind === "started" || e.kind === "exited" ? `${e.kind}:${e.releaseId}` : e.kind));
@@ -201,7 +208,7 @@ test("a start the controller never confirms is stopped when the startup window e
   });
 });
 
-test("a controller that ignores SIGTERM is killed after the grace, with its whole process group, and nothing else (K02a)", async () => {
+test("a controller that ignores SIGTERM is killed after the grace, with its whole process group, and nothing else (K02a)", { skip: POSIX_GROUPS }, async () => {
   await world(async (w) => {
     const g = await w.release("good", "confirm");
     await w.good(g);
@@ -377,7 +384,7 @@ test("a controller that exits 0 after its start was confirmed stopped on purpose
   });
 });
 
-test("what a controller that crashed left running in its process group is stopped before the next start (K02a)", async () => {
+test("what a controller that crashed left running in its process group is stopped before the next start (K02a)", { skip: POSIX_GROUPS }, async () => {
   await world(async (w) => {
     const g = await w.release("orphans", "orphan-crash");
     await w.good(g);
@@ -394,7 +401,7 @@ test("what a controller that crashed left running in its process group is stoppe
   });
 });
 
-test("members of the group that ignore SIGTERM after the leader obeyed it are killed after the grace; a group that has emptied is never signalled again (K02a)", async () => {
+test("members of the group that ignore SIGTERM after the leader obeyed it are killed after the grace; a group that has emptied is never signalled again (K02a)", { skip: POSIX_GROUPS }, async () => {
   await world(async (w) => {
     const g = await w.release("good", "confirm");
     await w.good(g);
@@ -451,7 +458,9 @@ test("one launcher per release root: a second one exits 5 and starts nothing whi
     third.stop();
     assert.equal((await third.done).code, 0);
   });
-  // The socket-file lock (macOS and other systems without abstract sockets), exercised on this system.
+  // The socket-file lock (macOS and other systems without abstract sockets), exercised on this system. Windows takes a named pipe whatever `abstract` says (lockRoot), and a plain file path cannot be
+  // listened on there, so this part is for POSIX systems.
+  if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "nn-k02a-lock-"));
   try {
     const one = await lockRoot(root, { abstract: false });
@@ -489,7 +498,8 @@ test("a confirmed controller that beats and then blocks its event loop is found 
     assert.equal(hung.thresholdMs, 30_000);
     assert.ok(hung.quietMs >= 30_000);
     assert.equal((w.events.find((e) => e.kind === "stopping") as { why: string }).why, "hung");
-    assert.equal((w.events.find((e) => e.kind === "exited") as { code: number | null }).code, 0, "the handler ran once the block ended and exited 0");
+    // On POSIX the stop is SIGTERM, which the handler takes once the block ends; Windows has no SIGTERM a process can catch, and taskkill /F ends it with code 1. Either way the exit is no stop on purpose.
+    if (process.platform !== "win32") assert.equal((w.events.find((e) => e.kind === "exited") as { code: number | null }).code, 0, "the handler ran once the block ended and exited 0");
     assert.deepEqual(w.events.find((e) => e.kind === "waiting"), { kind: "waiting", ms: 1000, failures: 1 }, `counted as a short run: ${JSON.stringify(w.events)}`);
     const st = w.state();
     assert.equal(st.known.id, a.id, "still the last known good");

@@ -24,12 +24,22 @@ const until = async (what, cond, ms = 30_000) => { const end = Date.now() + ms; 
 /** Staged releases are read-only; make them removable. */
 const unlockAll = (dir) => { try { chmodSync(dir, 0o700); for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) unlockAll(join(dir, e.name)); } catch { /* gone */ } };
 
+/**
+ * The file-backed secret store this host can use, chosen up front so a test never touches the account's own store: owner-only files on POSIX, DPAPI-protected files on Windows (where the product refuses the
+ * protected-file store: it needs POSIX permissions). Both keep their files under `<dataDir>/secrets`.
+ */
+const FILE_STORE_KIND = process.platform === "win32" ? "windows-dpapi" : "protected-file";
+const fileStore = async (dataDir) => {
+  const { protectedFileStore, windowsDpapiStore } = await dist("config", "index.js");
+  return (process.platform === "win32" ? windowsDpapiStore : protectedFileStore)(join(dataDir, "secrets"));
+};
+
 /** A fresh installation on disk: the starter configuration, and the file secret store chosen up front (a test never touches the account's own secret store). */
 function installation(extra = (c) => c) {
   const base = mkdtempSync(join(tmpdir(), "nn-entry-"));
   const dataDir = join(base, "data");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(dataDir, "secret-store.json"), `${JSON.stringify({ kind: "protected-file" })}\n`);
+  writeFileSync(join(dataDir, "secret-store.json"), `${JSON.stringify({ kind: FILE_STORE_KIND })}\n`);
   const config = extra(starterConfig(dataDir, {}));
   const configFile = join(dataDir, "nimblenewt.config.json");
   writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
@@ -61,7 +71,8 @@ test("under the launcher a relative path, or a release root or pointer kind that
   assert.throws(() => controllerSettings({ data: "/d", config: "c.json" }, launcherEnv), /--config is the relative path/);
   assert.throws(() => controllerSettings({ data: "/d", "release-root": "/elsewhere" }, launcherEnv), /--release-root differs from the launcher's NIMBLENEWT_RELEASE_ROOT/);
   assert.throws(() => controllerSettings({ data: "/d", "release-switcher": "symlink" }, launcherEnv), /--release-switcher differs/);
-  assert.deepEqual(controllerSettings({ data: "/d", "release-root": "/r/", "release-switcher": "pointer" }, launcherEnv).release, { root: "/r", switcher: "pointer", runningRelease: RELEASE }, "the same settings again are fine");
+  // The root is resolved (path.resolve): "/r" on POSIX, "<current drive>:\\r" on Windows.
+  assert.deepEqual(controllerSettings({ data: "/d", "release-root": "/r/", "release-switcher": "pointer" }, launcherEnv).release, { root: resolve("/r"), switcher: "pointer", runningRelease: RELEASE }, "the same settings again are fine");
   assert.equal(controllerSettings({ data: "rel" }, {}).dataDir, resolve("rel"), "by hand a relative path is the current directory's, as before");
 });
 
@@ -76,12 +87,12 @@ test("'start confirmed' is said only when this start (the open attempt) is confi
 test("the release wiring: the running release comes from NIMBLENEWT_RUNNING_RELEASE and needs a release root; the root and the pointer kind come from the flags or the launcher's variables (entry, K02a)", () => {
   const none = controllerSettings({}, { NIMBLENEWT_DATA: "/x/data" });
   assert.equal(none.release, undefined, "no release root: no release wiring at all");
-  assert.equal(none.configFile, "/x/data/nimblenewt.config.json");
+  assert.equal(none.configFile, join(resolve("/x/data"), "nimblenewt.config.json"));
   const fromEnv = controllerSettings({}, { NIMBLENEWT_DATA: "/d", NIMBLENEWT_RELEASE_ROOT: "/r", NIMBLENEWT_RELEASE_SWITCHER: "pointer", NIMBLENEWT_RUNNING_RELEASE: RELEASE });
-  assert.deepEqual(fromEnv.release, { root: "/r", switcher: "pointer", runningRelease: RELEASE });
+  assert.deepEqual(fromEnv.release, { root: resolve("/r"), switcher: "pointer", runningRelease: RELEASE });
   const byHand = controllerSettings({ "release-root": "/r2" }, { NIMBLENEWT_DATA: "/d" });
-  assert.deepEqual(byHand.release, { root: "/r2" }, "started by hand: releases can be staged, but this process is no release's controller");
-  assert.deepEqual(controllerSettings({ "release-root": "/r2", "release-switcher": "symlink" }, { NIMBLENEWT_RUNNING_RELEASE: RELEASE }).release, { root: "/r2", switcher: "symlink", runningRelease: RELEASE }, "the flag wins");
+  assert.deepEqual(byHand.release, { root: resolve("/r2") }, "started by hand: releases can be staged, but this process is no release's controller");
+  assert.deepEqual(controllerSettings({ "release-root": "/r2", "release-switcher": "symlink" }, { NIMBLENEWT_RUNNING_RELEASE: RELEASE }).release, { root: resolve("/r2"), switcher: "symlink", runningRelease: RELEASE }, "the flag wins");
   assert.throws(() => controllerSettings({}, { NIMBLENEWT_RUNNING_RELEASE: RELEASE }), /no release root/);
   assert.throws(() => controllerSettings({}, { NIMBLENEWT_RELEASE_ROOT: "/r", NIMBLENEWT_RUNNING_RELEASE: "latest" }), /not a release ID/);
   assert.throws(() => controllerSettings({}, { NIMBLENEWT_RELEASE_ROOT: "/r", NIMBLENEWT_RELEASE_SWITCHER: "junction" }), /pointer or symlink/);
@@ -244,16 +255,20 @@ test("environment changes: off by default, on with the flag or the variable, thr
   const envDir = `${inst.dataDir}.environments`;
   try {
     // The owner turns the worker host on (it counts from the next start).
-    const { protectedFileStore } = await dist("config", "index.js");
     const { ownerSecretName } = await dist("controller", "index.js");
     const first = await runEntry(["--data", inst.dataDir], {}, async ({ controller }) => {
-      const token = await protectedFileStore(join(inst.dataDir, "secrets")).resolve(ownerSecretName(inst.dataDir));
+      const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
       const set = await controller.api.handle(token, { v: 1, op: "host.local.set", commandId: "host-on", args: { enabled: true } });
       assert.equal(set.ok, true, JSON.stringify(set));
     });
     assert.equal(first.code, 0, first.log);
     const off = await runEntry(["--data", inst.dataDir], {});
-    if (/was not started/.test(off.log)) { assert.equal(required, false, `NIMBLENEWT_REQUIRE_SANDBOX=1 but the worker host could not start:\n${off.log}`); return; }
+    if (/was not started/.test(off.log)) {
+      // The local worker host runs agents in bubblewrap and says it is Linux only (scripts/local-host.mjs): a required sandbox makes its start required on Linux alone.
+      assert.equal(required && process.platform === "linux", false, `NIMBLENEWT_REQUIRE_SANDBOX=1 but the worker host could not start:\n${off.log}`);
+      if (process.platform !== "linux") assert.match(off.log, /bubblewrap, which is Linux only so far/, "off Linux the host says why it did not start");
+      return;
+    }
     assert.match(off.log, /running agents in a sandbox/);
     assert.equal(existsSync(envDir), false, "off by default: no environment store is made");
     const flag = await runEntry(["--data", inst.dataDir, "--local-host-environments"], {});
@@ -301,33 +316,33 @@ test("the configuration's workspace folders reach the start-up file system check
   const inst = installation((c) => ({ ...c, installation: { ...c.installation, workspaces: { main: { path: "checkouts" }, abs: { path: join(tmpdir(), "nn-ws-elsewhere") } } } }));
   try {
     const { launch } = await dist("controller", "index.js");
-    const { protectedFileStore, loadConfig } = await dist("config", "index.js");
+    const { loadConfig } = await dist("config", "index.js");
     const loaded = loadConfig(readFileSync(inst.configFile, "utf8"));
     assert.equal(loaded.ok, true);
     const asked = [];
     const facts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
     const start = (detect) => ({ facts, filesystem: detect, features: [], harnesses: [] });
     const printed = [];
-    const l = await launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: (t) => printed.push(t), start: start(async (path) => { asked.push(path); return { type: "ext4", network: false }; }) });
+    const l = await launch({ config: loaded.config, secrets: (await fileStore(inst.dataDir)), argv: [], env: {}, print: (t) => printed.push(t), start: start(async (path) => { asked.push(path); return { type: "ext4", network: false }; }) });
     await l.close();
     assert.ok(asked.includes(join(inst.dataDir, "checkouts")), `asked: ${asked.join(", ")}`);
     assert.ok(asked.includes(join(tmpdir(), "nn-ws-elsewhere")));
     assert.doesNotMatch(printed.join("\n"), /installation\.workspaces/, "nothing extra is said when the folders are fine");
     // A workspace on a file system that is not supported refuses the start, as the data directory's would, and the refusal says where the folder came from and what to do.
     const refused = [];
-    await assert.rejects(launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: (t) => refused.push(t), start: start(async (path) => (path.endsWith("checkouts") ? { type: "nfs", network: true } : { type: "ext4", network: false })) }), /workspace/);
+    await assert.rejects(launch({ config: loaded.config, secrets: (await fileStore(inst.dataDir)), argv: [], env: {}, print: (t) => refused.push(t), start: start(async (path) => (path.endsWith("checkouts") ? { type: "nfs", network: true } : { type: "ext4", network: false })) }), /workspace/);
     assert.ok(refused.join("\n").includes(`come from the configuration (installation.workspaces: main = ${join(inst.dataDir, "checkouts")}, abs = `), refused.join("\n"));
     assert.match(refused.join("\n"), /remove it from the configuration, or start with --allow-unsupported-environment/);
     // An explicit start.workspaceRoots wins: the configuration's folders are then not checked.
     const only = [];
-    const l2 = await launch({ config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: () => undefined, start: { ...start(async (path) => { only.push(path); return { type: "ext4", network: false }; }), workspaceRoots: [] } });
+    const l2 = await launch({ config: loaded.config, secrets: (await fileStore(inst.dataDir)), argv: [], env: {}, print: () => undefined, start: { ...start(async (path) => { only.push(path); return { type: "ext4", network: false }; }), workspaceRoots: [] } });
     await l2.close();
     assert.equal(only.includes(join(inst.dataDir, "checkouts")), false);
     // `~` is not expanded, and that is said.
     const tilde = loadConfig(JSON.stringify({ ...loaded.config, installation: { ...loaded.config.installation, workspaces: { home: { path: "~/code" } } } }));
     assert.equal(tilde.ok, true);
     const said = [];
-    const l3 = await launch({ config: tilde.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: (t) => said.push(t), start: start(async () => ({ type: "ext4", network: false })) });
+    const l3 = await launch({ config: tilde.config, secrets: (await fileStore(inst.dataDir)), argv: [], env: {}, print: (t) => said.push(t), start: start(async () => ({ type: "ext4", network: false })) });
     await l3.close();
     assert.match(said.join("\n"), /The workspace folder ~\/code \(installation\.workspaces\.home\) starts with ~, which is not expanded/);
   } finally { inst.cleanup(); }
@@ -342,7 +357,7 @@ test("the configuration's workspace folders reach the start-up file system check
 async function activatedRelease(inst, { restartOnce = false } = {}) {
   const root = join(inst.base, "rel");
   const { launch } = await dist("controller", "index.js");
-  const { protectedFileStore, loadConfig } = await dist("config", "index.js");
+  const { loadConfig } = await dist("config", "index.js");
   const loaded = loadConfig(readFileSync(inst.configFile, "utf8"));
   assert.equal(loaded.ok, true);
   const facts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -356,7 +371,7 @@ async function activatedRelease(inst, { restartOnce = false } = {}) {
     "compat.json": JSON.stringify({ protocol: { min: 1, max: 1 } }),
   };
   const l = await launch({
-    config: loaded.config, secrets: protectedFileStore(join(inst.dataDir, "secrets")), argv: [], env: {}, print: () => undefined,
+    config: loaded.config, secrets: (await fileStore(inst.dataDir)), argv: [], env: {}, print: () => undefined,
     start: { facts, filesystem: async () => ({ type: "ext4", network: false }), features: [], harnesses: [], releases: { root, switcher: "pointer", platform: cell } },
   });
   try {
