@@ -34,7 +34,11 @@ export interface PasscodeWrapper extends WrapperBase { readonly kind: "passcode"
 export interface RecoveryWrapper extends WrapperBase { readonly kind: "recovery" }
 export type Wrapper = PasscodeWrapper | RecoveryWrapper;
 /** The public part: nothing in it opens a backup without a passcode or the recovery key. */
-export interface Keyring { readonly version: typeof KEYRING_VERSION; readonly keyId: string; readonly createdAt: string; readonly publicKey: string; readonly wrappers: readonly Wrapper[] }
+export interface Keyring {
+  readonly version: typeof KEYRING_VERSION; readonly keyId: string; readonly createdAt: string; readonly publicKey: string; readonly wrappers: readonly Wrapper[];
+  /** Which key generation this is (1 when absent). A rotation (a passcode removed or replaced, card K01b) makes a new key pair, so later backups use a new key; `previousKeyId` names the generation it replaced. */
+  readonly generation?: number; readonly previousKeyId?: string;
+}
 /** The recovery file's content: the owner keeps it off the server. */
 export interface RecoveryFile { readonly format: "nimblenewt-recovery"; readonly version: 1; readonly keyId: string; readonly recoveryKey: string }
 
@@ -82,15 +86,19 @@ async function passcodeWrapper(secret: Buffer, passcode: string, keyId: string, 
 const recoveryKek = (recoveryKey: Buffer, keyId: string): Buffer => hkdf(recoveryKey, Buffer.from(keyId), "nn-backup-recovery-kek");
 
 /** Makes a new backup key: the keyring (kept by the server) and the recovery file (given to the owner once, never logged). */
-export async function createKeyring(options: { passcode: string; now?: () => Date; scrypt?: ScryptParams }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
+export async function createKeyring(options: { passcode: string; /** More passcodes, each wrapped separately (at most MAX_PASSCODE_WRAPPERS in all). */ morePasscodes?: readonly string[]; generation?: { number: number; previousKeyId: string }; now?: () => Date; scrypt?: ScryptParams }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
+  const all = [options.passcode, ...(options.morePasscodes ?? [])];
+  if (all.length > MAX_PASSCODE_WRAPPERS) throw new PasscodeRefused(`a key may have at most ${MAX_PASSCODE_WRAPPERS} passcodes`);
+  if (new Set(all).size !== all.length) throw new PasscodeRefused("the same passcode was given twice");
   const { publicKey, privateKey } = generateKeyPairSync("x25519");
   const secret = Buffer.from(privateKey.export({ type: "pkcs8", format: "der" }));
   const keyId = b64(randomBytes(12));
-  const pass = await passcodeWrapper(secret, options.passcode, keyId, options.scrypt ?? DEFAULT_SCRYPT);
+  const passes: PasscodeWrapper[] = [];
+  for (const passcode of all) passes.push(await passcodeWrapper(secret, passcode, keyId, options.scrypt ?? DEFAULT_SCRYPT));
   const recoveryKey = randomBytes(32); const rid = b64(randomBytes(6));
   const rec: RecoveryWrapper = { id: rid, kind: "recovery", ...wrap(secret, recoveryKek(recoveryKey, keyId), keyId, { id: rid, kind: "recovery" }) };
   secret.fill(0);
-  const keyring: Keyring = { version: KEYRING_VERSION, keyId, createdAt: (options.now ?? (() => new Date()))().toISOString(), publicKey: b64(publicKey.export({ type: "spki", format: "der" })), wrappers: [pass, rec] };
+  const keyring: Keyring = { version: KEYRING_VERSION, keyId, createdAt: (options.now ?? (() => new Date()))().toISOString(), publicKey: b64(publicKey.export({ type: "spki", format: "der" })), wrappers: [...passes, rec], ...(options.generation === undefined ? {} : { generation: options.generation.number, previousKeyId: options.generation.previousKeyId }) };
   return { keyring, recoveryFile: { format: "nimblenewt-recovery", version: 1, keyId, recoveryKey: b64(recoveryKey) } };
 }
 
@@ -112,6 +120,8 @@ export function parseKeyring(value: unknown): Keyring {
     if (w.kind === "passcode") { if (w.kdf?.name !== "scrypt") throw new SealedFileBad("a key wrapper is not valid"); checkParams(w.kdf); unb64(w.salt, "salt", 16); }
     unb64(w.nonce, "nonce", 12); unb64(w.wrapped, "wrapped key");
   }
+  if (k.generation !== undefined && (!Number.isInteger(k.generation) || k.generation < 1 || k.generation > 100_000)) throw new SealedFileBad("the key record is not valid");
+  if (k.previousKeyId !== undefined && (typeof k.previousKeyId !== "string" || k.previousKeyId.length > 64)) throw new SealedFileBad("the key record is not valid");
   createPublicKey({ key: unb64(k.publicKey, "public key"), format: "der", type: "spki" });
   return k;
 }
@@ -149,6 +159,42 @@ export function unlockWithRecovery(keyring: Keyring, file: unknown): BackupKey {
   throw new UnlockFailed();
 }
 
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/** Thrown for a recovery code that is not in the right form. The message is fixed text: the typed code is never put in it. */
+export class RecoveryCodeInvalid extends Error { constructor() { super("the recovery code is not valid: check that every character was typed as printed"); this.name = "RecoveryCodeInvalid"; } }
+const base32 = (bytes: Uint8Array): string => { let bits = 0; let acc = 0; let out = ""; for (const b of bytes) { acc = (acc << 8) | b; bits += 8; while (bits >= 5) { out += CROCKFORD[(acc >>> (bits - 5)) & 31]; bits -= 5; } acc &= (1 << bits) - 1; } if (bits > 0) out += CROCKFORD[(acc << (5 - bits)) & 31]; return out; };
+const codeCheck = (key: Buffer): string => base32(createHash("sha256").update("nn-recovery-code").update(key).digest().subarray(0, 3)).slice(0, 4);
+/**
+ * A printable form of the recovery key (card K01b): the 256 random bits (far over the 128 the card asks for) in Crockford base32, then 4 check characters, in dash-separated groups of 4 (e.g. `ABCD-EFGH-...`). The checksum
+ * catches a mistyped or misread character before any unlock is tried; it is no secret of its own (it does not shorten the key's strength in any way that matters: it is 20 bits of a hash of the key, not of the key).
+ */
+export function recoveryCodeOf(file: RecoveryFile): string {
+  const text = base32(unb64(file.recoveryKey, "recovery key", 32)) + codeCheck(unb64(file.recoveryKey, "recovery key", 32));
+  return (text.match(/.{1,4}/g) ?? []).join("-");
+}
+/** Reads a typed recovery code back to the recovery key; a wrong length, an unknown character or a failed checksum is `RecoveryCodeInvalid`. I, L and O are read as the digits they look like. */
+export function recoveryKeyFromCode(code: string): string {
+  if (typeof code !== "string" || code.length > 200) throw new RecoveryCodeInvalid();
+  const clean = code.toUpperCase().replace(/[\s-]/g, "").replace(/[IL]/g, "1").replace(/O/g, "0");
+  if (clean.length !== 52 + 4) throw new RecoveryCodeInvalid();
+  let acc = 0; let bits = 0; const out: number[] = [];
+  for (const ch of clean.slice(0, 52)) {
+    const v = CROCKFORD.indexOf(ch); if (v < 0) throw new RecoveryCodeInvalid();
+    acc = (acc << 5) | v; bits += 5;
+    if (bits >= 8) { out.push((acc >>> (bits - 8)) & 255); bits -= 8; acc &= (1 << bits) - 1; }
+  }
+  const key = Buffer.from(out);
+  // 52 characters carry 260 bits: the last 4 are padding and must be zero, or a changed last character would decode to the same key and slip past the checksum (only the canonical code is accepted).
+  if (bits !== 4 || acc !== 0) throw new RecoveryCodeInvalid();
+  if (key.length !== 32 || codeCheck(key) !== clean.slice(52)) throw new RecoveryCodeInvalid();
+  return b64(key);
+}
+/** Opens the key with a printed recovery code (the same key as the recovery file holds). */
+export function unlockWithRecoveryCode(keyring: Keyring, code: string): BackupKey {
+  const k = parseKeyring(keyring);
+  return unlockWithRecovery(k, { format: "nimblenewt-recovery", version: 1, keyId: k.keyId, recoveryKey: recoveryKeyFromCode(code) });
+}
+
 /** What a backup records about its encryption, in the manifest: the key it was made for and the public ephemeral half. */
 export interface BackupSeal { readonly scope: "everything"; readonly keyId: string; readonly ephemeral: string; readonly keyring: Keyring }
 
@@ -178,6 +224,11 @@ export class BackupKey {
   readonly keyring: Keyring;
   readonly #priv: KeyObject;
   constructor(keyring: Keyring, priv: KeyObject) { this.keyring = keyring; this.#priv = priv; }
+  /** A new passcode wrapper for this same key (the key is unwrapped only for the moment of wrapping). */
+  async wrapPasscode(passcode: string, params: ScryptParams = DEFAULT_SCRYPT): Promise<PasscodeWrapper> {
+    const secret = Buffer.from(this.#priv.export({ type: "pkcs8", format: "der" }));
+    try { return await passcodeWrapper(secret, passcode, this.keyring.keyId, params); } finally { secret.fill(0); }
+  }
   /** The cipher for a backup, or a refusal when the backup was made for another key. */
   cipherFor(seal: BackupSeal): BackupCipher {
     if (seal.keyId !== this.keyring.keyId) throw new UnlockFailed("could not unlock: this backup was made for a different backup key");
@@ -230,3 +281,25 @@ export async function* readPlain(path: string, cipher: BackupCipher | undefined,
 
 /** The digest an encrypted backup's manifest records (keyed) or the plain SHA-256. */
 export const hasherFor = (cipher: BackupCipher | undefined) => cipher === undefined ? createHash("sha256") : cipher.hasher();
+
+/** Adds a passcode to the key (card K01b): the same key, one more wrapper. Needs the key open (the owner proved a passcode or the recovery file), and refuses a passcode that already opens it. */
+export async function addPasscode(key: BackupKey, passcode: string, options: { scrypt?: ScryptParams } = {}): Promise<Keyring> {
+  const k = parseKeyring(key.keyring);
+  if (k.wrappers.filter((w) => w.kind === "passcode").length >= MAX_PASSCODE_WRAPPERS) throw new PasscodeRefused(`a key may have at most ${MAX_PASSCODE_WRAPPERS} passcodes: remove one by rotating the key first`);
+  checkPasscode(passcode);
+  const same = await unlockWithPasscode(k, passcode).then(() => true, () => false);
+  if (same) throw new PasscodeRefused("that passcode already opens this key");
+  return { ...k, wrappers: [...k.wrappers, await key.wrapPasscode(passcode, options.scrypt ?? DEFAULT_SCRYPT)] };
+}
+
+/**
+ * Removes or replaces a passcode by rotating the key (card K01b): a new key pair, wrapped for exactly the passcodes given (the ones to keep, and any replacement) and a new recovery key. Later backups are sealed for the new key,
+ * so a passcode that was dropped (say, because it was exposed) opens only the backups made before: those stay readable with the old unlock methods, and the owner must be told. The old generation is not changed or deleted here;
+ * each backup carries the key record it was made under, so an old backup restores without it.
+ */
+export async function rotateKeyring(options: { current: BackupKey; passcodes: readonly string[]; now?: () => Date; scrypt?: ScryptParams }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
+  const old = parseKeyring(options.current.keyring);
+  if (options.passcodes.length < 1) throw new PasscodeRefused("a rotated key needs at least one passcode");
+  const [first, ...more] = options.passcodes;
+  return createKeyring({ passcode: first!, morePasscodes: more, generation: { number: (old.generation ?? 1) + 1, previousKeyId: old.keyId }, ...(options.now === undefined ? {} : { now: options.now }), ...(options.scrypt === undefined ? {} : { scrypt: options.scrypt }) });
+}

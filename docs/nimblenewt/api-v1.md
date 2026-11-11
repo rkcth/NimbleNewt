@@ -1133,13 +1133,13 @@ Result: `{ item: { items, next? } }`.
 
 #### `backup.encryption.status`
 
-Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the last proof, and warnings (a recovery file left on the host). It never holds a passcode, a recovery key or any key material. Encryption is switched on and off on the host, because it needs the passcode and recovery file, which never travel through chat.
+Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the key generation, the last proof and the last proof that worked (kept across restarts) with whether a new proof is due (every three months: `proofDue`; ask the owner to put the passcode or recovery file in place and run backup.encryption.verify), and warnings (a recovery file left on the host, a proof overdue). It never holds a passcode, a recovery key or any key material. Encryption is switched on and off, an extra passcode added, and a passcode removed or replaced (which rotates to a new key, a new recovery file or printable recovery code) on the host with `backup encryption-setup`, `encryption-add-passcode` and `encryption-rotate`, because they need the passcode and recovery file, which never travel through chat; tell the owner those commands when they ask.
 
 Arguments:
 
 - none
 
-Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
 
 #### `backup.restore.preview`
 

@@ -7,7 +7,7 @@ import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
-import { BackupEncryption, BackupKeyPinService, BackupService, MaintenanceBarrier, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
+import { BackupEncryption, BackupKeyPinService, BackupProofStore, BackupService, MaintenanceBarrier, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile, statfs } from "node:fs/promises";
 import { activeProjectIds, defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
@@ -460,6 +460,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The backup public key is pinned the first time it is loaded; a different one is refused until the owner approved its fingerprint (card K01b).
     const backupKeyPin = backupEncryption === undefined ? undefined : BackupKeyPinService.withEpoch(storage, epoch);
     if (backupEncryption !== undefined) {
+      await backupEncryption.attachProofStore(BackupProofStore.withEpoch(storage, epoch));
       const pinned = await backupKeyPin!.check(backupEncryption.keyring);
       print(pinned.first ? `Backups are encrypted; the backup key (fingerprint ${pinned.fingerprint}) is now pinned to this installation.` : pinned.approved ? `The backup key was replaced with the one the owner approved (fingerprint ${pinned.fingerprint}).` : `Backups are encrypted (fingerprint ${pinned.fingerprint}).`);
       for (const warning of backupEncryption.warnings()) print(`Warning: ${warning}.`);
