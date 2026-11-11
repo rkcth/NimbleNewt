@@ -436,7 +436,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   };
   // Settling the journal is a short step under the state folder's lock, so two starts (or a start and a transfer) cannot each see the files before the other changed them. The lock is NOT held across the slow work that follows (a staged
   // restore's swap, the migrations of the database); the holder check is made under it again, and the epoch is taken with the epoch that check read (card F04m), so nothing slips in between.
-  if (stateDirectory !== undefined) await withStateLock(stateDirectory, async () => { const settled = await guardStart(stateDirectory, sourcePlace); if (settled.note !== undefined) print(settled.note); }, { wait: true });
+  if (stateDirectory !== undefined) await withStateLock(stateDirectory, async () => { const settled = await guardStart(stateDirectory, sourcePlace, undefined, "later"); if (settled.note !== undefined) print(settled.note); }, { wait: true });
   let seenEpoch: number | undefined;
   {
     if (options.storage.kind === "sqlite" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, resolve(options.storage.path), print, { ...(piFinal === undefined ? {} : { piFinal }), ...(dataLock === undefined || !(await dataLock.isHeld()) ? {} : { lock: dataLock }) });
@@ -460,7 +460,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     try {
       if (stateDirectory === undefined) seenEpoch = await assertNotFenced(stateDirectory, sourcePlace, storage);
       else {
-        await withStateLock(stateDirectory, async () => { const settled = await guardStart(stateDirectory, sourcePlace); if (settled.note !== undefined) print(settled.note); seenEpoch = await assertNotFenced(stateDirectory, sourcePlace, storage); }, { wait: true });
+        await withStateLock(stateDirectory, async () => { const settled = await guardStart(stateDirectory, sourcePlace, undefined, storage); if (settled.note !== undefined) print(settled.note); seenEpoch = await assertNotFenced(stateDirectory, sourcePlace, storage); }, { wait: true });
       }
     } catch (error) { await storage.close().catch(() => undefined); throw error; }
   }
