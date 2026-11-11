@@ -72,6 +72,19 @@ export const REMOTE_LIMITS = {
   toolBytes: 160 * 1024,
   /** The longest task credential a bridge request may carry, in characters (the controller authenticates it; a longer one cannot be one). */
   toolTokenChars: 512,
+  /** A worker's report of the processes it holds for an attempt (card L02e): at most this many entries, a reference of at most `processRef` characters each, in a body of at most `processBytes` bytes. */
+  processes: 50,
+  processRef: 120,
+  processBytes: 16 * 1024,
+  /**
+   * The model's thinking a remote host reports (card U09c): blocks per message and characters per block are the worker channel's own bounds (`THINKING_REPORT`, the same figures a local process is held to); the body is bounded
+   * so the largest message (50 blocks of 8000 characters, escaped) fits, and an attempt may send `thinkingMessages` messages (the figure a local process is held to) and have `thinkingInFlight` of them in the controller at once.
+   */
+  thinkingBlocks: 50,
+  thinkingChars: 8000,
+  thinkingBytes: 640 * 1024,
+  thinkingMessages: 2000,
+  thinkingInFlight: 2,
 } as const;
 
 // ---- wire shapes -----------------------------------------------------------------------------------------------------------------
@@ -121,7 +134,22 @@ export interface WorkspaceAsk {
 /** `failed`: the host's port threw, so the work may be half done (the controller records it as failed, as it does a local host's throw), not a refusal that changed nothing. */
 export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string; readonly failed?: true };
 
+/**
+ * What a remote worker reports of the processes it started for an attempt and has not cleaned up (card L02e), the same entries a local sandbox reports to Stop. `seq` rises with every report of a placement (a repeat or an older one changes nothing);
+ * `final` says the worker has stopped the attempt's sandbox and looked: what it lists then (normally nothing) is what is left. A report names no path of the controller and carries no credential: a reference is redacted and cut.
+ */
+export interface ProcessReport {
+  readonly seq: number;
+  readonly final: boolean;
+  readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[];
+}
+
 /** A tool bridge request as the worker's tool extension made it (card L05e): the same shape the controller's `ToolExecutionService.handle` takes, restated here because the worker side imports nothing of the controller. */
 export interface ToolBridgeRequest { readonly op: string; readonly callId: string; readonly args?: JsonObject }
 /** The controller's answer to it: a result, or a refusal with a code (a refusal is an answer, not a failed request). */
 export type ToolBridgeAnswer = { readonly ok: true; readonly result: JsonObject } | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** One block of the model's thinking a remote host's process reported (card U09c): the worker channel's `ThinkingReport`, restated because the worker side imports nothing of the controller. The text is untrusted; the controller cleans and bounds it. */
+export interface ThinkingWire { readonly entryId: number; readonly block: number; readonly provider: string; readonly model: string; readonly text: string; readonly opaque: boolean }
+/** The controller's answer to a thinking message: how many blocks it kept (`reason` says why none: the owner's switch is off, the record was removed, the blocks were already kept, the attempt is no longer the task's current one, or the attempt sent more than it may). Never the text. */
+export interface ThinkingAnswer { readonly kept: number; readonly reason?: "off" | "removed" | "nothing-new" | "stale" | "limit" | "unavailable" }

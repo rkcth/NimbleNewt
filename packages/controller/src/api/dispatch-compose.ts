@@ -13,7 +13,8 @@ import { AdmissionService } from "../admission/index.js";
 import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
-import { DecisionService, compactionKeep, startupItems, type DecisionDeps } from "../decisions/index.js";
+import { DecisionService, compactionKeep, ownerRuleItems, startupItems, type DecisionDeps } from "../decisions/index.js";
+import { ANCHOR_DEFAULT_CHARS, anchorBudget, findAnchors } from "../context/anchor.js";
 import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, ThinkingStore, type ReportedThinking, startSizeRecorder, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
@@ -21,7 +22,7 @@ import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type DispatcherDeps, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { EnvironmentService } from "../environments/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
@@ -79,7 +80,7 @@ const recovering = (by: Principal): Principal => ({ ...by, kind: "owner" });
 
 /** What the operator gives the controller to run the dispatcher (card H12c). Absent from `StartOptions`: no dispatcher is built and no loop runs. */
 /** The worker process's context limits for an order, in the shape of the channel's `ChannelContext` (the controller does not depend on the contracts package; the host's `context` option takes it structurally). */
-export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; /** The owner's decisions the process keeps through its own compactions (card C07q). */ readonly keep?: { readonly note: string; readonly lines: readonly string[] } } }
+export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; /** The owner's decisions the process keeps through its own compactions (card C07q). */ readonly keep?: { readonly note: string; readonly lines: readonly string[] }; /** Card W12: the goal anchor the controller wrote for the attempt, which the process puts at the top of every summary that replaces its cut conversation (replacing the earlier one). */ readonly anchor?: { readonly text: string } } }
 
 /** Remote workers (card H02): the artifact folder the controller owns, the listener workers connect to and the hosts the dispatcher may place attempts on. */
 export interface RemoteStartOptions {
@@ -256,6 +257,8 @@ export interface ComposeInput {
    * (an operation is then recorded, run behind the quiesce and answered as a typed outcome). The host is the one that runs the task's live attempt (or the one it is pinned to); with no live attempt, the host of the task's
    * last placement; a live attempt that is waiting with no host pinned names none and nothing is guessed. Only a task never placed anywhere falls back to the one host that has a workspace port, if there is exactly one.
    */
+  /** The controller's reading of a call's target version (card A05b follow-up, `createTargetVersions`); handed to the dispatcher as `targetVersion`. Absent: calls are bound by name only. */
+  readonly targetVersion?: DispatcherDeps["targetVersion"];
   readonly bindWorkspacePort?: (portOf: (taskId: string) => Promise<WorkspacePort | undefined>) => void;
   /** Suspensions and stops the controller was carrying out are carried on each tick, and at start-up by the first one (card L02b). */
   readonly stops?: Pick<StopService, "sweep" | "holding">;
@@ -510,6 +513,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
   const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
   const monitorOf = reporter === undefined ? undefined : (order: WorkOrder & { readonly hostId?: string }): RelayMonitor => relayMonitor(order, reporter, (error) => i.onError?.(error));
+  // The store that keeps the thinking of the task's current attempt, for a local host's process (card U09b) and a remote host's (card U09c): one store, one set of bounds and cleaning.
+  const thinkingStore = ThinkingStore.withEpoch(storage, epoch, ro);
   // The host's launch report goes to the owner's launch record (with what the dispatcher gave the launch and whose each figure was, card A08d) and onto the attempt's own record. The attempt's note is best effort: a note that
   // cannot be written never undoes a launch the host has made.
   const recordLaunch = async (record: LaunchRecord): Promise<void> => {
@@ -574,7 +579,10 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       // The process compacts its conversation itself (card C07q): it is given the owner's decisions for the task, read as the controller (as the route view reads them), to keep through every compaction.
       let keep: ReturnType<typeof compactionKeep>;
       try { const record = await decisions.controllerContext({ projectId: order.projectId, taskId: order.taskId }); keep = record === undefined ? undefined : compactionKeep(record); } catch (error) { i.onError?.(error); keep = undefined; }
-      return { toolOutputBytes: Math.min(Math.floor(budget.toolOutputChars), 10_000_000), compaction: { fallback: "extractive", ...(keep === undefined ? {} : { keep }) } };
+      // Card W12: the anchor at the top of the order's content that the order's contract names by digest (the task's own text may hold a block of its own; it is not the controller's and is never taken).
+      const named = order.contract?.anchorDigest;
+      const anchor = named === undefined ? undefined : findAnchors(order.content).find((a) => a.digest === named);
+      return { toolOutputBytes: Math.min(Math.floor(budget.toolOutputChars), 10_000_000), compaction: { fallback: "extractive", ...(keep === undefined ? {} : { keep }), ...(anchor === undefined ? {} : { anchor: { text: anchor.text } }) } };
     };
     // The task's own process compacted its conversation (card C07q): the compaction takes its place in the task's chain, so the lineage a continuation capture lists is the real one. A failure is reported and changes nothing for the attempt.
     const recordCompaction = async (order: WorkOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }): Promise<void> => {
@@ -585,7 +593,6 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         await context.recordProcessCompaction(principal, { taskId: order.taskId, attemptId: order.attemptId, key: `pc-${createHash("sha256").update(`${order.attemptId}\0${note.digest}`).digest("hex").slice(0, 40)}`, ...note }); } catch (error) { i.onError?.(error); }
     };
     // The thinking the task's own process reported (card U09b): kept for the owner (bounded, cleaned, redacted, switchable), only for the task's current attempt, and only up to the process's own message bounds. A failure is reported and changes nothing for the attempt.
-    const thinkingStore = ThinkingStore.withEpoch(storage, epoch, ro);
     const recordThinking = async (order: WorkOrder, blocks: readonly ReportedThinking[]): Promise<void> => {
       try {
         const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(order.taskId), i.assignments.getAttempt(order.attemptId)]);
@@ -670,6 +677,15 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The placement kept the order's route and the host (card L05e), so a remote call adds its reading of the route's speed on that host.
         ...(monitorOf === undefined ? {} : { monitor: (a: { attemptId: string; taskId: string; generation: number; route?: string; hostId: string }) => monitorOf({ ...a, route: a.route ?? "" } as unknown as WorkOrder) }),
         ...(i.toolBridge === undefined ? {} : { toolBridge: i.toolBridge }),
+        // The thinking a remote host's process reported (card U09c): kept by the same store as a local process's, and only while the attempt is still the task's current one at the placement's generation (anything else is dropped, `stale`). The text is never logged or put in an error.
+        thinking: async (a, blocks) => {
+          try {
+            const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(a.taskId), i.assignments.getAttempt(a.attemptId)]);
+            if (assignment === undefined || attempt === undefined || assignment.state !== "assigned" || assignment.activeAttemptId !== a.attemptId || assignment.generation !== a.generation || attempt.state !== "active") return { kept: 0, reason: "stale" };
+            const r = await thinkingStore.record(principal, { projectId: a.projectId, taskId: a.taskId, agent: a.agentId.startsWith("agent:") ? a.agentId : `agent:${a.agentId}`, attemptId: a.attemptId, blocks });
+            return { kept: r.kept, ...(r.reason === undefined ? {} : { reason: r.reason }) };
+          } catch (error) { i.onError?.(error); return { kept: 0, reason: "unavailable" }; }
+        },
         ...(i.options.remote.monitorProgressMs === undefined ? {} : { monitorProgressMs: i.options.remote.monitorProgressMs }),
         streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id), liveAttempts: (by) => d().liveAttempts(by) },
@@ -725,10 +741,27 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.onError === undefined ? {} : { onError: i.onError }),
     });
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
+      ...(i.targetVersion === undefined ? {} : { targetVersion: i.targetVersion }), ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses,
       ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      // Card W12: the goal anchor of an attempt about to start: on unless the owner turned it off, at most the owner's characters and the route's share of its window, and only where the route states a window.
+      anchor: {
+        plan: async (c) => {
+          const settings = i.contextRouteSettings === undefined ? undefined : await i.contextRouteSettings.effective();
+          if (settings?.anchor === false) return undefined;
+          const window = await windowOfRoute({ route: c.route } as WorkOrder);
+          if (window === undefined) return { leftOut: "no-window" as const };
+          const maxChars = anchorBudget(window, settings?.anchorChars ?? ANCHOR_DEFAULT_CHARS);
+          return maxChars === undefined ? { leftOut: "no-room" as const } : { maxChars };
+        },
+        rules: async (c) => {
+          const record = await decisions.controllerContext({ projectId: c.projectId, taskId: c.taskId });
+          if (record === undefined) return undefined;
+          const items = ownerRuleItems(record);
+          return items.length === 0 ? undefined : { version: record.version, total: items.length, items: items.slice(0, 12).map((x) => ({ id: x.id, text: x.text })) };
+        },
+      },
       routeChange: async (c) => {
         // The task's own text is in the prompt beside the view; `PROMPT_NOTE_RESERVE_CHARS` keeps room for the notes not measured here (the project's rules, a resume note), and the paragraph of what the task
         // was handed with (card C07m) is counted as it is on top of that — taking the larger of the two instead would let a long hand-off paragraph eat the room the rules were promised (C07m review).

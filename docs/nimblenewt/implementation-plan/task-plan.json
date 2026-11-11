@@ -2119,6 +2119,25 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "W12",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Re-anchor the goal and plan block after every context cut",
+      "depends_on": [
+        "W05",
+        "W10",
+        "C07q"
+      ],
+      "deliverable": "Owner decision 2026-11-11 (Rob): after the model's conversation is compacted an agent can lose track of its task's goal, acceptance criteria and plan, and drift, repeat finished work or declare done against the wrong goal. The controller writes a short, bounded, deterministic block from its own records (the task's title and detail, its expected result and acceptance criteria, what a done is checked against, the attempt's running notes, the owner's rules for the task, and the IDs of the hand-off and cut-note records), never from anything the agent can write; what other parties wrote inside it is cleaned, quoted and bounded as data. It opens each attempt's first prompt and is put back at the top of the summary that replaces every cut conversation, replacing the earlier copy, within a fixed small share of the route's window that stays under the compaction reserve. Its digest is in the dispatch contract and on the attempt's record. The owner can switch it off and set its size in free words",
+      "acceptance_and_verification": "The first prompt of an attempt opens with the block and the dispatch contract names its digest; after a forced cut by the real worker process the next model call holds exactly one block, at the top, equal to the block the records give when composed again, and after many cuts there is still one; the same records give the same block on every start of the attempt and a changed record another; text that forges the block's delimiters, instructs the agent or holds a secret, control or bidirectional characters stays quoted, cleaned and bounded; the block never passes its bound for any size of criteria; the agent's own change to the task contract is not in it and the owner's is; off or unreadable settings leave the attempt starting as before; the owner turns it off and sets its cap in free words, shown first; tests on all four storage backends, the Pi adapter and the real sandboxed worker",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "W09",
       "parent": "N03",
       "existing_issue": "AII-253",
@@ -9807,6 +9826,7 @@
         "C07q",
         "A07h",
         "W11",
+        "W12",
         "L02b",
         "H08b",
         "U06b",

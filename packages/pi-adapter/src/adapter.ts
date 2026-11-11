@@ -592,6 +592,16 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
     return storedThinking(this.id, await this.scan(0, undefined));
   }
 
+  /**
+   * Whether a request ID was already used on this conversation and, if so, whether this payload is the one it was used with (`same`) or not (`different`, which `submit` refuses as a conflict). Read-only, never waits.
+   * Card W12: a process restarted in its turn resubmits exactly what it sent before, whatever the conversation shows now.
+   */
+  async requestUse(request: Exclude<AdapterRequest, { kind: "command" }>): Promise<"unused" | "same" | "different"> {
+    const existing = await this.record(request.requestId);
+    if (existing === undefined) return "unused";
+    return fingerprintsMatch(existing.fingerprint, fingerprintOf(request)) ? "same" : "different";
+  }
+
   /** The recorded result of a request that has already settled and been read; `undefined` otherwise. Never waits. */
   async recorded(id: RequestId): Promise<SemanticResult | undefined> {
     return (await this.record(id))?.result;

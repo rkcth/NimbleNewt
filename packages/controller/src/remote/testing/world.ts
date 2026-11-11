@@ -12,7 +12,7 @@ import type { Capabilities } from "../../hosts/index.js";
 import type { Principal } from "../../security/index.js";
 import type { ControllerStorage, JsonObject } from "../../storage/types.js";
 import { RemoteWorkerClient, type RemoteWorkerClientOptions } from "../client.js";
-import type { ToolBridgeAnswer, VersionRange } from "../protocol.js";
+import type { ThinkingAnswer, ThinkingWire, ToolBridgeAnswer, VersionRange } from "../protocol.js";
 import { WorkerTransport, type WorkerTransportOptions } from "../server.js";
 import { adoptable } from "../host.js";
 import { RemoteWorkerService, type PlacementPolicyFor, type RelocationPolicyFor, type Requirements } from "../service.js";
@@ -119,10 +119,12 @@ export interface RemoteWorld extends DispatchWorld {
   readonly bridges: Record<string, EffectBridge>;
   /** The controller's tool bridge for a remote worker's tool requests (card L05e): every request the service passes on is logged (the credential, the attempt the gateway is bound to, the request); `handle` answers it (default: ok with the call ID). */
   readonly toolBridge: { readonly calls: { token: string; attemptId: string; request: { op: string; callId: string; args?: unknown } }[]; handle: (token: string, attemptId: string, request: { op: string; callId: string; args?: unknown }) => Promise<ToolBridgeAnswer> };
+  /** The thinking store a remote worker's thinking messages reach (card U09c): every message the service passes on is logged (the attempt facts the placement gave and the blocks); `answer` says what the store answered (default: all kept). `messages` is the most an attempt may send. */
+  readonly thinking: { readonly calls: { attempt: { attemptId: string; taskId: string; projectId: string; agentId: string; generation: number }; blocks: readonly ThinkingWire[] }[]; answer: (blocks: readonly ThinkingWire[]) => Promise<ThinkingAnswer> };
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner" } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { thinkingMessages?: number; policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner" } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
@@ -138,11 +140,14 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const confirmWindow: { ms: number | undefined } = { ms: undefined };
   const bridges: Record<string, EffectBridge> = {};
   const toolBridge: RemoteWorld["toolBridge"] = { calls: [], handle: async (_t, _a, request) => ({ ok: true, result: { callId: request.callId } }) };
+  const thinking: RemoteWorld["thinking"] = { calls: [], answer: async (blocks) => ({ kept: blocks.length }) };
   const security: RemoteWorld["security"] = { detected: [], reports: [], available: true };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts, bridges,
     toolBridge: { handle: async (token, gateway, request) => { toolBridge.calls.push({ token, attemptId: gateway.attemptId, request }); return toolBridge.handle(token, gateway.attemptId, request); } },
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id), liveAttempts: (by) => holder.dispatcher.liveAttempts(by) },
+    thinking: async (attempt, blocks) => { thinking.calls.push({ attempt, blocks }); return thinking.answer(blocks); },
+    ...(o.thinkingMessages === undefined ? {} : { thinkingMessages: o.thinkingMessages }),
     reaccept: async () => reaccept.mode,
     detect: (source, event) => { security.detected.push({ source, event }); },
     ...(security.available ? { reportSecurity: async (by: Principal, event: { kind: string; key: string; projectId?: string }) => { security.reports.push({ by: by.id, event }); return { itemId: "ntf-test", held: false }; } } : {}),
@@ -158,7 +163,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport, bridges, toolBridge, reaccept, security, notices, launches, patience, failLaunchRecords, confirmWindow,
+    remote, artifacts, blobs, transport, bridges, toolBridge, thinking, reaccept, security, notices, launches, patience, failLaunchRecords, confirmWindow,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },

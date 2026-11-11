@@ -18,11 +18,12 @@ import { credentialIdOf, scopedCommandId } from "../security/credentials.js";
 import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { cleanProcessRef } from "./process-ref.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
-import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 /** The latest events message of a model call: its number, a digest of its content and its (possibly still pending) answer. */
 interface LastMessage { readonly n: number; readonly digest: string; readonly answer: Promise<{ readonly held?: string }> }
@@ -101,6 +102,8 @@ export interface PlacementBody {
   readonly checkpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
   readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[]; /** The confirmation is kept but the owner's launch record is still to be written (a retry of the confirmation writes it). */ readonly recordPending?: true }; /** When the contract was last cleared for a new confirmation (a restart with a changed recipe): heartbeats are accepted for a bounded window from then. */ readonly reconfirmSince?: string; readonly refused?: readonly string[] };
+  /** The latest report of the worker on the processes it holds for this placement (card L02e). Belongs to the placement it names and to no other: a new placement (a move, a restart, a re-offer) starts without one. */
+  readonly processReport?: { readonly placement: number; /** The worker session that sent it: `seq` rises within one session (absent on a record written before this was kept). */ readonly sessionId?: string; readonly seq: number; readonly at: string; readonly final: boolean; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -262,6 +265,13 @@ export interface RemoteDeps {
    * same generation check and effect ledger as a local worker's. Absent: every bridge request from a remote worker is answered `unavailable`.
    */
   readonly toolBridge?: { readonly handle: (token: string, gateway: { readonly attemptId: string; readonly call: ToolGateway["call"] }, request: ToolBridgeRequest) => Promise<ToolBridgeAnswer> };
+  /**
+   * Keeps the model thinking a remote host's process reported (card U09c): the composed controller passes the thinking store, so a remote host's blocks are cleaned, redacted, bounded and kept exactly as a local process's are. It is called only
+   * for the host's own accepted placement of the attempt, and judges the rest itself (the attempt must still be the task's current one at the generation of the placement). Absent: every thinking message is answered `unavailable`, nothing kept.
+   */
+  readonly thinking?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number }, blocks: readonly ThinkingWire[]) => Promise<ThinkingAnswer>;
+  /** The most thinking messages an attempt may send (default `REMOTE_LIMITS.thinkingMessages`, the figure a local process is held to); settable so a test need not send two thousand. */
+  readonly thinkingMessages?: number;
   /** How often, at most, the output received so far of a remote model call is reported to `monitor` while it streams (ms, default 15,000, as for a local relay; 0 = with every message that carries output). */
   readonly monitorProgressMs?: number;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
@@ -343,6 +353,8 @@ export class RemoteWorkerService {
   /** One monitor per attempt, like the local relay's: its reports are numbered in order. */
   readonly #monitors = new Map<string, RelayMonitor>();
   /** The tool bridge requests being handled now, by attempt, call ID and placement (card L05e). */
+  /** Per attempt: the thinking messages taken so far and those being kept now (card U09c). Bounded like the other per-attempt memos; an attempt that falls out starts counting again. */
+  readonly #thinkingFlow = new Map<string, { readonly placement: number; messages: number; open: number }>();
   readonly #bridging = new Map<string, { readonly request: string; readonly answer: Promise<ToolBridgeAnswer> }>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
   readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
@@ -675,7 +687,7 @@ export class RemoteWorkerService {
         if (b.generation !== order.generation) throw new DomainError("fenced", `the placement of attempt ${attemptId} belongs to generation ${b.generation}`, { field: "order" });
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
-        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, ...rest } = b; void _s; void _a; void _r; void _c;
+        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, processReport: _p, ...rest } = b; void _s; void _a; void _r; void _c; void _p;
         next = { ...rest, ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
@@ -1317,6 +1329,37 @@ export class RemoteWorkerService {
     try { return await answer; } finally { if (this.#bridging.get(key)?.answer === answer) this.#bridging.delete(key); }
   }
 
+  /**
+   * The model's thinking a remote host's process reported for one of its attempts (card U09c), the counterpart of what a local host tells the thinking store. The session, host, placement and dispatch contract are checked like every message about
+   * an attempt (another host's attempt is `not_found` with the security signal, a stale placement or session `fenced`). The shape is strict (1 to 50 blocks, each with exactly the channel's six fields, text at most 8000 characters, no unknown or
+   * prototype members); the text is untrusted and goes unread to the thinking store, which cleans, redacts, bounds and dedups it and keeps it only while the attempt is still the task's current one at the placement's generation. Like the
+   * local path, an attempt may send 2000 messages and have 2 in the controller at once; past that a message is answered `limit` and dropped. A message that fails is an error that names a field, never a block's text. The answer says how many
+   * blocks were kept, never what they said.
+   */
+  async thinking(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, blocks: unknown): Promise<ThinkingAnswer> {
+    if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > REMOTE_LIMITS.thinkingBlocks) invalid("blocks", `must be 1 to ${REMOTE_LIMITS.thinkingBlocks} blocks`);
+    const whole = (v: unknown, field: string): number => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= 1_000_000_000 ? v : invalid(field, "must be a whole number"));
+    const short = (v: unknown, field: string, max: number): string => (typeof v === "string" && v.length >= 1 && v.length <= max ? v : invalid(field, `must be text of 1 to ${max} characters`));
+    const wire: ThinkingWire[] = (blocks as unknown[]).map((b, i) => {
+      if (b === null || typeof b !== "object" || Array.isArray(b)) return invalid(`blocks[${i}]`, "each block is an object");
+      onlyKnown(b as object, ["entryId", "block", "provider", "model", "text", "opaque"]);
+      const r = b as Record<string, unknown>;
+      if (typeof r["opaque"] !== "boolean") invalid("opaque", "must be true or false");
+      if (typeof r["text"] !== "string" || (r["text"] as string).length > REMOTE_LIMITS.thinkingChars) invalid("text", `must be text of at most ${REMOTE_LIMITS.thinkingChars} characters`);
+      return { entryId: whole(r["entryId"], "entryId"), block: whole(r["block"], "block"), provider: short(r["provider"], "provider", 80), model: short(r["model"], "model", 200), text: r["text"] as string, opaque: r["opaque"] as boolean };
+    });
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any thinking report");
+    const keep = this.#deps.thinking;
+    if (keep === undefined) return { kept: 0, reason: "unavailable" };
+    // The budget is the placement's, as a local process's is the process's: a move or restart (a new placement) starts again, so what one holding spent (a hostile host's included) is not taken from the next.
+    let flow = this.#thinkingFlow.get(b.attemptId);
+    if (flow === undefined || flow.placement !== b.placement) { flow = { placement: b.placement, messages: 0, open: 0 }; this.#thinkingFlow.delete(b.attemptId); this.#thinkingFlow.set(b.attemptId, flow); while (this.#thinkingFlow.size > 256) this.#thinkingFlow.delete(this.#thinkingFlow.keys().next().value as string); }
+    if (flow.open >= REMOTE_LIMITS.thinkingInFlight || flow.messages >= (this.#deps.thinkingMessages ?? REMOTE_LIMITS.thinkingMessages)) return { kept: 0, reason: "limit" };
+    flow.messages++; flow.open++;
+    try { return await keep({ attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation }, wire); } finally { flow.open--; }
+  }
+
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {
     if (typeof operationId !== "string") invalid("operationId", "must be an operation ID");
     return (await this.#gateway(host, sessionId, attemptId, placement, "any report")).report(operationId, outcome);
@@ -1445,6 +1488,43 @@ export class RemoteWorkerService {
     const b = await this.#running(host, sessionId, attemptId, placement);
     await this.#heartbeatAllowed(b);
     return this.#deps.dispatch.gateway(b.attemptId).heartbeat();
+  }
+
+  /**
+   * The worker reports the processes it holds for its placement (card L02e): what its sandbox lists for the attempt (running, asked to stop and not stopped, or unknown), and with `final` that it has stopped the sandbox and looked again. Stop reads it
+   * (`RemoteWorkerHost.localWork`). The same fences as every message about the attempt: the host's session, the host that holds the placement and its number (an older holder or placement is `fenced`), the worker session that accepted it. Unlike
+   * a tool call it is taken after the attempt ended or expired too, since a worker's last word is exactly "I stopped it": only a placement that was never accepted, or that moved on, is refused. `seq` must rise: an older report changes nothing
+   * (`kept: false`), the same report again is the same answer, another report under a sequence already used is `payload_changed`, and nothing follows a final report of a placement. Entries are checked one by one and their references redacted and cut.
+   */
+  async reportProcesses(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, report: { readonly seq: unknown; readonly final: unknown; readonly processes: unknown }): Promise<{ readonly kept: boolean }> {
+    const session = await this.#session(host, sessionId);
+    const id = attemptIdOf(attemptId);
+    const found = (await this.#runner.get(PLACEMENT_KIND, id))?.body as unknown as PlacementBody | undefined;
+    this.#holds(host, found, placement);
+    if (found.sessionId === undefined) throw new DomainError("fenced", `attempt ${id} was never accepted by this worker`);
+    if (found.sessionId !== session.sessionId) throw new DomainError("fenced", "the attempt was taken up in another session; accept it again", { field: "session" });
+    if (!["accepted", "completed", "ended"].includes(found.state)) throw new DomainError("fenced", `the placement of attempt ${id} is ${found.state}`);
+    const checked = checkProcessReport(report);
+    const sameAs = (x: NonNullable<PlacementBody["processReport"]>): boolean => canonicalJson({ final: x.final, processes: x.processes } as unknown as JsonObject) === canonicalJson({ final: checked.final, processes: checked.processes } as unknown as JsonObject);
+    const decide = (x: PlacementBody): "keep" | "same" | "old" | "final" => {
+      const had = x.processReport;
+      // A sequence belongs to the worker session that sent it (review of L02e): a worker program that restarted and took the attempt up again in a new session counts from 1, and its reports are the newest word.
+      if (had === undefined || had.placement !== x.placement || had.sessionId !== x.sessionId) return "keep";
+      if (checked.seq === had.seq) { if (!sameAs(had)) throw new DomainError("payload_changed", `report ${checked.seq} of attempt ${id} was already given with other figures`, { field: "seq" }); return "same"; }
+      if (checked.seq < had.seq) return "old";
+      return had.final ? "final" : "keep";
+    };
+    const first = decide(found);
+    if (first !== "keep") return { kept: first === "same" };
+    let verdict: "keep" | "same" | "old" | "final" = "keep";
+    await this.#changePlacement(id, async (current) => {
+      const x = current?.body;
+      if (x === undefined || x.hostId !== host.id || x.placement !== found.placement || x.sessionId !== found.sessionId) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
+      verdict = decide(x);
+      if (verdict !== "keep") return undefined;
+      return { next: { ...x, processReport: { placement: x.placement, ...(x.sessionId === undefined ? {} : { sessionId: x.sessionId }), seq: checked.seq, at: this.#runner.now(), final: checked.final, processes: checked.processes } } };
+    }, "processes", { actor: host.id });
+    return { kept: verdict === "keep" || verdict === "same" };
   }
 
   async acknowledgeDecisions(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<void> {
@@ -1755,7 +1835,7 @@ export class RemoteWorkerService {
       const storeBody = store?.body as unknown as StoreBody | undefined;
       if (storeBody !== undefined && storeBody.ownerHostId !== x.hostId) throw new DomainError("invalid_transition", `the native Pi store of ${x.agentId} belongs to ${storeBody.ownerHostId}, not to the host the attempt runs on`);
       const at = this.#runner.now();
-      const { sessionId: _s, acceptedAt: _a, result: _r, ...rest } = x; void _s; void _a; void _r;
+      const { sessionId: _s, acceptedAt: _a, result: _r, processReport: _p, ...rest } = x; void _s; void _a; void _r; void _p;
       const next: PlacementBody = {
         ...rest, hostId: to, placement: x.placement + 1, state: "relocating", relocations: x.relocations + 1, control: [], lastRelocation: { commandId, at },
         history: pushHistory(x.history, { hostId: x.hostId, placement: x.placement, at, reason: `relocated: ${reason}`, commandId }),
@@ -1908,6 +1988,28 @@ function checkControl(value: unknown): ControlMessage {
     }
     default: return invalid("kind", "must be tell, restart, checkpoint or stop");
   }
+}
+
+/** A process report as the worker sent it, checked field by field: nothing is kept that was not asked for (card L02e). */
+function checkProcessReport(raw: { readonly seq: unknown; readonly final: unknown; readonly processes: unknown }): { seq: number; final: boolean; processes: { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" }[] } {
+  if (typeof raw.seq !== "number" || !Number.isSafeInteger(raw.seq) || raw.seq < 1) return invalid("seq", "must be a whole number from 1");
+  if (typeof raw.final !== "boolean") return invalid("final", "must be true or false");
+  const list = raw.processes;
+  if (!Array.isArray(list) || list.length > REMOTE_LIMITS.processes) return invalid("processes", `must be a list of at most ${REMOTE_LIMITS.processes} entries`);
+  const seen = new Set<string>();
+  const processes = list.map((entry, i) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return invalid(`processes[${i}]`, "must be an object");
+    const e = entry as Record<string, unknown>;
+    onlyKnown(e, ["ref", "kind", "state"]);
+    if (typeof e["ref"] !== "string" || e["ref"].length === 0 || e["ref"].length > REMOTE_LIMITS.processRef * 4) return invalid(`processes[${i}].ref`, `must be text of at most ${REMOTE_LIMITS.processRef * 4} characters`);
+    if (e["kind"] !== "process" && e["kind"] !== "child") return invalid(`processes[${i}].kind`, "must be process or child");
+    if (e["state"] !== "running" && e["state"] !== "uncooperative" && e["state"] !== "unknown") return invalid(`processes[${i}].state`, "must be running, uncooperative or unknown");
+    // A command line can hold a secret: it is redacted before it is cut, every control or format character is made a space, the cut keeps whole characters, and an entry that is the same after that is one entry.
+    const ref = cleanProcessRef(e["ref"]);
+    const key = `${e["kind"]}|${ref}`;
+    return seen.has(key) ? undefined : (seen.add(key), { ref, kind: e["kind"], state: e["state"] });
+  }).filter((x): x is { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" } => x !== undefined);
+  return { seq: raw.seq, final: raw.final, processes };
 }
 
 function checkEnforcement(value: unknown): ContractEnforcement[] {

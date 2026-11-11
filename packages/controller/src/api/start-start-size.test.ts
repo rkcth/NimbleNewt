@@ -1,3 +1,4 @@
+import { stripAnchors } from "../context/anchor.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -113,7 +114,7 @@ test("a task whose attempts start larger at each hand-off raises one alert for t
     // Watching changed no task content: the task is as it was, and every attempt was given the task's own text whole.
     const taskAfter = (await s.projects.getTask(taskId))!;
     assert.deepEqual([taskAfter.title, taskAfter.description], [taskBefore.title, taskBefore.description]);
-    for (const content of contents) assert.ok(content.startsWith("Water the beds\n\nEvery bed, morning and evening."), content.slice(0, 200));
+    for (const content of contents) assert.ok(stripAnchors(content).replace(/^\s+/, "").startsWith("Water the beds\n\nEvery bed, morning and evening."), content.slice(0, 200));
 
     // The thresholds through the state API: validated, and the owner's.
     assert.equal((await call("context.start-size.change", { set: { warnPercent: 60 } }, "w1")).ok, true);

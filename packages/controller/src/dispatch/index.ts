@@ -1,4 +1,4 @@
-export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, type PlanCount, type TaskAttemptsBody, DONE_VERIFY_LIMITS, TERMINAL, operationKind, type DispatchBody, type DoneVerification, type DispatchRevisions, type DispatchState, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
+export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, type PlanCount, type TaskAttemptsBody, DONE_VERIFY_LIMITS, ANCHOR_RECORD_KEEP, type AnchorRecord, TERMINAL, operationKind, type DispatchBody, type DoneVerification, type DispatchRevisions, type DispatchState, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
 export { DispatcherService, type DispatchCheck, type DoneVerdict, type DoneEvidence, doneRefusal, type DispatcherDeps, type DispatcherLoop, type AttemptDispatcherOptions, type DispatcherLimitFigures, type RecipeChange, type RouteChoice, type RouteResolver, type TickReport } from "./dispatcher.js";
 export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./network.js";
 export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost, HostLocalWork, WorkProgress, DoneCheckRequest, DoneCheckReport, DoneCheckRun } from "./ports.js";
@@ -13,3 +13,4 @@ export { ModelStreamDecoder, ModelStreamRefused, type ModelStreamCall, type Mode
 export { ModelRelay, type AttemptRelay, type ModelEndpoint, type ModelRelayOptions, type RelayRequest, type RelayResponse } from "./relay.js";
 export { controllerGuards, estimatedFirstCall, unknownWindowReason, usableWindow, type GuardBinding } from "./runtime-guards.js";
 export { QuiesceCoordinator, QuiesceRefused, type Quiet, type QuiesceDeps, type QuiesceOperation } from "./quiesce.js";
+export { createTargetVersions, TargetVersionError, TARGET_VERSION_LIMITS, ABSENT_VERSION, type TargetVersionDeps, type TargetVersionOptions } from "./target-versions.js";

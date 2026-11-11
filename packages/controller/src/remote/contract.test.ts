@@ -323,3 +323,21 @@ for (const backend of backends) {
     assert.deepEqual(c.launches.filter((l) => l.attemptId === attemptId).map((l) => l.outcome), ["started"]);
   });
 }
+
+// Card W12: the contract names the goal anchor at the top of the order's content by its digest, so the process that must put it back after a cut finds the controller's block and no other.
+test("W12: the contract names the anchor in the order's content; a contract that names a block the content does not carry, or a malformed digest, is refused; the digest covers it", async () => {
+  const { composeAnchor } = await import("../context/anchor.js");
+  const block = composeAnchor({ taskId: "tsk-aaaaaaaaaaaa", projectId: "prj-aaaaaaaaaaaa", attemptId: "att-aaaaaaaaaaaa", title: "Water the plants" }, 2400)!;
+  const withBlock: WorkOrder = { ...ORDER, content: `${block.text}\n\nWater the plants` };
+  const sealed = sealContract(withBlock, { taskContractVersion: 1, permissions: [], bestEffort: false, anchorDigest: block.digest });
+  assert.equal(checkContract(sealed).anchorDigest, block.digest);
+  assert.equal(sealContract(withBlock, { taskContractVersion: 1, permissions: [], bestEffort: false }).contract!.anchorDigest, undefined, "no anchor, no field");
+  // The digest of the contract covers the field: another digest or none no longer matches.
+  const c = sealed.contract!;
+  assert.throws(() => checkContract({ ...sealed, contract: { ...c, anchorDigest: "b".repeat(64) } }), /anchorDigest names no anchor block|digest/);
+  const { anchorDigest: _drop, ...without } = c;
+  assert.throws(() => checkContract({ ...sealed, contract: without }), /digest/);
+  // The content must carry the block the contract names: a task text that holds a block of its own is not it.
+  assert.throws(() => checkContract({ ...sealed, content: "Water the plants" }), /names no anchor block in the order's content/);
+  assert.throws(() => checkContract({ ...sealed, contract: { ...c, anchorDigest: "not a digest" } }), /anchorDigest must be a SHA-256 in hex/);
+});

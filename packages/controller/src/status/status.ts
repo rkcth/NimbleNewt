@@ -247,7 +247,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
-  retention: { keys: [], about: "the retention values in force, which of them you set, and the revision (owner only)" },
+  retention: { keys: [], about: "owner only: the retention state in one answer: the values in force and which you set, the data disk's free room against the reserve for shutdown and recovery records, the per-project and per-agent storage quotas with use and the scopes near them, the backups and the latest one, and the latest deletions and retention runs (counts and record IDs only). Use it for how much room is left, which quotas are near their limit, which backups are kept and what retention deleted lately" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down, and each route's reply limit and reasoning cap; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
@@ -343,6 +343,72 @@ export type StatusRequest =
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
 interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string; rank: number }
 
+// ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
+
+const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5 } as const;
+
+const obj = (v: unknown): Record<string, unknown> | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
+const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
+const bytesWord = (n: number): string => (n < 1024 ? `${n} bytes` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KiB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MiB` : `${(n / 1024 ** 3).toFixed(2)} GiB`);
+/** The same reference the quota notice uses for an agent, so a quota line and its notice cite one record. */
+const quotaRef = (scope: string, id: string): Cite => (scope === "project" ? cite("project", id) : cite("quota", `a-${createHash("sha256").update(id).digest("hex").slice(0, 20)}`));
+
+/**
+ * The owner's lines from the retention status (the same answer as `retention.status`, read only): the disk against the reserve, each quota class with its use and the scopes near it, the backups and the last one,
+ * the last deletions and runs by record ID with counts only (never the text a record held or the reason typed for a deletion). Everything read from storage is quoted through `shown`, and the lists are bounded.
+ */
+function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: Cite): Line[] {
+  const lines: Line[] = [];
+  const disk = obj(st["disk"]);
+  if (disk !== undefined) {
+    const free = count(disk["freeBytes"]); const total = count(disk["totalBytes"]); const reserve = obj(disk["reserve"]);
+    lines.push(line(free === undefined || total === undefined || total === 0 ? "The data disk's free room is not known here." : `The data disk has ${bytesWord(free)} free of ${bytesWord(total)} (${Math.floor((free * 100) / total)}% free).`, settings));
+    if (reserve !== undefined) {
+      const wanted = count(reserve["wantedBytes"]) ?? 0;
+      lines.push(line(wanted === 0 ? "No room is set aside for shutdown and recovery records (reserveBytes is 0)." : reserve["inUse"] === true ? `The ${bytesWord(wanted)} reserve for shutdown and recovery records is in use: only those records are written until room is made.` : reserve["short"] === true ? `The disk has too little room to set the ${bytesWord(wanted)} reserve aside.` : `${bytesWord(wanted)} is set aside as the reserve for shutdown and recovery records${free === undefined ? "" : free >= wanted ? `; the free room is above it` : `; the free room is below it`}.`, settings));
+    }
+  }
+  const limits = obj(st["quotaLimits"]); const usage = obj(st["quotaUsage"]);
+  const pq = limits === undefined ? undefined : count(limits["projectBytes"]); const aq = limits === undefined ? undefined : count(limits["agentBytes"]);
+  if (limits !== undefined && pq === undefined && aq === undefined) lines.push(line("No storage quota is set for projects or agents.", settings));
+  for (const [scope, label] of [["project", "Project"], ["agent", "Agent"]] as const) {
+    const u = obj(usage?.[scope]); if (u === undefined) continue;
+    const quota = count(u["quota"]); const scopes = count(u["scopes"]); const totalBytes = count(u["totalBytes"]);
+    if (quota === undefined || scopes === undefined || totalBytes === undefined) continue;
+    const top = Array.isArray(u["top"]) ? (u["top"] as unknown[]).map(obj).filter((t): t is Record<string, unknown> => t !== undefined && typeof t["id"] === "string" && count(t["used"]) !== undefined).slice(0, 3) : [];
+    lines.push(line(`${label} quota: ${bytesWord(quota)} each (warning at ${count(limits?.["warnPercent"]) ?? "?"}%); ${scopes} ${scope}${scopes === 1 ? " holds" : "s hold"} ${bytesWord(totalBytes)} in all${top.length === 0 ? "" : `; the most: ${top.map((t) => `${shown(String(t["id"]), 60)} ${bytesWord(count(t["used"])!)}`).join(", ")}`}${st["quotaUsagePartial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings, ...top.map((t) => quotaRef(scope, String(t["id"])))));
+  }
+  const near = Array.isArray(st["quotas"]) ? (st["quotas"] as unknown[]).map(obj).filter((q): q is Record<string, unknown> => q !== undefined && typeof q["id"] === "string" && (q["scope"] === "project" || q["scope"] === "agent")) : [];
+  for (const q of near.slice(0, RETENTION_SHOWN.quotaScopes)) {
+    const used = count(q["used"]); const quota = count(q["quota"]); const percent = count(q["percent"]);
+    if (used === undefined || quota === undefined || percent === undefined) continue;
+    lines.push(line(`${q["scope"] === "project" ? "Project" : "Agent"} ${shown(String(q["id"]), 80)} is at ${percent}% of its storage quota (${bytesWord(used)} of ${bytesWord(quota)})${q["level"] === "full" ? "; new records from it are refused until you raise the quota or delete something" : ""}.`, quotaRef(String(q["scope"]), String(q["id"])), settings));
+  }
+  if (near.length > RETENTION_SHOWN.quotaScopes) lines.push(line(`${near.length - RETENTION_SHOWN.quotaScopes} more scope(s) are near their quota and not listed.`, settings));
+  const backups = obj(st["backups"]);
+  if (backups !== undefined) {
+    if (backups["configured"] !== true) lines.push(line("No backups are set up on this installation.", settings));
+    else {
+      const n = count(backups["count"]) ?? 0; const bad = count(backups["untrusted"]) ?? 0; const counts = obj(backups["counts"]); const latest = obj(backups["latest"]);
+      lines.push(line(`${n} backup${n === 1 ? " is" : "s are"} kept${bad > 0 ? ` (${bad} cannot be trusted)` : ""}; the rules keep ${count(counts?.["daily"]) ?? "?"} daily and ${count(counts?.["weekly"]) ?? "?"} weekly.`, settings));
+      if (latest !== undefined && typeof latest["name"] === "string" && typeof latest["at"] === "string") lines.push(line(`The latest backup is ${shown(latest["name"], 80)}, made ${shown(latest["at"], 40)}${latest["trusted"] === true ? "" : " (it cannot be trusted)"}.`, cite("backup", latest["name"])));
+      else if (n === 0) lines.push(line("No backup has been made yet.", settings));
+    }
+  }
+  const deletions = Array.isArray(st["deletions"]) ? (st["deletions"] as unknown[]).map(obj).filter((d): d is Record<string, unknown> => d !== undefined && typeof d["id"] === "string") : [];
+  if (deletions.length === 0) lines.push(line("No record has been deleted by request yet.", settings));
+  for (const d of deletions.slice(0, RETENTION_SHOWN.deletions)) {
+    const derived = obj(d["derived"]); let derivedCount = 0;
+    if (derived !== undefined) for (const k of ["copies", "summaries", "compactions", "archives", "others"]) if (Array.isArray(derived[k])) derivedCount += derived[k].length;
+    lines.push(line(`Deletion ${shown(String(d["id"]), 60)} of record ${shown(typeof d["recordId"] === "string" ? d["recordId"] : "?", 60)}: ${shown(typeof d["status"] === "string" ? d["status"] : "?", 20)}, ${shown(typeof d["at"] === "string" ? d["at"] : "?", 40)}, ${derivedCount} derived item(s) with it.`, cite("retention-deletion", String(d["id"]))));
+  }
+  if (deletions.length > RETENTION_SHOWN.deletions) lines.push(line(`${deletions.length - RETENTION_SHOWN.deletions} older deletion(s) are not listed.`, settings));
+  const runs = Array.isArray(st["runs"]) ? (st["runs"] as unknown[]).map(obj).filter((r): r is Record<string, unknown> => r !== undefined && typeof r["id"] === "string") : [];
+  if (runs.length === 0) lines.push(line("Retention has not run yet.", settings));
+  for (const r of runs.slice(0, RETENTION_SHOWN.runs)) lines.push(line(`Retention run ${shown(String(r["id"]), 60)} (${r["auto"] === true ? "automatic" : "by you"}), ${shown(typeof r["at"] === "string" ? r["at"] : "?", 40)}: ${count(r["removed"]) ?? 0} record(s) removed, ${count(r["backupsDeleted"]) ?? 0} backup(s) deleted, ${count(r["incidentsArchived"]) ?? 0} incident(s) archived, ${count(r["incidentsPurged"]) ?? 0} archived incident(s) removed.`, cite("retention-run", String(r["id"]))));
+  return lines;
+}
+
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
 export interface StatusDeps {
@@ -350,6 +416,8 @@ export interface StatusDeps {
   readonly retention?: {
     check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
     settings(by: Principal): Promise<{ readonly revision: number; readonly settings: Readonly<Record<string, unknown>>; readonly effective: Readonly<Record<string, unknown>> }>;
+    /** The same answer as `retention.status` (card K06d): the disk and the reserve, quotas and their use, backups, the last deletions and runs. Absent: the view tells the values only. */
+    status?(by: Principal): Promise<Readonly<Record<string, unknown>>>;
   };
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
@@ -1100,10 +1168,19 @@ export class StatusService {
     }
     const c = cite("retention-settings", "main", got.revision === 0 ? undefined : got.revision);
     const word = (v: unknown): string => (v === null ? "none (off or unlimited)" : String(v));
-    return { observedAt: this.#runner.now(), lines: [
+    const lines: Line[] = [
       line(`Retention values in force (settings revision ${got.revision}); the ones marked "set" are yours, the others are the installation's:`, c),
       ...Object.keys(got.effective).sort().map((k) => line(`${shown(k, 60)}: ${shown(word(got.effective[k]), 60)}${Object.prototype.hasOwnProperty.call(got.settings, k) ? " (set)" : ""}`, c)),
-    ] };
+    ];
+    if (this.#deps.retention.status !== undefined) {
+      let st: Readonly<Record<string, unknown>> | undefined;
+      try { st = await this.#deps.retention.status(by); } catch (error) {
+        if (error instanceof DomainError && error.code === "forbidden") return undefined;
+        lines.push(line("The disk, quota, backup and deletion figures could not be read just now; the values above are from your settings.", c));
+      }
+      if (st !== undefined) lines.push(...retentionStatusLines(st, c));
+    }
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /**
@@ -1293,6 +1370,8 @@ export class StatusService {
     const lines: Line[] = [];
     if (through !== undefined) lines.push(line(`Nothing was asked for ${askedName} itself: this is the ${r.mode} of ${name}${r.requestedAt === undefined ? "" : `, asked ${shown(r.requestedAt, 60)}`}, which reaches it. Every figure is that scope's, not ${askedName} alone.`, cite("stop", r.intentId), where, cite(through.kind, through.id)));
     lines.push(line(head, cite("stop", r.intentId), where));
+    // The window above starts again after each wait on a blocked preparation: when earlier windows counted something, the request's whole figure is told too (card L02e).
+    if (typeof r.cumulativeSpent === "number" && r.cumulativeSpent > r.spent) lines.push(line(`Over all its cleanup budget windows (earlier ones counted ${money(r.cumulativeSpent - r.spent)}) this request has counted ${money(r.cumulativeSpent)} (budget currency) in total.`, cite("stop", r.intentId), where));
     for (const a of r.attempts.slice(0, 20)) lines.push(line(`Attempt ${shown(a.attemptId, 80)}: ${money(a.costMicros)} and ${a.computeMs} ms of compute charged to its task's budget in all (every stop of it counted once)${a.pending ? "; a further charge is still being made" : ""}.`, cite("stop", r.intentId)));
     if (r.attempts.length > 20) lines.push(line(`${r.attempts.length - 20} more attempt(s) are not listed.`, cite("stop", r.intentId)));
     if (r.attempts.length === 0) lines.push(line("No attempt with a charged cleanup cost is recorded on this request.", cite("stop", r.intentId)));
