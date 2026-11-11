@@ -15,7 +15,12 @@ export interface EncryptionOptions {
   readonly now?: () => Date;
   /** Shortest time between two proofs (each passcode proof costs 128 MiB and a fraction of a second). Default 10 seconds. */
   readonly minIntervalMs?: number;
+  /** How many days may pass without a successful proof before the owner is asked for one (card K01b: every three months). Default 92. */
+  readonly proofEveryDays?: number;
 }
+
+/** Where the last successful proof is kept across restarts (the database); optional, so a proof still works without it. */
+export interface ProofStore { load(): Promise<{ readonly method: UnlockMethod; readonly at: string; readonly keyId: string } | undefined>; save(proof: { readonly method: UnlockMethod; readonly at: string; readonly keyId: string }): Promise<void> }
 
 export type UnlockMethod = "passcode" | "recovery";
 export interface EncryptionStatus {
@@ -30,6 +35,12 @@ export interface EncryptionStatus {
   /** How many unlock methods the key has, by kind: counts only. */
   readonly unlockMethods: { readonly passcode: number; readonly recovery: number };
   readonly lastProof?: { readonly at: string; readonly method: UnlockMethod; readonly ok: boolean };
+  /** The last proof that worked for THIS key (kept across restarts), and whether the owner is now due to prove a passcode or the recovery file again (every three months, counted from the key's creation until the first proof). */
+  readonly lastSuccessfulProof?: { readonly at: string; readonly method: UnlockMethod };
+  readonly proofDue: boolean;
+  readonly proofEveryDays: number;
+  /** Which key generation this is, and how many passcodes the key may still take. */
+  readonly generation: number;
 }
 
 export class ProofRefused extends Error { constructor(readonly code: "rate_limited" | "not_supplied" | "unreadable" | "failed", message: string) { super(message); this.name = "ProofRefused"; } }
@@ -52,14 +63,32 @@ export class BackupEncryption {
   #last: { at: string; method: UnlockMethod; ok: boolean } | undefined;
   #lastAttemptMs = -Infinity;
   #running = false;
+  #store: ProofStore | undefined;
+  #lastOk: { at: string; method: UnlockMethod } | undefined;
   constructor(options: EncryptionOptions) { this.#o = { ...options, keyring: parseKeyring(options.keyring) }; }
+
+  /** Connects the database record of the last successful proof (at start). A proof recorded for another key is ignored. */
+  async attachProofStore(store: ProofStore): Promise<void> {
+    this.#store = store;
+    const saved = await store.load().catch(() => undefined);
+    // A record that is not a proof of this key with a readable time does not count (an unreadable time would otherwise never fall due).
+    if (saved === undefined || saved === null || typeof saved !== "object" || saved.keyId !== this.#o.keyring.keyId || (saved.method !== "passcode" && saved.method !== "recovery") || typeof saved.at !== "string" || Number.isNaN(Date.parse(saved.at))) return;
+    if (this.#lastOk === undefined || Date.parse(saved.at) > Date.parse(this.#lastOk.at)) this.#lastOk = { at: new Date(saved.at).toISOString(), method: saved.method };
+  }
+
+  #proofDue(): boolean {
+    const since = Date.parse(this.#lastOk?.at ?? this.#o.keyring.createdAt);
+    // No readable time to count from (a hand-edited keyring's creation time) means a proof is due: the reminder fails towards asking, never towards silence.
+    if (Number.isNaN(since)) return true;
+    return this.#now().getTime() - since > (this.#o.proofEveryDays ?? 92) * 86_400_000;
+  }
 
   get keyring(): Keyring { return this.#o.keyring; }
   #now(): Date { return (this.#o.now ?? (() => new Date()))(); }
 
   status(): EncryptionStatus {
     const k = this.#o.keyring;
-    return { enabled: true, scope: "everything", keyId: k.keyId, createdAt: k.createdAt, fingerprint: keyringFingerprint(k), warnings: this.warnings(), unlockMethods: { passcode: k.wrappers.filter((w) => w.kind === "passcode").length, recovery: k.wrappers.filter((w) => w.kind === "recovery").length }, ...(this.#last === undefined ? {} : { lastProof: this.#last }) };
+    return { enabled: true, scope: "everything", keyId: k.keyId, createdAt: k.createdAt, fingerprint: keyringFingerprint(k), generation: k.generation ?? 1, proofDue: this.#proofDue(), proofEveryDays: this.#o.proofEveryDays ?? 92, ...(this.#lastOk === undefined ? {} : { lastSuccessfulProof: this.#lastOk }), warnings: this.warnings(), unlockMethods: { passcode: k.wrappers.filter((w) => w.kind === "passcode").length, recovery: k.wrappers.filter((w) => w.kind === "recovery").length }, ...(this.#last === undefined ? {} : { lastProof: this.#last }) };
   }
 
   /**
@@ -68,6 +97,7 @@ export class BackupEncryption {
    */
   warnings(): string[] {
     const out: string[] = [];
+    if (this.#proofDue()) out.push(`no passcode or recovery file has been proved to open the backup key for more than ${this.#o.proofEveryDays ?? 92} days: run backup.encryption.verify (a backup you cannot open is no backup)`);
     const rec = this.#o.recoveryFile; const ring = this.#o.keyringFile;
     if (rec !== undefined && ring !== undefined && dirname(resolve(rec)) === dirname(resolve(ring))) out.push("the recovery file is in the same folder as the keyring: keep it off this machine and give the controller a copy only for the moment of a proof");
     else if (rec !== undefined && existsSync(rec)) out.push("a recovery file is on this host right now: it should exist only while a proof runs, and be kept off this machine otherwise");
@@ -114,6 +144,8 @@ export class BackupEncryption {
         throw new ProofRefused("failed", error instanceof UnlockFailed ? error.message : "could not unlock with that file");
       }
       this.#last = { at: now.toISOString(), method, ok: true };
+      this.#lastOk = { at: now.toISOString(), method };
+      await this.#store?.save({ at: now.toISOString(), method, keyId: this.#o.keyring.keyId }).catch(() => undefined);
       return { ok: true, method, at: now.toISOString() };
     } finally { this.#running = false; }
   }
