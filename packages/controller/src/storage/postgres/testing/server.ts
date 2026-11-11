@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { sweepOnce, writeOwnerRecord } from "./orphans.js";
 
 /** A PostgreSQL server for tests. Either one the caller supplies, or a real one started from the `embedded-postgres` binaries. */
 /**
@@ -129,7 +130,11 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
   hydrateSymlinks(join(embeddedDir, ".."));
   type Embedded = { initialise(): Promise<void>; start(): Promise<void>; stop(): Promise<void>; createDatabase(name: string): Promise<void> };
   const { default: EmbeddedPostgres } = (await import(pathToFileURL(entry).href)) as { default: new (options: Record<string, unknown>) => Embedded };
+  // Servers and folders left by test processes that were killed (their recorded owner is gone) are stopped and removed first; then this
+  // server's folder records its own owner, so a later start can tell when it was left behind the same way (follow-up of card 19).
+  await sweepOnce(baseDirectory);
   const directory = mkdtempSync(join(baseDirectory, "nn-test-pg-"));
+  try { writeOwnerRecord(directory); } catch (error) { removeTree(directory); throw error; }
   // A free port is only free when it was probed: another test process's server, or any outgoing connection on this machine, can take it before this
   // server binds it (initdb takes seconds on a loaded machine). A server that cannot bind is started again on a new port (card 19).
   let port = testing.firstPort ?? await freePort();
