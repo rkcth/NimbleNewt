@@ -86,6 +86,13 @@ export class WebSessionStore {
     return false;
   }
 
+  /** Whether a session with this handle is still there and inside its limits (does not slide the idle time): the cheap look made again before a long request changes anything. */
+  isLive(handle: string): boolean {
+    const now = this.#now();
+    for (const s of this.#byKey.values()) if (s.handle === handle) return now - s.lastSeen < this.#limits.idleMs && now - s.createdAt < this.#limits.maxMs;
+    return false;
+  }
+
   /** Ends the session behind this cookie value. */
   revokeCookie(cookie: string | undefined): void { if (cookie !== undefined) this.#byKey.delete(digest(cookie)); }
 

@@ -79,7 +79,7 @@ import type { CommandService } from "../commands/index.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
-import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ContinuationOps } from "./operations.js";
+import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ContinuationOps, type WebAccessPort } from "./operations.js";
 
 export const API_VERSION = 1;
 
@@ -163,6 +163,7 @@ export interface StateApiDeps {
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   /** The coordinator, looked up when asked. */
   readonly coordinator?: () => Pick<CoordinatorService, "get" | "configure" | "setState"> | undefined;
+  readonly webAccess?: () => WebAccessPort | undefined;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
@@ -331,6 +332,7 @@ export class StateApi {
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),
         ...(this.#deps.coordinator === undefined ? {} : { coordinator: this.#deps.coordinator }),
+        ...(this.#deps.webAccess === undefined ? {} : { webAccess: this.#deps.webAccess }),
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
         ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
         ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
