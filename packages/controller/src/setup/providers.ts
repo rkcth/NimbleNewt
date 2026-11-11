@@ -21,6 +21,9 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const SECRET_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
+/** The smallest window a route can work in (the worker refuses a smaller one; kept equal to `MIN_WORKABLE_WINDOW` in pi-adapter, which an integration test checks, card CMP). */
+export const MIN_WORKABLE_CONTEXT_TOKENS = 8192;
+
 export interface ProviderEndpointBody { readonly provider: string; readonly endpoint: string; /** The name of the secret in the secret store; the value is never kept here. */ readonly credentialName?: string; readonly kind?: string; readonly setBy: string }
 
 export interface ProviderSpec {
@@ -71,6 +74,7 @@ function checkSpec(raw: unknown, i: number): ProviderSpec {
   if (new Set(models).size !== models.length) invalid(`${at}.models`, "lists a model twice");
   const ct = e["contextTokens"];
   if (typeof ct !== "number" || !Number.isSafeInteger(ct) || ct < 1 || ct > ROUTING_LIMITS.contextTokens) invalid(`${at}.contextTokens`, "must be the model's context window as a whole number of tokens");
+  if ((ct as number) < MIN_WORKABLE_CONTEXT_TOKENS) invalid(`${at}.contextTokens`, `${String(ct)} tokens is too small for the team to work in (at least ${String(MIN_WORKABLE_CONTEXT_TOKENS)} are needed); give the model's real context window, or choose a model with a larger one`);
   return { name, location, endpoint, ...(credentialName === undefined ? {} : { credentialName }), ...(e["paid"] === undefined ? {} : { paid: e["paid"] as boolean }), ...(e["enabled"] === undefined ? {} : { enabled: e["enabled"] as boolean }), models, contextTokens: ct as number };
 }
 

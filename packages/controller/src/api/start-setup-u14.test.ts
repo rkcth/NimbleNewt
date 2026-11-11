@@ -131,6 +131,7 @@ test("routing.provider.add registers two providers in one step with their addres
     await bad({ endpoint: "ftp://x" }, /http:\/\/ or https:\/\//);
     await bad({ apiKey: "x" }, /not a provider field/);
     await bad({ contextTokens: 0 }, /context window/);
+    await bad({ contextTokens: 4096 }, /too small.*at least 8192/);
     await bad({ models: [] }, /1 to 20 model names/);
   } finally { await w.done(); }
 });
