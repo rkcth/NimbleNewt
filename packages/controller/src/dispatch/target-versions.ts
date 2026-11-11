@@ -42,6 +42,13 @@ export interface TargetVersionOptions {
   readonly totalMs?: number;
   /** How many git processes may run at once (default 4); a reading waits its turn within its own time. */
   readonly gitProcesses?: number;
+  /**
+   * How a file reading proves that what it opened is where its walk was (tests only; the default is right for the platform): `kernel` asks Linux where the open file is (/proc/self/fd); `walk` checks that
+   * the checkout root and every directory on the way did not change from before the walk to after the read. Without Linux's answer the default is `walk`.
+   */
+  readonly readCheck?: "kernel" | "walk";
+  /** Tests only: called during a file reading, to change the checkout at exactly these moments (before the last name is looked at, and right after the file is opened). */
+  readonly readHooks?: { readonly beforeLastName?: () => Promise<void> | void; readonly afterOpen?: () => Promise<void> | void };
 }
 
 export interface TargetVersionDeps {
@@ -91,12 +98,21 @@ function relativeParts(path: string): string[] {
 
 const fold = (name: string): string => name.normalize("NFC").toLowerCase();
 
+/** A directory as lstat sees it: which one it is, and the times that every change of its entries (a name made, removed or renamed) moves. */
+interface DirMark { readonly dev: bigint; readonly ino: bigint; readonly mtimeNs: bigint; readonly ctimeNs: bigint }
+const dirMark = async (path: string): Promise<DirMark | undefined> => {
+  try { const s = await lstat(path, { bigint: true }); return s.isDirectory() && !s.isSymbolicLink() ? { dev: s.dev, ino: s.ino, mtimeNs: s.mtimeNs, ctimeNs: s.ctimeNs } : undefined; } catch { return undefined; }
+};
+const sameMark = (a: DirMark, b: DirMark | undefined): boolean => b !== undefined && a.dev === b.dev && a.ino === b.ino && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+/** A directory on the way changed while the file was read: the reading is made again (a few times), then refused. */
+class WalkMoved extends Error {}
+const WALK_ATTEMPTS = 3;
 /**
- * macOS (11 and later) `O_NOFOLLOW_ANY`: the open fails if ANY name of the path is a symbolic link, decided by the kernel in the same lookup that opens the file. Node does not name it in `fs.constants`;
- * the value is the one in macOS's <sys/fcntl.h>. Elsewhere 0: Linux asks the kernel where the open file is instead (/proc/self/fd), other systems ask the real path again.
+ * A directory whose change time is this recent proves nothing: a file system's clock has ticks (Linux's coarse clock moves every few milliseconds), and a second change within the tick of the last one
+ * leaves the times as they were. Such a directory is looked at again after this pause. A change time in the future (the clock was set back) is not taken as recent.
  */
-const O_NOFOLLOW_ANY_DARWIN = 0x20000000;
-const noLinkAnywhere = (platform: NodeJS.Platform): number => (platform === "darwin" ? O_NOFOLLOW_ANY_DARWIN : 0);
+const WALK_QUIET_MS = 50;
+const recent = (m: DirMark): boolean => { const age = BigInt(Date.now()) * 1_000_000n - m.ctimeNs; return age >= 0n && age < BigInt(WALK_QUIET_MS) * 1_000_000n; };
 
 export function createTargetVersions(deps: TargetVersionDeps): (target: { readonly kind: string; readonly id: string }, taskId: string) => Promise<string | undefined> {
   const fileCap = deps.options?.fileBytes ?? TARGET_VERSION_LIMITS.fileBytes;
@@ -198,13 +214,41 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
     return detached.code === 0 && COMMIT.test(out) ? out : unreadable("git could not read HEAD");
   };
 
-  /** The digest of a file below the checkout, walking each name without following links. */
+  const readCheck = deps.options?.readCheck ?? (process.platform === "linux" ? "kernel" : "walk");
+
+  /**
+   * The digest of a file below the checkout, walking each name without following links. Only the last name can be opened without following a link, so a directory on the way swapped for a link after it
+   * was looked at would lead elsewhere. On Linux the kernel says where the open file really is. Elsewhere (Node has no openat, and asking for the real path again cannot see a swap that was undone by then)
+   * the checkout root and each directory on the way are marked (identity, modification and change time) before the walk looks inside them, and marked again after the read, the deepest first and the
+   * root last. A rename, a new or a removed name in a directory moves its times, and the root itself is the controller's own, so if no mark moved, every name on the way named the same directory for the
+   * whole time, the open included. A moved mark makes the reading again, a few times, and then refuses it: a directory that keeps changing is refused, never read through. A directory changed within
+   * the last `WALK_QUIET_MS` is not trusted yet (two changes within one tick of the file system's clock leave its times as they were) and is looked at again after a pause. Left: a file system whose
+   * clock ticks slower than that (HFS+, one second), and a clock set back by the owner.
+   */
   const fileOf = async (taskId: string, path: string, signal: AbortSignal): Promise<string | undefined> => {
     const parts = relativeParts(path);
     const where = await rootOf(taskId);
     if (where === undefined) return undefined;
     const { root, paths } = where;
     if (!scopeAllows({ mode: "read", paths }, { mode: "read", path })) refuse("that path is outside what the project may use of its checkout");
+    for (let attempt = 1; ; attempt++) {
+      try { return await readOnce(root, parts, signal); } catch (error) {
+        if (!(error instanceof WalkMoved)) throw error;
+        if (attempt >= WALK_ATTEMPTS || signal.aborted) return refuse("a directory on the way changed while the file was being read");
+        await new Promise((r) => setTimeout(r, WALK_QUIET_MS));
+      }
+    }
+  };
+
+  const readOnce = async (root: string, parts: readonly string[], signal: AbortSignal): Promise<string> => {
+    const walk = readCheck === "walk";
+    const marks: { path: string; mark: DirMark }[] = [];
+    const mark = async (dir: string, ino?: number): Promise<void> => {
+      const m = await dirMark(dir);
+      if (m === undefined || (ino !== undefined && m.ino !== BigInt(ino)) || recent(m)) throw new WalkMoved();
+      marks.push({ path: dir, mark: m });
+    };
+    if (walk) await mark(root);
     let current = root;
     for (let i = 0; i < parts.length; i++) {
       const name = parts[i]!;
@@ -214,24 +258,23 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
       // A different spelling of this name in the same directory is a collision, as in the bridge, not the same file.
       if (entries.some((e) => e !== name && fold(e) === fold(name))) refuse("that name collides with another spelling in its directory");
       const next = join(current, name);
+      if (last) await deps.options?.readHooks?.beforeLastName?.();
       const info = await lstat(next).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined; return unreadable("the path could not be examined"); });
       if (info === undefined) return ABSENT_VERSION;
       if (info.isSymbolicLink()) refuse("a link on the way is not followed");
-      if (!last) { if (!info.isDirectory()) return ABSENT_VERSION; current = next; continue; }
+      if (!last) { if (!info.isDirectory()) return ABSENT_VERSION; current = next; if (walk) await mark(next, info.ino); continue; }
       if (info.isDirectory()) refuse("that is a directory");
       if (!info.isFile()) refuse("that is not a plain file");
       if (info.size > fileCap) throw new TargetVersionError("too_large", `the file is larger than ${fileCap} bytes, so its version is not read`);
-      // Opened without following a link and without blocking (a file swapped for a pipe after the check must not hold the reading), then compared with what was looked at. On macOS no name of the whole
-      // path may be a link at the moment of the open (O_NOFOLLOW_ANY): a directory on the way swapped for a link after it was looked at then fails the open itself, which the real path asked afterwards
-      // cannot see (the swap may be undone by then).
-      const handle = await open(next, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | noLinkAnywhere(process.platform)).catch(() => unreadable("the file could not be opened without following a link"));
+      // Opened without following a link and without blocking (a file swapped for a pipe after the check must not hold the reading), then compared with what was looked at.
+      const handle = await open(next, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => unreadable("the file could not be opened without following a link"));
       try {
+        await deps.options?.readHooks?.afterOpen?.();
         const opened = await handle.stat();
-        if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) refuse("the file changed while it was being opened");
-        // Only the last name is opened without following a link: a directory on the way swapped for a link after it was looked at would lead elsewhere (and the look at the file would then follow it too).
-        // What was opened must be where the walk was; on Linux the kernel says where the open file is, elsewhere its real path is asked again.
-        const at = process.platform === "linux" ? await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined) : undefined;
-        if ((at ?? await realpath(next).catch(() => undefined)) !== next) refuse("a directory on the way changed while the file was being opened");
+        if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) { if (walk) throw new WalkMoved(); refuse("the file changed while it was being opened"); }
+        // What was opened must be where the walk was (see fileOf): on Linux the kernel says where the open file is; the walk check asks the real path too, and decides after the read.
+        const at = walk ? undefined : await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined);
+        if ((at ?? await realpath(next).catch(() => undefined)) !== next) { if (walk) throw new WalkMoved(); refuse("a directory on the way changed while the file was being opened"); }
         const hash = createHash("sha256");
         const chunk = Buffer.allocUnsafe(64 * 1024);
         let total = 0;
@@ -242,6 +285,13 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
           total += bytesRead;
           if (total > fileCap) throw new TargetVersionError("too_large", `the file is larger than ${fileCap} bytes, so its version is not read`);
           hash.update(chunk.subarray(0, bytesRead));
+        }
+        if (walk) {
+          // After the read: the file is still the one open, then every directory on the way, the deepest first and the root last, is as it was before the walk looked inside it.
+          const now = await lstat(next, { bigint: true }).catch(() => undefined);
+          const held = await handle.stat({ bigint: true });
+          if (now === undefined || now.isSymbolicLink() || now.dev !== held.dev || now.ino !== held.ino || (await realpath(next).catch(() => undefined)) !== next) throw new WalkMoved();
+          for (const m of [...marks].reverse()) if (!sameMark(m.mark, await dirMark(m.path))) throw new WalkMoved();
         }
         return `sha256:${hash.digest("hex")}`;
       } finally { await handle.close(); }

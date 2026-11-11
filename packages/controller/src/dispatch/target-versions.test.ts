@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { after, test } from "node:test";
@@ -259,7 +259,10 @@ test("card A05b follow-up: links are never followed: a symlink to a file, a dire
   assert.equal(await over(viaLink).read({ kind: "file", id: "real/f" }, "t"), sha("in"));
 });
 
-test("card A05b follow-up review: a directory on the way swapped for a link while the file is read never yields a file outside the checkout", async () => {
+/** The file-reading checks to test here: the platform's own, and on Linux also the walk check that macOS and Windows use (`readCheck`), so it is exercised on every run. */
+const READ_CHECKS: readonly ("kernel" | "walk")[] = process.platform === "linux" ? ["kernel", "walk"] : ["walk"];
+
+for (const check of READ_CHECKS) test(`card A05b follow-up review: a directory on the way swapped for a link while the file is read never yields a file outside the checkout (${check} check)`, async () => {
   const outer = temp();
   const d = join(outer, "ws");
   mkdirSync(join(d, "sub"), { recursive: true });
@@ -269,18 +272,86 @@ test("card A05b follow-up review: a directory on the way swapped for a link whil
   symlinkSync(join(outer, "elsewhere"), join(d, "link"));
   // Another process swaps sub and the link back and forth as fast as it can.
   const swapper = spawn(process.execPath, ["-e", `const fs=require("node:fs");const p=require("node:path");const d=${JSON.stringify(d)};const end=Date.now()+20000;for(;Date.now()<end;){try{fs.renameSync(p.join(d,"sub"),p.join(d,"sub.real"));fs.renameSync(p.join(d,"link"),p.join(d,"sub"));fs.renameSync(p.join(d,"sub"),p.join(d,"link"));fs.renameSync(p.join(d,"sub.real"),p.join(d,"sub"));}catch{}}`], { stdio: "ignore" });
+  const { read } = over(d, [], { readCheck: check });
+  const outside = sha("outside");
+  let inside = 0;
   try {
-    const { read } = over(d);
-    const outside = sha("outside");
-    let inside = 0;
     const end = Date.now() + 4_000;
     while (Date.now() < end) {
       const got = await read({ kind: "file", id: "sub/f" }, "t").catch(() => "error");
       assert.notEqual(got, outside, "the file outside was read through a swapped directory");
       if (got === sha("inside")) inside++;
     }
-    assert.ok(inside > 0, "the file inside is read when nothing is swapped at that moment");
-  } finally { swapper.kill("SIGKILL"); }
+  } finally { swapper.kill("SIGKILL"); await new Promise((r) => { if (swapper.exitCode !== null || swapper.signalCode !== null) r(undefined); else swapper.once("exit", r); }); }
+  // The kernel's answer is exact, so readings succeed whenever the open itself was not swapped. The walk check refuses any reading during which the root changed, and the swapper changes it all the time:
+  // there the proof that it still reads is a reading once the directory is put back and left alone.
+  if (check === "kernel") assert.ok(inside > 0, "the file inside is read when nothing is swapped at that moment");
+  for (const n of ["sub", "sub.real", "link"]) rmSync(join(d, n), { recursive: true, force: true });
+  mkdirSync(join(d, "sub"));
+  writeFileSync(join(d, "sub", "f"), "inside");
+  assert.equal(await read({ kind: "file", id: "sub/f" }, "t"), sha("inside"), "with nothing changing, the file inside is read");
+});
+
+test("card A05b follow-up (CI platform repair): a directory swapped for a link just before the file is looked at and swapped back just after it is opened is caught by either check, never read through", async () => {
+  const outer = temp();
+  const d = join(outer, "ws");
+  mkdirSync(join(d, "sub"), { recursive: true });
+  mkdirSync(join(outer, "elsewhere"));
+  writeFileSync(join(d, "sub", "f"), "inside");
+  writeFileSync(join(outer, "elsewhere", "f"), "outside");
+  symlinkSync(join(outer, "elsewhere"), join(d, "link"));
+  // The walk check does not trust a directory changed in the last moment: let the tree be older than that, as a checkout usually is.
+  await new Promise((r) => setTimeout(r, 120));
+  for (const check of READ_CHECKS) {
+    let swaps = 0;
+    // The interleaving a fast swapper found on macOS: `sub` is the walk's real directory, then the link while the file is looked at and opened (the outside file), then real again before any later look.
+    const toLink = (): void => { if (swaps === 0) { renameSync(join(d, "sub"), join(d, "sub.real")); renameSync(join(d, "link"), join(d, "sub")); swaps++; } };
+    const back = (): void => { if (swaps === 1) { renameSync(join(d, "sub"), join(d, "link")); renameSync(join(d, "sub.real"), join(d, "sub")); swaps++; } };
+    const { read } = over(d, [], { readCheck: check, readHooks: { beforeLastName: toLink, afterOpen: back } });
+    const got = await read({ kind: "file", id: "sub/f" }, "t").catch((e: unknown) => (e instanceof TargetVersionError ? `refused: ${e.message}` : `other: ${String(e)}`));
+    assert.equal(swaps, 2, `${check}: the swap happened`);
+    assert.notEqual(got, sha("outside"), `${check}: the file outside was read through a directory swapped for a link`);
+    // The kernel check sees where the open file is and refuses; the walk check sees the root changed and reads again, now with nothing swapped.
+    if (check === "kernel") assert.match(got!, /refused: a directory on the way changed/);
+    else assert.equal(got, sha("inside"), "the walk check read again and got the file inside");
+    await new Promise((r) => setTimeout(r, 120));
+  }
+});
+
+test("card A05b follow-up (CI platform repair): the walk check reads what the kernel check reads, and a directory that keeps changing under a reading is refused after a few tries, never read through", async () => {
+  const outer = temp();
+  const d = join(outer, "ws");
+  mkdirSync(join(d, "a", "b"), { recursive: true });
+  writeFileSync(join(d, "a", "b", "f"), "deep");
+  writeFileSync(join(d, "top"), "top");
+  writeFileSync(join(outer, "secret"), "outside");
+  symlinkSync(join(outer, "secret"), join(d, "a", "out"));
+  symlinkSync(outer, join(d, "up"));
+  const kernelOrWalk = READ_CHECKS.map((check) => over(d, [], { readCheck: check }).read);
+  for (const read of kernelOrWalk) {
+    assert.equal(await read({ kind: "file", id: "a/b/f" }, "t"), sha("deep"));
+    assert.equal(await read({ kind: "file", id: "top" }, "t"), sha("top"));
+    assert.equal(await read({ kind: "file", id: "a/b/none" }, "t"), "absent");
+    for (const id of ["a/out", "up/secret", "a"]) await refused(read({ kind: "file", id }, "t"), "refused");
+  }
+  // A directory on the way that changes during every reading (a name made and removed in it while the file is read): three tries, then refused. The file is large, so the reading is still going on when
+  // the change lands.
+  const big = Buffer.alloc(4 * 1024 * 1024, 1);
+  writeFileSync(join(d, "a", "b", "big"), big);
+  const walk = over(d, [], { readCheck: "walk" }).read;
+  const churn = spawn(process.execPath, ["-e", `const fs=require("node:fs");const p=${JSON.stringify(join(d, "a", "churn"))};const end=Date.now()+20000;for(;Date.now()<end;){try{fs.mkdirSync(p);fs.rmdirSync(p);}catch{}}`], { stdio: "ignore" });
+  try {
+    let refusedSeen = 0;
+    const end = Date.now() + 3_000;
+    while (Date.now() < end && refusedSeen === 0) {
+      const got = await walk({ kind: "file", id: "a/b/big" }, "t").catch((e: unknown) => (e instanceof TargetVersionError && e.code === "refused" && /changed while the file was being read/.test(e.message) ? "refused" : `other: ${String(e)}`));
+      assert.ok(got === "refused" || got === sha(big), got);
+      if (got === "refused") refusedSeen++;
+    }
+    assert.ok(refusedSeen > 0, "a reading while a directory on the way keeps changing is refused");
+  } finally { churn.kill("SIGKILL"); await new Promise((r) => { if (churn.exitCode !== null || churn.signalCode !== null) r(undefined); else churn.once("exit", r); }); }
+  rmSync(join(d, "a", "churn"), { recursive: true, force: true });
+  assert.equal(await walk({ kind: "file", id: "a/b/big" }, "t"), sha(big), "once it stops changing, it is read");
 });
 
 test("card A05b follow-up: a pipe, a directory and a too large file are refused, not read; a file at the cap is read; a huge sparse file is refused without being read", async () => {
@@ -299,7 +370,8 @@ test("card A05b follow-up: a pipe, a directory and a too large file are refused,
   await refused(read({ kind: "file", id: "eleven" }, "t"), "too_large");
   assert.equal(await read({ kind: "file", id: "ten" }, "t"), sha("0123456789"));
   writeFileSync(join(d, "sparse"), "");
-  truncateSync(join(d, "sparse"), 50 * 1024 * 1024 * 1024);
+  // NTFS does not make a file sparse when it is extended (it reserves the space: 50 GiB was ENOSPC on the Windows runner), so there the huge file is 2 GiB; still far above the cap, and never read.
+  truncateSync(join(d, "sparse"), (process.platform === "win32" ? 2 : 50) * 1024 * 1024 * 1024);
   await refused(over(d).read({ kind: "file", id: "sparse" }, "t"), "too_large");
   writeFileSync(join(d, "limit"), Buffer.alloc(8 * 1024 * 1024, 7));
   assert.equal(await over(d).read({ kind: "file", id: "limit" }, "t"), sha(Buffer.alloc(8 * 1024 * 1024, 7)), "the bridge's own limit is the default cap");
