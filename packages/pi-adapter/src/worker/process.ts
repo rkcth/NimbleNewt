@@ -14,6 +14,7 @@ import { processClock } from "./clock.js";
 import { classifyTurnEnd } from "./end-kind.js";
 import { nudgeCallId, nudgeText } from "./nudge.js";
 import { relayFetch } from "./relay-fetch.js";
+import { pendingThinking, type ThinkingMark } from "./thinking-report.js";
 
 /**
  * The worker process (card H12b): the Pi conversation of one attempt, run inside the sandbox. It has no network and holds only the task credential it is started with. Its whole connection to the world is the channel on standard input and
@@ -295,6 +296,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars, systemPromptChars: sharedSystemText(PI_AGENT_LAYOUT).length });
   };
 
+  let thinkingSent: ThinkingMark = { entryId: -1, block: -1 };
   const turn = async (requestIdText: string, content: string): Promise<void> => {
     if (adapter === undefined || started === undefined) return fault("the process was not started");
     turnOpen = true;
@@ -307,6 +309,12 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       try { await bridge!.declarations.openRequest(requestIdText); shown = bridge!.declarations.textOf(requestIdText); } catch { /* the model works without the list; it can still ask tool-discover */ }
       const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: shown === "" ? content : `${content}\n\n${volatileContext(shown)}` });
       const result = await handle.result();
+      // Card U09b: the model's thinking returned in this turn is reported to the host (bounded, untrusted text); a failure to report never changes the turn.
+      try {
+        const next = pendingThinking(await adapter.root().thinking(), thinkingSent);
+        thinkingSent = next.sent;
+        for (const blocks of next.messages) send({ t: "thinking", blocks });
+      } catch { /* the owner's view is shorter; the turn is not */ }
       // How many times the turn was continued (card W04), from the conversation's document; told with every result so the attempt records it.
       let nudges = 0;
       try { const c = await adapter.continuations(); if (c.turn === requestIdText) nudges = c.used; } catch { /* not known: 0 is not claimed as more */ }
