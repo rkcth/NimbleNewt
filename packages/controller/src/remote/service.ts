@@ -18,6 +18,7 @@ import { credentialIdOf, scopedCommandId } from "../security/credentials.js";
 import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { cleanProcessRef } from "./process-ref.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
@@ -102,7 +103,7 @@ export interface PlacementBody {
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
   readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[]; /** The confirmation is kept but the owner's launch record is still to be written (a retry of the confirmation writes it). */ readonly recordPending?: true }; /** When the contract was last cleared for a new confirmation (a restart with a changed recipe): heartbeats are accepted for a bounded window from then. */ readonly reconfirmSince?: string; readonly refused?: readonly string[] };
   /** The latest report of the worker on the processes it holds for this placement (card L02e). Belongs to the placement it names and to no other: a new placement (a move, a restart, a re-offer) starts without one. */
-  readonly processReport?: { readonly placement: number; readonly seq: number; readonly at: string; readonly final: boolean; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] };
+  readonly processReport?: { readonly placement: number; /** The worker session that sent it: `seq` rises within one session (absent on a record written before this was kept). */ readonly sessionId?: string; readonly seq: number; readonly at: string; readonly final: boolean; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -1467,7 +1468,8 @@ export class RemoteWorkerService {
     const sameAs = (x: NonNullable<PlacementBody["processReport"]>): boolean => canonicalJson({ final: x.final, processes: x.processes } as unknown as JsonObject) === canonicalJson({ final: checked.final, processes: checked.processes } as unknown as JsonObject);
     const decide = (x: PlacementBody): "keep" | "same" | "old" | "final" => {
       const had = x.processReport;
-      if (had === undefined || had.placement !== x.placement) return "keep";
+      // A sequence belongs to the worker session that sent it (review of L02e): a worker program that restarted and took the attempt up again in a new session counts from 1, and its reports are the newest word.
+      if (had === undefined || had.placement !== x.placement || had.sessionId !== x.sessionId) return "keep";
       if (checked.seq === had.seq) { if (!sameAs(had)) throw new DomainError("payload_changed", `report ${checked.seq} of attempt ${id} was already given with other figures`, { field: "seq" }); return "same"; }
       if (checked.seq < had.seq) return "old";
       return had.final ? "final" : "keep";
@@ -1480,7 +1482,7 @@ export class RemoteWorkerService {
       if (x === undefined || x.hostId !== host.id || x.placement !== found.placement || x.sessionId !== found.sessionId) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
       verdict = decide(x);
       if (verdict !== "keep") return undefined;
-      return { next: { ...x, processReport: { placement: x.placement, seq: checked.seq, at: this.#runner.now(), final: checked.final, processes: checked.processes } } };
+      return { next: { ...x, processReport: { placement: x.placement, ...(x.sessionId === undefined ? {} : { sessionId: x.sessionId }), seq: checked.seq, at: this.#runner.now(), final: checked.final, processes: checked.processes } } };
     }, "processes", { actor: host.id });
     return { kept: verdict === "keep" || verdict === "same" };
   }
@@ -1962,8 +1964,8 @@ function checkProcessReport(raw: { readonly seq: unknown; readonly final: unknow
     if (typeof e["ref"] !== "string" || e["ref"].length === 0 || e["ref"].length > REMOTE_LIMITS.processRef * 4) return invalid(`processes[${i}].ref`, `must be text of at most ${REMOTE_LIMITS.processRef * 4} characters`);
     if (e["kind"] !== "process" && e["kind"] !== "child") return invalid(`processes[${i}].kind`, "must be process or child");
     if (e["state"] !== "running" && e["state"] !== "uncooperative" && e["state"] !== "unknown") return invalid(`processes[${i}].state`, "must be running, uncooperative or unknown");
-    // A command line can hold a secret: it is redacted before it is cut, and an entry that is the same after that is one entry.
-    const ref = redactText(e["ref"]).replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, REMOTE_LIMITS.processRef);
+    // A command line can hold a secret: it is redacted before it is cut, every control or format character is made a space, the cut keeps whole characters, and an entry that is the same after that is one entry.
+    const ref = cleanProcessRef(e["ref"]);
     const key = `${e["kind"]}|${ref}`;
     return seen.has(key) ? undefined : (seen.add(key), { ref, kind: e["kind"], state: e["state"] });
   }).filter((x): x is { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" } => x !== undefined);

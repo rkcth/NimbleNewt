@@ -96,6 +96,23 @@ for (const backend of backends) {
     assert.deepEqual((await c.remote.placement(c.dispatcherPrincipal, attemptId))!.processReport!.processes, [P("kept")]);
   });
 
+  suite("a worker that took the attempt up again in a newer session (a restarted worker program) starts its own sequence: its reports and its final word are kept, and the older session's are fenced (review of L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, placement, attempt } = await c.started(r1);
+    assert.deepEqual(await attempt.reportProcesses({ seq: 5, final: false, processes: [P("from the old program")] }), { kept: true });
+    // The worker program restarts: a new session, the attempt taken up again (auto), and a runner whose sequence starts from 1.
+    const fresh = new RemoteWorkerClient({ url: c.transport.url, token: r1.token, workerVersion: "w" });
+    await fresh.connect({ ...REMOTE_CAPS }, "re-2");
+    const again = fresh.attempt(attemptId, placement);
+    await again.accept();
+    assert.deepEqual(await again.reportProcesses({ seq: 1, final: false, processes: [P("from the new program")] }), { kept: true }, "a new session's first report is not an old one");
+    assert.deepEqual((await hostOf(c, r1.id).localWork([attemptId])).processes.map((p) => p.ref), ["from the new program"]);
+    assert.deepEqual(await again.reportProcesses({ seq: 2, final: true, processes: [] }), { kept: true }, "and its last word is taken");
+    assert.deepEqual((await hostOf(c, r1.id).localWork([attemptId])).processes, []);
+    await wireRefuses("fenced", () => attempt.reportProcesses({ seq: 6, final: false, processes: [P("late, old program")] }), 409);
+    assert.deepEqual(await again.reportProcesses({ seq: 1, final: false, processes: [P("replayed")] }), { kept: false }, "within one session the sequence still only rises");
+  });
+
   suite("a report is checked entry by entry: exact fields, the kinds and states that exist, a bounded list and body, a sequence from 1, redacted and cut references; a bad report keeps nothing (card L02e)", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, placement } = await c.started(r1);
@@ -127,6 +144,13 @@ for (const backend of backends) {
     assert.equal(kept.processes[1]!.ref, "two lines evil");
     assert.equal(kept.placement, placement);
     assert.deepEqual(await hostOf(c, r1.id).localWork([attemptId]).then((w) => w.processes.length), REMOTE_LIMITS.processes - 1);
+    // Every control or format character is replaced (C1 controls, the marks that turn text around, line separators), and a cut never leaves half a character (review of L02e).
+    const odd = `a\u0085b‏c؜d e f﻿g ${"x".repeat(REMOTE_LIMITS.processRef - 17)}😀😀`;
+    await post({ placement, seq: 2, final: false, processes: [{ ref: odd, kind: "process", state: "running" }] });
+    const cleaned = (await c.remote.placement(c.dispatcherPrincipal, attemptId))!.processReport!.processes[0]!.ref;
+    assert.ok(!new RegExp("[\\u0080-\\u009f\\u200e\\u200f\\u061c\\u2028\\u2029\\ufeff]").test(cleaned), JSON.stringify(cleaned));
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(cleaned), "no half of a character is kept");
+    assert.ok(cleaned.length <= REMOTE_LIMITS.processRef);
   });
 
 }
@@ -181,7 +205,7 @@ test("a host that cannot look reports nothing; a look that fails or a report tha
   assert.ok(failing.trouble.includes("process report") && failing.trouble.includes("final process report"));
   const flaky = stubRun({ list: () => [{ ref: "x", kind: "process", state: "running" }], failReport: (n) => (n === 1 ? new Error("network") : undefined) });
   assert.equal(await flaky.runner.run(flaky.offer), "completed");
-  assert.ok(flaky.sent.length >= 1 && flaky.sent[0]!.seq === 1, "a report that failed is sent again with the same number");
+  assert.ok(flaky.sent.length >= 1 && flaky.sent[0]!.seq === 2, "a report that failed is sent again under a new number (it may have arrived: its number is never used for other figures)");
   assert.ok(flaky.trouble.includes("process report"));
   const fenced = stubRun({ list: () => [{ ref: "x", kind: "process", state: "running" }], failReport: () => new WorkerRequestError(409, "fenced", "the placement moved"), runMs: 600 });
   assert.notEqual(await fenced.runner.run(fenced.offer), undefined);
@@ -201,4 +225,54 @@ test("the host reads only the report that belongs to the placement it holds now:
   assert.deepEqual(await ask(body({ processReport: left })), [{ attemptId: "att-aaaaaaaaaaaaaaaaaaaa", ref: "remote:att-aaaaaaaaaaaaaaaaaaaa", kind: "process", state: "unknown" }], "a live placement whose only report is another placement's reads as unreported");
   assert.deepEqual(await ask(body({ state: "ended", processReport: left })), [], "and an ended one as never reported");
   assert.deepEqual((await ask(body({ processReport: { ...left, placement: 2, final: false } }))).map((p) => p.ref), ["from placement one"], "its own is read");
+});
+
+test("a report whose answer was lost never has its number used again for other figures, so the controller does not refuse every later report and the final one (review of L02e)", async () => {
+  // The stub controller keeps what it was sent by number, as the real one does, and the answer to the first report is lost after it arrived.
+  const kept = new Map<number, string>();
+  let list: Held[] = [{ ref: "one", kind: "process", state: "running" }];
+  let calls = 0;
+  const offer = stubRun({ list: () => [] }).offer;
+  const real: { seq: number; final: boolean; processes: readonly unknown[] }[] = [];
+  const attempt = {
+    accept: async () => ({}), honorContract: async () => ({ ok: true }), pollControl: async () => [], complete: async () => ({}),
+    reportProcesses: async (r: { seq: number; final: boolean; processes: readonly unknown[] }) => {
+      calls += 1;
+      const body = JSON.stringify([r.final, r.processes]);
+      const had = kept.get(r.seq);
+      if (had !== undefined && had !== body) throw new WorkerRequestError(409, "payload_changed", `report ${r.seq} was already given with other figures`);
+      kept.set(r.seq, body); real.push(r);
+      // The answer is lost, and what the sandbox holds changes before the next look.
+      if (calls === 1) { list = [{ ref: "two", kind: "process", state: "running" }]; throw new Error("the connection dropped before the answer"); }
+      return { kept: true };
+    },
+  };
+  const handle = { run: async () => { await new Promise((ok) => setTimeout(ok, 400)); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => { list = []; } };
+  const trouble: string[] = [];
+  const runner = new RemoteOfferRunner({ client: { attempt: () => attempt } as never, host: { start: async () => handle, localWork: async () => ({ processes: list, known: [] }) } as never, abilities: FULL_ABILITIES, controlMs: 10, onTrouble: (_id, what) => trouble.push(what) });
+  const done = runner.run(offer);
+  assert.equal(await done, "completed");
+  assert.ok(!trouble.some((t) => t === "final process report"), `the final report was taken: ${trouble.join(", ")}`);
+  const last = real.at(-1)!;
+  assert.equal(last.final, true);
+  assert.deepEqual(last.processes, []);
+  assert.equal(trouble.filter((t) => t === "process report").length, 1, "only the lost answer was a trouble");
+});
+
+test("a report always fits the controller's body limit: references are redacted before they are cut, and a list too big for the body is cut with a line saying so (review of L02e)", async () => {
+  const secret = "Bearer sk-live-abcdefghijklmnopqrstuvwxyz0123456789";
+  // Three bytes a character: 50 references of 120 characters are over the 16 KB body.
+  const long = (i: number): Held => ({ ref: `${i} ${"€".repeat(50)} -H 'Authorization: ${secret}' ${"€".repeat(300)}`, kind: "process", state: "running" });
+  const w = stubRun({ list: () => Array.from({ length: REMOTE_LIMITS.processes }, (_, i) => long(i)) });
+  assert.equal(await w.runner.run(w.offer), "completed");
+  assert.ok(w.sent.length >= 2);
+  for (const r of w.sent) {
+    const bytes = Buffer.byteLength(JSON.stringify({ placement: Number.MAX_SAFE_INTEGER, seq: r.seq, final: r.final, processes: r.processes }), "utf8");
+    assert.ok(bytes <= REMOTE_LIMITS.processBytes, `a report of ${bytes} bytes is over the limit`);
+    for (const p of r.processes as { ref: string }[]) {
+      assert.ok(p.ref.length <= REMOTE_LIMITS.processRef, String(p.ref.length));
+      assert.ok(!/sk-live-abc/.test(p.ref), "no part of a credential is sent");
+    }
+    assert.match(String((r.processes.at(-1) as { ref: string }).ref), /more processes are not listed/);
+  }
 });

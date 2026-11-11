@@ -4,10 +4,12 @@ import type { JsonObject } from "../storage/types.js";
 import type { RemoteAttempt, RemoteWorkerClient } from "./client.js";
 import { WorkerRequestError } from "./client.js";
 import type { WorkerAbilities } from "./contract.js";
+import { cleanProcessRef } from "./process-ref.js";
 import { REMOTE_LIMITS, type Offer, type ProcessReport, type SequencedControl, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
 
 /** The processes of one attempt as this machine's sandbox lists them, the entries a report to the controller carries (card L02e). */
 type Held = ProcessReport["processes"];
+type Entry = Held[number];
 
 export interface RemoteOfferRunnerOptions {
   /** The worker's session with the controller (connected by the host's poller). */
@@ -146,10 +148,14 @@ export class RemoteOfferRunner {
       if (look === undefined) return undefined;
       const found = await look([attemptId]);
       const own = found.processes.filter((p) => p.attemptId === undefined || p.attemptId === attemptId);
-      const items = own.slice(0, REMOTE_LIMITS.processes).map((p) => ({ ref: String(p.ref).slice(0, REMOTE_LIMITS.processRef * 4), kind: p.kind, state: p.state }));
-      // More than a report holds: the rest is said as one more entry, never dropped silently.
-      if (own.length > REMOTE_LIMITS.processes) items[REMOTE_LIMITS.processes - 1] = { ref: `${own.length - REMOTE_LIMITS.processes + 1} more processes are not listed`, kind: "process", state: "unknown" };
-      return items;
+      // Each reference is redacted while whole, cleaned and cut here (`cleanProcessRef`); the controller does it again on what it is sent.
+      const items: Entry[] = own.slice(0, REMOTE_LIMITS.processes).map((p) => ({ ref: cleanProcessRef(String(p.ref)), kind: p.kind, state: p.state }));
+      // More than a report holds, or more than fits the controller's body limit (review of L02e: 50 long command lines were over it, so every report was refused whole): the rest is said as one more entry, never dropped silently.
+      const fits = (list: Held): boolean => Buffer.byteLength(JSON.stringify({ placement: Number.MAX_SAFE_INTEGER, seq: Number.MAX_SAFE_INTEGER, final: false, processes: list }), "utf8") <= REMOTE_LIMITS.processBytes;
+      const upTo = (n: number): Held => (n >= own.length ? items.slice(0, n) : [...items.slice(0, n), { ref: `${own.length - n} more processes are not listed`, kind: "process", state: "unknown" }]);
+      let shown = own.length > REMOTE_LIMITS.processes ? REMOTE_LIMITS.processes - 1 : own.length;
+      while (shown > 0 && !fits(upTo(shown))) shown -= 1;
+      return upTo(shown);
     };
     return {
       change: async () => {
@@ -158,16 +164,24 @@ export class RemoteOfferRunner {
           if (items === undefined) return;
           const key = JSON.stringify(items);
           if (key === sent) return;
-          await attempt.reportProcesses({ seq: seq + 1, final: false, processes: items });
-          seq += 1; sent = key;
+          // The number is taken before the report goes out (review of L02e): a report whose answer was lost may have arrived, and its number must never carry other figures, or the controller refuses every later report, the final one too.
+          seq += 1;
+          await attempt.reportProcesses({ seq, final: false, processes: items });
+          sent = key;
         } catch (error) { if (error instanceof WorkerRequestError && error.fenced) throw error; trouble("process report", error); }
       },
       final: async () => {
         try {
           const items = await held();
           if (items === undefined) return;
-          await attempt.reportProcesses({ seq: seq + 1, final: true, processes: items });
           seq += 1;
+          // The last word is tried three times under one number (the same report again is the same answer there): one lost connection would otherwise leave the earlier report standing, unconfirmed, for good.
+          for (let tries = 1; ; tries += 1) {
+            try { await attempt.reportProcesses({ seq, final: true, processes: items }); return; } catch (error) {
+              if (tries >= 3 || (error instanceof WorkerRequestError && (error.fenced || error.status < 500))) throw error;
+              await new Promise((r) => setTimeout(r, this.#o.controlMs ?? 500));
+            }
+          }
         } catch (error) { trouble("final process report", error); }
       },
     };
