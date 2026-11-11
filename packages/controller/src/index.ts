@@ -45,3 +45,4 @@ export { CATALOG_LIMITS, CatalogService, checkHost, checkManifest, personalNames
 export { COMMAND_ALIASES, COMMAND_LIMITS, CommandResolver, CommandService, catalogSource, parseInvocation, type CommandContext, type CommandSource, type Resolution as CommandResolution, type Target as CommandTarget } from "./commands/index.js";
 export * from "./backup/index.js";
 export * from "./transfer/index.js";
+export type { EnvironmentRuntime, TrialInput as EnvironmentTrialInput, TrialResult as EnvironmentTrialResult, ReloadInput as EnvironmentReloadInput, ReloadResult as EnvironmentReloadResult, ValidateInput as EnvironmentValidateInput, ValidateResult as EnvironmentValidateResult } from "./maintenance/index.js";

@@ -254,3 +254,16 @@ test("status results are shown as plain lines, and markup in them stays text", (
   assert.deepEqual(c.linesOf({ note: "<img src=x onerror=alert(1)>" }), ["note: <img src=x onerror=alert(1)>"]);
   assert.deepEqual(c.linesOf(null), []);
 });
+
+test("the Settings view reads the door's settings and the browser list with the session's cookie, changes nothing, and shows them as text", async () => {
+  const server = new FakeController(); const storage = new Storage();
+  const { client } = make(server, storage);
+  await client.login({ token: "t" });
+  await client.settings();
+  await client.sessions();
+  assert.deepEqual(server.calls.filter((c) => /settings|sessions/.test(c)), ["GET /web/settings", "GET /web/sessions"], "reads only");
+  // The page draws the card with textContent (never markup), names the tab Settings, and offers a sign-out for each other browser and for all.
+  assert.match(APP_JS, /function settingsCard/); assert.match(APP_JS, /'Settings'/);
+  assert.match(APP_JS, /Sign it out/); assert.match(APP_JS, /Sign out all other browsers/); assert.match(APP_JS, /trustedProxy/);
+  assert.doesNotMatch(APP_JS.slice(APP_JS.indexOf("function settingsCard"), APP_JS.indexOf("function renderSessions")), /innerHTML|insertAdjacentHTML/);
+});

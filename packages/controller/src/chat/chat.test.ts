@@ -69,7 +69,7 @@ for (const backend of backends) {
 
   test(`${backend.name}: the owner sets how notifications reach them by chat (escalation hours, quiet hours, digest times); the revision is filled in, an agent cannot use the chat (card U11b)`, async () => {
     assert.ok(CHAT_OPS["notifications.configure"], "the chat's operations include the notification setting");
-    for (const k of ["escalateAfterHours", "quietHours", "digestTimes", "channel", "expectedRevision", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "urgentInterruptsQuietHours"]) assert.ok(acceptedArgs("notifications.configure")!.includes(k), k);
+    for (const k of ["escalateAfterHours", "quietHours", "digestTimes", "channel", "expectedRevision", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "stoppedWorkAfterMinutes", "urgentInterruptsQuietHours"]) assert.ok(acceptedArgs("notifications.configure")!.includes(k), k);
     assert.equal(CHAT_OPS["notifications.settings"], undefined, "reading is a query, not a chat command");
     let state: Record<string, unknown> = { revision: 3, escalateAfterHours: 24 };
     const calls: Record<string, unknown>[] = [];
@@ -114,6 +114,19 @@ for (const backend of backends) {
       script[loud] = [cmd("notifications.configure", { securityDetectors: true }, loud)];
       assert.equal(only((await say(w, chat, loud)).outcomes).status, "applied");
       assert.equal(state["securityDetectors"], true);
+      // Stopped work and the 09:00 digest of card U11d: a number sets the minutes, null turns the trigger off, and naming digest times is how the owner asks for the digest even with a stand-up.
+      const stalled = "if something waits on me and the project has nothing else to do, page me after 15 minutes";
+      script[stalled] = [cmd("notifications.configure", { stoppedWorkAfterMinutes: 15 }, stalled)];
+      assert.equal(only((await say(w, chat, stalled)).outcomes).status, "applied");
+      assert.equal(state["stoppedWorkAfterMinutes"], 15);
+      const nostall = "do not page me about stopped work any more";
+      script[nostall] = [cmd("notifications.configure", { stoppedWorkAfterMinutes: null }, nostall)];
+      assert.equal(only((await say(w, chat, nostall)).outcomes).status, "applied");
+      assert.equal(state["stoppedWorkAfterMinutes"], null);
+      const digest = "send me the digest at 09:00 even when there is a stand-up";
+      script[digest] = [cmd("notifications.configure", { digestTimes: ["09:00"] }, digest)];
+      assert.equal(only((await say(w, chat, digest)).outcomes).status, "applied");
+      assert.deepEqual(state["digestTimes"], ["09:00"]);
     } finally { await w.close(); }
   });
 
