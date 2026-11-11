@@ -256,6 +256,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
+  setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
   owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
 };
 
@@ -295,6 +296,7 @@ export type StatusRequest =
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
   | { readonly kind: "failed_event"; readonly handlingId: string }
   | { readonly kind: "owner_questions"; readonly limit?: number }
+  | { readonly kind: "setup" }
   | { readonly kind: "needs_you"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "start_size"; readonly taskId: string }
@@ -359,6 +361,8 @@ export interface StatusDeps {
   readonly stall?: Pick<StallService, "list">;
   /** Pause gates (card L01). Absent: no gate is shown and none is assumed. */
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
+  /** The setup readiness view (card U14). Absent: the `setup` view is not offered. */
+  readonly setup?: { check(by: Principal): Promise<{ readonly ready: boolean; readonly next?: string; readonly items: readonly { readonly id: string; readonly label: string; readonly state: string; readonly required: boolean; readonly detail: string; readonly guide: { readonly question: string; readonly recommended: string; readonly ifDeclined: string } }[] }> };
   /** Which event sources are watched (card H13f). Absent: the view is not offered. */
   readonly eventSources?: { get(by: Principal): Promise<{ readonly revision: number; readonly sources: readonly { readonly id: string; readonly type: string; readonly enabled: boolean; readonly critical: boolean; readonly defined: boolean; readonly watches?: string }[] }> };
   /**
@@ -643,6 +647,7 @@ export class StatusService {
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
+      case "setup": { onlyKnown(request, ["kind"]); return this.setupLines(by); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
     }
@@ -763,6 +768,21 @@ export class StatusService {
    * The jobs that have not ended (card T07b), oldest first: state, label (quoted), task, kind and since when; outcome-unknown ones say they wait for a reconciliation (`job.reconcile`), a stop that was not obeyed and the orphans a
    * stop could not end are named. The output of a job is never shown here (it is the program's text; `job.get` reads it). Owner only.
    */
+  /** The first-run walk-through (card U14): the readiness view in the order a person sets things up, with the plain question for the next open step. Reads records only; no secret is read. */
+  async setupLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.setup === undefined || by.kind !== "owner") return undefined;
+    const r = await this.#deps.setup.check(by);
+    const c = cite("setup", "readiness");
+    const mark = (state: string): string => (state === "done" ? "done" : state === "default" ? "default (nothing chosen, works as it is)" : state === "optional" ? "optional, not yet" : "OPEN");
+    const open = r.items.find((i) => i.state === "missing" || (i.state === "optional" && i.id === "task"));
+    const lines: Line[] = [
+      line(r.ready ? "Everything a first agent needs is set up." : `Not ready for a first agent yet: the first required step still open is ${shown(r.items.find((i) => i.id === r.next)?.label ?? "", 80)}.`, c),
+      ...r.items.map((i) => line(`${shown(i.label, 80)}: ${mark(i.state)}${i.required ? " (needed)" : ""}. ${shown(i.detail, 240)}`, c)),
+    ];
+    if (open !== undefined) lines.push(line(`Next to ask: ${shown(open.guide.question, 700)} Recommended: ${shown(open.guide.recommended, 200)} If you decline: ${shown(open.guide.ifDeclined, 250)} Ask the owner this one question; apply nothing until they answer, and every answer can be changed later by chat.`, c));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async jobLines(by: Principal, limit = 20): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.jobs === undefined || by.kind !== "owner") return undefined;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid("limit", "must be a whole number from 1 to 100");

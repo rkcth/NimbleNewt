@@ -30,6 +30,8 @@ export * from "./jobs/index.js";
 export * from "./lifecycle/index.js";
 export * from "./chat/index.js";
 export * from "./web/index.js";
+export * from "./launcher/index.js";
+export * from "./setup/index.js";
 export * from "./status/index.js";
 export * from "./meetings/index.js";
 export * from "./standups/index.js";

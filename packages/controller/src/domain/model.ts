@@ -21,6 +21,18 @@ export interface Milestone { readonly id: string; readonly name: string; readonl
 /** An agent the owner has authorized to take part in the project (card P01). The record grants nothing by itself; grants are separate (A01). */
 export interface Participant { readonly principalId: string; readonly role?: string }
 
+/**
+ * Where a project's repository is hosted and which CI checks it (card U14). NimbleNewt needs a git repository only; nothing assumes GitHub. `host` is the owner's own answer
+ * (`github`, `gitlab`, `self-hosted` with `hostName` such as "Gitea", or `none` for a repository with no remote); `ci` is a short label (`GitHub Actions`, `GitLab CI`, `Jenkins`, ...) or `none`.
+ * Absent: the owner has not been asked yet, which the setup view shows as open. The record changes no behaviour by itself.
+ */
+export interface VersionControl {
+  readonly host: "github" | "gitlab" | "self-hosted" | "none";
+  readonly hostName?: string;
+  readonly ci?: string;
+}
+export const VERSION_CONTROL_HOSTS: readonly VersionControl["host"][] = ["github", "gitlab", "self-hosted", "none"];
+
 export interface ProjectBody {
   readonly name: string;
   readonly goal: string;
@@ -32,6 +44,8 @@ export interface ProjectBody {
   readonly workstreams?: readonly Workstream[];
   readonly milestones?: readonly Milestone[];
   readonly participants?: readonly Participant[];
+  /** Version control host and CI (card U14), kept by every other project command. */
+  readonly versionControl?: VersionControl;
 }
 
 // ---- tasks ---------------------------------------------------------------------------------------------------------------------
@@ -117,6 +131,19 @@ export function repositories(value: unknown, field: string): Repository[] {
     const location = text(entry["location"], `${at}.location`, { min: 1, max: LIMITS.locationLength });
     return entry["label"] === undefined ? { id, location } : { id, location, label: text(entry["label"], `${at}.label`, { min: 1, max: LIMITS.label }) };
   });
+}
+/** The owner's answer to "where is this hosted and what CI do you use". Unknown fields are refused; `hostName` is for a self-hosted forge only. */
+export function versionControl(value: unknown, field: string): VersionControl {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid(field, "must be an object with host (github, gitlab, self-hosted or none) and optionally hostName and ci");
+  const e = value as Record<string, unknown>;
+  for (const key of Object.keys(e)) if (key !== "host" && key !== "hostName" && key !== "ci") invalid(`${field}.${key}`, "is not a version control field");
+  const host = typeof e["host"] === "string" ? VERSION_CONTROL_HOSTS.find((h) => h === e["host"]) : undefined;
+  if (host === undefined) return invalid(`${field}.host`, "must be github, gitlab, self-hosted or none");
+  if (e["hostName"] !== undefined && host !== "self-hosted") invalid(`${field}.hostName`, "is for a self-hosted forge only");
+  const hostName = e["hostName"] === undefined ? undefined : text(e["hostName"], `${field}.hostName`, { min: 1, max: LIMITS.label });
+  const ci = e["ci"] === undefined ? undefined : text(e["ci"], `${field}.ci`, { min: 1, max: LIMITS.label });
+  if (host === "none" && ci !== undefined && ci.toLowerCase() !== "none") invalid(`${field}.ci`, "a repository with no remote has no hosted CI; leave it out or say none");
+  return { host, ...(hostName === undefined ? {} : { hostName }), ...(ci === undefined ? {} : { ci }) };
 }
 export const repositoryId = (value: unknown, field: string): string =>
   (typeof value === "string" && REPOSITORY_ID.test(value) ? value : invalid(field, "is not a repository ID"));
