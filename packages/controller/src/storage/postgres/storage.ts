@@ -11,6 +11,7 @@ import type {
   OperationResult, Page, StoredOperation, TimerClaim, TimerRecord, Timestamp,
 } from "../types.js";
 import { classify, isConnectionLoss } from "./errors.js";
+import { CLOSE_GRACE_MS, KEEPALIVE_IDLE_MS, REPLY_MARGIN_MS, answeredOrCut, endConnection, socketOf, within } from "./connection.js";
 import { CONTROLLER_APPLICATION, LIVE_LOCK_CLASS, liveLockKey } from "./restore-swap.js";
 import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
@@ -92,37 +93,13 @@ export function serverVersionProblem(versionNum: number, version: string, floor:
 type Row = Record<string, unknown>;
 interface Tx { q(sql: string, params?: unknown[]): Promise<Row[]> }
 
-/**
- * How much longer than the server's own statement timeout the client waits for any answer before it gives up on the connection (card 19).
- * The server bounds every statement it runs; this bounds what it cannot: a server, or a network path to it, that has stopped answering at all
- * (a paused or hung host, a silent network). Without it a call on an already open connection waits until the operating system gives up on the
- * socket (many minutes on a dead network, for ever on a paused server), and `close()` waits with it. A statement that is not answered in time is
- * `retryable`, or `uncertain_commit` if it was the COMMIT, and its connection is discarded. The migration phase is exempt (it may run long).
- */
-export const REPLY_MARGIN_MS = 10_000;
+// The client-side limits (card 19) live in `connection.ts`, shared with the transfer and restore helpers; exported here as before.
+export { CLOSE_GRACE_MS, REPLY_MARGIN_MS } from "./connection.js";
 
-/**
- * How long a closing connection may take to say goodbye before its socket is cut (card 19 review). A graceful end waits for the server to close its side,
- * which a paused or hung server never does, so `close()` (and with it a controller's shutdown) waited for ever. Cutting the socket ends the session the
- * same way for the server: its open transaction, if any, is rolled back and its locks released when it next runs.
- */
-export const CLOSE_GRACE_MS = 5_000;
-
-const socketOf = (client: pg.ClientBase): { destroyed: boolean; destroy(): void; once(event: "close", listener: () => void): unknown } | undefined =>
-  (client as unknown as { connection?: { stream?: { destroyed: boolean; destroy(): void; once(event: "close", listener: () => void): unknown } } }).connection?.stream;
-
-/** Waits up to `ms` for `done`, then calls `cut` and waits for `done` again (it settles once the socket is gone). */
-async function within(done: Promise<unknown>, ms: number, cut: () => void): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  const late = await Promise.race([done.then(() => false, () => false), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), ms); })]);
-  clearTimeout(timer);
-  if (late) { cut(); await done.catch(() => undefined); }
-}
-
-/** Ends a connection of our own; one whose server does not answer the goodbye within `CLOSE_GRACE_MS` is cut. */
-async function endConnection(client: pg.Client): Promise<void> {
-  await within(client.end().catch(() => undefined), CLOSE_GRACE_MS, () => socketOf(client)?.destroy());
-}
+/** Schema upgrade phase (no statement timeout): after this long without an answer, the server is asked every `PROBE_EVERY_MS` whether the statement's session is still there. */
+export const PROBE_EVERY_MS = 5_000;
+/** Probes in a row that get no answer at all before a schema upgrade statement's connection is cut as a server that stopped answering. */
+export const PROBE_MISSES = 3;
 
 const optional = <K extends string, V>(name: K, value: V | undefined | null): { [P in K]?: V } => (value === undefined || value === null ? {} : ({ [name]: value } as { [P in K]?: V }));
 const plus = (at: Timestamp, ms: number): Timestamp => new Date(Date.parse(at) + ms).toISOString();
@@ -240,14 +217,15 @@ export class PostgresStorage implements ControllerStorage {
       max: resolved.maxConnections,
       connectionTimeoutMillis: resolved.connectTimeoutMs,
       idleTimeoutMillis: resolved.idleTimeoutMs,
-      keepAlive: true, // an idle pooled connection to a host that vanished is found dead by the operating system instead of only at its next use
+      keepAlive: true, // an idle pooled connection, or a long schema upgrade statement, to a host that vanished is found dead by the operating system instead of only at its next use
+      keepAliveInitialDelayMillis: KEEPALIVE_IDLE_MS, // the operating system's default is about two hours of silence before the first probe
       application_name: CONTROLLER_APPLICATION,
       types,
       // Session settings applied to every connection by the server at startup: our schema, durable commits, bounded waits.
       options: `-c search_path=${schema} -c synchronous_commit=on -c default_transaction_isolation=read\\ committed -c lock_timeout=${resolved.lockTimeoutMs} -c statement_timeout=${resolved.statementTimeoutMs} -c idle_in_transaction_session_timeout=${resolved.statementTimeoutMs}`,
     });
     const store = new PostgresStorage(pool, resolved, { allowUnsupported: options.allowUnsupportedServer === true, minimum: options.minimumServerVersionNum });
-    store.#liveClient = () => new pg.Client({ connectionString: withControllerApplication(options.connectionString), application_name: CONTROLLER_APPLICATION, connectionTimeoutMillis: resolved.connectTimeoutMs, keepAlive: true,
+    store.#liveClient = () => new pg.Client({ connectionString: withControllerApplication(options.connectionString), application_name: CONTROLLER_APPLICATION, connectionTimeoutMillis: resolved.connectTimeoutMs, keepAlive: true, keepAliveInitialDelayMillis: KEEPALIVE_IDLE_MS,
       query_timeout: resolved.statementTimeoutMs + REPLY_MARGIN_MS, options: `-c statement_timeout=${resolved.statementTimeoutMs}` });
     try {
       // Before anything touches the schema: from here until close, a restore is never swapped into (or out of) it (second review of card K01i). The server check only reads, so it is made
@@ -383,7 +361,23 @@ export class PostgresStorage implements ControllerStorage {
     const ignore = () => undefined;
     client.on("error", ignore);
     let broken = false;
-    const q = async (sql: string, params?: unknown[]): Promise<Row[]> => (await client.query(sql, params)).rows as Row[];
+    // No statement timeout in this phase, so no reply deadline either; instead a statement unanswered past the usual deadline is watched (follow-up of card 19):
+    // it may run for hours as long as the server says its session is there, and its connection is cut only when the server stops answering.
+    let stopped: "gone" | "silent" | undefined;
+    // The server's own number for this session, asked of the server: the driver's `processID` is what a pooler in session mode (PgBouncer) made up, and no session
+    // in `pg_stat_activity` has it, so every long upgrade statement through one would be cut as "gone". Until it is known, only silence can cut a statement.
+    let pid: number | undefined;
+    const q = async (sql: string, params?: unknown[]): Promise<Row[]> => {
+      try {
+        return (await answeredOrCut(client.query(sql, params), {
+          quietMs: this.#options.statementTimeoutMs + REPLY_MARGIN_MS, everyMs: PROBE_EVERY_MS, misses: PROBE_MISSES,
+          probe: () => this.#sessionThere(pid), cut: (why) => { stopped ??= why; broken = true; socketOf(client)?.destroy(); },
+        })).rows as Row[];
+      } catch (error) {
+        if (stopped === undefined) throw error;
+        throw new StorageError("retryable", `the database server ${stopped === "gone" ? "ended the session of the schema upgrade without telling this controller" : "stopped answering during the schema upgrade (it may be paused, overloaded or unreachable)"}; the connection was dropped. Each upgrade step is recorded, so nothing is left half done: start again when the server answers.`, { cause: error });
+      }
+    };
     // Waiting for another process's migration is not an error and a migration may legitimately run long, so the wait is a poll of
     // pg_try_advisory_lock, never a blocking lock call: a session blocked in a statement holds a snapshot, and CREATE INDEX
     // CONCURRENTLY in the running migration waits for every such snapshot, which would be a deadlock. The statements of this phase
@@ -403,6 +397,7 @@ export class PostgresStorage implements ControllerStorage {
       }
     };
     try {
+      pid = Number((await q("SELECT pg_backend_pid() AS pid"))[0]!.pid);
       await lock();
       try {
         // 1. The schema and its journal. A schema with tables but no journal is somebody else's.
@@ -464,6 +459,20 @@ export class PostgresStorage implements ControllerStorage {
       client.off("error", ignore);
       client.release(broken);
     }
+  }
+
+  /**
+   * Whether the server session `pid` (a statement of the schema upgrade still running on it) is still there, asked on a short connection of its own.
+   * Rejects when the server does not answer (that connection is then cut); a server that answers with an error of its own counts as alive (`answeredOrCut`).
+   */
+  async #sessionThere(pid: number | undefined): Promise<boolean> {
+    if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return true; // not known: the session cannot be looked up, so only a probe that gets no answer counts
+    const probe = this.#liveClient!();
+    probe.on("error", () => undefined);
+    try {
+      await probe.connect();
+      return (await probe.query({ text: "SELECT 1 AS x FROM pg_stat_activity WHERE pid = $1", values: [pid], query_timeout: REPLY_MARGIN_MS } as pg.QueryConfig)).rows.length > 0;
+    } catch (error) { socketOf(probe)?.destroy(); throw error; } finally { await endConnection(probe); }
   }
 
   /** The server and session settings in force, read back from the database. */
