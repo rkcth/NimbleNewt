@@ -11,6 +11,7 @@ import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
 import { launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
+import { RUNNING_CALL_KIND, RunningCallStore } from "./running-store.js";
 
 after(stopServer);
 
@@ -795,6 +796,68 @@ for (const backend of backends) {
       await c.tick();
       assert.equal(good(out["running"]!)["state"], "failed");
     } finally { svc.dispose(); }
+  });
+
+  suite("T02d close-out: a call running in one service is listed by another service on the same store (elsewhere), once, without its input; the record goes when the call ends; a record that cannot be written or read never stops the call", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+    const deps = (runRecords: ConstructorParameters<typeof ToolExecutionService>[0]["runRecords"], run: ScriptRunner["run"]) => new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) }, assignments: c.assignments,
+      catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, facts: async () => hostFacts, isLocalHost: () => true, revocationWatchMs: 0, ...(runRecords === undefined ? {} : { runRecords }), runner: { run },
+    });
+    const here = deps(RunningCallStore.withEpoch(c.storage, c.epoch), async () => { started(); await gate; return { text: '{"ok":true}', cpuMs: 1 }; });
+    const there = deps(RunningCallStore.withEpoch(c.storage, c.epoch), async () => ({ text: '{"ok":true}' }));
+    const broken = { begin: async () => { throw new Error("store down"); }, end: async () => { throw new Error("store down"); }, elsewhere: async () => { throw new Error("store down"); }, sweep: async () => { throw new Error("store down"); } };
+    const fragile = deps(broken as never, async () => ({ text: '{"ok":true}', cpuMs: 1 }));
+    const seen: Record<string, unknown> = {};
+    const out: Record<string, BridgeResponse> = {};
+    const until = async (ok: () => Promise<boolean>) => { const end = Date.now() + 3000; while (Date.now() < end && !(await ok())) await new Promise((r) => setTimeout(r, 10)); };
+    try {
+      c.worker.script = c.session(async (s) => {
+        const name = await c.install(s, "slow", "1.0.0");
+        const args = { tool: name, version: "1.0.0", input: { url: "u" } };
+        await c.clear(s, args, "long-call");
+        const running = here.handle(s.token, s.gateway, { op: "tool.invoke", callId: "long-call", args });
+        await hasStarted;
+        await until(async () => (await there.runningEverywhere(name, "1.0.0")).total === 1);
+        seen["there"] = await there.runningEverywhere(name, "1.0.0");
+        seen["here"] = await here.runningEverywhere(name, "1.0.0");
+        seen["thereLocal"] = there.runningTotal(name, "1.0.0");
+        // The record of this very call rewritten by another writer (a leftover replaced meanwhile): the service running it still lists it once, as its own.
+        const ghost = RunningCallStore.withEpoch(c.storage, c.epoch);
+        const ghostId = await ghost.begin({ name, version: "1.0.0", attemptId: s.attemptId, callId: "long-call", taskId: "tsk-x", agentId: ann.id, seconds: 30 });
+        seen["hereWithGhost"] = (await here.runningEverywhere(name, "1.0.0")).total;
+        release();
+        out["running"] = await running;
+        await ghost.end(ghostId!);
+        await until(async () => (await there.runningEverywhere(name, "1.0.0")).total === 0);
+        seen["thereAfter"] = (await there.runningEverywhere(name, "1.0.0")).total;
+        seen["records"] = (await c.storage.listAggregates(RUNNING_CALL_KIND, { limit: 10 })).length;
+        // A record that cannot be written or read: the call runs and answers as ever; the listing says the other processes could not be checked.
+        await c.clear(s, args, "fragile-call");
+        out["fragile"] = await fragile.handle(s.token, s.gateway, { op: "tool.invoke", callId: "fragile-call", args });
+        seen["fragileList"] = await fragile.runningEverywhere(name, "1.0.0");
+        seen["swept"] = await fragile.sweepRunRecords().catch(() => "threw");
+      });
+      await c.tick();
+      const there1 = seen["there"] as { calls: Record<string, unknown>[]; total: number };
+      assert.equal(there1.total, 1, JSON.stringify(seen));
+      assert.deepEqual(there1.calls[0], { attemptId: there1.calls[0]!["attemptId"], callId: "long-call", taskId: there1.calls[0]!["taskId"], agentId: ann.id, elsewhere: true }, "named by attempt, call, task and agent, never by its input");
+      assert.equal(seen["thereLocal"], 0, "the other service runs nothing itself");
+      const here1 = seen["here"] as { calls: Record<string, unknown>[]; total: number };
+      assert.equal(here1.total, 1, "the service that runs it lists it once, as its own");
+      assert.equal(here1.calls[0]!["elsewhere"], undefined);
+      assert.equal(seen["hereWithGhost"], 1, "a record of a call running here, whoever wrote it, is not counted again");
+      assert.equal(good(out["running"]!)["state"], "confirmed");
+      assert.equal(seen["thereAfter"], 0, "the record goes when the call ends");
+      assert.equal(seen["records"], 0);
+      assert.equal(good(out["fragile"]!)["state"], "confirmed", "a record that cannot be written does not stop the call");
+      assert.deepEqual(seen["fragileList"], { calls: [], total: 0, elsewhereUnknown: true });
+      assert.equal(seen["swept"], 0, "a sweep that cannot reach the store answers 0, never throws");
+    } finally { here.dispose(); there.dispose(); fragile.dispose(); }
   });
 
   suite("the credential decides who is asking: another agent's, a wrong, an ended or another attempt's credential is refused; a caller cannot name a principal, actor, project or task", async (c) => {

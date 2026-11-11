@@ -28,6 +28,7 @@ import { JOB_WAKE_RULE } from "../jobs/wakes.js";
 import type { View } from "../domain/model.js";
 import { checkValue, schemaProblems } from "./schema.js";
 import type { RecallService } from "../context/recall-service.js";
+import type { RunningCallRecords } from "./running-store.js";
 
 /**
  * The controller side of the protected agent tool bridge (card T06). The extension loaded into the worker (`@nimblenewt/pi-adapter`, `bridge.ts`) exposes a small, fixed set of tools; each call is
@@ -108,6 +109,11 @@ export interface ToolExecutionDeps {
    * `revocationPolicy`) exactly as the listener does. Default 2000; `0` turns it off. Needs `catalog.revocationOf`.
    */
   readonly revocationWatchMs?: number;
+  /**
+   * Card T02d close-out: the durable record of running calls (`RunningCallStore`), so a controller process that did not start a call still lists it (`runningEverywhere`), and the owner's revoke question and choice cover
+   * calls running in another process. Absent: only this process's calls are listed. A record that cannot be written never stops the call.
+   */
+  readonly runRecords?: RunningCallRecords;
   /** The owner who revoked, by principal ID, for the `pause` choice applied after a revocation that another process took. Absent or `undefined` answer: the calls are stopped and the owner is told the tasks could not be paused. */
   readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
   readonly hosts: Pick<HostService, "status">;
@@ -343,6 +349,27 @@ export class ToolExecutionService {
 
   /** How many calls of the version are running in all (the list above is cut). */
   runningTotal(name: string, version: string): number { return this.#running.get(`${name}|${version}`)?.size ?? 0; }
+
+  /**
+   * Card T02d close-out: the running calls of a version in THIS process and, from the durable record, in any other controller process on the same store (marked `elsewhere: true`). This is what the owner's `catalog.running` and the
+   * chat's revoke question show, so a choice is asked for and recorded when the calls run only in another process (that process applies it through its store check). A call in both lists is shown once, as here. When the record
+   * cannot be read the calls here are still answered, with `elsewhereUnknown: true`. Capped like `runningCalls`; `total` counts all.
+   */
+  async runningEverywhere(name: string, version: string): Promise<{ readonly calls: readonly { readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string; readonly elsewhere?: true }[]; readonly total: number; readonly elsewhereUnknown?: true }> {
+    const here = this.runningCalls(name, version);
+    const hereTotal = this.runningTotal(name, version);
+    const records = this.#deps.runRecords;
+    if (records === undefined) return { calls: here, total: hereTotal };
+    let other: Awaited<ReturnType<RunningCallRecords["elsewhere"]>>;
+    try { other = await records.elsewhere(name, version); } catch { return { calls: here, total: hereTotal, elsewhereUnknown: true }; }
+    const mine = new Set([...(this.#running.get(`${name}|${version}`) ?? [])].map((r) => `${r.attemptId}\0${r.callId}`));
+    const away = other.calls.filter((r) => !mine.has(`${r.attemptId}\0${r.callId}`));
+    const calls = [...here, ...away.map(({ attemptId, callId, taskId, agentId }) => ({ attemptId, callId, taskId, agentId, elsewhere: true as const }))].slice(0, BRIDGE_LIMITS.runningListed);
+    return { calls, total: hereTotal + away.length };
+  }
+
+  /** Removes durable records of runs that can no longer be running (left by a process that stopped or lost the epoch). Best effort; answers how many. */
+  async sweepRunRecords(): Promise<number> { try { return (await this.#deps.runRecords?.sweep()) ?? 0; } catch { return 0; } }
 
   /**
    * What the owner chose on the revoke command decides; with no choice (nobody could be asked) the dependency `revocationPolicy` answers, and without one the run finishes. A policy that cannot be read, or answers
@@ -894,10 +921,28 @@ export class ToolExecutionService {
   /** Runs `body` as a running call of the version, so a revocation can abort it (`own`), and forgets it when it ends. */
   async #tracked<T>(c: Context, v: VersionBody, body: (own: AbortController) => Promise<T>): Promise<T> {
     const own = new AbortController();
+    const forget = this.#enter(c, v, own);
+    try { return await body(own); } finally { forget(); }
+  }
+
+  /**
+   * Enters a call in the running set (so a revocation can abort it) and, with `runRecords`, in the durable record other processes read; answers the function that takes it out of both. The durable write is not waited for (a call
+   * is never delayed or refused by it); the removal waits for it, so the two are never reordered.
+   */
+  #enter(c: Context, v: VersionBody, own: AbortController): () => void {
+    const key = `${v.name}|${v.version}`;
     const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
-    const set = this.#running.get(`${v.name}|${v.version}`) ?? new Set<typeof entry>();
-    set.add(entry); this.#running.set(`${v.name}|${v.version}`, set); this.#noteRunning();
-    try { return await body(own); } finally { set.delete(entry); if (set.size === 0) this.#running.delete(`${v.name}|${v.version}`); this.#noteRunning(); }
+    const set = this.#running.get(key) ?? new Set<typeof entry>();
+    set.add(entry); this.#running.set(key, set); this.#noteRunning();
+    const records = this.#deps.runRecords;
+    const recorded = records?.begin({ name: v.name, version: v.version, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id, seconds: v.manifest.limits.seconds }).catch(() => undefined);
+    let gone = false;
+    return () => {
+      if (gone) return;
+      gone = true;
+      const now = this.#running.get(key); now?.delete(entry); if (now !== undefined && now.size === 0) this.#running.delete(key); this.#noteRunning();
+      if (records !== undefined && recorded !== undefined) void recorded.then((id) => (id === undefined ? undefined : records.end(id))).catch(() => undefined);
+    };
   }
 
   /**
@@ -959,11 +1004,7 @@ export class ToolExecutionService {
           // The job is a running call of its version until its end is recorded (card T07b review): a revocation that cancels or pauses the version's running calls lists it and stops it (a recorded Stop by the job host),
           // as it aborts a `tool.invoke` run; one that lets them finish leaves it alone.
           const own = new AbortController();
-          const key = `${v.name}|${v.version}`;
-          const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
-          const set = this.#running.get(key) ?? new Set<typeof entry>();
-          set.add(entry); this.#running.set(key, set); this.#noteRunning();
-          const forget = (): void => { const now = this.#running.get(key); now?.delete(entry); if (now !== undefined && now.size === 0) this.#running.delete(key); this.#noteRunning(); };
+          const forget = this.#enter(c, v, own);
           let handed = false;
           try {
             await this.#authorizeStart(c, v, facts, own);

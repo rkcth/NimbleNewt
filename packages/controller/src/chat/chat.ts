@@ -1417,11 +1417,13 @@ export class ChatService {
       if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "Which tool should be revoked, and which version of it? Nothing in your message names them.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "catalog.running", args: { name: args["name"], version: args["version"] } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
-      const running = (found.result["items"] ?? []) as { attemptId: string; callId: string; taskId: string; agentId: string }[];
+      const running = (found.result["items"] ?? []) as { attemptId: string; callId: string; taskId: string; agentId: string; elsewhere?: boolean }[];
       const total = typeof found.result["total"] === "number" ? Math.max(found.result["total"], running.length) : running.length;
-      const listed = running.slice(0, 10).map((r) => `call ${String(r.callId).slice(0, 40)} of task ${String(r.taskId).slice(0, 60)} (agent ${String(r.agentId).slice(0, 60)})`);
+      const listed = running.slice(0, 10).map((r) => `call ${String(r.callId).slice(0, 40)} of task ${String(r.taskId).slice(0, 60)} (agent ${String(r.agentId).slice(0, 60)})${r.elsewhere === true ? " in another controller process" : ""}`);
       const more = total > listed.length ? ` and ${total - listed.length} more` : "";
       if (total > 0) notes.push(`${total} running ${total === 1 ? "call" : "calls"} of ${args["name"].slice(0, 80)} ${args["version"].slice(0, 20)}: ${listed.join("; ")}${more}.`.slice(0, CHAT_LIMITS.line - 10));
+      // Card T02d close-out: when the record of other processes' calls could not be read, the owner is told rather than shown "nothing is running" as a fact.
+      if (found.result["elsewhereUnknown"] === true) notes.push("Calls running in another controller process on this store could not be checked just now; any there follow your choice, or the standing policy if you make none.");
       notes.push("A version is revoked once: choosing finish cannot be changed to cancel or pause later. Cancel and pause reach every running call when they are carried out, including calls that start before you accept.");
       if (args["runningCalls"] === undefined) {
         if (total > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, be cancelled, or should their tasks be paused? (A cancelled call ends as failed. A pause stops the call too, so nothing the revoked tool writes reaches the agent, and it also pauses the task: the agent does nothing more until you resume it.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed", "pause: stop each call and pause its task; you decide when to resume"], field: "runningCalls", choices: ["finish", "cancel", "pause"] };

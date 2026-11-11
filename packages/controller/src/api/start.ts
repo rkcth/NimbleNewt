@@ -63,7 +63,7 @@ import { WebChatDoor, type WebChatOptions } from "../web/index.js";
 import { CatalogPolicyService, CatalogService } from "../catalog/index.js";
 import { AdmissionService } from "../admission/index.js";
 import { HostService } from "../hosts/index.js";
-import { ToolExecutionService, type BoundGateway, type BridgeRequest, type BridgeResponse, type ToolExecutionDeps } from "../toolbridge/index.js";
+import { RunningCallStore, ToolExecutionService, type BoundGateway, type BridgeRequest, type BridgeResponse, type ToolExecutionDeps } from "../toolbridge/index.js";
 import { CommandService, catalogSource } from "../commands/index.js";
 import { BUILTIN_COMMANDS } from "./operations.js";
 
@@ -716,7 +716,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The standing answer for running calls when a revoke names none (card T02c); an operator-given `tools.revocationPolicy` wins over it.
     const operatorPolicy = options.tools?.revocationPolicy;
     const catalogPolicy = CatalogPolicyService.withEpoch(storage, epoch, "finish", {}, operatorPolicy);
-    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), revocations: (owner, query) => catalogService.revocations(owner, query), running: async (_owner, name, version) => ({ calls: toolsLive?.runningCalls(name, version) ?? [], total: toolsLive?.runningTotal(name, version) ?? 0 }) };
+    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), revocations: (owner, query) => catalogService.revocations(owner, query), running: async (_owner, name, version) => (toolsLive === undefined ? { calls: [], total: 0 } : toolsLive.runningEverywhere(name, version)) };
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(catalogService)));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
@@ -1188,9 +1188,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // The task, artifact and message requests of the bridge go through the API and the message service every client uses (card C09h: without them a worker's output and messages never reached the task or its activity).
         state: api, recall: dispatch.recall, messages, activity: (step) => activity.record(dispatch!.principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(jobRuns === undefined ? {} : { jobs, jobRuns }), ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded, bind: v.bindCall, admit: v.admitCall, requireStream: v.requireStream, record: v.record }; } }), revocationPolicy: () => catalogPolicy.effective(),
         // Card T02d: a revocation taken by another process pauses as the owner who revoked (read from the store, active principals only).
+        // Card T02d close-out: each running call is also on the durable record, so another controller process on this store lists it and the owner's revoke question and choice reach it.
+        runRecords: RunningCallStore.withEpoch(storage, epoch),
         revocationOwner: async (id) => { const p = await principals.get(id); return p === undefined || p.kind !== "owner" || p.state !== "active" ? undefined : { id: p.id, kind: p.kind, name: p.name, grants: p.grants }; },
       });
     }
+    // Records of runs a stopped (or fenced) controller could not remove are cleared once they can no longer be running. Best effort (never throws; one bounded look), waited for so it never races the close.
+    if (tools !== undefined) await tools.sweepRunRecords().catch(() => 0);
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
     let webChat: WebChatDoor | undefined;
