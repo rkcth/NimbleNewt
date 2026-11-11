@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, MAX_TURN_NUDGES, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
+import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, MAX_TURN_NUDGES, THINKING_REPORT, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
 
 const start: ChannelStart = {
   attemptId: "att-1", agentId: "agent:ann", namespaceId: "abcdef0123456789", credential: "tok", storeDir: "/home/agent/pi", relayBase: "http://relay.invalid",
@@ -109,4 +109,18 @@ test("a compacted notice carries the count, the summary length and a sha-256 dig
   const ok = { t: "compacted", messageCount: 3, summaryChars: 10, digest: "0".repeat(64) };
   assert.deepEqual(parseFromChild(ok), ok);
   for (const bad of [{ ...ok, digest: "G".repeat(64) }, { ...ok, digest: "0".repeat(63) }, { ...ok, messageCount: -1 }, { ...ok, messageCount: undefined }, { ...ok, summaryChars: 1.5 }, { ...ok, summaryChars: undefined }, { ...ok, messageCount: 10_000_001 }]) assert.throws(() => parseFromChild(bad), ChannelError);
+});
+
+test("a thinking report carries bounded blocks of untrusted text and nothing else is accepted (card U09b)", () => {
+  const block = { entryId: 4, block: 0, provider: "llama", model: "local", text: "I should read the file first.", opaque: false };
+  const ok = { t: "thinking", blocks: [block, { ...block, block: 1, text: "", opaque: true }] };
+  assert.deepEqual(parseFromChild(ok), ok);
+  assert.deepEqual(parseFromChild({ t: "thinking", blocks: [{ ...block, text: "x".repeat(THINKING_REPORT.parseChars) }] }).t, "thinking");
+  const many = Array.from({ length: THINKING_REPORT.blocks + 1 }, (_, i) => ({ ...block, block: i }));
+  for (const bad of [
+    { t: "thinking" }, { t: "thinking", blocks: [] }, { t: "thinking", blocks: many }, { t: "thinking", blocks: "x" }, { t: "thinking", blocks: [5] },
+    { t: "thinking", blocks: [{ ...block, text: "x".repeat(THINKING_REPORT.parseChars + 1) }] }, { t: "thinking", blocks: [{ ...block, entryId: -1 }] }, { t: "thinking", blocks: [{ ...block, block: 1.5 }] },
+    { t: "thinking", blocks: [{ ...block, opaque: "no" }] }, { t: "thinking", blocks: [{ ...block, model: "" }] }, { t: "thinking", blocks: [{ ...block, provider: "p".repeat(81) }] }, { t: "thinking", blocks: [{ ...block, text: 7 }] },
+  ]) assert.throws(() => parseFromChild(bad), ChannelError, JSON.stringify(bad).slice(0, 80));
+  assert.deepEqual(parseFromChild(many.slice(0, THINKING_REPORT.blocks).length === THINKING_REPORT.blocks ? { t: "thinking", blocks: many.slice(0, THINKING_REPORT.blocks) } : {}).t, "thinking");
 });
