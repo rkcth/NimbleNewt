@@ -261,7 +261,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.ok(requestText(answer, 2).length < requestText(answer, 1).length + 12000, "and not the whole stored conversation again");
 
       // A call that no compaction can bring under the limit is refused at start: the attempt ends failed, the blocker is open, and the model is not called.
-      x.window.value = 1024;
+      x.window.value = 8192; // the smallest window the worker accepts (card CMP: a smaller one is refused at its start); the fixed part of a call alone is over its startup share
       const calls = answer.seen.length;
       const refused = await run(4, three.checkpoint);
       assert.equal(refused.status, "failed");
