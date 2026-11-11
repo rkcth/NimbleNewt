@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Placeholder: responsive web UI (not yet implemented).",
+  "description": "Responsive web chat assets (card U07): the page, script and style the controller serves to the owner's phone browser.",
   "type": "module",
   "exports": {
     ".": {
@@ -13,5 +13,8 @@
   },
   "files": [
     "dist"
-  ]
+  ],
+  "scripts": {
+    "test": "node ../../scripts/run-package-tests.mjs"
+  }
 }
