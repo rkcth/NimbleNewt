@@ -26,7 +26,7 @@ import type { View } from "../domain/model.js";
 import type { JobBody, JobService } from "../jobs/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import { describeRun, type RetentionService, type RetentionSettingsService } from "../retention/index.js";
-import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
@@ -113,6 +113,7 @@ export interface Context {
   /** Coverage of responsibilities and its alert setting (card P04). */
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
+  readonly leases?: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   /** Retention, quotas, archive, export and deletion, and their settings (card K06). */
   readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
@@ -395,6 +396,7 @@ const taskArtifactsOf = (c: Context): NonNullable<Context["taskArtifacts"]> => c
 const serviceOpsOf = (c: Context): NonNullable<Context["serviceOps"]> => c.serviceOps ?? unavailable("service operations");
 const acceptanceOf = (c: Context): NonNullable<Context["acceptance"]> => c.acceptance ?? unavailable("deliverable acceptance");
 const submissionsOf = (c: Context): NonNullable<Context["submissions"]> => c.submissions ?? unavailable("submissions");
+const leasesOf = (c: Context): NonNullable<Context["leases"]> => c.leases ?? unavailable("maintenance leases");
 const incidentsOf = (c: Context): NonNullable<Context["incidents"]> => c.incidents ?? unavailable("responsibility incidents");
 const coverageOf = (c: Context): NonNullable<Context["coverage"]> => c.coverage ?? unavailable("coverage");
 const retentionOf = (c: Context): NonNullable<Context["retention"]> => c.retention ?? unavailable("retention");
@@ -1376,6 +1378,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId"]); const r = await retentionOf(c).restore(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ id: r.taskId, ...r, shown: [`Restored ${r.restored.length} record(s); ${r.conflicts.length} changed since they were archived and were left alone.`] }); } },
   { name: "retention.export", kind: "query", summary: "Owner only: an export of a project's records (project, tasks, desk records, summaries, artifact metadata, archived originals) in pages. Secrets are excluded: secret-named fields are replaced, key-shaped text is masked, and credential records are not exported.", args: { projectId: "the project", "after?": "the `next` of the previous page", "limit?": "1 to 200 (default 100)" }, result: "`{ projectId, items, redactions, next?, partial? }`.",
     run: async (c, a) => { only(a, ["projectId", "after", "limit"]); return asJson(await retentionOf(c).export(c.principal, { projectId: str(a, "projectId"), ...(a["after"] === undefined ? {} : { after: a["after"] as string }), ...(a["limit"] === undefined ? {} : { limit: a["limit"] as number }) })); } },
+  { name: "lease.list", kind: "query", summary: "The maintenance leases of a project's managed resources: who holds each, why, until when, whether it ran out unreleased (`expired`), how many times another agent was blocked and the last few blocks (who, when, why), how a holding ended (validation result and response) and from whom a lease was taken over.", args: { projectId: "the project", "resourceId?": "only this resource" }, result: "`{ items }`.",
+    run: async (c, a) => { only(a, ["projectId", "resourceId"]); return asJson({ items: (await leasesOf(c).list(c.principal, str(a, "projectId"), a["resourceId"] === undefined ? {} : { resourceId: a["resourceId"] as string })) ?? ((): never => { throw new DomainError("not_found", "no such project"); })() } as never); } },
+  { name: "lease.acquire", kind: "command", summary: "Takes (or, for the holder, renews) the maintenance lease on a resource a responsibility manages, before changing it. Only one agent holds it at a time: if another agent holds it the answer is `status: blocked` with the holder and the time, and the attempt is recorded visibly on the lease. A lease that ran out unreleased is taken over and the previous holder recorded. For the answerable agent, the owner or a holder of `responsibility.write`; a paused responsibility starts no new maintenance.", args: { resourceId: "the managed resource's ID", purpose: "what the maintenance is for", "minutes?": "how long, 1 to 1440 (default 60)", commandId: "required" }, result: "`{ status: granted | blocked, lease }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["resourceId", "purpose", "minutes"]); return asJson(await leasesOf(c).acquire(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "lease.release", kind: "command", summary: "Gives back a maintenance lease with the result of validating the change: `validation` passed or failed. A failed validation needs `onFailure`: `rollback` (only when the responsibility permits the action `rollback`) or `escalate` (opens an incident and escalates it at once to the responsibility's escalation target or the owner). Both are recorded in the responsibility's history. The owner may instead release another agent's lease by force: give only `evidence` (the reason), no `validation`.", args: { resourceId: "the resource", "validation?": "`passed` or `failed` (leave out only for the owner's forced release)", evidence: "what shows the result, or the reason for a forced release", "onFailure?": "`rollback` or `escalate`, with a failed validation", commandId: "required" }, result: "`{ lease, response?, incidentId? }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["resourceId", "validation", "evidence", "onFailure"]); return asJson(await leasesOf(c).release(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
   { name: "incident.report", kind: "command", summary: "Reports an alert on a responsibility: the first of a signature opens an incident, later ones add to it.", args: { responsibilityId: "the responsibility", signature: "what the alert is about, for example `disk-full:web-1`", summary: "what was found", outcome: "`attention` or `failed`", commandId: "required" }, result: "`{ id, replayed }`.",
     run: async (c, a, id) => written(await incidentsOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "incident.resolve", kind: "command", summary: "Resolves an open incident with the evidence that it is over.", args: { incidentId: "the incident", evidence: "what shows it is resolved", commandId: "required" }, result: "`{ id, replayed }`.",

@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "concern";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "concern" | "responsibility";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -142,6 +142,13 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },
   "project.plan": { verb: "Plan project", mode: "apply", revision: "project", needsProject: true },
   "responsibility.create": { verb: "Create responsibility", mode: "propose", needsProject: true },
+  // Maintenance leases on a managed resource (card P04). Taking one only reserves the resource for the agent and is undone by releasing it, so it applies at once; releasing another agent's lease by force, or ending one with a failed validation (a rollback or an escalation), acts on a resource or opens an incident: shown first.
+  // Changing a responsibility (card P04): pausing it stops new checks without stopping the managed service, resuming restarts them, retiring is final and releases its resources, and a new answerable agent or escalation target changes who answers: shown first in every profile. The revision is read for the owner.
+  "responsibility.update": { verb: "Change a responsibility (pause, resume, retire it, or change its agent, schedule or escalation)", mode: "propose", revision: "responsibility", needsProject: true },
+  // Resolving an incident records the owner's evidence that it is over and changes nothing else; the owner's explicit order follows the profile.
+  "incident.resolve": { verb: "Resolve an incident", mode: "profile", needsProject: true },
+  "lease.acquire": { verb: "Take the maintenance lease on a resource", mode: "apply", needsProject: true },
+  "lease.release": { verb: "Release a maintenance lease (with the result of validating the change, or by force)", mode: "propose", needsProject: true },
   // Topics for a later stand-up (card M03). Capturing and correcting are reversible edits of a saved topic and apply at once, shown back to the owner; a topic that records an instruction or a decision for the team is first shown (see `proposalReason`).
   "agenda.capture": { verb: "Add agenda item", mode: "apply", needsProject: true },
   "agenda.correct": { verb: "Correct agenda item", mode: "apply", revision: "agenda", needsProject: true },
@@ -320,7 +327,7 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
+  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
 }
 
 /**

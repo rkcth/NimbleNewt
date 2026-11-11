@@ -5,3 +5,4 @@ export { OBSERVATION_KINDS, OUTCOMES, RESPONSIBILITY_STATES, ResponsibilityServi
 export { ResponsibilityChecks, type CheckBody } from "./checks.js";
 export { COVERAGE_PERIOD, CoverageService, CoverageSettingsService, type CoverageGap, type CoverageNotice, type CoverageReport, type CoverageSettings } from "./coverage.js";
 export { IncidentService, type IncidentBody, type ResponsibilityObservedState } from "./incidents.js";
+export { MaintenanceLeaseService, LEASE_DEFAULT_MINUTES, LEASE_MAX_MINUTES, type AcquireResult, type LeaseBlock, type LeaseBody, type LeaseRelease, type LeaseView, type ReleaseResult } from "./leases.js";

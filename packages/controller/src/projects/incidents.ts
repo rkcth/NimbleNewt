@@ -162,6 +162,31 @@ export class IncidentService {
     return out;
   }
 
+  /**
+   * Escalates one open incident now, whatever the clock or the count (a failed validation after maintenance, card P04): the same record as the timed escalation (`escalatedAt`, `escalatedTo`), so the loop that tells
+   * the target picks it up. `to` is the responsibility's escalation target, or the owner when it names none. Once only; an already escalated or resolved incident is returned unchanged. Whoever may report may escalate.
+   */
+  async escalateNow(by: Principal, incidentId: string): Promise<View<IncidentBody>> {
+    const first = await this.#runner.get(INCIDENT, incidentId);
+    const fb = first?.body as unknown as IncidentBody | undefined;
+    const duty = fb === undefined ? undefined : await this.#duties.get(by, fb.responsibilityId);
+    if (first === undefined || fb === undefined || duty === undefined || !this.#mayReport(by, duty)) throw hidden(by, "escalate that incident");
+    if (fb.state !== "open" || fb.escalatedAt !== undefined) return view<IncidentBody>(first);
+    await this.#runner.command("responsibility.incident.escalate-now", { commandId: `resn-${incidentId}`, actor: by.id }, async () => ({
+      payload: { incidentId },
+      build: async (): Promise<Built> => {
+        const fresh = await this.#runner.get(INCIDENT, incidentId);
+        const cur = fresh?.body as unknown as IncidentBody | undefined;
+        if (fresh === undefined || cur === undefined) throw new DomainError("not_found", "no such incident");
+        if (cur.state !== "open" || cur.escalatedAt !== undefined) throw new DomainError("stale_revision", "already handled");
+        const to = duty.escalation?.to ?? "owner";
+        const next: IncidentBody = { ...cur, escalatedAt: this.#runner.now(), escalatedTo: to };
+        return { ref: { kind: INCIDENT, id: incidentId }, creates: false, changes: [{ type: "update", ref: { kind: INCIDENT, id: incidentId }, expectedRevision: fresh.revision, body: next as unknown as JsonObject }], detail: { to } };
+      },
+    })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "stale_revision") return undefined; throw error; });
+    return view<IncidentBody>((await this.#runner.get(INCIDENT, incidentId))!);
+  }
+
   /** Escalated incidents of a project whose notice has not been recorded as sent, oldest escalation first. Owner, service, or `responsibility.write`. */
   async untold(by: Principal, projectId: string): Promise<View<IncidentBody>[]> {
     if (!(by.kind === "owner" || by.kind === "service" || may(by, "responsibility.write", projectId))) throw hidden(by, "read incidents of that project");
