@@ -239,10 +239,11 @@ test("the reader keeps to the attempt's own task: an attempt, a hand-off or a cu
 });
 
 test("no write path: the files that answer task.recall hold no call that writes a record", () => {
-  const here = fileURLToPath(new URL(".", import.meta.url));
+  // dist -> src on the URL, whose separator is "/" on every system (a Windows path has backslashes, so the path itself never matched "/dist/" there).
+  const here = new URL(".", import.meta.url).href;
   const dir = here.includes("/dist/") ? here.replace("/dist/", "/src/") : here;
   for (const file of ["recall.ts", "recall-source.ts", "recall-service.ts"]) {
-    const text = readFileSync(`${dir}${file}`, "utf8");
+    const text = readFileSync(fileURLToPath(new URL(file, dir)), "utf8");
     for (const bad of [/\.command\(/, /applyOperation/, /\.record\(/, /\.write\(/, /\.create\(/, /\.set\(\s*REF/, /writeFile/, /appendFile/]) assert.doesNotMatch(text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""), bad, `${file} must not write: ${bad}`);
   }
 });

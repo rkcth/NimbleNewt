@@ -9,7 +9,9 @@ import { PolicyService, launch, runTerminalChat, type EnvironmentFacts, type Fil
 // the host's relay reads from the owner's provider records, with the keys from the secret store by NAME. No sandbox is needed here; the end to end run is u14b-local-host.test.ts.
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const facts: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
-const start = { facts, filesystem: ext4 } as const;
+// The facts and the file system are stand-ins, and so are the prerequisite features: without `features` a start with a local host probes this machine's real bubblewrap, which macOS (and a Linux
+// machine without it) does not have, and the start these tests describe would then fail for that reason instead.
+const start = { facts, filesystem: ext4, features: [] } as const;
 const memorySecrets = (seed: Record<string, string> = {}): LauncherSecrets & { values: Map<string, string> } => { const values = new Map(Object.entries(seed)); return { values, resolve: async (n) => values.get(n), set: async (n, v) => { values.set(n, v); }, remove: async (n) => values.delete(n) }; };
 const configFor = (dir: string, extra: Partial<LauncherConfig> = {}): LauncherConfig => ({ installation: { name: "test", dataDir: dir }, controller: { storage: { kind: "sqlite", path: join(dir, "controller.sqlite") } }, models: { providers: {
   primary: { adapter: "openai-compatible", endpoint: "http://127.0.0.1:8002/v1", enabled: true, paid: false, models: ["local-x"] },

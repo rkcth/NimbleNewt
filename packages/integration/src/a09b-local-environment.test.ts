@@ -30,7 +30,8 @@ function pack(name: string, version: string, files: Record<string, string>, scri
 }
 const D = (c: string): string => `sha256:${c.repeat(64)}`;
 
-test("an approved package is installed into the agent's environment directory by the real local runtime: digest checked, scripts off, revision active, owner informed; a wrong digest and undeclared scripts are refused (card A09)", async () => {
+// The real local environment runtime says it is Linux only ("changing an agent's environment is supported only on Linux so far", worker/src/environment/host.ts).
+test("an approved package is installed into the agent's environment directory by the real local runtime: digest checked, scripts off, revision active, owner informed; a wrong digest and undeclared scripts are refused (card A09)", { skip: process.platform !== "linux" && "the local environment runtime is Linux only (worker/src/environment/host.ts)" }, async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-a09b-"));
   const data = join(d, "data"); mkdirSync(data);
   const registry = new Map<string, Uint8Array>(); const fetched: string[] = [];

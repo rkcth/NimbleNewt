@@ -9,8 +9,10 @@ export interface ProxyFault {
    * the client cannot tell whether the statement took effect.
    * `silent`: forward the whole statement, let the server process it, then deliver nothing more on that connection while keeping it open: a server,
    * or a network path, that has stopped answering (a paused or hung host). Only the client's own deadline ends the wait.
+   * `hold`: do not forward the message, and from then on forward nothing either way on that connection and keep the server's side open even after the client
+   * goes: a network path that went silent before the message arrived, so the server never hears it nor the client's goodbye (only `stop()` ends it).
    */
-  readonly when: "before" | "after" | "silent";
+  readonly when: "before" | "after" | "silent" | "hold";
 }
 
 /** Cut the connection at the Nth statement (counted from `arm`): see `ProxyFault.when` for the two modes. */
@@ -32,6 +34,8 @@ export class FaultProxy {
   trace: string[] | undefined;
   fired = 0;
   port = 0;
+  /** When set, the process number in the server's BackendKeyData is replaced by one no server session has, as a pooler in session mode (PgBouncer) does. */
+  fakeBackendPids = false;
   #frozen = false;
 
   private constructor(server: net.Server) { this.#server = server; }
@@ -74,15 +78,16 @@ export class FaultProxy {
     let pendingAfter = false;
     let pendingSilent = false;
     let silent = false;
+    let held = false;
     const closeBoth = () => { client.destroy(); upstream.destroy(); };
     client.on("error", closeBoth);
     upstream.on("error", () => { if (silent || this.#frozen) upstream.destroy(); else closeBoth(); });
-    client.on("close", () => upstream.destroy());
+    client.on("close", () => { if (!held) upstream.destroy(); });
     client.on("end", () => { if (!this.#frozen) client.end(); }); // the client said goodbye: answered, unless the "server" is frozen
     upstream.on("close", () => { if (!silent && !this.#frozen) client.destroy(); }); // a silent server's goodbye is not heard either
 
     client.on("data", (chunk: Buffer) => {
-      if (this.#frozen) return;
+      if (this.#frozen || held) return;
       buffer = Buffer.concat([buffer, chunk]);
       for (;;) {
         // Startup (and SSL request) messages have no type byte; everything after has one.
@@ -113,6 +118,7 @@ export class FaultProxy {
           this.#faults.shift();
           this.fired += 1;
           if (next.when === "before") return closeBoth();
+          if (next.when === "hold") { held = true; return; }
           if (next.when === "silent") pendingSilent = true; else pendingAfter = true;
         }
         upstream.write(message);
@@ -123,8 +129,13 @@ export class FaultProxy {
         }
       }
     });
+    let keyRewritten = false;
     upstream.on("data", (chunk: Buffer) => {
-      if (silent || this.#frozen) return; // the server answered; the client never hears from it again
+      if (silent || held || this.#frozen) return; // the server answered; the client never hears from it again
+      if (this.fakeBackendPids && !keyRewritten) {
+        const at = chunk.indexOf(Buffer.from([0x4b, 0, 0, 0, 12])); // 'K', length 12: process number, secret key
+        if (at >= 0 && at + 9 <= chunk.length) { chunk.writeInt32BE(2_000_000_000 - (chunk.readInt32BE(at + 5) % 1_000_000), at + 5); keyRewritten = true; }
+      }
       if (dropAnswer) {
         // The statement ran; the client never learns the result.
         dropAnswer = false;
