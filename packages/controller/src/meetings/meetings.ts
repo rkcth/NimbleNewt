@@ -12,6 +12,7 @@ import { redactText } from "../security/redact.js";
 import type { SettingDefinition } from "../configuration/settings.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { OwnerAnswerNote, RecordBody } from "./record-types.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import { knownZone, dueSlots, isLocalDate, isLocalTime, nextSlot, wallClock, type Recurrence, type Slot, type SlotRule } from "./zones.js";
 
 export type ScheduleState = "active" | "paused" | "ended";
@@ -1038,7 +1039,7 @@ export class MeetingService {
         const recFound = body.occurrenceId === undefined ? undefined : await this.#runner.get("meeting-record", derivedId("mrc", body.occurrenceId));
         if (recFound !== undefined) {
           const recBody = recFound.body as unknown as RecordBody;
-          const note: OwnerAnswerNote = { questionId: id, topic: body.topic.slice(0, 120), question: body.question.slice(0, 300), answer: answer.slice(0, 1000), answeredAt: at };
+          const note: OwnerAnswerNote = { questionId: id, topic: safeSlice(body.topic, 120), question: safeSlice(body.question, 300), answer: safeSlice(answer, 1000), answeredAt: at };
           changes.push({ type: "update", ref: { kind: "meeting-record", id: recFound.id }, expectedRevision: recFound.revision, body: clean({ ...recBody, ownerAnswers: [...(recBody.ownerAnswers ?? []).filter((x) => x.questionId !== id), note].slice(-MEETING_LIMITS.recordOwnerAnswers) }) });
         }
         return { ref, creates: false, changes, detail: { projectId: body.projectId } };

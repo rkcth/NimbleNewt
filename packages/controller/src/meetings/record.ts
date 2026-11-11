@@ -17,7 +17,8 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { clean, invalid, optionalPlain, plain, whole } from "../standups/shared.js";
 import { ATTENDANCE_LIMITS, type MeetingDecision } from "./attendance.js";
-import { MEETING_LIMITS, authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody } from "./meetings.js";
+import { MEETING_LIMITS, authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody, type OwnerQuestionBody } from "./meetings.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import {
   ENTRY_TAGS, FINAL_MOTION_STATES,
   type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type UnloggedIndexBody, type OwnerResponse,
@@ -1267,11 +1268,11 @@ export class MeetingRecordService {
         for (const motionId of rec.motions) {
           const m = known<MotionBody>(await this.#runner.get("meeting-motion", motionId));
           if (m === undefined || m.agendaItemId === undefined || m.outcomeReturned === true || !FINAL_MOTION_STATES.includes(m.state)) continue;
-          motions.push({ id: motionId, number: m.number, text: m.text.slice(0, 300), state: m.state, deferred: m.state !== "adopted" && m.state !== "rejected" });
+          motions.push({ id: motionId, number: m.number, text: safeSlice(m.text, 300), state: m.state, deferred: m.state !== "adopted" && m.state !== "rejected" });
         }
         if (motions.length === 0) continue;
         if (meetings.length >= limit) return { meetings, truncated: true };
-        meetings.push({ id: a.id, projectId: rec.projectId, title: rec.title.slice(0, 120), motions });
+        meetings.push({ id: a.id, projectId: rec.projectId, title: safeSlice(rec.title, 120), motions });
       }
       if (page.length < 100) return { meetings, truncated: false };
     }
@@ -1628,14 +1629,24 @@ export class MeetingRecordService {
         if (open === undefined) open = await meetings.ownerQuestions(by, rec.projectId).then((q) => q.open.length, () => 0);
         if (open >= MEETING_LIMITS.ownerQuestionsOpen) notAsked.push({ motionId, reason: `${MEETING_LIMITS.ownerQuestionsOpen} questions to the owner are already open in this project; the outcome is returned without a question` });
         else {
-          const reason = (m.voidReason ?? "").slice(0, 120);
-          question = plan.words.get(motionId) ?? `On "${ib.topic.slice(0, 80)}": motion ${m.number} ("${m.text.slice(0, 160)}") ended ${m.state}${reason === "" ? "" : ` (${reason})`}, so nothing was decided. How should the team go on?`.slice(0, MEETING_LIMITS.ownerQuestion);
+          // The made words quote an agent's topic and motion: each excerpt is one line (a line of its own cannot pass for the system speaking), cut between whole characters (a split pair is refused as text, which
+          // would fail the whole hand-back on every try), and anything credential-shaped the cut or the joining could form is redacted rather than refused.
+          const excerpt = (s: string, n: number): string => safeSlice(s.replace(/\s+/g, " ").trim(), n);
+          const reason = excerpt(m.voidReason ?? "", 120);
+          question = plan.words.get(motionId) ?? redactText(safeSlice(`On "${excerpt(ib.topic, 80)}": motion ${m.number} ("${excerpt(m.text, 160)}") ended ${m.state}${reason === "" ? "" : ` (${reason})`}, so nothing was decided. How should the team go on?`, MEETING_LIMITS.ownerQuestion));
           open += 1;
         }
       }
+      // Whether the item's question was asked in this very meeting (by an earlier try of this hand-back, whoever made it), not one left on the topic by an earlier meeting.
+      const askedHere = async (): Promise<boolean> => {
+        if (ib.ownerQuestionId === undefined) return false;
+        const q = known<OwnerQuestionBody>(await this.#runner.get("owner-question", ib.ownerQuestionId));
+        return q !== undefined && q.agendaItemId === m.agendaItemId && q.occurrenceId === rec.occurrenceId;
+      };
       let settled = false;
       try {
-        if (ib.state === "scheduled" || ib.state === "discussed" || ib.state === "deferred") {
+        // An undecided motion whose topic is already deferred (by an earlier try of this hand-back, this caller's or another's, or by another motion) moves nothing: deferring it again is not a move and would be refused.
+        if (ib.state === "scheduled" || ib.state === "discussed" || (decided && ib.state === "deferred")) {
           settled = true;
           // A repeat after the motion could not be marked returned finds the item already moved by this very command (same ID, the revision since changed): that settling stands and is not made again, nor is its question.
           await meetings.setAgendaState(by, decided
@@ -1643,9 +1654,9 @@ export class MeetingRecordService {
             : { commandId: `ret-${motionId}`, itemId: m.agendaItemId, expectedRevision: item.revision, to: "deferred", reason: (m.voidReason ?? `the motion ended ${m.state}`).slice(0, 500), nextStep: question === undefined ? "it is on the next meeting's agenda" : "the owner was asked; it is on the next meeting's agenda with the question", ...(question === undefined ? {} : { ownerQuestion: question }) }).catch(async (error: unknown) => {
             // Only an item that is no longer waiting in the meeting can have been moved by an earlier try of this command; a conflict on a scheduled item is a real one.
             if (!(error instanceof DomainError) || error.code !== "command_conflict" || ib.state === "scheduled") throw error;
-            if (question !== undefined && ib.ownerQuestionId === undefined) settled = false;
+            settled = question !== undefined && await askedHere();
           });
-        }
+        } else if (question !== undefined) settled = await askedHere();
         await this.#retrying(() => this.#runner.command("meeting.motion.returned", { commandId: `mtg-returned:${motionId}`, actor: by.id }, async () => ({
           payload: { motionId },
           build: async () => {
@@ -1655,8 +1666,8 @@ export class MeetingRecordService {
         })));
         returned.push(motionId);
         if (question !== undefined && settled) asked.push(motionId);
-        // Another motion already settled this topic (resolved or queued again), so there is no state change to hang a question on.
-        else if (question !== undefined) { notAsked.push({ motionId, reason: `the topic is ${ib.state}, settled by another motion of this meeting, so it takes no question` }); open = (open ?? 1) - 1; }
+        // Another motion or an earlier hand-back already settled this topic (resolved, deferred or queued again) without a question of this meeting, so there is no state change to hang one on.
+        else if (question !== undefined) { notAsked.push({ motionId, reason: `the topic is already ${ib.state}, settled by another motion or an earlier hand-back of this meeting, so it takes no question` }); open = (open ?? 1) - 1; }
       } catch (error) {
         if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "unavailable")) pending.push(motionId);
         else throw error;
