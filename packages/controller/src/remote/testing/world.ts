@@ -88,6 +88,8 @@ export interface RemoteHost {
 }
 
 export interface RemoteWorld extends DispatchWorld {
+  /** What the security detectors were told and what hosts reported (card U11d). */
+  readonly security: { readonly detected: { source: string; event: { kind: string; key: string } }[]; readonly reports: { by: string; event: { kind: string; key: string; projectId?: string } }[]; available: boolean };
   readonly remote: RemoteWorkerService;
   readonly artifacts: ArtifactService;
   readonly blobs: FileBlobStore;
@@ -129,10 +131,13 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const patience: RemoteWorld["patience"] = { ms: 24 * 3600_000 };
   const failLaunchRecords = { count: 0 };
   const confirmWindow: { ms: number | undefined } = { ms: undefined };
+  const security: RemoteWorld["security"] = { detected: [], reports: [], available: true };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id), liveAttempts: (by) => holder.dispatcher.liveAttempts(by) },
     reaccept: async () => reaccept.mode,
+    detect: (source, event) => { security.detected.push({ source, event }); },
+    ...(security.available ? { reportSecurity: async (by: Principal, event: { kind: string; key: string; projectId?: string }) => { security.reports.push({ by: by.id, event }); return { itemId: "ntf-test", held: false }; } } : {}),
     patienceMs: async () => patience.ms,
     confirmWindowMs: async () => confirmWindow.ms,
     recordLaunch: async (r) => { if (failLaunchRecords.count > 0) { failLaunchRecords.count--; throw new Error("the record could not be kept"); } launches.push({ attemptId: r.attemptId, outcome: r.outcome, ...(r.reason === undefined ? {} : { reason: r.reason }) }); },
@@ -145,7 +150,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport, reaccept, notices, launches, patience, failLaunchRecords, confirmWindow,
+    remote, artifacts, blobs, transport, reaccept, security, notices, launches, patience, failLaunchRecords, confirmWindow,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },

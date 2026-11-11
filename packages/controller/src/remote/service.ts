@@ -5,6 +5,7 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
+import type { SecurityEvent } from "../notifications/urgent.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { mergeChanges } from "../domain/changes.js";
@@ -214,6 +215,10 @@ function within<T>(promise: Promise<T>, ms: number): Promise<T> {
 // ---- the service -----------------------------------------------------------------------------------------------------------------
 
 export interface RemoteDeps {
+  /** The controller's security detectors (card U11d): a host that names an attempt it never held is a credential used on the wrong host. Never throws, never waits. */
+  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string }) => void;
+  /** Where a host's own security report goes (`UrgentWatch.reportSecurityFrom`): the report is the host's, so its allowance, once-per-key rule and collected item apply. Absent: reports are refused as unavailable. */
+  readonly reportSecurity?: (by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }) => Promise<{ readonly itemId: string; readonly held: boolean }>;
   /** The dispatcher's own service principal (`service:dispatcher`): it places attempts, reads host status and moves attempts. */
   readonly principal: Principal;
   readonly hosts: Pick<HostService, "announce" | "heartbeat" | "status">;
@@ -483,6 +488,19 @@ export class RemoteWorkerService {
     const late = ask.abandoned;
     for (const wake of [...ask.waiters]) wake();
     return { accepted: true, repeat: false, late };
+  }
+
+  /**
+   * A security event the host itself detected (card U11d, the worker-side hook): the report goes to the controller's Urgent watch as the host's own, so a host can neither fake nor mute another's event. The
+   * kind, key and project are checked there; this only needs a current session of a known host.
+   */
+  async reportSecurity(host: Principal, sessionId: unknown, event: unknown): Promise<{ readonly itemId: string; readonly held: boolean }> {
+    await this.#session(host, sessionId);
+    if (this.#deps.reportSecurity === undefined) throw new DomainError("unavailable", "this controller takes no security reports");
+    if (event === null || typeof event !== "object" || Array.isArray(event)) throw new DomainError("invalid_command", "event: must be an object with kind and key", { field: "event" });
+    const e = event as Record<string, unknown>;
+    for (const k of Object.keys(e)) if (k !== "kind" && k !== "key" && k !== "projectId") throw new DomainError("invalid_command", `event.${k}: is not a field of a security report`, { field: "event" });
+    return this.#deps.reportSecurity(host, e as { kind: string; key: string; projectId?: string });
   }
 
   /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
@@ -1149,6 +1167,8 @@ export class RemoteWorkerService {
     if (b === undefined) throw new DomainError("not_found", "no such attempt");
     if (b.hostId !== host.id) {
       if (b.history.some((h) => h.hostId === host.id)) throw new DomainError("fenced", `attempt ${b.attemptId} is no longer on this host`);
+      // A host that never held this attempt names it: its session is used for something it was not given (card U11d). The refusal is unchanged; the detectors are only told.
+      try { this.#deps.detect?.("host-channel", { kind: "credential-misused", key: `host:${host.id.slice(0, 80)}>attempt:${b.attemptId.slice(0, 80)}` }); } catch { /* telling never changes the refusal */ }
       throw new DomainError("not_found", "no such attempt");
     }
     if (typeof placement !== "number" || !Number.isSafeInteger(placement)) invalid("placement", "must be a whole number");
@@ -1495,8 +1515,14 @@ export class RemoteWorkerService {
     return b?.checkpoint === undefined ? undefined : { ...(await this.#readCheckpoint(b.checkpoint)), artifactId: b.checkpoint.artifactId, sequence: b.checkpoint.sequence, digest: b.checkpoint.digest };
   }
 
+  /** A stored file that no longer hashes to its record (card U11d, A08): told to the detectors, then refused as before. The key is the artifact only (no path, no content). */
+  #damaged(artifactId: string, error: unknown): never {
+    if (error instanceof DomainError && error.code === "integrity") { try { this.#deps.detect?.("artifact-store", { kind: "integrity-check-failed", key: `artifact:${artifactId.slice(0, 80)}` }); } catch { /* telling never changes the refusal */ } }
+    throw error;
+  }
+
   async #readCheckpoint(c: NonNullable<PlacementBody["checkpoint"]>): Promise<{ checkpoint: JsonObject }> {
-    const bytes = await this.#deps.artifacts.readFile(c.artifactId, "checkpoint.json", { maxBytes: REMOTE_LIMITS.checkpointBytes });
+    const bytes = await this.#deps.artifacts.readFile(c.artifactId, "checkpoint.json", { maxBytes: REMOTE_LIMITS.checkpointBytes }).catch((error: unknown) => this.#damaged(c.artifactId, error));
     return { checkpoint: JSON.parse(Buffer.from(bytes).toString("utf8")) as JsonObject };
   }
 
@@ -1526,7 +1552,7 @@ export class RemoteWorkerService {
     const entry = artifact?.entries.find((e) => e.path === path);
     if (entry === undefined) throw new DomainError("not_found", "no such file");
     if (entry.size > this.#fileBytes) throw new DomainError("invalid_command", `${path} is ${entry.size} bytes; one fetch returns at most ${this.#fileBytes}`, { field: "path" });
-    const bytes = await this.#deps.artifacts.readFile(artifactId, path, { maxBytes: this.#fileBytes });
+    const bytes = await this.#deps.artifacts.readFile(artifactId, path, { maxBytes: this.#fileBytes }).catch((error: unknown) => this.#damaged(artifactId, error));
     return { bytes, digest: entry.digest, size: entry.size };
   }
 

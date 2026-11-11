@@ -19,7 +19,7 @@ import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
-import type { NotificationService } from "../notifications/index.js";
+import type { NotificationService, SecurityEvent } from "../notifications/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
 import type { RoutingService } from "../routing/service.js";
@@ -229,6 +229,8 @@ export interface StateApiDeps {
   /** When present, the owner can read and set notification settings through the API (card U11b). */
   readonly notifications?: Pick<NotificationService, "configure" | "settings">;
   /** When present, hosts and services can report security events to the Urgent watch (card U11c). */
+  /** The controller's security detectors (card U11d), handed to each call as `Context.detect`. */
+  readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly projectId?: string }) => void;
   readonly security?: { report(by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }): Promise<{ itemId: string; held: boolean }> };
   /** When present, budgets can be read, asked for and decided through the API (card R05c). */
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide" | "open" | "raise" | "close" | "aggregate" | "setAggregate">;
@@ -373,6 +375,7 @@ export class StateApi {
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
         ...(this.#deps.notifications === undefined ? {} : { notifications: this.#deps.notifications }),
         ...(this.#deps.security === undefined ? {} : { security: this.#deps.security }),
+        ...(this.#deps.detect === undefined ? {} : { detect: this.#deps.detect }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
         ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
         ...(this.#deps.commands === undefined ? {} : { commands: this.#deps.commands }),

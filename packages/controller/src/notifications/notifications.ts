@@ -55,6 +55,8 @@ export interface NotificationSettings {
   readonly deniedAlertsPerHour?: number | null;
   /** How many security reports one host or service may raise as their own items in an hour (card U11c); the rest are collected in ONE item for that reporter. Default 20, `null` turns it off. */
   readonly securityReportsPerHour?: number | null;
+  /** Whether the controller's own security detectors (a credential of another task, a host naming an attempt it never held, and the hooks of its workers) report at all (card U11d). Default true; false stops the reports, not the refusals. */
+  readonly securityDetectors?: boolean;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
   readonly levelByKind?: Readonly<Partial<Record<NotificationKind, NotificationLevel>>>;
 }
@@ -232,9 +234,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -276,6 +278,10 @@ export class NotificationService {
     if (command.urgentInterruptsQuietHours !== undefined) {
       if (typeof command.urgentInterruptsQuietHours !== "boolean") invalid("urgentInterruptsQuietHours", "must be true or false");
       next = { ...next, urgentInterruptsQuietHours: command.urgentInterruptsQuietHours };
+    }
+    if (command.securityDetectors !== undefined) {
+      if (typeof command.securityDetectors !== "boolean") invalid("securityDetectors", "must be true or false");
+      next = { ...next, securityDetectors: command.securityDetectors };
     }
     // The Urgent triggers of card U11c: a number sets one, null turns it off (and a number turns it on again).
     for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"], ["securityReportsPerHour", 1, 1000, "reports"]] as const) {
