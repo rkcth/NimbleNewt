@@ -33,7 +33,7 @@ for (const backend of backends) {
     asA: Principal; asB: Principal; asC: Principal; asD: Principal; asE: Principal;
     pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
     meetings: MeetingService; records: MeetingRecordService; decisions: DecisionService; grants: GrantService; principals: PrincipalService; projects: ProjectService;
-    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; failReturned: boolean; narrate: "ok" | "throw" };
+    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; failReturned: boolean; stuckMotions: Set<string>; stuckRecords: Set<string>; narrate: "ok" | "throw" };
     reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">; policyWideningLimit: (projectId: string) => Promise<number | undefined> }>): MeetingRecordService;
     task(title?: string): Promise<{ id: string; revision: number }>;
     grantUpdate(agent: string): Promise<{ id: string; revision: number }>;
@@ -68,13 +68,15 @@ for (const backend of backends) {
         const meetings = MeetingService.withEpoch(world.storage, epoch, {}, { availability: pauses.availability, ...options });
         const decisions = DecisionService.withEpoch(world.storage, epoch, {}, options);
         const shared = new Set<string>();
-        const calls = { applied: [] as string[], failOnce: false, failLog: false, failReturned: false, narrate: "ok" as "ok" | "throw" };
+        const calls = { applied: [] as string[], failOnce: false, failLog: false, failReturned: false, stuckMotions: new Set<string>(), stuckRecords: new Set<string>(), narrate: "ok" as "ok" | "throw" };
         // The record service writes through this: with `failLog` set, the next write of a decision log line fails once (a lost log write).
         const flaky = new Proxy(world.storage, { get(target, name, receiver) {
           if (name !== "applyOperation") { const v = Reflect.get(target, name, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
           return async (input: Parameters<typeof target.applyOperation>[0]) => {
             if (calls.failLog && input.changes.some((x) => x.type === "create" && x.ref.kind === "meeting-decision-log")) { calls.failLog = false; throw new Error("the disk is full"); }
             if (calls.failReturned && input.changes.some((x) => x.type === "update" && x.ref.kind === "meeting-motion" && (x.body as { outcomeReturned?: boolean }).outcomeReturned === true)) { throw new Error("the disk is full"); }
+            if (input.changes.some((x) => x.type === "update" && x.ref.kind === "meeting-motion" && (x.body as { outcomeReturned?: boolean }).outcomeReturned === true && calls.stuckMotions.has(x.ref.id))) throw new DomainError("invalid_command", "this motion can never be marked returned");
+            if (input.changes.some((x) => x.type === "update" && x.ref.kind === "meeting-record" && calls.stuckRecords.has(x.ref.id))) throw new DomainError("invalid_command", "this record can never be written");
             return target.applyOperation(input);
           };
         } });
@@ -1794,6 +1796,39 @@ for (const backend of backends) {
     assert.deepEqual([...first.returned, ...second.returned].sort(), made.map((x) => x.rec).sort());
     for (const x of made) assert.equal((await motionBody(c, x.motion)).outcomeReturned, true);
     assert.deepEqual((await c.records.sweep(svc, { projectId: c.project })).returned, []);
+  });
+
+  suite("meetings whose hand-back always fails do not take every place of every pass: the meetings listed after them still go back (card M03i review)", async (c) => {
+    const svc = await manager(c);
+    const stuck: { rec: string; motion: string }[] = [];
+    for (let i = 0; i < RECORD_LIMITS.autoReturnPerPass; i++) stuck.push(await endedTabled(c));
+    for (const x of stuck) c.calls.stuckMotions.add(x.motion);
+    const late = await endedTabled(c);
+    assert.deepEqual(await listed(c), [...stuck.map((x) => x.rec), late.rec]);
+    minutes(61);
+    const first = await c.records.sweep(svc, { projectId: c.project });
+    assert.deepEqual([first.returned, first.returnFailed.sort()], [[], stuck.map((x) => x.rec).sort()], "the first pass tries the first five and they fail");
+    const second = await c.records.sweep(svc, { projectId: c.project });
+    assert.deepEqual(second.returned, [late.rec], "the next pass starts after them");
+    assert.equal((await motionBody(c, late.motion)).outcomeReturned, true);
+    // The failing ones stay listed and are tried again; once they can go back, they do.
+    c.calls.stuckMotions.clear();
+    const third = await c.records.sweep(svc, { projectId: c.project });
+    assert.deepEqual(third.returned.sort(), stuck.map((x) => x.rec).sort());
+    assert.deepEqual(await listed(c), []);
+  });
+
+  suite("an open meeting record the lease cannot end does not keep it from handing back other meetings' outcomes, and the failure is still raised (card M03i review)", async (c) => {
+    const svc = await manager(c);
+    const done = await endedTabled(c);
+    const { rec } = await c.meet({ chair: c.pD });
+    c.calls.stuckRecords.add(rec);
+    minutes(200);
+    await refuses("invalid_command", () => c.records.sweep(svc, { projectId: c.project }));
+    assert.equal((await motionBody(c, done.motion)).outcomeReturned, true, "the ended meeting's outcome went back on the same pass");
+    assert.equal((await recordOf(c, rec)).state, "open");
+    c.calls.stuckRecords.clear();
+    assert.deepEqual((await c.records.sweep(svc, { projectId: c.project })).interrupted, [rec]);
   });
 
   suite("a meeting with no motion on an agenda topic is never listed, and another project's lease does not return this project's outcomes (card M03i)", async (c) => {

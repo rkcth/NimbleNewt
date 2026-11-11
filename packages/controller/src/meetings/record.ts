@@ -313,6 +313,8 @@ export class MeetingRecordService {
   readonly #runner: CommandRunner;
   readonly #deps: { meetings?: MeetingService; decisions?: DecisionService };
   readonly #options: RecordOptions;
+  /** Per project: the listed meeting the next hand-back pass starts from (see `#sweepReturns`). Bounded by the projects swept. */
+  readonly #returnFrom = new Map<string, string>();
 
   private constructor(runner: CommandRunner, deps: { meetings?: MeetingService; decisions?: DecisionService }, options: RecordOptions) { this.#runner = runner; this.#deps = deps; this.#options = options; }
 
@@ -1517,7 +1519,9 @@ export class MeetingRecordService {
     const failedTies: string[] = [];
     const interrupted: string[] = [];
     const ids = known<OpenIndexBody>(await this.#runner.get(OPEN_KIND, projectId))?.ids ?? [];
-    for (const recordId of ids) {
+    // One record whose step fails does not hold back the others, the log check or the hand-back (card M03i review); the first failure is raised after all were tried.
+    let fault: unknown;
+    for (const recordId of ids) try {
       const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
       if (rec === undefined || rec.state !== "open") continue;
       const now = this.#runner.now();
@@ -1538,10 +1542,11 @@ export class MeetingRecordService {
         await this.#finish(by, recordId, true, "nobody finished this meeting record; it was closed by the lease", scopedCommandId(by.id, `sweep:${recordId}:finish`));
         interrupted.push(recordId);
       }
-    }
+    } catch (error) { fault ??= error; }
     // A log line lost to a crash or a failed write is written here (bounded per call).
-    const logChecked = await this.#sweepLog(projectId);
-    const handBack = await this.#sweepReturns(by, projectId);
+    const logChecked = await this.#sweepLog(projectId).catch((error: unknown) => { fault ??= error; return [] as string[]; });
+    const handBack = await this.#sweepReturns(by, projectId).catch((error: unknown) => { fault ??= error; return { returned: [] as string[], failed: [] as string[] }; });
+    if (fault !== undefined) throw fault;
     return { closed, tied, failedTies, interrupted, logChecked, returned: handBack.returned, returnFailed: handBack.failed };
   }
 
@@ -1560,13 +1565,18 @@ export class MeetingRecordService {
     const failed: string[] = [];
     const wait = (this.#options.autoReturnMinutes ?? RECORD_LIMITS.autoReturnMinutes) * 60_000;
     const ids = known<OpenIndexBody>(await this.#runner.get(RETURN_KIND, projectId))?.ids ?? [];
+    // A fair rotation (card M03i review): each pass starts where the last one ran out of room, so meetings whose hand-back keeps failing or staying pending cannot take the five places of every pass and starve the meetings listed
+    // after them. The place is kept in memory (a write per pass would grow the store); after a restart the pass starts from the front again.
+    const from = ids.indexOf(this.#returnFrom.get(projectId) ?? "");
+    const order = from <= 0 ? ids : [...ids.slice(from), ...ids.slice(0, from)];
+    this.#returnFrom.delete(projectId);
     const finished: string[] = [];
     let handled = 0;
-    for (const recordId of ids) {
+    for (const recordId of order) {
       const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
       if (rec === undefined) { finished.push(recordId); continue; }
       if (rec.state === "open" || ms(this.#runner.now()) < ms(rec.endedAt ?? rec.endsAt) + wait) continue;
-      if (handled >= RECORD_LIMITS.autoReturnPerPass) break;
+      if (handled >= RECORD_LIMITS.autoReturnPerPass) { this.#returnFrom.set(projectId, recordId); break; }
       handled++;
       try {
         const r = await this.returnOutcomes(by, { recordId });
