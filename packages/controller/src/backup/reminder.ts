@@ -37,7 +37,8 @@ export class BackupProofReminder {
   async sweep(options: { readonly throttled?: boolean } = {}): Promise<{ raised: string[]; cleared: string[] }> {
     const raised: string[] = []; const cleared: string[] = [];
     const now = this.#now();
-    if (options.throttled === true && now.getTime() < this.#next) return { raised, cleared };
+    // A clock set back would otherwise hold the next look off for as long as it went back.
+    if (options.throttled === true && now.getTime() < this.#next && this.#next - now.getTime() <= (this.#o.everyMs ?? 300_000)) return { raised, cleared };
     this.#next = now.getTime() + (this.#o.everyMs ?? 300_000);
     const n = this.#o.notifications;
     const open = await n.openRefIds(REF_DUE.kind);

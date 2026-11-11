@@ -240,3 +240,34 @@ test("the quarterly proof is a Needs-you notification, becomes Urgent when it st
     } finally { await c.close(); }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("review: without a keyring the setting says backups are plain whatever it says, and cannot be switched on; an installation that signed cannot restart without the signing option (card K01b3)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k3r-"));
+  try {
+    const clock = Date.parse("2026-11-01T10:00:00.000Z");
+    const store = memoryStore();
+    const start = (signing: { store: SigningSecretStore } | undefined) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, backup: { directory: join(d, "backups"), now: () => new Date(clock), ...(signing === undefined ? {} : { signing }) } });
+    let c = await start(undefined);
+    let token = "";
+    try {
+      token = (await c.services.principals.bootstrapOwner({ name: "rob" })).token;
+      const call = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as Reply;
+      const st = (await call("backup.encryption.status", {})).result.item;
+      assert.equal(st.enabled, false);
+      assert.match(st.setting.text, /No backup keyring is configured/);
+      assert.doesNotMatch(st.setting.text, /sealed/);
+      const off = await call("backup.encryption.set", { enabled: false }, "s1");
+      assert.ok(off.ok, JSON.stringify(off));
+      assert.match(off.result.text, /No backup keyring is configured/);
+      const on = await call("backup.encryption.set", { enabled: true }, "s2");
+      assert.equal(on.error?.code, "invalid_transition", JSON.stringify(on));
+      assert.match(on.error!.message!, /no backup keyring is configured/);
+    } finally { await c.close(); }
+    // Signing switched on, then the option dropped: refused, so no backup goes out unsigned and no restore goes unchecked.
+    c = await start({ store });
+    await c.close();
+    await assert.rejects(start(undefined), /signs its backups, but the configuration no longer gives/);
+    c = await start({ store });
+    await c.close();
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

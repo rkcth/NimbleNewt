@@ -105,7 +105,13 @@ export async function checkSignature(path: string, manifest: BackupManifest, tru
 /** The part of the host's secret store (F09) the signing key needs. */
 export interface SigningSecretStore { resolve(name: string): Promise<string | undefined>; set(name: string, value: string): Promise<void> }
 
-export interface SigningKeyEntry { readonly keyId: string; readonly publicKey: string; readonly generation: number; readonly createdAt: string; readonly retiredAt?: string }
+export interface SigningKeyEntry {
+  readonly keyId: string; readonly publicKey: string; readonly generation: number; readonly createdAt: string; readonly retiredAt?: string;
+  /** The key was given up as exposed when it was replaced: it is no longer trusted for any backup, old or new (a holder of it could sign a forgery with any date). */
+  readonly revokedAt?: string;
+  /** The rotation command that made this key, so a repeat of that command is answered with it. */
+  readonly madeBy?: string;
+}
 export interface SigningRecord { readonly keys: readonly SigningKeyEntry[]; /** When signing was first switched on: backups made before it are allowed to be unsigned. */ readonly since: string }
 
 const REF = { kind: "backup-signing", id: "main" } as const;
@@ -122,6 +128,7 @@ export class BackupSigningService implements BackupSigner {
   readonly #store: SigningSecretStore;
   readonly #name: string;
   readonly #rotationHooks: ((entry: SigningKeyEntry, by: string) => Promise<void>)[] = [];
+  #rotating: Promise<unknown> = Promise.resolve();
   private constructor(runner: CommandRunner, store: SigningSecretStore, name: string) { this.#runner = runner; this.#store = store; this.#name = name; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, store: SigningSecretStore, options: RunnerOptions & { secretName?: string } = {}): BackupSigningService {
@@ -197,7 +204,22 @@ export class BackupSigningService implements BackupSigner {
   /** The keys a restore on this installation trusts (every generation, retired ones included), and when signing began. Controller-side: not an API read. */
   async trust(): Promise<SignatureTrust | undefined> {
     const rec = await this.#record();
-    return rec === undefined ? undefined : { keys: rec.body.keys.map((k) => ({ keyId: k.keyId, publicKey: k.publicKey })), since: rec.body.since };
+    return rec === undefined ? undefined : { keys: rec.body.keys.filter((k) => k.revokedAt === undefined).map((k) => ({ keyId: k.keyId, publicKey: k.publicKey })), since: rec.body.since };
+  }
+
+  /** Whether this installation has ever signed backups (its record exists). The start refuses to go on without the signing option when it has (card K01b3: no quiet downgrade to unsigned backups and unchecked restores). */
+  static async hasRecord(storage: Pick<ControllerStorage, "getAggregate">): Promise<boolean> { return (await storage.getAggregate(REF)) !== undefined; }
+
+  /**
+   * The signer for the snapshot taken before a database upgrade, before the database (and so the record) is open: it signs with the key in the secret store. No key there yet means signing has not begun (the snapshot is
+   * older than the record's `since`, so it is accepted unsigned); a store that cannot be read fails the snapshot, and with it the upgrade.
+   */
+  static async storeSigner(store: SigningSecretStore, secretName?: string): Promise<BackupSigner | undefined> {
+    let secret: string | undefined;
+    try { secret = await store.resolve(secretName ?? SIGNING_SECRET_NAME); } catch { throw new Error("backups are set to be signed but the secret store cannot be read; no backup is made without its signature"); }
+    if (secret === undefined) return undefined;
+    const key = secret;
+    return { sign: async (manifest) => signManifest(manifest, key) };
   }
 
   /** The owner reads the signing key generations and the public keys to keep off the server. Owner only. A private key is never in it. */
@@ -207,23 +229,68 @@ export class BackupSigningService implements BackupSigner {
     return rec === undefined ? { revision: 0, keys: [] } : { revision: rec.revision, since: rec.body.since, keys: rec.body.keys };
   }
 
-  /** Owner only: makes a new signing key (the old one stops signing and stays trusted for the backups it signed). Recorded; the owner is told by the hooks. */
-  async rotate(owner: Principal, command: NoActor & { expectedRevision?: number }): Promise<{ revision: number; keyId: string; generation: number }> {
+  /**
+   * Owner only: makes a new signing key (the old one stops signing and stays trusted for the backups it signed, unless `revokePrevious` says it was exposed: then it is trusted for none). Recorded; the owner is told by the hooks.
+   * The new private key is put in the secret store inside the recorded command, after the repeat check: a repeat of the command is answered with the key it made and touches the store not at all, and a rotation whose record
+   * cannot be written puts the previous key back, so the store never holds a key the record does not name as current (which would stop every backup).
+   */
+  rotate(owner: Principal, command: NoActor & { expectedRevision?: number; revokePrevious?: unknown }): Promise<{ revision: number; keyId: string; generation: number; revoked: number }> {
+    // One rotation at a time on this controller: two at once would each put a key in the store, and the store would end up with the one the record does not name.
+    const run = this.#rotating.then(() => this.#rotate(owner, command));
+    this.#rotating = run.catch(() => undefined);
+    return run;
+  }
+
+  async #rotate(owner: Principal, command: NoActor & { expectedRevision?: number; revokePrevious?: unknown }): Promise<{ revision: number; keyId: string; generation: number; revoked: number }> {
     if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", `${owner.id} may not rotate the backup signing key`);
-    const unknown = Object.keys(command).filter((k) => !["commandId", "expectedRevision"].includes(k));
+    const unknown = Object.keys(command).filter((k) => !["commandId", "expectedRevision", "revokePrevious"].includes(k));
     if (unknown.length > 0) throw new DomainError("invalid_command", `${unknown[0]}: is not a field of this command`, { field: unknown[0]! });
     if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number", { field: "expectedRevision" });
-    const current = await this.#record();
-    if (current === undefined) throw new DomainError("invalid_transition", "backup signing has not started yet");
-    if (command.expectedRevision !== undefined && current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the signing record is at revision ${current.revision}, not ${command.expectedRevision}`, { currentRevision: current.revision });
-    const made = generateSigningKey();
-    const now = this.#runner.now();
-    const entry: SigningKeyEntry = { keyId: made.keyId, publicKey: made.publicKey, generation: current.body.keys.length + 1, createdAt: now };
-    // The new private key goes into the secret store first and the record second: until the record names it, `sign` refuses (the store's key is not the current one in the record), so nothing is ever signed with an unrecorded key.
-    // If the record cannot be written, the next start's `ensure` finds the store's key and records it as the new generation.
-    try { await this.#store.set(this.#name, made.privateKey); } catch { throw new DomainError("unavailable", "the new signing key could not be put in the secret store; nothing was changed"); }
-    const revision = await this.#write(current, { keys: [...current.body.keys.map((k) => (k.retiredAt === undefined ? { ...k, retiredAt: now } : k)), entry], since: current.body.since }, "backup.signing.rotate", scopedCommandId(owner.id, command.commandId), owner.id, { keyId: made.keyId, generation: entry.generation });
+    if (command.revokePrevious !== undefined && typeof command.revokePrevious !== "boolean") throw new DomainError("invalid_command", "revokePrevious: must be true or false", { field: "revokePrevious" });
+    const revoke = command.revokePrevious === true;
+    const commandId = scopedCommandId(owner.id, command.commandId);
+    let made: GeneratedSigningKey | undefined; let entry: SigningKeyEntry | undefined; let previous: string | undefined; let stored = false; let revoked = 0;
+    // After a failed or answered-by-another write: the store goes back to the key the record names as current, when that is the key it held before.
+    const reconcile = async (): Promise<void> => {
+      if (!stored || made === undefined) return;
+      const live = (await this.#record().catch(() => undefined))?.body.keys.find((k) => k.retiredAt === undefined);
+      if (live === undefined || live.keyId === made.keyId || previous === undefined) return;
+      let previousId: string | undefined;
+      try { previousId = BackupSigningService.publicOf(previous).keyId; } catch { previousId = undefined; }
+      if (previousId === live.keyId) await this.#store.set(this.#name, previous).catch(() => undefined);
+    };
+    let result: Awaited<ReturnType<CommandRunner["command"]>>;
+    try {
+      result = await this.#runner.command("backup.signing.rotate", { commandId, actor: owner.id }, async () => ({
+        payload: { expectedRevision: command.expectedRevision ?? null, revokePrevious: revoke },
+        build: async () => {
+          const current = await this.#record();
+          if (current === undefined) throw new DomainError("invalid_transition", "backup signing has not started yet");
+          if (command.expectedRevision !== undefined && current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the signing record is at revision ${current.revision}, not ${command.expectedRevision}`, { currentRevision: current.revision });
+          const now = this.#runner.now();
+          made = generateSigningKey();
+          entry = { keyId: made.keyId, publicKey: made.publicKey, generation: current.body.keys.length + 1, createdAt: now, madeBy: commandId };
+          try { previous = await this.#store.resolve(this.#name); } catch { throw new DomainError("unavailable", "the secret store cannot be read; nothing was changed"); }
+          try { await this.#store.set(this.#name, made.privateKey); stored = true; } catch { throw new DomainError("unavailable", "the new signing key could not be put in the secret store; nothing was changed"); }
+          const keys = current.body.keys.map((k) => {
+            const retired = k.retiredAt === undefined ? { ...k, retiredAt: now } : k;
+            if (!revoke || retired.revokedAt !== undefined) return retired;
+            revoked++;
+            return { ...retired, revokedAt: now };
+          });
+          const body: SigningRecord = { keys: [...keys, entry], since: current.body.since };
+          return { ref: REF, creates: false, changes: [{ type: "update" as const, ref: REF, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { keyId: made.keyId, generation: entry.generation, revoked } };
+        },
+      }));
+    } catch (error) { await reconcile(); throw error; }
+    if (result.replayed || entry === undefined) {
+      await reconcile();
+      const rec = await this.#record();
+      const mine = rec?.body.keys.find((k) => k.madeBy === commandId);
+      if (mine === undefined) throw new DomainError("unavailable", "the rotation was recorded but its key is no longer in the signing record");
+      return { revision: result.revision, keyId: mine.keyId, generation: mine.generation, revoked: (rec?.body.keys ?? []).filter((k) => k.revokedAt !== undefined && k.revokedAt === mine.createdAt).length };
+    }
     for (const hook of this.#rotationHooks) await hook(entry, owner.id).catch(() => undefined);
-    return { revision, keyId: made.keyId, generation: entry.generation };
+    return { revision: result.revision, keyId: entry.keyId, generation: entry.generation, revoked };
   }
 }

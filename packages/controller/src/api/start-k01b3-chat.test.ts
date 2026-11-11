@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createKeyring } from "../backup/index.js";
 import { ModelInterpreter } from "../chat/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { SNAPSHOT_TABLES } from "../storage/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -53,6 +54,31 @@ test("the owner switches backup encryption off and on by free wording through th
       await turn("Actually, protect my backups again.", "on");
       assert.equal((await turn("Go ahead.", "agree"))[0].status, "applied");
       assert.equal(await backupNow(), true, "sealed again with the same key");
+    } finally { await c.close(); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("review: a value the model puts in backup.encryption.set that is not a switch or a scope (a passcode, say) is refused before any proposal holds it (card K01b3)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k3chat2-"));
+  const model = { complete: async (): Promise<string> => JSON.stringify([{ kind: "command", op: "backup.encryption.set", args: { scope: PASS }, evidence: `My backup passcode is ${PASS}`, basis: "owner" }]) };
+  try {
+    const { keyring } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
+    const keyringFile = join(d, "keyring.json");
+    writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 });
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: join(d, "backups"), encryption: { keyringFile } } });
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      // A value that is not in the owner's words is refused by the chat's general check ...
+      const foreign = (await c.chat!.submit(boot.token, { messageId: "m0", text: "Please stop encrypting my backups." })).outcomes as any[];
+      assert.notEqual(foreign[0]?.status, "proposed", JSON.stringify(foreign));
+      // ... and one the owner did type (a passcode said in passing) is refused because it is no switch or scope: no proposal shows or keeps it.
+      const out = (await c.chat!.submit(boot.token, { messageId: "m1", text: `My backup passcode is ${PASS} and I want to stop encrypting the backups.` })).outcomes as any[];
+      assert.equal(out.length, 1);
+      assert.deepEqual([out[0].status, out[0].code], ["refused", "invalid_command"], JSON.stringify(out));
+      assert.ok(!JSON.stringify(out).includes(PASS));
+      // No record other than the owner's own message holds it.
+      const snapshot = await c.storage.snapshot();
+      try { for (const t of SNAPSHOT_TABLES) { const page = (await snapshot.read(t, { limit: 1000 })).filter((row) => !(t === "aggregates" && String(row["kind"]).startsWith("chat-turn"))); assert.ok(!JSON.stringify(page).includes(PASS), `${t}: ${JSON.stringify(page).split(PASS)[0]!.slice(-300)}`); } } finally { await snapshot.close(); }
     } finally { await c.close(); }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

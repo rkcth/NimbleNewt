@@ -4109,13 +4109,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `backup.signing.rotate`
 
-Owner only, recorded and announced to the owner's inbox: makes a new backup signing key (after the old key may have been exposed, say). The old key stops signing; its public key stays trusted so backups it signed still verify. The owner should then save the new public key (backup.signing.status) off the server.
+Owner only, recorded and announced to the owner's inbox: makes a new backup signing key (after the old key may have been exposed, say). The old key stops signing; its public key stays trusted so backups it signed still verify, unless `revokePrevious: true` (the owner says the key was exposed or stolen): then every earlier key is trusted for no backup at all, since whoever holds it could sign a forgery with any date, and backups those keys signed can only be restored with the host command without a trusted key. The owner should then save the new public key (backup.signing.status) off the server.
 
 Arguments:
 
 - `expectedRevision` (optional): the revision you read from backup.signing.status
+- `revokePrevious` (optional): true when the old key may be in someone else's hands
 
-Result: `{ revision, keyId, generation }`.
+Result: `{ revision, keyId, generation, revoked }`; `revoked` is how many earlier keys are no longer trusted.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -210,3 +210,99 @@ test("the command line checks a signature against a public key file the owner ke
     assert.equal((await say("restore", a.path, "--sqlite", join(d, "r2.sqlite"), "--manifest-digest", "f".repeat(64))).code, 1);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+test("review: a repeated rotation is answered with the key it made and leaves the store alone; a rotation whose record is not written puts the previous key back; two at once both end signable (card K01b3)", async () => {
+  const { storage, epoch } = await populated();
+  // A storage whose next operation fails (a full disk at the moment of the commit).
+  let failNext = false;
+  const flaky = new Proxy(storage, { get(target, prop, receiver) {
+    if (prop === "applyOperation") return async (...a: unknown[]) => { if (failNext) { failNext = false; throw new Error("disk full"); } return (target.applyOperation as (...x: unknown[]) => unknown).apply(target, a); };
+    const v = Reflect.get(target, prop, receiver); return typeof v === "function" ? v.bind(target) : v;
+  } });
+  const store = memoryStore();
+  const svc = BackupSigningService.withEpoch(flaky, epoch, store);
+  const told: string[] = [];
+  svc.onRotated(async (e) => { told.push(e.keyId); });
+  await svc.ensure();
+  const root = tmp();
+  try {
+    const r = await svc.rotate(owner, { commandId: "r1" });
+    const after = store.values.get("backup-signing-key");
+    // The client repeats the same command (a timeout): the same answer, no new key in the store, nothing announced again, and backups still sign.
+    const again = await svc.rotate(owner, { commandId: "r1" });
+    assert.deepEqual([again.keyId, again.generation], [r.keyId, r.generation]);
+    assert.equal(store.values.get("backup-signing-key"), after, "a repeat puts no new key in the store");
+    assert.deepEqual(told, [r.keyId]);
+    await createBackup(storage, { root, kind: "manual", version: "1", now: () => new Date(AT), signer: svc });
+    // The record cannot be written: the store goes back to the current key, so backups still sign.
+    failNext = true;
+    await assert.rejects(svc.rotate(owner, { commandId: "r2" }), /disk full/);
+    assert.equal(store.values.get("backup-signing-key"), after, "the previous key is back in the store");
+    assert.equal((await svc.status(owner)).keys.length, 2);
+    await createBackup(storage, { root, kind: "manual", version: "1", now: () => new Date("2026-10-29T11:00:00.000Z"), signer: svc });
+    // Two rotations at the same moment: both recorded one after the other, and the store holds the one the record names.
+    const [x, y] = await Promise.all([svc.rotate(owner, { commandId: "r3" }), svc.rotate(owner, { commandId: "r4" })]);
+    assert.notEqual(x.keyId, y.keyId);
+    const live = (await svc.status(owner)).keys.filter((k) => k.retiredAt === undefined);
+    assert.deepEqual(live.map((k) => k.keyId), [BackupSigningService.publicOf(store.values.get("backup-signing-key")!).keyId]);
+    await createBackup(storage, { root, kind: "manual", version: "1", now: () => new Date("2026-10-29T12:00:00.000Z"), signer: svc });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("review: a rotation for an exposed key revokes the earlier keys, so a backup they signed (or forged with them) is no longer trusted (card K01b3)", async () => {
+  const { storage, epoch } = await populated();
+  const store = memoryStore();
+  const svc = BackupSigningService.withEpoch(storage, epoch, store);
+  await svc.ensure();
+  const root = tmp();
+  try {
+    const exposed = store.values.get("backup-signing-key")!;
+    const old = await createBackup(storage, { root, kind: "manual", version: "1", now: () => new Date(AT), signer: svc });
+    await assert.rejects(svc.rotate(owner, { commandId: "bad", revokePrevious: "yes" }), /revokePrevious/);
+    // A plain rotation keeps the old key trusted ...
+    await svc.rotate(owner, { commandId: "r1" });
+    assert.equal((await checkSignature(old.path, old.manifest, await svc.trust())).status, "valid");
+    // ... an exposed one does not: a forgery made with it after the fact is refused, and so is the old backup it signed.
+    const r = await svc.rotate(owner, { commandId: "r2", revokePrevious: true });
+    assert.equal(r.revoked, 2);
+    assert.equal((await svc.rotate(owner, { commandId: "r2", revokePrevious: true })).revoked, 2, "a repeat says the same");
+    const forged = await createBackup(storage, { root, kind: "manual", version: "1", now: () => new Date("2026-10-29T11:00:00.000Z"), signer: { sign: async (m) => signManifest(m, exposed) } });
+    for (const b of [old, forged]) assert.deepEqual((await checkSignature(b.path, b.manifest, await svc.trust())).problems, ["the backup is signed by a key you do not trust"]);
+    const status = await svc.status(owner);
+    assert.deepEqual(status.keys.map((k) => k.revokedAt !== undefined), [true, true, false]);
+    // The revoked key put back into the store is refused at start.
+    store.values.set("backup-signing-key", exposed);
+    await assert.rejects(svc.ensure(), /retired/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("review: the snapshot before a database upgrade is signed with the stored key, so it verifies against the record; no key yet means signing has not begun; a locked store fails it (card K01b3)", async () => {
+  const { storage, epoch } = await populated();
+  const store = memoryStore();
+  assert.equal(await BackupSigningService.storeSigner(store), undefined);
+  const svc = BackupSigningService.withEpoch(storage, epoch, store);
+  await svc.ensure();
+  const root = tmp();
+  try {
+    const signer = (await BackupSigningService.storeSigner(store))!;
+    const snap = await createBackup(storage, { root, kind: "pre-upgrade", version: "1", now: () => new Date("2027-01-01T00:00:00.000Z"), signer });
+    assert.equal((await checkSignature(snap.path, snap.manifest, await svc.trust())).status, "valid");
+    store.failResolve = true;
+    await assert.rejects(BackupSigningService.storeSigner(store), /cannot be read/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("review: the signature is checked before any file of the backup is read: a forged backup with a damaged file is refused for its signature alone (card K01b3)", async () => {
+  const d = tmp();
+  try {
+    const { storage } = await populated();
+    const key = generateSigningKey();
+    const made = await createBackup(storage, { root: d, kind: "manual", version: "1.0.0", now: () => new Date(AT), signer: { sign: async (m) => signManifest(m, key.privateKey) } });
+    const manifestPath = join(made.path, "manifest.json");
+    writeFileSync(manifestPath, readFileSync(manifestPath, "utf8").replace('"kind": "manual"', '"kind": "scheduled"'));
+    writeFileSync(join(made.path, "aggregates.jsonl"), "not what was written\n");
+    const check = await verifyBackup(made.path, { signatureTrust: trustOf(key.publicKey) });
+    assert.equal(check.ok, false);
+    assert.deepEqual(check.problems, ["the signature does not match the manifest: the backup was changed or forged"], "no file was looked at");
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});

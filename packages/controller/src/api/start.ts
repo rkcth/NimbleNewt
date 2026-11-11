@@ -428,7 +428,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   const piFinal = options.backup?.restore?.piFinal ?? options.dispatch?.local?.piState?.final;
   // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
   const beforeUpgrade: BeforeUpgrade | undefined = options.backup === undefined ? undefined : async (notice) => {
-    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }), ...(piState === undefined ? {} : { piState }) });
+    // Signed with the key in the secret store (card K01b3), so a restore of it on a signing installation is not refused as unsigned; the database, and so the signing record, is not open yet.
+    const signing = options.backup!.signing;
+    const signer = signing === undefined ? undefined : await BackupSigningService.storeSigner(signing.store, signing.secretName);
+    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }), ...(piState === undefined ? {} : { piState }), ...(signer === undefined ? {} : { signer }) });
     print(`The database is being upgraded from schema ${notice.from} to ${notice.to}; a backup of it as it was is in ${options.backup!.directory}.`);
   };
   // Settling the journal is a short step under the state folder's lock, so two starts (or a start and a transfer) cannot each see the files before the other changed them. The lock is NOT held across the slow work that follows (a staged
@@ -489,10 +492,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The backup public key is pinned the first time it is loaded; a different one is refused until the owner approved its fingerprint (card K01b).
     const backupKeyPin = backupEncryption === undefined ? undefined : BackupKeyPinService.withEpoch(storage, epoch);
     const backupClock = options.backup?.now === undefined ? {} : { clock: () => options.backup!.now!().toISOString() };
-    const backupEncryptionSetting = options.backup === undefined ? undefined : BackupEncryptionSettingService.withEpoch(storage, epoch, backupClock);
+    const backupEncryptionSetting = options.backup === undefined ? undefined : BackupEncryptionSettingService.withEpoch(storage, epoch, { ...backupClock, keyringConfigured: backupEncryption !== undefined });
     // An installation that has made encrypted backups does not quietly go plain because the configuration lost its keyring: that needs the owner's recorded switch-off (card K01b3).
     if (backupEncryption === undefined && backupEncryptionSetting !== undefined && await BackupKeyPinService.withEpoch(storage, epoch).hasPin() && (await backupEncryptionSetting.effective()).enabled) {
       throw new Error("this installation has made encrypted backups, but the configuration no longer names a keyring file; no plain backup is made. Restore the keyring option, or have the owner switch backup encryption off (backup.encryption.set) first.");
+    }
+    // An installation that has signed backups does not quietly go unsigned (and its restores unchecked) because the configuration lost the signing option (card K01b3).
+    if (options.backup !== undefined && options.backup.signing === undefined && await BackupSigningService.hasRecord(storage)) {
+      throw new Error("this installation signs its backups, but the configuration no longer gives the signing key's secret store; no unsigned backup is made and no restore goes unchecked. Restore the signing option.");
     }
     const backupSigning = options.backup?.signing === undefined ? undefined : BackupSigningService.withEpoch(storage, epoch, options.backup.signing.store, { ...backupClock, ...(options.backup.signing.secretName === undefined ? {} : { secretName: options.backup.signing.secretName }) });
     if (backupSigning !== undefined) {
