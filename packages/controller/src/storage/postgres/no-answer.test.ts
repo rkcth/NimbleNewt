@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isStorageError } from "../index.js";
 import { MIGRATIONS, PostgresNoAnswer, PostgresStorage, discardPostgresTransferCopy, dropPostgresSchema, postgresDatabaseBytes, postgresRestorePort, postgresSchemaExists, stagedSchemaOf } from "./index.js";
-import { REPLY_MARGIN_MS, SHORT_CONNECT_MS, SHORT_STATEMENT_MS } from "./connection.js";
+import { REPLY_MARGIN_MS, SHORT_CONNECT_MS, SHORT_STATEMENT_MS, answeredOrCut } from "./connection.js";
 import { PROBE_EVERY_MS, PROBE_MISSES } from "./storage.js";
 import { FaultProxy } from "./testing/proxy.js";
 import { startTestServer, withClient, type TestServer } from "./testing/server.js";
@@ -69,6 +69,7 @@ test("on a frozen server every transfer and restore helper fails within its boun
       ["port.dropStaged", port.dropStaged(schema, staged)],
       ["port.keptSchemas", port.keptSchemas!(schema)],
       ["port.swapRefusal", port.swapRefusal!(schema)],
+      ["port.swapMade", port.swapMade!({ live: schema, staged, aside: `${schema}_br_${stamp.toLowerCase()}` })],
     ];
     for (const [what, call] of steps) {
       const { error } = await settles(what, call, SHORT_CONNECT_MS + SLACK_MS);
@@ -122,6 +123,34 @@ test("a statement the server never answers ends the step at once at its bound: a
   }
 });
 
+test("a swap whose COMMIT never reaches the server (the network went silent first) does not leave its transaction holding the swap's lock: the server ends it", async () => {
+  const rig = await viaProxy();
+  if (rig === undefined) return;
+  const live = schemaName();
+  const stamp = "20261111T120200Z";
+  const s = { live, staged: stagedSchemaOf(live, stamp), aside: `${live}_br_${stamp.toLowerCase()}` };
+  try {
+    await withClient(rig.direct, async (c) => { await c.query(`CREATE SCHEMA ${s.live}`); await c.query(`CREATE SCHEMA ${s.staged}`); });
+    rig.proxy.inject({ match: /^Q[\s\S]{4}COMMIT\0/, when: "hold" });
+    const swap = await settles("swap, COMMIT never arrives", postgresRestorePort(rig.url).swap(s), REPLY_MS + SLACK_MS);
+    assert.ok(noAnswer(swap.error, "unknown"), String(swap.error));
+    // The server still has the transaction (renames made, lock held) and never heard the client go. It must end it itself, within the same bound.
+    const port = postgresRestorePort(rig.direct);
+    const t0 = Date.now();
+    let made: unknown;
+    for (;;) {
+      made = await port.swapMade!(s).catch((error: unknown) => error);
+      if (typeof made === "boolean" || Date.now() - t0 > REPLY_MS + SLACK_MS) break;
+      await sleep(1000);
+    }
+    assert.equal(made, false, `the abandoned swap still held its lock ${Date.now() - t0} ms later: ${String(made)}`);
+    assert.deepEqual([await exists(rig.direct, s.live), await exists(rig.direct, s.staged), await exists(rig.direct, s.aside)], [true, true, false], "not swapped at all");
+  } finally {
+    await rig.proxy.stop();
+    for (const name of [s.live, s.staged, s.aside]) await withClient(rig.direct, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${name} CASCADE`); });
+  }
+});
+
 test("a helper step that waits longer than the margin but is answered is not cut (a discard waiting for a lock)", async () => {
   const rig = await viaProxy();
   if (rig === undefined) return;
@@ -144,6 +173,25 @@ test("a helper step that waits longer than the margin but is answered is not cut
   } finally { await rig.proxy.stop(); await dropPostgresSchema(rig.direct, copy); }
 });
 
+test("a discard whose drop waits past the server's statement limit for another session's lock says the schema is in use, not that it holds foreign objects", async () => {
+  const s = await server();
+  const copy = schemaName();
+  try {
+    await (await PostgresStorage.open({ connectionString: s.url(), schema: copy })).close();
+    const { default: pg } = await import("pg");
+    const holder = new pg.Client({ connectionString: s.url() });
+    await holder.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT 1 FROM ${copy}.state`); // a reader's lock: the DROP waits for it until the server's own limit stops it
+      const { error } = await settles("discard behind a reader", discardPostgresTransferCopy(s.url(), copy, "transfer-pending:x"), SHORT_STATEMENT_MS + SLACK_MS);
+      assert.match(String((error as Error | undefined)?.message), /is in use by another session .* nothing was dropped; try again when it is free/);
+      await holder.query("ROLLBACK");
+    } finally { await holder.end(); }
+    assert.equal(await exists(s.url(), copy), true, "nothing was dropped");
+  } finally { await dropPostgresSchema(s.url(), copy); }
+});
+
 /** This version's migrations with `statement` added to the first one (a transactional migration: it commits with its journal entry, or not at all). */
 const withStatement = (statement: string) => MIGRATIONS.map((m, i) => (i === 0 ? { ...m, statements: [...m.statements, statement] } : m));
 
@@ -162,6 +210,21 @@ test("a schema upgrade statement that runs far beyond the statement timeout is n
     assert.ok(took >= runMs, `the long statement ran to its end (${took} ms)`);
     const probes = rig.proxy.trace.filter((line) => line.includes("pg_stat_activity")).length;
     assert.ok(probes >= 2, `the session was checked while the statement ran (${probes} probes)`);
+  } finally { await rig.proxy.stop(); await dropPostgresSchema(rig.direct, schema); }
+});
+
+test("through a pooler that hides the server's process number, a long schema upgrade statement is not cut as a session that is gone", async () => {
+  const rig = await viaProxy();
+  if (rig === undefined) return;
+  const schema = schemaName();
+  const statementTimeoutMs = 1000;
+  const runMs = statementTimeoutMs + REPLY_MARGIN_MS + 2 * PROBE_EVERY_MS + 2000;
+  try {
+    rig.proxy.fakeBackendPids = true; // the driver's processID is not a server session's: only the server can say which session the upgrade runs on
+    rig.proxy.trace = [];
+    const store = await PostgresStorage.open({ connectionString: rig.url, schema, statementTimeoutMs, connectTimeoutMs: 2000, migrations: withStatement(`SELECT pg_sleep(${runMs / 1000})`) });
+    await store.close();
+    assert.ok(rig.proxy.trace.filter((line) => line.includes("pg_stat_activity")).length >= 2, "the session was checked while the statement ran");
   } finally { await rig.proxy.stop(); await dropPostgresSchema(rig.direct, schema); }
 });
 
@@ -204,4 +267,33 @@ test("a schema upgrade on a server that stops answering, or whose session ends u
     await stopBackend();
     for (const schema of schemas) await dropPostgresSchema(rig.direct, schema);
   }
+});
+
+test("the upgrade watch: a probe the server answers with an error keeps the statement, a missed probe is forgiven by the next answer, only that many misses in a row cut", async () => {
+  const run = async (answers: (boolean | "error" | "silent")[], settleMs: number): Promise<{ cut: string | undefined; probes: number }> => {
+    let cut: string | undefined;
+    let probes = 0;
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const done = answeredOrCut(pending, {
+      quietMs: 10, everyMs: 10, misses: 3,
+      probe: async () => {
+        const a = answers[Math.min(probes++, answers.length - 1)];
+        if (a === "error") throw Object.assign(new Error("sorry, too many clients already"), { code: "53300" });
+        if (a === "silent") throw new Error("timeout expired");
+        return a as boolean;
+      },
+      cut: (why) => { cut = why; finish(); },
+    });
+    const timer = setTimeout(finish, settleMs);
+    await done;
+    clearTimeout(timer);
+    return { cut, probes };
+  };
+  assert.equal((await run(["error"], 400)).cut, undefined, "a server that answers with an error of its own is alive");
+  assert.equal((await run(["silent", "silent", true, "silent", "silent", true], 400)).cut, undefined, "misses that are not in a row do not cut");
+  assert.equal((await run([true, "silent", "silent", "silent"], 2000)).cut, "silent");
+  assert.equal((await run([true, false], 2000)).cut, "gone");
+  const quiet = await run([true], 0); // answered before the first probe is due
+  assert.equal(quiet.probes, 0);
 });

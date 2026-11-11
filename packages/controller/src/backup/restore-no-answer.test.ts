@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "../api/index.js";
-import { asideSchemaOf, postgresRestorePort, stagedSchemaOf } from "../storage/postgres/index.js";
+import { PostgresNoAnswer, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { FaultProxy } from "../storage/postgres/testing/proxy.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { JOURNAL_FILE, PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
@@ -86,6 +86,78 @@ test("a restore swap whose COMMIT is never answered, on a server that then freez
     try { assert.ok(JSON.stringify((await call(c2, token, "project.list", {})).result).includes("Late"), "the data as it was before the restore"); } finally { await c2.close(); }
   } finally {
     await proxy.stop();
+    await withClient(url, async (c) => { for (const name of [schema, stagedSchemaOf(schema, stamp || "20000101T000000Z"), asideSchemaOf(schema, stamp || "20000101T000000Z")]) await c.query(`DROP SCHEMA IF EXISTS ${name} CASCADE`); }).catch(() => undefined);
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("a swap the server still holds open (its COMMIT unread by a frozen backend) is never taken as not made: the start stops, and after the server runs it the next start puts it back", async () => {
+  const s = await pg();
+  if (s.kind !== "embedded") return; // the backend process is paused with a signal: a local, disposable server only
+  const url = s.url();
+  const schema = `k01nb_${process.pid}`;
+  const d = mkdtempSync(join(tmpdir(), "nn-k01nb-"));
+  mkdirSync(join(d, "data"));
+  const open = () => startController({ storage: { kind: "postgres", url, schema }, dataDirectory: join(d, "data"), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
+    backup: { directory: join(d, "backups") } } as never);
+  let stamp = "";
+  let frozen: number | undefined;
+  const thaw = () => { if (frozen !== undefined) { try { process.kill(frozen, "SIGCONT"); } catch { /* gone */ } frozen = undefined; } };
+  try {
+    const c = await open();
+    let token: string;
+    try {
+      token = (await c.services.principals.bootstrapOwner({ name: "rob" })).token;
+      await call(c, token, "project.create", { name: "Garden" }, "p1");
+      const name = (await call(c, token, "backup.now", {}, "b1")).result.item.name as string;
+      await call(c, token, "project.create", { name: "Late" }, "p2");
+      const preview = await call(c, token, "backup.restore.preview", { name });
+      assert.ok((await call(c, token, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1")).ok);
+      stamp = (await call(c, token, "backup.restore.status", {})).result.item.pending.stamp as string;
+    } finally { await c.close(); }
+    const staged = stagedSchemaOf(schema, stamp);
+    const aside = asideSchemaOf(schema, stamp);
+    const real = postgresRestorePort(url);
+    const where = async () => [await real.exists(schema), await real.exists(staged), await real.exists(aside)];
+
+    // The swap's transaction is made as the real one is (migration lock, both renames); then its server process is paused before it reads the COMMIT,
+    // and the client gives up on the answer and drops the connection. The server still holds the transaction: when the process runs again it reads the COMMIT.
+    const { default: driver } = await import("pg");
+    const late: PostgresRestorePort = {
+      ...real,
+      swap: async (sw) => {
+        const client = new driver.Client({ connectionString: url, application_name: "nimblenewt-restore" });
+        client.on("error", () => undefined);
+        await client.connect();
+        await client.query("BEGIN");
+        assert.equal((await client.query("SELECT pg_try_advisory_xact_lock(7306457, hashtext($1)) AS got", [`nimblenewt:${sw.live}`])).rows[0].got, true);
+        await client.query(`ALTER SCHEMA ${sw.live} RENAME TO ${sw.aside}`);
+        await client.query(`ALTER SCHEMA ${sw.staged} RENAME TO ${sw.live}`);
+        frozen = Number((await client.query("SELECT pg_backend_pid() AS p")).rows[0].p);
+        process.kill(frozen, "SIGSTOP");
+        void client.query("COMMIT").catch(() => undefined);
+        await sleep(300);
+        (client as unknown as { connection: { stream: { destroy(): void } } }).connection.stream.destroy();
+        throw new PostgresNoAnswer(`swapping the restored schema ${sw.staged} in as ${sw.live}`, "unknown", 40_000);
+      },
+    };
+    const first = await applyPendingRestore(join(d, "data"), { postgres: { url, schema, port: late } }).then((v) => ({ v }), (e: unknown) => ({ e }));
+    // While the server holds the swap, nobody can tell whether it is made: the start must stop with the journal kept, never conclude "nothing to put back".
+    assert.ok("e" in first, `the start concluded while the server still held the swap: ${JSON.stringify(first)}`);
+    assert.match(String((first.e as Error).message), /the restore could not be undone yet: .*Start again/);
+    assert.equal(existsSync(join(d, "data", JOURNAL_FILE)), true, "the journal records what to put back");
+    thaw();
+    for (let i = 0; i < 100 && (await where())[1]; i++) await sleep(100); // the paused process runs and commits the swap it held
+    assert.deepEqual(await where(), [true, false, true], "the server made the swap once it ran again");
+
+    const again: string[] = [];
+    assert.equal(await applyPendingRestore(join(d, "data"), { postgres: { url, schema, port: real } }, (l) => again.push(l)), undefined);
+    assert.match(again.join("\n"), /put back/);
+    assert.deepEqual(await where(), [true, true, false], "the live schema is the one it was before the restore");
+    const c2 = await open();
+    try { assert.ok(JSON.stringify((await call(c2, token, "project.list", {})).result).includes("Late"), "the data as it was before the restore"); } finally { await c2.close(); }
+  } finally {
+    thaw();
     await withClient(url, async (c) => { for (const name of [schema, stagedSchemaOf(schema, stamp || "20000101T000000Z"), asideSchemaOf(schema, stamp || "20000101T000000Z")]) await c.query(`DROP SCHEMA IF EXISTS ${name} CASCADE`); }).catch(() => undefined);
     rmSync(d, { recursive: true, force: true });
   }

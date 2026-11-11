@@ -364,11 +364,14 @@ export class PostgresStorage implements ControllerStorage {
     // No statement timeout in this phase, so no reply deadline either; instead a statement unanswered past the usual deadline is watched (follow-up of card 19):
     // it may run for hours as long as the server says its session is there, and its connection is cut only when the server stops answering.
     let stopped: "gone" | "silent" | undefined;
+    // The server's own number for this session, asked of the server: the driver's `processID` is what a pooler in session mode (PgBouncer) made up, and no session
+    // in `pg_stat_activity` has it, so every long upgrade statement through one would be cut as "gone". Until it is known, only silence can cut a statement.
+    let pid: number | undefined;
     const q = async (sql: string, params?: unknown[]): Promise<Row[]> => {
       try {
         return (await answeredOrCut(client.query(sql, params), {
           quietMs: this.#options.statementTimeoutMs + REPLY_MARGIN_MS, everyMs: PROBE_EVERY_MS, misses: PROBE_MISSES,
-          probe: () => this.#sessionThere((client as unknown as { processID?: number }).processID), cut: (why) => { stopped ??= why; broken = true; socketOf(client)?.destroy(); },
+          probe: () => this.#sessionThere(pid), cut: (why) => { stopped ??= why; broken = true; socketOf(client)?.destroy(); },
         })).rows as Row[];
       } catch (error) {
         if (stopped === undefined) throw error;
@@ -394,6 +397,7 @@ export class PostgresStorage implements ControllerStorage {
       }
     };
     try {
+      pid = Number((await q("SELECT pg_backend_pid() AS pid"))[0]!.pid);
       await lock();
       try {
         // 1. The schema and its journal. A schema with tables but no journal is somebody else's.
@@ -462,11 +466,12 @@ export class PostgresStorage implements ControllerStorage {
    * Rejects when the server does not answer (that connection is then cut); a server that answers with an error of its own counts as alive (`answeredOrCut`).
    */
   async #sessionThere(pid: number | undefined): Promise<boolean> {
+    if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return true; // not known: the session cannot be looked up, so only a probe that gets no answer counts
     const probe = this.#liveClient!();
     probe.on("error", () => undefined);
     try {
       await probe.connect();
-      return (await probe.query({ text: "SELECT 1 AS x FROM pg_stat_activity WHERE pid = $1", values: [pid ?? 0], query_timeout: REPLY_MARGIN_MS } as pg.QueryConfig)).rows.length > 0;
+      return (await probe.query({ text: "SELECT 1 AS x FROM pg_stat_activity WHERE pid = $1", values: [pid], query_timeout: REPLY_MARGIN_MS } as pg.QueryConfig)).rows.length > 0;
     } catch (error) { socketOf(probe)?.destroy(); throw error; } finally { await endConnection(probe); }
   }
 

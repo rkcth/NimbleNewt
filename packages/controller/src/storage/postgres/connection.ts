@@ -80,6 +80,9 @@ export async function withShortConnection<T>(connectionString: string, step: { n
   const replyMs = SHORT_STATEMENT_MS + REPLY_MARGIN_MS;
   const client = new driver.Client({
     connectionString, connectionTimeoutMillis: SHORT_CONNECT_MS, statement_timeout: SHORT_STATEMENT_MS, query_timeout: replyMs,
+    // A transaction left open on the server by a connection this client dropped (the network went silent before the COMMIT arrived) is ended by the
+    // server itself instead of holding its locks (a swap's migration lock) until the server's own keepalive notices, which may be hours.
+    idle_in_transaction_session_timeout: replyMs,
     keepAlive: true, keepAliveInitialDelayMillis: KEEPALIVE_IDLE_MS, ...(step.applicationName === undefined ? {} : { application_name: step.applicationName }),
   });
   client.on("error", () => undefined); // a dropped connection is reported by the statement that was waiting on it

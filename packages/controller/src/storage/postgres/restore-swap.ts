@@ -54,6 +54,12 @@ export interface PostgresRestorePort {
   swap(s: SchemaSwap): Promise<void>;
   /** The swap undone, in one transaction: live -> staged, aside -> live. */
   unswap(s: SchemaSwap): Promise<void>;
+  /**
+   * Whether the swap is made (staged gone, aside there), read under the migration lock every swap and unswap holds for its whole transaction. A swap or unswap
+   * the server still holds open (its connection was dropped while the COMMIT was unanswered: a paused server process, a COMMIT waiting for the disk or a
+   * synchronous standby) may still commit, so its outcome is not known yet: refused (PostgresSwapBusy) instead of read from names it may still change.
+   */
+  swapMade?(s: SchemaSwap): Promise<boolean>;
   /** Drops a staged schema this restore made (the name must be a staged name of `live`). Gone already is a success. */
   dropStaged(live: string, staged: string): Promise<void>;
   /** Why the database role could not make the swap (it must own `live` and may create schemas in the database: PostgreSQL's rule for a schema rename), or undefined when it can. Asked before a restore is prepared. */
@@ -110,6 +116,18 @@ export function postgresRestorePort(connectionString: string): PostgresRestorePo
     controllersConnected: (live) => { if (live !== undefined && !SCHEMA_NAME.test(live)) throw new Error("invalid schema name"); return withClient(connectionString, { name: "checking for other controllers connected to the database", writes: false }, (c) => othersConnected(c, live)); },
     swap: async (s) => { check(s); await renameInOne(connectionString, s, `swapping the restored schema ${s.staged} in as ${s.live}`, [[s.live, s.aside], [s.staged, s.live]], { absent: s.aside, present: [s.live, s.staged] }); },
     unswap: async (s) => { check(s); await renameInOne(connectionString, s, `undoing the swap of the restored schema ${s.staged}`, [[s.live, s.staged], [s.aside, s.live]], { absent: s.staged, present: [s.live, s.aside] }); },
+    swapMade: async (s) => {
+      check(s);
+      return withClient(connectionString, { name: `checking whether the restored schema ${s.staged} is swapped in`, writes: false }, async (c) => {
+        await c.query("BEGIN");
+        try {
+          if (!(await c.query("SELECT pg_try_advisory_xact_lock($1, hashtext($2)) AS got", [LOCK_CLASS, `nimblenewt:${s.live}`])).rows[0]?.got) {
+            throw new PostgresSwapBusy("the database server still holds an earlier swap or undo of this restore, or a controller is opening the schema (its migration lock is held), so whether the swap is made is not known yet");
+          }
+          return !(await schemaExists(c, s.staged)) && (await schemaExists(c, s.aside));
+        } finally { await c.query("ROLLBACK").catch(() => undefined); } // a read: nothing to commit
+      });
+    },
     dropStaged: async (live, staged) => {
       if (!SCHEMA_NAME.test(live) || !SCHEMA_NAME.test(staged) || !/^nnrs_[0-9a-f]{8}_[0-9]{8}t[0-9]{6}z$/.test(staged) || !staged.startsWith(stagedSchemaOf(live, "20000101T000000Z").slice(0, 14))) throw new Error("only a staged restore schema of this installation may be dropped");
       await withClient(connectionString, { name: `dropping the staged restore schema ${staged}`, writes: true }, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${staged} CASCADE`); });

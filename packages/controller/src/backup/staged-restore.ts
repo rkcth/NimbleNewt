@@ -325,6 +325,8 @@ const swapOf = (m: Move): { live: string; staged: string; aside: string } => ({ 
 async function made(m: Move, live: Live): Promise<boolean> {
   if (m.aside === undefined) return !(await exists(m.from)) && (await exists(m.to));
   const port = portFor(m, live);
+  // Under the swap's lock: names read while the server still holds an unanswered swap (or undo) would say "not made" and that transaction could still commit.
+  if (port.swapMade !== undefined) return port.swapMade(swapOf(m));
   return !(await port.exists(m.from)) && (await port.exists(m.aside));
 }
 async function makeMove(o: ApplyOptions, m: Move, live: Live): Promise<void> {
@@ -343,6 +345,7 @@ async function rollBack(data: string, key: Buffer, j: Journal, o: ApplyOptions, 
     const m = j.moves[i - 1]!;
     try { await undoMove(o, m, live); } catch (error) {
       await writeJournal(data, key, { stamp: j.stamp, mode: "back", moves: j.moves, at: i });
+      if (error instanceof PostgresSwapBusy) throw new Error(`the restore could not be undone yet: ${error.message}. Nothing more was changed; the journal ${JOURNAL_FILE} lists every move. Start again in a minute: putting things back continues from where it stopped, checking each move first.`, { cause: error });
       if (error instanceof PostgresNoAnswer) throw new Error(`the restore could not be undone yet: ${error.what}. Nothing more was changed; the journal ${JOURNAL_FILE} lists every move. Start again when the database server answers: putting things back continues from where it stopped, checking each move first.`, { cause: error });
       throw new Error(`the restore could not be undone: ${basename(m.to)} could not be moved back to ${basename(m.from)} (${(error as NodeJS.ErrnoException).code ?? "error"}). The data directory is half-swapped; the journal ${JOURNAL_FILE} lists every move. Free the file and start again: the rollback continues from where it stopped.`);
     }

@@ -4,7 +4,7 @@
  * A server that stops answering fails a step as `PostgresNoAnswer` (connection.ts): never a wait for ever, and never a cut while the server is still answering.
  */
 
-import { withShortConnection } from "./connection.js";
+import { SHORT_STATEMENT_MS, withShortConnection } from "./connection.js";
 import { CONTROLLER_TABLES } from "./schema.js";
 
 const SCHEMA_NAME = /^[a-z][a-z0-9_]{0,40}$/;
@@ -46,6 +46,9 @@ export async function discardPostgresTransferCopy(connectionString: string, sche
         await c.query(`DROP TABLE IF EXISTS ${CONTROLLER_TABLES.map((t) => `${schema}.${t}`).join(", ")} RESTRICT`);
         await c.query(`DROP SCHEMA ${schema} RESTRICT`);
       } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        // The server's own limit on a statement waiting for a lock is not a sign of foreign objects: say what it is.
+        if (code === "57014" || code === "55P03") throw new Error(`the schema ${schema} is in use by another session (the drop waited ${SHORT_STATEMENT_MS / 1000} s for its lock and the server stopped it), so nothing was dropped; try again when it is free`, { cause: error });
         throw new Error(`the schema ${schema} holds, or is depended on by, objects the transfer did not create, so nothing was dropped (${error instanceof Error ? error.message.slice(0, 200) : "refused"})`);
       }
       await c.query("COMMIT");
