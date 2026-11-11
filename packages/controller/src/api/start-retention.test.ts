@@ -74,6 +74,8 @@ test("user-requested deletion: material a resumable task needs is retained and s
     const copy = await c.services.desks.copy(ben.p, { commandId: "cp1", recordId: rec.id, visibility: "private" });
     const sum = await c.services.retrieval.summarize(ann.p, { commandId: "sm1", projectId: project, title: "Summary", text: "Beds are done.", sources: [{ kind: "desk-record", id: rec.id }] });
     await put("ctx-compaction", "cmp-1", { taskId: t1, projectId: project, key: "k", compressorId: "c", state: "done", generation: 1, lineage: [], sources: [{ kind: "desk-record", id: rec.id }], pinned: [], title: "t", summary: "Beds are done.", digest: "dg", summaryId: sum.id, startedBy: "x" });
+    // The backup is made after the record was written (as a real one is): the backup clock is read now, not fixed at the test's start, which a slow machine could leave seconds before the record.
+    clock = Math.max(clock, Date.now() + 1_000);
     await c.services.backups!.backUpNow("manual");
 
     // The task can still resume: the record is retained, and says why; the owner sees the request recorded as retained.
@@ -121,6 +123,27 @@ test("user-requested deletion: material a resumable task needs is retained and s
     assert.equal((await call(boot.token, "retention.delete", { recordId: "task-aaaaaaaaaaaaaaaaaaaa", reason: "x" }, "d3")).error?.code, "invalid_command");
     assert.equal((await call(boot.token, "retention.delete", { recordId: rec.id, reason: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789" }, "d4")).error?.code, "invalid_command");
     clock += 1;
+  } finally { await c.close(); clean(d); }
+});
+
+test("backups holding a deleted record are counted by the second the record was created, not the day: the boundary is pinned (card K06, midnight flake)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-bdy-"));
+  let clock = Date.now();
+  const { c, boot, call, project, agent } = await world(d, { backup: { directory: join(d, "backups"), now: () => new Date(clock) } });
+  try {
+    const ann = await agent("ann");
+    const rec = await c.services.desks.write(ann.p, { commandId: "w1", projectId: project, kind: "note", title: "a", body: "a", visibility: "shared" });
+    const created = Date.parse((await c.storage.getAggregate({ kind: "desk-record", id: rec.id }))!.createdAt);
+    const holding = async (id: string) => { const r = await call(boot.token, "retention.delete", { recordId: rec.id, reason: "owner asked", dryRun: true }, id); assert.ok(r.ok, JSON.stringify(r)); return r.result.backups.holding as number; };
+    for (const at of [created - 1_000, created - 86_400_000]) { clock = at; await c.services.backups!.backUpNow("manual"); }
+    assert.equal(await holding("b0"), 0, "backups made before the record's second do not hold it");
+    clock = created; await c.services.backups!.backUpNow("manual");
+    assert.equal(await holding("b1"), 1, "a backup in the record's own second holds it");
+    clock = created + 86_400_000; await c.services.backups!.backUpNow("manual");
+    assert.equal(await holding("b2"), 2);
+    // Backups are kept one per UTC day, so each count needs its own day; the count still follows the record's time, not the calendar day.
+    clock = created + 2 * 86_400_000; await c.services.backups!.backUpNow("manual");
+    assert.equal(await holding("b3"), 3);
   } finally { await c.close(); clean(d); }
 });
 
