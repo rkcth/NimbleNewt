@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { FileBlobStore } from "../artifacts/index.js";
 import { join } from "node:path";
+import type { SignatureCheck, SignatureTrust } from "./signing.js";
 import { createInterface } from "node:readline";
 import { SNAPSHOT_TABLES, canonicalJson, type ControllerStorage, type SnapshotRow } from "../storage/index.js";
 import { cipherOf, blobFile, manifestDigestOf, readAll, verifyBackup } from "./verify.js";
@@ -15,6 +16,8 @@ export class RestoreRefused extends Error {
 
 export interface RestoreResult {
   readonly manifest: BackupManifest;
+  /** What the signature check found (card K01b3), with the plain statement of what a valid signature does and does not show. */
+  readonly signature?: SignatureCheck;
   readonly rows: number;
   /** Effects that were only intended when the copy was taken: they may have happened afterwards, so they are restored as uncertain and left to be reconciled, never run again. */
   readonly effectsMarkedUncertain: number;
@@ -37,8 +40,8 @@ const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this 
  * Restores a backup into an empty store (one no controller has owned). The backup is verified first, against its manifest and the store's schema version; nothing is written when it fails. An interrupted restore leaves
  * a partly filled store, which the caller discards (a restore always starts from a new, empty database), because the state row that makes a store look used is written last.
  */
-export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string; /** The digest of the manifest the caller approved (`manifestDigestOf`): the backup verified here must be exactly that one. */ expectedManifestDigest?: string } = {}): Promise<RestoreResult> {
-  const check = await verifyBackup(path, { ...(options.unlock === undefined ? {} : { unlock: options.unlock }), ...(options.requireEncrypted === undefined ? {} : { requireEncrypted: options.requireEncrypted }) });
+export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** The signing public keys already trusted (card K01b3): the backup must carry a valid signature of one of them. */ signatureTrust?: SignatureTrust; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string; /** The digest of the manifest the caller approved (`manifestDigestOf`): the backup verified here must be exactly that one. */ expectedManifestDigest?: string } = {}): Promise<RestoreResult> {
+  const check = await verifyBackup(path, { ...(options.signatureTrust === undefined ? {} : { signatureTrust: options.signatureTrust }), ...(options.unlock === undefined ? {} : { unlock: options.unlock }), ...(options.requireEncrypted === undefined ? {} : { requireEncrypted: options.requireEncrypted }) });
   if (!check.ok || check.manifest === undefined) throw new RestoreRefused(`the backup cannot be restored: ${check.problems.join("; ")}`);
   const manifest = check.manifest;
   if (options.expectedManifestDigest !== undefined && manifestDigestOf(manifest) !== options.expectedManifestDigest) throw new RestoreRefused("the backup is not the one that was approved: it changed after the preview");
@@ -104,5 +107,5 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
     }
     await flush();
   }
-  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), blobsSkippedDeleted: skippedDeleted, piStoresRestored: piStores, piFilesRestored: piFiles };
+  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), blobsSkippedDeleted: skippedDeleted, piStoresRestored: piStores, piFilesRestored: piFiles, ...(check.signature === undefined ? {} : { signature: check.signature }) };
 }

@@ -681,7 +681,9 @@ for (const backend of backends) {
     // Intents for the coordinator (card U03): the action and the fields it needs are checked.
     const co = (extra: Record<string, unknown>) => [{ kind: "coordinator", evidence: "e", basis: "owner", ...extra }];
     assert.equal(checkIntents(co({ action: "answer", question: "why?" }))[0]!.kind, "coordinator");
-    for (const bad of [{ action: "dance" }, { action: "answer" }, { action: "answer", question: "q", outcome: "o" }, { action: "start", question: "q" }, { action: "configure", principalId: "agent:c" }, { action: "configure", principalId: "agent:c", routes: ["a", "b", "c", "d", "e"] }, { action: "assign", projectName: "A", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }]) {
+    // Routes are optional in the words (card U03d): a hosted coordinator uses its agent's profile; the service refuses a principal that is not an agent record when none are named.
+    assert.equal(checkIntents(co({ action: "configure", principalId: "agent:c" }))[0]!.kind, "coordinator");
+    for (const bad of [{ action: "dance" }, { action: "answer" }, { action: "answer", question: "q", outcome: "o" }, { action: "start", question: "q" }, { action: "configure", principalId: "agent:c", routes: ["a", "b", "c", "d", "e"] }, { action: "assign", projectName: "A", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }]) {
       assert.throws(() => checkIntents(co(bad)), DomainError, JSON.stringify(bad));
     }
     assert.throws(() => checkIntents(Array.from({ length: 9 }, () => ({ kind: "none", reason: "r" }))), DomainError);

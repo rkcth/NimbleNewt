@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { localHostBuilder } from "./local-host.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = async (pkg) => import(pathToFileURL(join(root, "packages", pkg, "dist", "index.js")).href);
@@ -155,7 +156,7 @@ export async function main(argv, io = { stdin: process.stdin, stdout: process.st
     const { store, reason } = await secretStoreFor(config);
     const { launch, runTerminalChat, setupGreeting } = await load("controller");
     const passthrough = [...(args.flags["allow-unsupported-environment"] === true ? ["--allow-unsupported-environment"] : [])];
-    const launched = await launch({ config, secrets: store, argv: passthrough, env: io.env, print: (l) => io.stderr.write(`${l}\n`), ...(args.flags.serve === true ? { serve: {} } : {}) });
+    const launched = await launch({ config, secrets: store, argv: passthrough, env: io.env, print: (l) => io.stderr.write(`${l}\n`), localHost: localHostBuilder({ root, load }), ...(args.flags.serve === true ? { serve: {} } : {}) });
     try {
       out(`Secrets are kept in: ${reason}.`);
       for (const n of launched.notes) out(n);

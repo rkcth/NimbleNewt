@@ -22,10 +22,10 @@ import type { ModelCall, ModelReply } from "./model-interpreter.js";
  */
 
 /** The routes to try for a role, in order: the eligible ones of the table's selection, at most `max`. A role with no profile, or no eligible route, has none. */
-export function chatRoutes(routing: { select(request: RouteRequest): Promise<Selection & { revision: number }> }, options: { readonly role: string; readonly data?: RouteRequest["data"]; readonly paidAuthorized?: boolean; readonly contextTokens?: number; readonly max?: number }): () => Promise<readonly string[]> {
+export function chatRoutes(routing: { select(request: RouteRequest): Promise<Selection & { revision: number }> }, options: { readonly role: string; /** A routing profile that replaces the role's own (card U03d: a hosted coordinator's agent has a `defaultProfile`). */ readonly profile?: string; readonly data?: RouteRequest["data"]; readonly paidAuthorized?: boolean; readonly contextTokens?: number; readonly max?: number }): () => Promise<readonly string[]> {
   return async () => {
     try {
-      const picked = await routing.select({ role: options.role, contextTokens: options.contextTokens ?? 8000, needs: [], data: options.data ?? "local-only", paidAuthorized: options.paidAuthorized ?? false });
+      const picked = await routing.select({ role: options.role, ...(options.profile === undefined ? {} : { profile: options.profile }), contextTokens: options.contextTokens ?? 8000, needs: [], data: options.data ?? "local-only", paidAuthorized: options.paidAuthorized ?? false });
       return picked.candidates.filter((c) => c.eligible).map((c) => c.route).slice(0, options.max ?? 4);
     } catch (error) {
       if (error instanceof DomainError && error.code === "not_found") return [];
@@ -208,8 +208,14 @@ export class ModelCoordinatorModel implements CoordinatorModel {
   readonly #model: ModelCall;
   constructor(model: ModelCall) { this.#model = model; }
 
-  async respond(route: string, request: CoordinatorRequest): Promise<unknown> {
+  async respond(route: string, request: CoordinatorRequest, meter?: (tokens: { readonly inputTokens: number; readonly outputTokens: number }) => void): Promise<unknown> {
     const { system, user } = prompt(request);
+    // The provider's own token count is passed on when the model gives one (for the agent's usage record); the reply is the same either way.
+    if (meter !== undefined && this.#model.completeDetailed !== undefined) {
+      const reply = await this.#model.completeDetailed(route, { system, user });
+      if (reply.usage !== undefined) meter({ inputTokens: reply.usage.inputTokens, outputTokens: reply.usage.outputTokens });
+      return parseObject(reply.text);
+    }
     return parseObject(await this.#model.complete(route, { system, user }));
   }
 }

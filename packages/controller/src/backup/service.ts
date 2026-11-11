@@ -6,6 +6,7 @@ import { type BackupKind, type BackupManifest } from "./format.js";
 import { basename } from "node:path";
 import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo, type Retention } from "./retention.js";
 import type { Keyring } from "./crypto.js";
+import type { BackupSigner } from "./signing.js";
 import { createBackup } from "./write.js";
 import type { PiStateSource } from "./pi-state.js";
 
@@ -25,6 +26,10 @@ export interface BackupServiceOptions {
   readonly blobs?: FileBlobStore;
   /** Encrypt each backup for this key (card K01b): the public keyring only. */
   readonly encryption?: Keyring;
+  /** The keyring to seal for at the moment of each backup (card K01b3: the owner's on/off and scope setting); `undefined` means this backup is plain. Takes precedence over `encryption`. A source that throws fails the backup, it never falls back to plain. */
+  readonly encryptionSource?: () => Promise<Keyring | undefined>;
+  /** Signs each backup (card K01b3). */
+  readonly signer?: BackupSigner;
   /** The agents' own conversation stores on this machine (card K01h): copied into each backup. */
   readonly piState?: PiStateSource;
 }
@@ -44,6 +49,12 @@ export class BackupService {
   constructor(storage: ControllerStorage, options: BackupServiceOptions) {
     this.#storage = storage;
     this.#options = options;
+  }
+
+  /** The encryption and signing this backup gets: the owner's setting is read now (card K01b3), so a change applies from the next backup. */
+  async #sealing(): Promise<{ encryption?: Keyring; signer?: BackupSigner }> {
+    const encryption = this.#options.encryptionSource === undefined ? this.#options.encryption : await this.#options.encryptionSource();
+    return { ...(encryption === undefined ? {} : { encryption }), ...(this.#options.signer === undefined ? {} : { signer: this.#options.signer }) };
   }
 
   #now(): Date { return (this.#options.now ?? (() => new Date()))(); }
@@ -75,7 +86,7 @@ export class BackupService {
     await this.finish();
     // Two restores prepared within one second would share a name: the later one is stamped a second on.
     for (let skew = 0; ; skew++) {
-      try { return await createBackup(this.#storage, { root: this.#options.root, kind: "pre-restore", version: this.#options.version, now: () => new Date(this.#now().getTime() + skew * 1000), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) }) }
+      try { return await createBackup(this.#storage, { root: this.#options.root, kind: "pre-restore", version: this.#options.version, now: () => new Date(this.#now().getTime() + skew * 1000), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) }) }
       catch (error) { if (skew >= 30 || !["ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     }
   }
@@ -86,7 +97,7 @@ export class BackupService {
     if (this.#running !== undefined) return this.#running;
     const run = (async () => {
       try {
-        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
+        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
         this.#lastError = undefined;
         await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.#counts() }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
         return made;

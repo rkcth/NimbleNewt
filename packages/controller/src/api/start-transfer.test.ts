@@ -92,6 +92,50 @@ test("once the new database has recorded work the transfer cannot be rolled back
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
 
+test("a rollback stopped after the fence with work that slipped in before it: the real start on the new database finds the work, keeps the move and starts with it; the previous database is refused (card F04n review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfk-"));
+  const oldPath = join(d, "a", "c.sqlite"), newPath = join(d, "b", "moved.sqlite"), state = join(d, "state");
+  let point: ((p: string) => Promise<void>) | undefined;
+  const lines: string[] = [];
+  const open = async (path: string, other: { name: string; path: string }) => startController({ storage: { kind: "sqlite", path }, argv: [], env: {}, print: (l: string) => { lines.push(l); }, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
+    transfer: { stateDirectory: state, inject: async (p: string) => { await point?.(p); }, targets: [await sqliteTarget({ name: other.name, path: other.path, open: () => SqliteStorage.open({ path: other.path }) })] } } as never);
+  let c = await open(oldPath, { name: "moved", path: newPath });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    let call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    await call("project.create", { name: "Garden" }, "p1");
+    const preview = await call("database.transfer.preview", { target: "moved" });
+    assert.ok((await call("database.transfer.apply", { target: "moved", confirm: preview.result.item.token }, "t1")).ok);
+    await c.close();
+    c = await open(newPath, { name: "previous", path: oldPath });
+    call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    // A write that got past the barrier between the rollback's check and its fence (a second connection, under the epoch the controller holds), then the process stops right after the fence.
+    point = async (p) => {
+      if (p === "rollback:journal") {
+        const side = await SqliteStorage.open({ path: newPath });
+        try {
+          const snap = await side.snapshot(); let epoch = 0;
+          try { epoch = Number((await snap.read("state", { limit: 1 }))[0]!["epoch"]); } finally { await snap.close(); }
+          await side.applyOperation({ operationId: "slipped", epoch, actor: "owner:rob", correlationId: "c-slipped", at: new Date().toISOString(), changes: [], audit: [{ type: "late.record", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+        } finally { await side.close(); }
+      }
+      if (p === "rollback:fenced") throw new Error("crash");
+    };
+    assert.equal((await call("database.transfer.rollback", {}, "t2")).ok, false);
+    point = undefined;
+    await c.close();
+    lines.length = 0;
+    c = await open(newPath, { name: "previous", path: oldPath });
+    assert.ok(lines.some((l) => /not finished.*recorded work.*move stands/.test(l)), lines.join("\n"));
+    assert.equal((await readAuthority(state))?.active.name, "moved");
+    call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    assert.ok(JSON.stringify(await call("project.list", {})).includes("Garden"));
+    assert.equal((await call("project.create", { name: "After" }, "p2")).ok, true, "the controller works on the new database");
+    await c.close();
+    await assert.rejects(open(oldPath, { name: "moved", path: newPath }), /moved to/);
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
 test("the transfer state folder must be an absolute path (card F04e)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-xfa-"));
   try {

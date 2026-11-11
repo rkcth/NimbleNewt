@@ -27,6 +27,7 @@ export async function runTerminalChat(options: TerminalChatOptions): Promise<num
       const said = turn.reply.join("\n");
       // The chat's own line says the assistant is unavailable; at the terminal the likely cause on a new installation is that no model server is registered or reachable, which the setup view names.
       options.write(`${said}${/assistant that reads free-form messages is unavailable/.test(said) ? "\nIf this stays so: check that a model server is registered (the setup list shows it under \"A model provider and route\"), that it is running, and that its key, if it needs one, is in the secret store." : ""}\n`);
+      for (const secret of turn.secrets ?? []) options.write(`${secret.label} (shown once, kept nowhere; copy it now):\n${secret.value}\n`);
     } catch (error) {
       options.write(`${plainProblem(error)}\n`);
     }

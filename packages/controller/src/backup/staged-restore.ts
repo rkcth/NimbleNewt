@@ -18,6 +18,7 @@ import { ProofRefused, type UnlockMethod } from "./encryption.js";
 import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js";
 import { manifestDigestOf, readManifest, verifyBackup } from "./verify.js";
+import { checkSignature, type SignatureTrust } from "./signing.js";
 import { tableFile, type BackupManifest } from "./format.js";
 import { validStoreId } from "./pi-state.js";
 import { acquireDataLocks, LINK_FALLBACK_CODES, type DataLock } from "./data-lock.js";
@@ -105,6 +106,8 @@ export interface StagedRestoreOptions {
   /** The unlock for an encrypted backup (reads a host file; never an argument). */
   readonly unlock?: (method: UnlockMethod) => Promise<BackupKey>;
   readonly deletions?: () => Promise<readonly LedgerEntry[]>;
+  /** The signing public keys this installation already trusts (card K01b3: the owner's records, never the backup's own). With it a backup must carry a valid signature of one of them, and the preview says what a valid signature shows. */
+  readonly signatureTrust?: () => Promise<SignatureTrust | undefined>;
   readonly onStaged?: (pending: PendingRestore) => void;
   /**
    * How the controller gets restarted once a restore is staged (card K01i). `automatic`: the host's own restart (it closes this controller and starts it again), called `delayMs` after the restore is staged, so the owner's
@@ -530,6 +533,10 @@ export class StagedRestore {
     if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
     const encrypted = m.encryption !== undefined;
     const warnings: string[] = [];
+    // The signature is checked against the keys this installation already trusts, for plain and sealed backups alike (it needs no secret): a backup that fails is not offered for restore.
+    const signature = await checkSignature(path, m, await this.#o.signatureTrust?.());
+    if (signature.problems.length > 0) throw new DomainError("integrity", `the backup cannot be restored: ${signature.problems.join("; ")}`);
+    if (this.#o.signatureTrust !== undefined) warnings.push(signature.text);
     let effects: number | undefined, deliveries: number | undefined;
     if (!encrypted && verify) {
       const check = await verifyBackup(path);
@@ -562,6 +569,11 @@ export class StagedRestore {
       ],
       warnings,
     };
+  }
+
+  async #signatureOption(): Promise<{ signatureTrust?: SignatureTrust }> {
+    const trust = await this.#o.signatureTrust?.();
+    return trust === undefined ? {} : { signatureTrust: trust };
   }
 
   /** What restoring this backup would do, exactly. Changes nothing and needs no secret. */
@@ -681,7 +693,7 @@ export class StagedRestore {
       const fresh: ControllerStorage = liveDb.pg === undefined ? await SqliteStorage.open({ path: stagedDb }) : await (liveDb.pg.openStaged ?? ((schema: string) => PostgresStorage.open({ connectionString: liveDb.pg!.url, schema })))(stagedDb);
       try {
         // The one verification: the restore checks the backup, and the manifest it checked must be the one the approval named.
-        result = await restoreBackup(path, fresh, { ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
+        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
       } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error; }
       await fresh.close();
       await this.#checkMargin(manifest, margin, shown);

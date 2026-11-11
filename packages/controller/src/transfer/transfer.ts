@@ -268,14 +268,24 @@ const wasTransferred = (h: string | null | undefined): string | undefined => (ty
  * destination and abandoned on the source; an authority file already written settles the journal. Then: a start on a database the authority file does not name is refused, and so is a start on the destination of a transfer the authority
  * does not name (a partial, failed, abandoned or rolled-back copy: the state row is copied last, so such a store looks empty).
  */
-export async function guardStart(stateDirectory: string, configured: Configured, now: () => Date = () => new Date()): Promise<{ resolved?: "finished" | "abandoned"; note?: string }> {
+export async function guardStart(stateDirectory: string, configured: Configured, now: () => Date = () => new Date(), database?: Pick<ControllerStorage, "snapshot"> | "later"): Promise<{ resolved?: "finished" | "abandoned"; note?: string }> {
   const journal = await readJournal(stateDirectory);
   let authority = await readAuthority(stateDirectory);
   const at = now().toISOString();
   const journalFile = join(stateDirectory, TRANSFER_JOURNAL);
   let result: { resolved?: "finished" | "abandoned"; note?: string } = {};
   let current = journal;
-  if (journal !== undefined && journal.phase === "rolling-back") {
+  // Card F04n review: a rollback stopped before it wrote the authority file (a crash after the fence, or late work found while the state folder could not be written) may have left work on the new database that its last check
+  // never saw or could not record. A start on that very database checks it first: one that shows work since its first start keeps the move (the journal goes back to `switched`) instead of rolling the work away. Before the
+  // database is open (`later`) the decision waits for the call that has it. A start on the previous database cannot look and finishes the rollback, as the owner asked.
+  const pendingOnNew = journal !== undefined && journal.phase === "rolling-back" && journal.to.fingerprint === configured.fingerprint && journal.firstStart !== undefined && !(authority?.transferId === journal.id && authority.active.fingerprint === journal.from.fingerprint);
+  if (pendingOnNew && database === "later") return result;
+  const workSince = pendingOnNew && database !== undefined && database !== "later" ? await workSinceFirstStart(database, journal.firstStart!) : undefined;
+  if (journal !== undefined && workSince !== undefined) {
+    current = { ...journal, phase: "switched", updatedAt: at, note: `a rollback that was stopped part way was not finished at the start: the new database recorded work (${workSince}), so the move stands` };
+    await writeJson(journalFile, current);
+    result = { resolved: "finished", note: `database transfer ${journal.id}: the rollback that was stopped part way was not finished, because the new database recorded work (${workSince}); the move stands and the controller database is ${journal.to.name}` };
+  } else if (journal !== undefined && journal.phase === "rolling-back") {
     // A rollback that passed its checks is finished whatever stopped it: the previous database is the authoritative one again.
     if (!(authority?.transferId === journal.id && authority.active.fingerprint === journal.from.fingerprint)) {
       authority = { format: 1, generation: (authority?.generation ?? 0) + 1, active: journal.from, previous: journal.to, transferId: journal.id, since: at };
@@ -311,6 +321,18 @@ export async function guardStart(stateDirectory: string, configured: Configured,
     return refusal(`this database is the destination of database transfer ${current.id} (${current.phase}), which did not complete; it may hold only part of the data. Empty it, or point controller.storage at ${authority?.active.name ?? current.from.name}.`);
   }
   return result;
+}
+/** What the database recorded since the first start a rollback compares with (the same test as `#rollback`'s), or undefined when nothing. */
+async function workSinceFirstStart(storage: Pick<ControllerStorage, "snapshot">, first: NonNullable<TransferJournal["firstStart"]>): Promise<string | undefined> {
+  const snap = await storage.snapshot();
+  let s: SnapshotRow | undefined;
+  try { s = (await snap.read("state", { limit: 1 }))[0]; } finally { await snap.close(); }
+  const audit = Number(s?.["audit_seq"] ?? 0) - first.auditSeq, deliveries = Number(s?.["delivery_seq"] ?? 0) - first.deliverySeq;
+  if (audit !== 0 || deliveries !== 0) return `${audit} audit records, ${deliveries} messages`;
+  if (first.digests === undefined) return undefined;
+  const now = await digestTables(storage, Object.keys(first.digests) as SnapshotTable[]);
+  const changed = Object.keys(first.digests).filter((t) => now[t] !== first.digests![t]);
+  return changed.length > 0 ? `${changed.join(", ")} changed` : undefined;
 }
 function refuse2(journal?: TransferJournal, authority?: StorageAuthority): never {
   if (authority !== undefined) return refusal(`the controller database was moved to ${authority.active.name} (${authority.active.kind}) by a database transfer on ${authority.since}, and this start is configured for another database. Point controller.storage at ${authority.active.name}; or, from a controller running on ${authority.active.name} that has not recorded any work yet, ask in chat to roll the transfer back.`);
@@ -883,7 +905,12 @@ export class DatabaseTransferService {
         }
         if (late !== undefined) {
           // Take the epoch back with the holder it had; this controller's services still hold the old epoch, so they are deposed and a restart follows.
-          await this.#o.storage.acquireEpoch({ holder: originalHolder ?? "controller", at: this.#now() });
+          try { await this.#o.storage.acquireEpoch({ holder: originalHolder ?? "controller", at: this.#now() }); } catch {
+            if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== (originalHolder ?? "controller")) {
+              // Card F04n: the journal still says `copying` and the source stays fenced; the next start abandons the transfer and the source is authoritative.
+              throw new DomainError("unavailable", `the source changed between the last check and the fence (${late}); nothing was switched. The fence on the source could not be lifted; the source stays the authoritative database: restart the controller and it starts on the source again.`);
+            }
+          }
           fenced = false; deposed = true;
           throw new Error(`the source changed between the last check and the fence (${late}); nothing was switched. The fence was lifted and the controller must be restarted`);
         }
@@ -960,17 +987,36 @@ export class DatabaseTransferService {
       // From here the rollback is finished by any start, whatever stops it (the journal says so before the database is touched).
       const rolling = await this.#journal(journal, { phase: "rolling-back" });
       await this.#at("rollback:journal");
-      try { await this.#o.storage.acquireEpoch({ holder: `rolled-back:${journal.id}`, at: this.#now(), expectedEpoch: now.epoch }); } catch (error) { if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== `rolled-back:${journal.id}`) { await this.#journal(rolling, { phase: "switched" }); throw error; } }
+      try { await this.#o.storage.acquireEpoch({ holder: `rolled-back:${journal.id}`, at: this.#now(), expectedEpoch: now.epoch }); } catch (error) {
+        if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== `rolled-back:${journal.id}`) {
+          // Not fenced: the journal goes back to `switched` and work goes on. If it cannot be written the journal still says `rolling-back`, so work must not go on (a start on the previous database would finish the rollback
+          // without it): the barrier stays up and the controller waits for a restart, which settles the rollback (card F04n review).
+          try { await this.#journal(rolling, { phase: "switched" }); } catch {
+            throw new DomainError("unavailable", "the new database could not be fenced and the record of the move could not be written back (the disk or the state folder refused it), so the rollback was neither made nor undone. Nothing was lost; work is paused and the controller must be restarted once the state folder can be written again.");
+          }
+          throw error;
+        }
+      }
       fenced = true;
       await this.#at("rollback:fenced");
       // Anything committed between the check and the fence is found now (epoch-checked writes cannot commit any more) and the fence is lifted.
       const after = await this.#mark(this.#o.storage);
       const lateTables = mark.digests === undefined ? [] : await this.#changedSince(mark.digests);
       if (after.auditSeq !== mark.auditSeq || after.deliverySeq !== mark.deliverySeq || lateTables.length > 0) {
-        await this.#o.storage.acquireEpoch({ holder: holder ?? "controller", at: this.#now() });
-        await this.#journal(rolling, { phase: "switched" });
+        const what = "work was recorded on the new database while the rollback was being made, so it was not rolled back";
+        // The journal goes back to `switched` FIRST (card F04n): a restart on a journal that still says `rolling-back` finishes the rollback onto the previous database and drops this work without a word. With `switched` and the
+        // authority file naming this database, a restart on it is allowed even if the fence cannot be lifted. If the journal cannot be written nothing else is touched: the fence stays, and a restart on this database finds the work (`guardStart`) and keeps the move.
+        try { await this.#journal(rolling, { phase: "switched" }); } catch {
+          throw new DomainError("unavailable", `${what}. The record of the move could not be written back (the disk or the state folder refused it), so nothing else was changed: the new database stays fenced and the record still says the rollback was under way. Restart the controller on the new database (not the previous one) once the state folder can be written again: the start finds that work and keeps the move. Do not start it on the previous database: that would finish the rollback and drop the work.`);
+        }
+        try { await this.#o.storage.acquireEpoch({ holder: holder ?? "controller", at: this.#now() }); } catch {
+          // The commit may have happened and the answer been lost: the database itself says whether the fence is gone.
+          if ((await this.#holder(this.#o.storage).catch(() => undefined)) !== (holder ?? "controller")) {
+            throw new DomainError("unavailable", `${what}. The record says the move stands, but the fence on the new database could not be lifted. Nothing was lost: restart the controller and it starts on the new database with that work.`);
+          }
+        }
         fenced = false;
-        throw new DomainError("invalid_transition", "work was recorded on the new database while the rollback was being made, so it was not rolled back. The fence was lifted and the controller must be restarted");
+        throw new DomainError("invalid_transition", `${what}. The fence was lifted and the controller must be restarted`);
       }
       await writeJson(join(this.#o.stateDirectory, AUTHORITY_FILE), { format: 1, generation: authority.generation + 1, active: journal.from, previous: journal.to, transferId: journal.id, since: this.#now() } satisfies StorageAuthority);
       await this.#at("rollback:authority");
