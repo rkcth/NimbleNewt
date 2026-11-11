@@ -16,7 +16,7 @@ import type { LeaseHandover } from "../lifecycle/handoff.js";
  */
 export const LEASE_LIMITS = { ttlMinMs: 60_000, ttlMaxMs: 24 * 3_600_000, branch: 200, note: 300, perTask: 8 } as const;
 const KIND = "integrator-lease";
-/** The leases a task has held (most recent last, at most `perTask`), so the hand-off finds the sender's without reading every lease. */
+/** The leases a task holds (at most `perTask` live ones at once; one that ended is dropped to make room, a live one never), so the hand-off finds the sender's without reading every lease. */
 const TASK_INDEX = "integrator-lease-task";
 const BRANCH = /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._/-]+$/;
 
@@ -40,6 +40,17 @@ export interface IntegratorLease extends IntegratorLeaseBody { readonly leaseId:
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const json = (value: object): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
 const fenced = (message: string): DomainError => new DomainError("fenced", message);
+/** A lost race that is built again (card L03j review): the marker below, never shown to a caller. */
+const RACE = "integrator lease: lost a race, build again";
+const retry = async (): Promise<DomainError> => new DomainError("stale_revision", RACE);
+async function retried<T>(exhausted: string, run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await run(); } catch (error) {
+      if (!(error instanceof DomainError && error.code === "stale_revision" && error.message === RACE)) throw error;
+      if (attempt >= 8) throw new DomainError("unavailable", exhausted);
+    }
+  }
+}
 
 export class IntegratorLeaseService {
   readonly #runner: CommandRunner;
@@ -60,7 +71,8 @@ export class IntegratorLeaseService {
     const taskId = checkTaskId(command.taskId);
     const ttlMs = this.#ttl(command.ttlMs);
     const leaseId = IntegratorLeaseService.leaseIdOf(projectId, branch);
-    await this.#runner.command("lease.acquire", { commandId: command.commandId, actor: "controller" }, async () => ({
+    // A lost race on the task's index alone (the same task taking another branch at that moment) is built again; a lost race on the lease itself is a refusal, said by the next build or below.
+    await retried(`branch ${branch} was leased by someone else at the same moment`, () => this.#runner.command("lease.acquire", { commandId: command.commandId, actor: "controller" }, async () => ({
       payload: { projectId, branch, holder, taskId, ttlMs },
       build: async () => {
         const ref: AggregateRef = { kind: KIND, id: leaseId };
@@ -73,10 +85,10 @@ export class IntegratorLeaseService {
           ref, creates: current === undefined,
           changes: [current === undefined ? { type: "create", ref, body: json(body) } : { type: "update", ref, expectedRevision: current.revision, body: json(body) }, ...(await this.#index(taskId, leaseId))],
           detail: { branch, fence: body.fence },
-          contention: async () => new DomainError("unavailable", `branch ${branch} was leased by someone else at the same moment`),
+          contention: async () => retry(),
         };
       },
-    }));
+    })));
     return (await this.get(leaseId))!;
   }
 
@@ -158,13 +170,19 @@ export class IntegratorLeaseService {
     const ids = ((current?.body as unknown as { leases?: unknown } | undefined)?.leases);
     const list = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === "string") : [];
     if (list.includes(leaseId)) return [];
-    const next = [...list, leaseId].slice(-LEASE_LIMITS.perTask);
+    // Room is made by dropping leases that are no longer live holds of this task, never a live one (a hold missing from the index would never be released or moved by a hand-off).
+    const kept: string[] = [];
+    for (const id of list) { const l = await this.get(id); if (l !== undefined && l.live && l.taskId === taskId) kept.push(id); }
+    if (kept.length >= LEASE_LIMITS.perTask) throw new DomainError("unavailable", `task ${taskId} already holds ${kept.length} integrator leases, at most ${LEASE_LIMITS.perTask} at once; release one first`);
+    const next = [...kept, leaseId];
     return [current === undefined ? { type: "create", ref, body: json({ leases: next }) } : { type: "update", ref, expectedRevision: current.revision, body: json({ leases: next }) }];
   }
 
   async #change(type: string, commandId: string, leaseId: string, payload: JsonObject, next: (b: IntegratorLeaseBody) => IntegratorLeaseBody, indexTask?: string): Promise<void> {
     if (typeof leaseId !== "string" || !/^ilz-[a-z2-7]{20}$/.test(leaseId)) invalid("leaseId", "is not a lease ID");
-    await this.#runner.command(type, { commandId, actor: "controller" }, async () => ({
+    // A lost race (a renew and a release at the same moment, or the index changing) is built again from what is stored now, so a hold that is still this fence is acted on and one that changed is refused `fenced`
+    // by that build; never `fenced` only because of the race (the hand-off takes `fenced` as final and would leave the hold with the sender).
+    await retried(`lease ${leaseId} kept changing; try again`, () => this.#runner.command(type, { commandId, actor: "controller" }, async () => ({
       payload: { leaseId, ...payload },
       build: async () => {
         const current = await this.#runner.get(KIND, leaseId);
@@ -175,10 +193,10 @@ export class IntegratorLeaseService {
           ref, creates: false,
           changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(body) }, ...(indexTask === undefined ? [] : await this.#index(indexTask, leaseId))],
           detail: { fence: body.fence, state: body.state },
-          contention: async () => fenced(`lease ${leaseId} changed at the same moment; read it again`),
+          contention: async () => retry(),
         };
       },
-    }));
+    })));
   }
 }
 

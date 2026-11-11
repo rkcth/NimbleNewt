@@ -278,7 +278,9 @@ export class HandoffService {
     const missing = b.package?.missing ?? [...REQUIRED_SECTIONS];
     if (missing.length > 0 && command.acceptGaps !== true) throw new DomainError("invalid_command", `the package is missing ${missing.join(", ")}; complete it with acceptGaps to hand it over anyway`, { field: "acceptGaps" });
     const at = this.#runner.now();
-    await this.#update(command.handoffId, (x) => ({ ...x, phase: "transferring", ...(ids.length === 0 ? {} : { reassign: { ids, by: by.id, at } }), ...(moveLease ? { leaseMove: { by: by.id, at } } : {}), ...(missing.length === 0 ? {} : { acceptedGaps: { by: by.id, missing, at } }), history: this.#push(x, "transferring", by.id, missing.length === 0 ? "package accepted" : `package accepted with gaps: ${missing.join(", ")}`) }), ["ready"]);
+    const applied = await this.#update(command.handoffId, (x) => ({ ...x, phase: "transferring", ...(ids.length === 0 ? {} : { reassign: { ids, by: by.id, at } }), ...(moveLease ? { leaseMove: { by: by.id, at } } : {}), ...(missing.length === 0 ? {} : { acceptedGaps: { by: by.id, missing, at } }), history: this.#push(x, "transferring", by.id, missing.length === 0 ? "package accepted" : `package accepted with gaps: ${missing.join(", ")}`) }), ["ready"]);
+    // Another completion (or a cancel) got there first: answered as a repeat would be, so a choice that lost (the lease or the responsibilities) is refused rather than answered as if it were made (card L03j review).
+    if (!applied) return this.complete(by, command);
     return this.advance(by, { handoffId: command.handoffId });
   }
 
@@ -399,7 +401,8 @@ export class HandoffService {
         try {
           await this.#assignments.transferTask({ commandId: `${id}-transfer`, actor: by.id, taskId: b.taskId, expectedRevision: assignment.revision, to: b.to, reason: b.mode === "forced" ? `takeover: ${b.reason}`.slice(0, 500) : `hand-off: ${b.reason}`.slice(0, 500) });
         } catch (error) {
-          if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "fenced")) throw error;
+          // A command conflict is the same transfer sent at that moment by another caller under this hand-off's command ID (card L03j review).
+          if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "fenced" && error.code !== "command_conflict")) throw error;
           continue; // someone else moved it: the next pass reads where it stands
         }
         continue;

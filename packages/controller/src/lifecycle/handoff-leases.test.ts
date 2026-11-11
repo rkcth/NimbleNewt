@@ -155,6 +155,37 @@ for (const backend of backends) {
     assert.equal(done.leaseMove?.by, c.owner.id);
   });
 
+  suite("a lease another agent holds for the same task (an integrator working its landing) is neither listed as the sender's nor released or moved by the hand-off (card L03j review)", async (c) => {
+    const mine = await take(c, c.a.id);
+    const theirs = await c.leases.acquire({ commandId: cid("lz"), projectId: c.project, branch: "release/2", holder: c.c.id, taskId: c.task, ttlMs: 30 * MIN });
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "leave" });
+    const done = await c.handoffs.complete(c.owner, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: true });
+    assert.deepEqual(done.leasePlan?.entries.map((e) => e.leaseId), [mine.leaseId], "only the sender's hold is planned");
+    const after = (await c.leases.get(theirs.leaseId))!;
+    assert.deepEqual([after.holder, after.fence, after.state, after.revision], [c.c.id, 1, "held", theirs.revision], "the other integrator's lease is untouched");
+  });
+
+  suite("two completions at the same moment, the owner moving the lease and a manager not: the one whose choice lost is refused, never answered as if its choice were done (card L03j review)", async (c) => {
+    let from = c.a, to = c.b;
+    for (let round = 0; round < 4; round++) {
+      const l = await take(c, from.id);
+      const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to, reason: "leave" });
+      const calls = [() => c.handoffs.complete(c.owner, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: true }), () => c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: false })];
+      const [own, man] = await Promise.allSettled(round % 2 === 0 ? [calls[0]!(), calls[1]!()] : [calls[0]!(), calls[1]!()].reverse()).then((x) => (round % 2 === 0 ? x : x.reverse()));
+      const rec = (await c.handoffs.get(c.owner, h.id))!;
+      assert.equal(rec.phase, "transferred");
+      const moved = rec.leaseMove !== undefined;
+      assert.equal((await c.leases.get(l.leaseId))!.state === "released", !moved);
+      // The call whose choice was recorded succeeds; the other is refused (invalid_command), never a success that hides its choice was not taken.
+      assert.equal(own!.status, moved ? "fulfilled" : "rejected", `owner: ${String((own as PromiseRejectedResult).reason ?? "")}`);
+      assert.equal(man!.status, moved ? "rejected" : "fulfilled", `manager: ${String((man as PromiseRejectedResult).reason ?? "")}`);
+      const lost = (moved ? man : own) as PromiseRejectedResult;
+      assert.ok(lost.reason instanceof DomainError && lost.reason.code === "invalid_command", String(lost.reason));
+      if (moved) { const now2 = (await c.leases.get(l.leaseId))!; await c.leases.release({ commandId: cid("rl"), leaseId: l.leaseId, fence: now2.fence }); }
+      [from, to] = [to, from];
+    }
+  });
+
   suite("a forced takeover releases the sender's lease; a temporary reassignment cannot move it (card L03j)", async (c) => {
     const l = await take(c, c.a.id);
     const t = await c.handoffs.takeover(c.owner, { commandId: cid("tk"), taskId: c.task, to: c.b, reason: "A is unreachable" });
