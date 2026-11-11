@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import { after } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { JsonObject } from "../storage/types.js";
@@ -113,6 +114,46 @@ for (const backend of backends) {
     const old = await rawRequest(c.transport.url, "POST", `/worker/attempts/${attemptId}/tool`, { ...base, headers: { "idempotency-key": "k2", [SESSION_HEADER]: session.sessionId, [PROTOCOL_HEADER]: String(session.protocol + 1) } });
     assert.equal(old.status, 426);
     assert.equal(c.toolBridge.calls.length, 1, "only the one valid request reached the bridge");
+  });
+
+  suite("an overlapping copy with ANOTHER credential is not handed the first copy's answer: the bridge judges its credential itself (review of L05e)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attempt } = await c.started(r1, "Order seeds");
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let started!: () => void;
+    const begun = new Promise<void>((r) => { started = r; });
+    c.toolBridge.handle = async (token, _a, request) => {
+      if (token !== TOKEN) return { ok: false, code: "unauthenticated", message: "the credential was not accepted" };
+      started(); await held; return { ok: true, result: { callId: request.callId } };
+    };
+    const first = attempt.toolBridge(TOKEN, REQUEST("call_1"));
+    const gaveUp = first.catch(() => release());
+    await Promise.race([begun, gaveUp]);
+    const forged = await attempt.toolBridge("nnt-some-other-credential-000000", REQUEST("call_1"), "forged");
+    release();
+    assert.deepEqual(forged, { ok: false, code: "unauthenticated", message: "the credential was not accepted" });
+    assert.deepEqual(await first, { ok: true, result: { callId: "call_1" } });
+    assert.equal(c.toolBridge.calls.length, 2, "the copy with another credential reached the bridge on its own");
+  });
+
+  suite("a body over the route's limit sent without a length (chunked) is refused while it streams, not after it was buffered", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId } = await c.started(r1, "Order seeds");
+    const session = r1.client.session!;
+    const url = new URL(`/worker/attempts/${attemptId}/tool`, c.transport.url);
+    assert.equal(url.protocol, "http:");
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(url, { method: "POST", headers: { authorization: `Bearer ${r1.token}`, "content-type": "application/json", "transfer-encoding": "chunked", "idempotency-key": "k1", [SESSION_HEADER]: session.sessionId, [PROTOCOL_HEADER]: String(session.protocol) } }, (res) => { res.resume(); resolve(res.statusCode!); });
+      req.on("error", reject);
+      // More than the limit, and the request is never ended: only a check while reading can answer.
+      const chunk = "x".repeat(16 * 1024);
+      req.write(`{"placement":1,"token":"${TOKEN}","request":{"op":"desk.write","callId":"c","args":{"t":"`);
+      for (let sent = 0; sent <= REMOTE_LIMITS.toolBytes; sent += chunk.length) req.write(chunk);
+      setTimeout(() => { req.destroy(); reject(new Error("no answer before the body ended: the limit is applied only after buffering")); }, 5000).unref();
+    });
+    assert.equal(status, 413);
+    assert.deepEqual(c.toolBridge.calls, []);
   });
 
   suite("the credential is not kept: it is not in the placement, the controller's operations or the stored records", async (c) => {

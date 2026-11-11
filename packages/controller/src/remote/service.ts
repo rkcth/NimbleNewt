@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ArtifactService } from "../artifacts/index.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
@@ -1299,7 +1299,8 @@ export class RemoteWorkerService {
     const bridge = this.#deps.toolBridge;
     if (bridge === undefined) return { ok: false, code: "unavailable", message: "the tool bridge is not available on this controller" };
     const callId = r.callId as string;
-    const key = `${b.attemptId}\0${callId}\0${b.placement}`;
+    // The credential is part of what makes two copies the same request (a digest, never the credential itself): a copy with another credential is judged by the bridge on its own and never handed the answer of a copy whose credential was accepted.
+    const key = `${b.attemptId}\0${callId}\0${b.placement}\0${createHash("sha256").update(token as string).digest("hex")}`;
     let canonical: string;
     try { canonical = canonicalJson({ op: r.op as string, args: (r.args ?? {}) as JsonObject }); } catch { return invalid("request.args", "must be plain JSON"); }
     const gateway = await this.#deps.dispatch.gateway(b.attemptId);

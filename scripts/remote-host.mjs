@@ -13,6 +13,8 @@ import { pathToFileURL } from "node:url";
 
 const SYSTEM_ROOTS = new Set(["/usr", "/bin", "/lib", "/sbin", "/lib64", "/"]);
 const FALLBACK_WINDOW = 32_768;
+/** The controller's attempt IDs; an offer naming anything else (a path, `..`) is not run, since its ID becomes a folder of this host. */
+const ATTEMPT = /^att-[a-z2-7]{20}$/;
 
 /** What the machine's own sandbox enforces, found by trying (not claimed): `full` only where the launcher's plan really limits it. */
 async function abilitiesOf(worker) {
@@ -91,6 +93,7 @@ export async function startRemoteWorker(setup, config) {
   const parts = worker.localWorkerParts({
     launcher, app: worker.appFromRepository(setup.root, { root: nodeRoot, executable: "bin/node" }), protectedPaths,
     workspace: async (order) => {
+      if (!ATTEMPT.test(String(order.attemptId))) throw new Error("the attempt ID of the order is not an attempt ID; nothing is made for it");
       const made = await workspaces.ensure({ taskId: order.taskId, projectId: order.projectId });
       const home = join(base, "attempts", order.attemptId, "home");
       const scratch = join(base, "attempts", order.attemptId, "scratch");
@@ -132,6 +135,8 @@ export async function startRemoteWorker(setup, config) {
     // One offer at a time per attempt: a repeat of an offer already being run is the controller offering again, not a second run.
     onOffers: async (offers) => {
       for (const offer of offers) {
+        // The ID names folders of this host and is sent back in addresses: an offer whose ID is not an attempt ID (a confused or hostile controller) is not run.
+        if (!ATTEMPT.test(String(offer?.order?.attemptId))) { log("an offer whose attempt ID is not an attempt ID was not run"); continue; }
         if (attempts.has(offer.order.attemptId)) continue;
         attempts.set(offer.order.attemptId, offer.placement);
         void runner.run(offer).then((outcome) => log(`attempt ${offer.order.attemptId} ${outcome}`), (error) => log(`attempt ${offer.order.attemptId} broke (${describe(error)})`)).finally(() => attempts.delete(offer.order.attemptId));
@@ -185,11 +190,19 @@ function describe(error) {
 
 function isFolder(path) { try { return isAbsolute(path) && statSync(path).isDirectory(); } catch { return false; } }
 
+/** The host credential from its own file: a regular file that only its owner can read or write (as ssh asks of a key), or the host does not start. */
+function readTokenFile(path) {
+  const st = statSync(path);
+  if (!st.isFile()) throw new Error("tokenFile: must be a regular file");
+  if (process.platform !== "win32" && (st.mode & 0o077) !== 0) throw new Error("tokenFile: other users can read or change it; make it readable by its owner only (chmod 600)");
+  return readFileSync(path, "utf8").trim();
+}
+
 /** Reads a configuration file; the host credential comes from `NIMBLENEWT_WORKER_TOKEN` or the `tokenFile` the file names (never from the file's own text, so a copied configuration holds no secret). */
 export function readRemoteConfig(file, env = process.env) {
   const config = JSON.parse(readFileSync(file, "utf8"));
   if (config.token !== undefined) throw new Error("token: the host credential must not be written in the configuration; use NIMBLENEWT_WORKER_TOKEN or tokenFile");
-  const token = env["NIMBLENEWT_WORKER_TOKEN"] ?? (config.tokenFile === undefined ? undefined : readFileSync(config.tokenFile, "utf8").trim());
+  const token = env["NIMBLENEWT_WORKER_TOKEN"] ?? (config.tokenFile === undefined ? undefined : readTokenFile(String(config.tokenFile)));
   const ca = config.caFile === undefined ? config.ca : readFileSync(config.caFile, "utf8");
   const { tokenFile: _t, caFile: _c, ...rest } = config;
   return { ...rest, ...(token === undefined ? {} : { token }), ...(ca === undefined ? {} : { ca }) };

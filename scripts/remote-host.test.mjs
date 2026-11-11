@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,7 +18,7 @@ function packages() {
     async bridge(attemptId, token, request) { seen.bridged.push({ attemptId, token, request }); return { ok: true, result: {} }; }
     tap(attemptId) { return { attemptId }; }
     async verdict(attemptId, verdict) { seen.verdicts.push([attemptId, verdict]); }
-    async run() { return "completed"; }
+    async run(offer) { (seen.ran ??= []).push(offer.order.attemptId); return "completed"; }
   }
   class WorkspaceResponder { constructor(options) { seen.responderOptions = options; } handle() {} }
   class HostPoller { constructor(options) { seen.poller = options; } run() { return new Promise((resolve) => { seen.stopPoller = resolve; }); } }
@@ -57,7 +57,13 @@ test("a configuration file holds no credential: the host credential comes from t
     assert.throws(() => readRemoteConfig(file, {}), /must not be written in the configuration/);
     assert.equal(String(assert.throws(() => readRemoteConfig(file, {}))?.message).includes("written-in-the-file"), false);
     writeFileSync(file, JSON.stringify({ url: "https://c", base: "/b", routes: {}, tokenFile: join(dir, "t") }));
-    writeFileSync(join(dir, "t"), "from-the-token-file\n");
+    writeFileSync(join(dir, "t"), "from-the-token-file\n", { mode: 0o644 });
+    chmodSync(join(dir, "t"), 0o644);
+    // A token file other users can read is refused (as ssh refuses such a key), and the refusal holds no part of it.
+    const open = assert.throws(() => readRemoteConfig(file, {}), /tokenFile: other users can read or change it/);
+    void open;
+    assert.equal(String((() => { try { readRemoteConfig(file, {}); } catch (e) { return e.message; } })()).includes("from-the-token-file"), false);
+    chmodSync(join(dir, "t"), 0o600);
     assert.equal(readRemoteConfig(file, {}).token, "from-the-token-file");
     assert.equal(readRemoteConfig(file, { NIMBLENEWT_WORKER_TOKEN: "from-the-environment" }).token, "from-the-environment");
     assert.equal("tokenFile" in readRemoteConfig(file, {}), false);
@@ -107,6 +113,25 @@ test("the workspace host's security hook is the client's reportSecurity; the pro
     assert.equal(typeof seen.poller.onWorkspace, "function");
   } finally { seen.stopPoller(); await host.stop(); }
   assert.equal(seen.launcherStopped, true, "stopping the host stops the sandbox launcher");
+});
+
+test("an offer whose attempt ID is not an attempt ID (a path, `..`) is not run and makes no folder of this host", async () => {
+  const lines = [];
+  const { seen, load } = packages();
+  const base = mkdtempSync(join(tmpdir(), "nn-l05e-ids-"));
+  const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ base, log: (l) => lines.push(l) }));
+  try {
+    const good = "att-abcdefghijklmnopqrst";
+    await seen.poller.onOffers([{ placement: 1, order: { attemptId: "../../escaped" } }, { placement: 1, order: { attemptId: "att-../x" } }, { placement: 1, order: { attemptId: good } }]);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(seen.ran, [good]);
+    assert.equal(lines.filter((l) => /not an attempt ID was not run/.test(l)).length, 2);
+    await assert.rejects(seen.parts.workspace({ attemptId: "../../escaped", taskId: "task-1", projectId: "proj-1" }), /not an attempt ID/);
+    assert.equal(existsSync(join(base, "escaped")), false);
+    assert.equal(existsSync(join(base, "..", "escaped")), false);
+    const made = await seen.parts.workspace({ attemptId: good, taskId: "task-1", projectId: "proj-1" });
+    assert.equal(made.home, join(base, "attempts", good, "home"));
+  } finally { seen.stopPoller(); await host.stop(); rmSync(base, { recursive: true, force: true }); }
 });
 
 test("a host that cannot confine agents does not start, and says why without a value that could be a secret", async () => {
