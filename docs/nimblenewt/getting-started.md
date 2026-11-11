@@ -4,6 +4,7 @@ Written 2026-10-30, updated for the launcher and first-run chat (card U14) and f
 
 ## Where things stand
 
+- A **controller entry** exists for running without a terminal chat (`node scripts/nimblenewt-controller.mjs --data DIR`, the program the release launcher runs; see [maintenance-and-updates](maintenance-and-updates.md)). Agents' environment changes are off unless `--local-host-environments` (or `NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1`) is given to it or to `nimblenewt.mjs start`.
 - A **launcher** exists (`scripts/nimblenewt.mjs`, card U14): `init` writes a configuration file that holds no secret, `start` loads it, starts the controller, makes you the owner the first time (your credential goes into the operating system's secret store, never into a file you must guard) and opens the **chat in your terminal**. `secret set NAME` puts a model key or a database address into the secret store. From there the setup is a conversation: see [Quick start](#quick-start-the-launcher-and-the-chat).
 - The one door to everything is still the **state API** (`controller.api.handle(token, request)`, see [api-v1](api-v1.md)); the chat is a client of it. It is in-process: there is no HTTP route for the API. `--serve` adds the conversation listener (`conversationTransport`, card U02b), local only.
 - The phone web chat (U07, first slice, see [private-web-chat](private-web-chat.md)) is built; the settings views (U08, U09) are not. The chat needs a model, so **one model server must be named before the chat can answer** (`init --model-endpoint ...`, or the configuration's `models.providers`); everything after that is done by chat, and every answer is changeable later by chat.
@@ -202,8 +203,9 @@ Run `ask("setup.readiness")` again. Every required item should be `done` and `re
 | Notification levels, Needs you view | U11b | the inbox |
 | Landing gated on required checks for the exact tree | P09 | checks recorded only |
 | Windows sandbox launcher | A03b | Linux and macOS only |
-| Installing and enabling the release launcher as a service on a real macOS, Linux or Windows machine (the unit text and install steps are printed by `scripts/nimblenewt-service.mjs`, and `scripts/nimblenewt-updater.mjs` stages and announces a release; see [maintenance-and-updates](maintenance-and-updates.md)); exit-code-aware restarts on macOS and Windows; the full maintenance sequence | K02 follow-up | run the printed steps yourself |
+| Installing and enabling the release launcher as a service on a real macOS, Linux or Windows machine (the unit text and install steps are printed by `scripts/nimblenewt-service.mjs`, and `scripts/nimblenewt-updater.mjs` stages and announces a release; see [maintenance-and-updates](maintenance-and-updates.md)); exit-code-aware restarts on macOS and Windows; the full maintenance sequence | K02 follow-up | run the printed steps yourself | Also: the controller entry the launcher runs is `scripts/nimblenewt-controller.mjs` (run by hand: `node scripts/nimblenewt-controller.mjs --data DIR`); see maintenance-and-updates.
 | Real-hardware QA of the whole path | D04 | run it yourself and report |
+| Backups, signing, the model reviewer client, cache pins and other start options that only code passes (see the production wiring notes) | production wiring follow-up | not available from a configuration yet |
 
 ## How this guide is kept true
 
