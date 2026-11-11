@@ -17,6 +17,10 @@ export interface RetentionValues {
   readonly generationRunDays: number | null;
   /** Route-change records (the text cut from a task's startup context when it moved to a smaller route, and the decisions) are removed this many days after their last change (card C07f). `null`: kept (the default). */
   readonly contextRouteDays: number | null;
+  /** Responsibility checks that came due (card P04) and were finished (a check was recorded on the responsibility after their slot, or the responsibility is retired or gone) are removed this many days after their slot. A check still owed is never removed. `null`: kept (default). Card K06d. */
+  readonly checkRecordDays: number | null;
+  /** Stall concerns (card H11) that are over are removed this many days after their last change: cleared, confirmed, or dismissed with the dismissal run out, and only once they can never be written again (their task is done, cancelled or gone, or was assigned again since: the stall scan names a concern by task, generation and kind). A suspected concern, a dismissal still in force (one with no end is in force for good) and a concern with a recovery step half made are never removed. `null`: kept (default). Card K06d. */
+  readonly concernDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;
   /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). Recorded here; the deletion itself needs adapter support (card K06c). */
@@ -55,7 +59,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, contextRouteDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -65,6 +69,8 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   derivedDays: { kind: "days", min: 7, max: 3650, nullable: true },
   generationRunDays: { kind: "days", min: 1, max: 3650, nullable: true },
   contextRouteDays: { kind: "days", min: 1, max: 3650, nullable: true },
+  checkRecordDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  concernDays: { kind: "days", min: 7, max: 3650, nullable: true },
   autoRun: { kind: "flag", min: 0, max: 1, nullable: false },
   thinkingDays: { kind: "days", min: 1, max: 365, nullable: false },
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },

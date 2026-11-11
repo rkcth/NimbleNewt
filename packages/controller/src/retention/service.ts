@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assignmentIdOf } from "../domain/assignment-model.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
@@ -170,8 +171,12 @@ export class RetentionService {
     else if (reserve !== undefined && reserve.short) warnings.push("the disk has too little room to set the reserve aside");
     if (space !== undefined && space.totalBytes > 0 && space.freeBytes * 10 < space.totalBytes) warnings.push(`the data disk has ${Math.floor((space.freeBytes * 100) / space.totalBytes)}% free`);
     const deletions = (await this.#recent("retention-deletion", 20)).map((a) => ({ id: a.id, ...(a.body as object) }));
+    // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
+    const growth: Record<string, number | string> = {};
+    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
     return {
       values: values as unknown as JsonObject,
+      growth: growth as unknown as JsonObject,
       disk: { ...(space === undefined ? {} : { freeBytes: space.freeBytes, totalBytes: space.totalBytes }), reserve: { wantedBytes: reserve?.wanted ?? 0, inUse: reserve?.released ?? false, short: reserve?.short ?? false, ...(reserve?.releasedAt === undefined ? {} : { usedAt: reserve.releasedAt }) } },
       quotas: quotas as unknown as JsonObject[], quotaUsagePartial: partial, warnings,
       backups: this.#deps.backups === undefined ? { configured: false } : { configured: true, count: (await this.#deps.backups.list()).length, counts: { daily: values.backupDaily, weekly: values.backupWeekly } },
@@ -289,6 +294,49 @@ export class RetentionService {
       }
       if (candidates.length > limit) { candidates.length = limit; partial = true; }
     }
+    if (values.checkRecordDays !== null) {
+      // Responsibility checks (card P04) that were finished: a check is owed only while its slot is after the responsibility's last recorded check, so a record at or before it (or of a retired or missing responsibility) is history. Card K06d.
+      const cutoff = now - values.checkRecordDays * DAY;
+      const old: Aggregate[] = [];
+      const complete = await scan(this.#runner, "responsibility-check", (a) => { const slot = Date.parse((a.body as { slotStart?: string }).slotStart ?? ""); if (Number.isFinite(slot) && slot < cutoff) old.push(a); });
+      if (!complete) partial = true;
+      for (const a of old) {
+        if (candidates.length >= limit) { partial = true; break; }
+        const b = a.body as { responsibilityId?: unknown; projectId?: unknown; slotStart: string };
+        const resp = typeof b.responsibilityId === "string" ? await this.#runner.get("responsibility", b.responsibilityId) : undefined;
+        const log = typeof b.responsibilityId === "string" ? (await this.#runner.get("responsibility-log", b.responsibilityId))?.body as { lastCheckAt?: string } | undefined : undefined;
+        const live = resp !== undefined && (resp.body as { state?: unknown }).state !== "retired";
+        const done = !live || (log?.lastCheckAt !== undefined && Date.parse(log.lastCheckAt) >= Date.parse(b.slotStart));
+        if (!done) continue;
+        candidates.push({ kind: "responsibility-check", id: a.id, revision: a.revision, projectId: typeof b.projectId === "string" ? b.projectId : undefined, ageDays: Math.floor((now - Date.parse(b.slotStart)) / DAY) });
+      }
+    }
+    if (values.concernDays !== null) {
+      // Stall concerns (card H11) that are over. The owner's decision stays in the audit; the working record goes. Card K06d.
+      const cutoff = now - values.concernDays * DAY;
+      const old: Aggregate[] = [];
+      const complete = await scan(this.#runner, "stall-concern", (a) => { const c = a.body as { lastChangedAt?: string; state?: string }; if (c.state !== "suspected" && Date.parse(c.lastChangedAt ?? "") < cutoff) old.push(a); });
+      if (!complete) partial = true;
+      for (const a of old) {
+        if (candidates.length >= limit) { partial = true; break; }
+        const c = a.body as { state: string; taskId?: string; projectId?: unknown; lastChangedAt: string; dismissedUntil?: string; generation?: unknown; recoveryPending?: unknown };
+        if (c.state !== "cleared" && c.state !== "dismissed" && c.state !== "confirmed") continue;
+        // A dismissal is in force until its end (one with no end is in force for good, as the stall scan reads it); a recovery step half made is finished on this record.
+        if (c.state === "dismissed" && !(c.dismissedUntil !== undefined && Date.parse(c.dismissedUntil) < now)) continue;
+        if (c.recoveryPending !== undefined) continue;
+        // The stall scan names a concern by (task, generation, kind) and opens it with a command ID made from that name alone, so a concern removed while its task can still
+        // stall under the same generation could never be opened again (the scan's create would be answered as the old command). Only a concern that can never be written
+        // again goes: its task is done, cancelled or gone (final), or the task was assigned again since (the generation only grows). Both stay true, so no race with the confirm.
+        const task = typeof c.taskId === "string" ? (await this.#runner.get("task", c.taskId))?.body as { state?: string } | undefined : undefined;
+        let over = task === undefined || task.state === "done" || task.state === "cancelled";
+        if (!over && typeof c.taskId === "string" && typeof c.generation === "number") {
+          const generation = ((await this.#runner.get("assignment", assignmentIdOf(c.taskId)))?.body as { generation?: unknown } | undefined)?.generation;
+          over = typeof generation === "number" && generation > c.generation;
+        }
+        if (!over) continue;
+        candidates.push({ kind: "stall-concern", id: a.id, revision: a.revision, projectId: typeof c.projectId === "string" ? c.projectId : undefined, ageDays: Math.floor((now - Date.parse(c.lastChangedAt)) / DAY) });
+      }
+    }
     const keepVersions = values.catalogVersionsKept;
     let versions: { items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean } | undefined;
     const versionsRetained: { name: string; version: string; reasons: string[] }[] = [];
@@ -322,7 +370,7 @@ export class RetentionService {
     }
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays, incidentsDue === undefined ? null : [incidentsDue.archive, incidentsDue.purge]], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length, ...(incidentsDue.more ? { more: true } : {}) }) } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -339,7 +387,7 @@ export class RetentionService {
       for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
         const why = material.why(c.kind, c.id);
         if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
-        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : values.derivedDays!);
+        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -446,7 +494,7 @@ export class RetentionService {
           const arc = await this.#runner.get("retention-archive", archiveIdOf(c.id));
           const changes: Change[] = [{ type: "delete", ref, expectedRevision: fresh.revision }];
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;
