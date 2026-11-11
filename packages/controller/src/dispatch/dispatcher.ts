@@ -50,6 +50,9 @@ import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, du
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
+/** Finished attempts whose worker was not confirmed stopped (card L02e): a later Stop of their scope still asks their host what their sandboxes hold. Bounded: past the cap the oldest are forgotten. */
+const UNCONFIRMED: AggregateRef = { kind: "dispatch-unconfirmed", id: "unconfirmed" };
+const UNCONFIRMED_MAX = 100;
 /** The held-resume notice (card L04c): the longest detail a notification takes (NOTIFICATION_LIMITS.detail), and how much of the task's title it quotes. */
 const NOTICE_DETAIL = 200;
 const HELD_TITLE = 40;
@@ -642,7 +645,7 @@ export class DispatcherService {
     const host = this.#deps.workers.find((w) => w.hostId === d.body.hostId);
     if (host?.release === undefined) return false;
     const ok = await host.release(attemptId, "confirming the worker of a finished attempt is stopped", signal).then(() => true, () => false);
-    if (ok) await this.#update(attemptId, (x) => ({ ...x, workerStopped: true })).catch(() => undefined);
+    if (ok) await this.#update(attemptId, (x) => ({ ...x, workerStopped: true }), async () => this.#unconfirmedChange(attemptId, false)).catch(() => undefined);
     return ok;
   }
 
@@ -1322,6 +1325,24 @@ export class DispatcherService {
   }
 
   /**
+   * The finished attempts of a task or an agent whose worker was never confirmed stopped (card L02e: its host could not end the process when the attempt ended, so a Stop made after the attempt finished still has to
+   * ask what its sandbox holds). Only staff may ask. An attempt whose worker has been confirmed since is not listed. At most 100 are remembered, the newest kept.
+   */
+  async unconfirmedAttemptsOf(by: Principal, scope: { readonly taskId?: string; readonly agentId?: string }): Promise<string[]> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not list attempts whose worker is unconfirmed`);
+    if (scope.taskId === undefined && scope.agentId === undefined) invalid("scope", "must name a task or an agent");
+    const found = await this.#runner.get(UNCONFIRMED.kind, UNCONFIRMED.id);
+    const out: string[] = [];
+    for (const id of found === undefined ? [] : (found.body as unknown as { ids: string[] }).ids) {
+      const d = await this.#load(id);
+      if (d === undefined || d.body.state !== "finished" || d.body.workerStopped === true) continue;
+      if ((scope.taskId === undefined || d.body.taskId === scope.taskId) && (scope.agentId === undefined || d.body.agentId === scope.agentId)) out.push(id);
+    }
+    return out;
+  }
+
+  /**
    * What the worker hosts still hold for these attempts (card L02d): local processes and child work, and the cleanup cost so far as a running total per attempt. Only staff may ask. Each host answers for the attempts it knows;
    * a host that throws fails the whole look (the caller treats that as unknown, never as nothing running). Bounded: at most 500 attempts, 200 entries per host.
    */
@@ -1479,6 +1500,16 @@ export class DispatcherService {
   async #liveIds(): Promise<string[]> {
     const found = await this.#runner.get(LIVE.kind, LIVE.id);
     return found === undefined ? [] : [...(found.body as unknown as { ids: string[] }).ids];
+  }
+
+  /** Adds an attempt to, or takes it off, the list of finished attempts whose worker is not confirmed stopped, in the same commit as the record that says so (nothing is written when there is nothing to change). */
+  async #unconfirmedChange(attemptId: string, add: boolean): Promise<Change[]> {
+    const found = await this.#runner.get(UNCONFIRMED.kind, UNCONFIRMED.id);
+    const ids = found === undefined ? [] : (found.body as unknown as { ids: string[] }).ids;
+    if (add ? ids.includes(attemptId) && ids[ids.length - 1] === attemptId : !ids.includes(attemptId)) return [];
+    const next = add ? [...ids.filter((i) => i !== attemptId), attemptId].slice(-UNCONFIRMED_MAX) : ids.filter((i) => i !== attemptId);
+    const body = { ids: next } as unknown as JsonObject;
+    return found === undefined ? (add ? [{ type: "create", ref: UNCONFIRMED, body }] : []) : [{ type: "update", ref: UNCONFIRMED, expectedRevision: found.revision, body }];
   }
 
   /** Adds or removes an attempt from the live list in the same commit as the record that makes it so. */
@@ -2720,11 +2751,11 @@ export class DispatcherService {
     const held = this.#takeTurnEnd(attemptId);
     const turnEnd = held.turnEnd === undefined && options.agentEnded === true ? { turnEnd: { endKind: "normal" as const, at: this.#runner.now() } } : held;
     const finished = await this.#update(attemptId, (x) => { const late = lateOf(x); settleLate = ran(x); return { ...withoutFreeze(x, true), ...turnEnd, ...nudgeTotal(x, turnEnd), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: options.stoppedEarly === undefined ? outcome : "stopped-early", summary: summary.slice(0, 500), at: this.#runner.now() }, ...(options.stoppedEarly === undefined ? {} : { stoppedEarly: [...(x.stoppedEarly ?? []).slice(-(STOPPED_EARLY_READMITS + 1)), options.stoppedEarly.run] }), ...(late === undefined ? {} : { lateHeld: late }) }; },
-      async (x) => (lateOf(x) === undefined ? this.#liveChange(attemptId, false) : []));
+      async (x) => [...(lateOf(x) === undefined ? await this.#liveChange(attemptId, false) : []), ...(workerStopped ? [] : await this.#unconfirmedChange(attemptId, true))]);
     if (settleLate !== undefined && finished.reservationId === settleLate) { const { releasingId: _r, ...rest } = finished; void _r; await this.#settleReservation(rest, options.lost === true, `:${settleLate}`); }
     // A worker registered while this end was running (its start answered after the end began) is let go too.
     const late = this.#live.get(attemptId);
-    if (late !== undefined && late.handle !== live?.handle && !(await late.handle.stop().then(() => true, () => false))) { workerStopped = false; await this.#update(attemptId, (x) => ({ ...x, workerStopped: false })).catch(() => undefined); }
+    if (late !== undefined && late.handle !== live?.handle && !(await late.handle.stop().then(() => true, () => false))) { workerStopped = false; await this.#update(attemptId, (x) => ({ ...x, workerStopped: false }), async () => this.#unconfirmedChange(attemptId, true)).catch(() => undefined); }
     this.#live.delete(attemptId);
     this.#usageSeq.delete(attemptId);
     if (outcome === "failed") {

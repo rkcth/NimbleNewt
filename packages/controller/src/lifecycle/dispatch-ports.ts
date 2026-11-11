@@ -8,7 +8,7 @@ import type { Principal } from "../security/principals.js";
 import type { PauseScope } from "./pause.js";
 import type { InventoryItem, StopPorts } from "./stop.js";
 
-type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "get" | "quiesce" | "stop" | "operations" | "release" | "localWorkOf"> & Partial<Pick<DispatcherService, "endLocalWorkOf">>;
+type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "get" | "quiesce" | "stop" | "operations" | "release" | "localWorkOf"> & Partial<Pick<DispatcherService, "endLocalWorkOf" | "unconfirmedAttemptsOf">>;
 
 /**
  * The agent IDs a scope covers (card L02b): an agent is itself; a team is every agent whose team chain passes through it (the same walk the pause gate reads); the installation is every agent. Cycles and over-long chains stop the walk.
@@ -122,7 +122,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   readonly charge?: (by: Principal, charge: { commandId: string; taskId: string; agentId?: string; costMicros: number; computeMs: number }) => Promise<unknown>;
 }): StopPorts {
   /** What one port call has already looked up (the swarm walk reads every link, so it is done once per call, not once per use). Per scope: `own` the tasks of the scope itself, `kids` the tasks spawned below them, `truncated` that the walk was cut, `attempts` every attempt seen for the scope (its own tasks' and their children's). */
-  interface Look { readonly descendants: Map<string, { ids: readonly string[]; truncated: boolean }>; readonly agents: Map<string, string | undefined>; readonly scopes: Map<string, { own: Set<string>; kids: Set<string>; truncated: boolean; attempts: string[] }> }
+  interface Look { readonly descendants: Map<string, { ids: readonly string[]; truncated: boolean }>; readonly agents: Map<string, string | undefined>; readonly scopes: Map<string, { own: Set<string>; kids: Set<string>; truncated: boolean; attempts: string[]; leftover: string[] }> }
   const look = (): Look => ({ descendants: new Map(), agents: new Map(), scopes: new Map() });
   const kids = async (l: Look, taskId: string): Promise<{ ids: readonly string[]; truncated: boolean }> => {
     const had = l.descendants.get(taskId);
@@ -154,7 +154,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
    * What a scope covers: `own` the tasks of the scope itself (a task is itself; a wider scope's tasks are those its attempts run), `kids` the tasks spawned below them (a Stop of an agent, a team or the installation reaches
    * their work as a task's own Stop does, card L02e), `truncated` that the walk was cut, and `attempts` every live attempt of either. Read once per port call.
    */
-  const resolveScope = async (scope: PauseScope, l: Look): Promise<{ own: Set<string>; kids: Set<string>; truncated: boolean; attempts: string[] }> => {
+  const resolveScope = async (scope: PauseScope, l: Look): Promise<{ own: Set<string>; kids: Set<string>; truncated: boolean; attempts: string[]; leftover: string[] }> => {
     const key = `${scope.kind}:${scope.id}`;
     const had = l.scopes.get(key);
     if (had !== undefined) return had;
@@ -162,16 +162,18 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     const h = dispatch();
     if (h === undefined) {
       if (runtime() !== "none") throw new Error("the dispatcher is not running, so what is running cannot be known");
-      const nothing = { own: new Set<string>(), kids: new Set<string>(), truncated: false, attempts: [] };
+      const nothing = { own: new Set<string>(), kids: new Set<string>(), truncated: false, attempts: [], leftover: [] };
       l.scopes.set(key, nothing);
       return nothing;
     }
     let mine: string[] = [];
+    let memberIds: readonly string[] = [];
     if (scope.kind === "task") mine = await h.dispatcher.liveAttemptsOf(h.principal, { taskId: scope.id });
     else if (scope.kind === "agent") mine = await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(scope.id) });
     else {
       if (members === undefined) throw new Error(`a ${scope.kind} scope is not resolved to attempts by this runtime yet`);
-      for (const agentId of await members(scope)) mine.push(...await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) }));
+      memberIds = await members(scope);
+      for (const agentId of memberIds) mine.push(...await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) }));
     }
     // The tasks the scope's own attempts run: a wider scope is named by its agent, team or the installation, so its tasks are known only from what runs for them.
     const own = new Set<string>(scope.kind === "task" ? [scope.id] : []);
@@ -180,19 +182,29 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     const childTasks = new Set<string>(walked.ids);
     const out = new Set<string>(mine);
     for (const child of childTasks) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { taskId: child })) out.add(id);
-    const resolved = { own, kids: childTasks, truncated: walked.truncated, attempts: [...out] };
+    // Attempts that have finished but whose worker was never confirmed stopped (card L02e): what their sandboxes still hold is part of this scope's Stop, though they are not live. Only the local-work look and a Force Stop use them.
+    const leftover = new Set<string>();
+    if (h.dispatcher.unconfirmedAttemptsOf !== undefined) {
+      const ask = h.dispatcher.unconfirmedAttemptsOf.bind(h.dispatcher);
+      const byAgents: string[] = scope.kind === "agent" ? [scope.id] : scope.kind === "task" ? [] : [...memberIds];
+      for (const agentId of byAgents) for (const id of await ask(h.principal, { agentId: principalForm(agentId) })) leftover.add(id);
+      for (const taskId of new Set<string>([...own, ...childTasks])) for (const id of await ask(h.principal, { taskId })) leftover.add(id);
+    }
+    for (const id of out) leftover.delete(id);
+    const resolved = { own, kids: childTasks, truncated: walked.truncated, attempts: [...out], leftover: [...leftover] };
     l.scopes.set(key, resolved);
     return resolved;
   };
   const attemptsOf = async (scope: PauseScope, l: Look = look()): Promise<string[]> => (await resolveScope(scope, l)).attempts;
   // The attempts seen for a scope, so a process of one that ended during preparation is still asked about when the stop ends.
   const seen = new Map<string, Set<string>>();
-  const localOf = async (attempts: readonly string[], scope: PauseScope, lookOnly = false): Promise<InventoryItem[]> => {
+  const localOf = async (attempts: readonly string[], scope: PauseScope, l: Look | undefined, lookOnly = false): Promise<InventoryItem[]> => {
     if (local?.processes === undefined) return [];
     const key = `${scope.kind}:${scope.id}`;
     // A look-only call (a readiness check) asks about what was remembered plus what runs now, and remembers nothing.
-    const all = lookOnly ? new Set<string>([...(seen.get(key) ?? []), ...attempts]) : (seen.get(key) ?? new Set<string>());
-    if (!lookOnly) { for (const a of attempts) all.add(a); seen.set(key, all); }
+    const leftover = l === undefined ? [] : (await resolveScope(scope, l)).leftover;
+    const all = lookOnly ? new Set<string>([...(seen.get(key) ?? []), ...attempts, ...leftover]) : (seen.get(key) ?? new Set<string>());
+    if (!lookOnly) { for (const a of [...attempts, ...leftover]) all.add(a); seen.set(key, all); }
     if (all.size === 0) return [];
     const found = await local.processes([...all]).catch(() => undefined);
     // A runtime that cannot say what is running is itself unknown: one item says so, so a stop is never reported clean on silence.
@@ -233,7 +245,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     return { rows: [...rows.values()], incomplete };
   };
   const inFlight = async (attempts: readonly string[], scope: PauseScope, l: Look, lookOnly = false): Promise<InventoryItem[]> => {
-    const localItems = await localOf(attempts, scope, lookOnly);
+    const localItems = await localOf(attempts, scope, l, lookOnly);
     const h = dispatch();
     const covered = await resolveScope(scope, l);
     const out: InventoryItem[] = [];
@@ -300,9 +312,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     return { allowed, deniedTasks };
   };
   // What the cleanup cost, per attempt, for every attempt seen for the scope (also ones that ended during preparation). A runtime that cannot say charges nothing.
-  const costsOf = async (scope: PauseScope, attempts: readonly string[]): Promise<{ costs?: { attemptId: string; costMicros?: number; computeMs?: number }[] }> => {
+  const costsOf = async (scope: PauseScope, attempts: readonly string[], l: Look): Promise<{ costs?: { attemptId: string; costMicros?: number; computeMs?: number }[] }> => {
     if (local?.costs === undefined) return {};
-    const all = [...new Set<string>([...(seen.get(`${scope.kind}:${scope.id}`) ?? []), ...attempts])];
+    const all = [...new Set<string>([...(seen.get(`${scope.kind}:${scope.id}`) ?? []), ...attempts, ...(await resolveScope(scope, l)).leftover])];
     if (all.length === 0) return {};
     const costs = await local.costs(all).catch(() => undefined);
     return costs === undefined || !Array.isArray(costs) ? {} : { costs: costs.map((c) => ({ ...c })) };
@@ -339,7 +351,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       // What the preparation cost, as the runtime counts it (a hook that is absent or fails says nothing, so nothing is charged on a guess).
       const figure = local?.spent === undefined ? undefined : await local.spent(attempts).catch(() => undefined);
       const spent = typeof figure === "number" && Number.isFinite(figure) && figure >= 0 ? figure : undefined;
-      return { remaining: [...await inFlight(attempts, scope, l), ...starting], ...(spent === undefined ? {} : { spent }), ...(await costsOf(scope, attempts)) };
+      return { remaining: [...await inFlight(attempts, scope, l), ...starting], ...(spent === undefined ? {} : { spent }), ...(await costsOf(scope, attempts, l)) };
     },
     checkpoint: async (scope, options) => {
       const h = dispatch();
@@ -389,7 +401,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       // A Force Stop kills what the hosts still hold for every attempt seen for the scope (also one that ended earlier and left a process behind), without asking first (card L02d). A swarm child's attempt only for someone
       // who may control the child. A failure is not reported as such: the look below names whatever is still there.
       if (options.force && local?.end !== undefined) {
-        const every = [...new Set([...(seen.get(`${scope.kind}:${scope.id}`) ?? []), ...attempts])];
+        const every = [...new Set([...(seen.get(`${scope.kind}:${scope.id}`) ?? []), ...attempts, ...(await resolveScope(scope, l)).leftover])];
         const mine = every.length === 0 ? [] : (await controllable(options.by, every, scope, l)).allowed;
         if (mine.length > 0) await local.end(mine).catch(() => undefined);
       }
@@ -398,7 +410,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const after = await inFlight(attempts, scope, look()).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
       for (const item of after) if (((item.kind === "process" || item.kind === "child") && item.state !== "settled") || (item.kind === "job" && (item.state === "unknown" || item.state === "uncooperative"))) { if (!unresolved.includes(item.ref)) unresolved.push(item.ref); }
       // The stop is over for this scope: what was remembered about its attempts is not carried into a later one.
-      const costs = await costsOf(scope, attempts);
+      const costs = await costsOf(scope, attempts, l);
       seen.delete(`${scope.kind}:${scope.id}`);
       return { ended: true, unresolved, ...costs };
     },

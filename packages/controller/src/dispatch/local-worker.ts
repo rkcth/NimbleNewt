@@ -260,6 +260,20 @@ export class LocalWorker implements WorkerHost {
   }
 
   /**
+   * Whether an attempt that has finished has anything left here (card L02e): the dispatcher asks again later for an attempt whose close could not end its worker, and a look that finds every sandbox of the attempt
+   * empty is the confirmation (it answers; the attempt's scratch may then be removed). Nothing is killed here (that is Force Stop's `endLocalWork`). It refuses, and the attempt stays unconfirmed, when a process
+   * is still listed, when a sandbox cannot say what it holds, or when this process has no record of the attempt (the controller restarted: nothing can be said about what it left).
+   */
+  async release(attemptId: string, _reason: string, _signal?: AbortSignal): Promise<void> {
+    const entry = this.#sessions.get(attemptId);
+    if (entry === undefined) throw new Error("this host has no record of the attempt's sandboxes, so it cannot confirm they are empty");
+    if (entry.sessions.some((s) => s.work === undefined)) throw new Error("a sandbox of the attempt cannot say what it holds");
+    const found = await this.localWork([attemptId]);
+    const left = found.processes.filter((p) => p.attemptId === attemptId).length;
+    if (left > 0) throw new Error(`${left} process${left === 1 ? "" : "es"} of the attempt still run${left === 1 ? "s" : ""} in its sandbox`);
+  }
+
+  /**
    * Force Stop's last step on this host (card L02d): every sandbox session these attempts have had is told to kill what it still holds (`SandboxSession.end`), whether or not its close went through. A session that fails is
    * reported after the others were told (the stop looks again afterwards and names what is left).
    */
