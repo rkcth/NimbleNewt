@@ -205,7 +205,7 @@ export class GitBridge {
         await options.hooks?.beforeOpen?.(safe.absolute);
         let handle;
         try { handle = await open(safe.absolute, constants.O_WRONLY | constants.O_CREAT | NOFOLLOW, 0o644); } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} became a link while the refresh ran; it was not written`);
+          if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} became a link while the refresh ran; it was not written`, { tamper: true });
           throw new WorkspaceError("unavailable", `${JSON.stringify(s.path.slice(0, 80))} could not be opened for writing`);
         }
         let streamed = false;
@@ -213,7 +213,7 @@ export class GitBridge {
           const opened = await handle.stat();
           const now = await lstat(safe.absolute).catch(() => undefined);
           const parent = await realpath(dirname(safe.absolute)).catch(() => undefined);
-          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`);
+          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
           await handle.truncate(0);
           if (s.mode !== undefined) await handle.chmod(s.mode);
           streamed = true; // the stream closes the handle

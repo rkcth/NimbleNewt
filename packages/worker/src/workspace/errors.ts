@@ -17,11 +17,14 @@ export type WorkspaceErrorCode =
 export class WorkspaceError extends Error {
   readonly code: WorkspaceErrorCode;
   /** For `partial`: the paths put back as they were and the paths that could not be put back. */
+  /** Set when the refusal is a sign of tampering and not only of a name the bridge does not carry: a file that was swapped, or became a link, between being looked at and being used (card U11d). */
+  readonly tamper?: true;
   readonly detail?: { readonly restored: readonly string[]; readonly notRestored: readonly string[]; readonly written: readonly string[] };
-  constructor(code: WorkspaceErrorCode, message: string, options?: { cause?: unknown; detail?: { restored: readonly string[]; notRestored: readonly string[]; written: readonly string[] } }) {
+  constructor(code: WorkspaceErrorCode, message: string, options?: { cause?: unknown; tamper?: true; detail?: { restored: readonly string[]; notRestored: readonly string[]; written: readonly string[] } }) {
     super(message, options);
     this.name = "WorkspaceError";
     this.code = code;
     if (options?.detail !== undefined) this.detail = options.detail;
+    if (options?.tamper === true) this.tamper = true;
   }
 }
