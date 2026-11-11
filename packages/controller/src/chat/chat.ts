@@ -142,15 +142,26 @@ export const FOLLOW_UP_PROJECTS = 5;
 /** The latest follow-ups of a turn the listing shows. */
 export const FOLLOW_UP_SHOWN = 3;
 
+/** What the channel a message came by can do. A channel that keeps what it shows (the web page's outbox) says `secrets: false`. */
+export interface ChatChannel { readonly secrets?: boolean }
+/** Operations whose result carries a secret shown once (card U14b). */
+export const SECRET_OPS: ReadonlySet<string> = new Set(["credential.issue"]);
+const NO_SECRET_CHANNEL = "this channel keeps what it shows, so it cannot show a credential once; issue it in the terminal chat (or through the API)";
+
+/** A secret an operation made for the owner (card U14b: a credential). It is handed to the caller of the turn once, in memory, and is in no record: not the turn, the proposal, an outcome or a log. */
+export interface RevealedSecret { readonly label: string; readonly value: string }
+
 export interface TurnResult {
   readonly turnId: string;
   readonly replayed: boolean;
   readonly outcomes: readonly Outcome[];
   /** The owner-facing answer, one plain line each. */
   readonly reply: readonly string[];
+  /** Secrets this turn made (a new credential), shown once to the owner. Never stored: a turn sent again (`replayed`) does not have them. */
+  readonly secrets?: readonly RevealedSecret[];
 }
 
-export interface ApplyResult { readonly proposalId: string; readonly applied: boolean; readonly replayed: boolean; readonly results: readonly ChatStepResult[]; readonly failure?: { readonly step: number; readonly code: string; readonly message: string } }
+export interface ApplyResult { readonly proposalId: string; readonly applied: boolean; readonly replayed: boolean; readonly results: readonly ChatStepResult[]; readonly secrets?: readonly RevealedSecret[]; readonly failure?: { readonly step: number; readonly code: string; readonly message: string } }
 
 export interface ChatDeps {
   readonly principals: PrincipalService;
@@ -223,6 +234,10 @@ async function endedOf<T>(run: () => Promise<T>): Promise<T> { try { return awai
 export class ChatService {
   readonly #runner: CommandRunner;
   readonly #deps: ChatDeps;
+  /** Secrets made while a turn runs, by turn, until the turn's caller takes them. Memory only. */
+  readonly #revealed = new Map<string, RevealedSecret[]>();
+  /** Turns from a channel that cannot show a secret once (the web page keeps what it receives): an operation that makes one is refused in them. */
+  readonly #noSecrets = new Set<string>();
 
   private constructor(runner: CommandRunner, deps: ChatDeps) {
     this.#runner = runner;
@@ -236,11 +251,11 @@ export class ChatService {
   // ---- the message -----------------------------------------------------------------------------------------------------------
 
   /** Handles one message from the owner. `messageId` is the owner's idempotency key for the message: sending it again returns the first turn. */
-  async submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: CallOptions = {}): Promise<TurnResult> {
-    return endedOf(() => this.#submit(token, message, guardOf(options)));
+  async submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: CallOptions & ChatChannel = {}): Promise<TurnResult> {
+    return endedOf(() => this.#submit(token, message, options, guardOf(options)));
   }
 
-  async #submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, guard: Guard | undefined): Promise<TurnResult> {
+  async #submit(token: unknown, message: { messageId: string; text: string; quoted?: readonly string[] }, options: ChatChannel, guard: Guard | undefined): Promise<TurnResult> {
     const owner = await this.#owner(token);
     const tok = token as string;
     onlyKnown(message, ["messageId", "text", "quoted"]);
@@ -254,6 +269,7 @@ export class ChatService {
     // Quoted material is untrusted and may well hold secrets: they are cut out before anything sees it.
     const safeQuoted = quoted.map((q) => redactForModel(q));
     const turnId = `turn-${hash(owner.id, messageId)}`;
+    if (options.secrets === false) this.#noSecrets.add(turnId);
 
     let turn = await this.#turn(turnId);
     let replayed = turn !== undefined;
@@ -290,15 +306,19 @@ export class ChatService {
       }
     }
     if (turn === undefined) throw new DomainError("unavailable", "the turn could not be recorded");
-    const finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn, guard);
+    let finished: TurnBody;
+    try { finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn, guard); } catch (error) { this.#revealed.delete(turnId); throw error; } finally { this.#noSecrets.delete(turnId); }
+    const secrets = this.#revealed.get(turnId);
+    this.#revealed.delete(turnId);
     const reply = replyOf(finished.outcomes ?? []);
+    if (secrets !== undefined) reply.push(`${secrets.length === 1 ? "A credential was made" : "Credentials were made"}. ${secrets.length === 1 ? "It is" : "They are"} shown once, below, and kept nowhere: copy ${secrets.length === 1 ? "it" : "them"} now into the secret store of the agent or host. If ${secrets.length === 1 ? "it is" : "they are"} lost, ask for a new one.`);
     let count = 0;
     let needing = 0;
     try { needing = (await this.#deps.needing?.(owner)) ?? 0; } catch { /* the reply is still given */ }
     try { count = needing > 0 ? 0 : (await this.#deps.waiting?.(owner)) ?? 0; } catch { /* the reply is still given */ }
     if (needing > 0) reply.push(`${needing >= 50 ? "50 or more" : needing} ${needing === 1 ? "thing needs" : "things need"} your decision. Ask what needs you to see ${needing === 1 ? "it" : "them"}.`);
     if (count > 0) reply.push(`${count >= 50 ? "50 or more" : count} ${count === 1 ? "question from an agent is" : "questions from agents are"} waiting for your answer. Ask what is waiting to see ${count === 1 ? "it" : "them"}.`);
-    return { turnId, replayed, outcomes: finished.outcomes ?? [], reply };
+    return { turnId, replayed, outcomes: finished.outcomes ?? [], reply, ...(secrets === undefined ? {} : { secrets }) };
   }
 
   /** A turn as recorded (the owner only): what was planned and what came of each part, with the command IDs that link it to the audit trail. */
@@ -341,11 +361,11 @@ export class ChatService {
    * The explicit request that applies a proposal: its steps are sent to the state API in order, each under its fixed command ID and the credential it names. A proposal that was applied is
    * answered with its recorded results (`replayed`); one whose step is refused stays open, with the steps that did apply recorded by the API, and applying it again carries on.
    */
-  async applyProposal(token: unknown, request: { commandId: string; proposalId: string }, options: CallOptions = {}): Promise<ApplyResult> {
+  async applyProposal(token: unknown, request: { commandId: string; proposalId: string }, options: CallOptions & ChatChannel = {}): Promise<ApplyResult> {
     const owner = await this.#owner(token);
     onlyKnown(request, ["commandId", "proposalId"]);
     const guard = guardOf(options);
-    return endedOf(() => this.#apply(owner, token as string, request.proposalId, request.commandId, undefined, guard));
+    return endedOf(() => this.#apply(owner, token as string, request.proposalId, request.commandId, undefined, options.secrets !== false, guard));
   }
 
   async discardProposal(token: unknown, request: { commandId: string; proposalId: string }, options: CallOptions = {}): Promise<{ proposalId: string; replayed: boolean }> {
@@ -800,6 +820,9 @@ export class ChatService {
     if (intent.op === "decision.record" && (intent.args["basedOn"] !== undefined || intent.args["session"] !== undefined)) return refuse("invalid_command", "basedOn and session are set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
+    // Backup encryption takes only a switch and one of two scopes (card K01b3): any other value is refused before a proposal is made, so text the model put there (a passcode, say) is never stored or shown.
+    if (intent.op === "backup.encryption.set" && ((args["enabled"] !== undefined && typeof args["enabled"] !== "boolean") || (args["scope"] !== undefined && args["scope"] !== "everything" && args["scope"] !== "secrets"))) return refuse("invalid_command", "backup encryption is set with enabled (true or false) and scope (everything or secrets) only");
+    if (intent.op === "backup.signing.rotate" && args["revokePrevious"] !== undefined && typeof args["revokePrevious"] !== "boolean") return refuse("invalid_command", "revokePrevious is true or false");
     if (intent.op === "decision.record" && args["category"] === "gate") args["topic"] = GATE_TOPIC;
     // Cancelling a release test applies at once: it names an attempt ID the owner said, or a candidate (also in the owner's words) with exactly one test running.
     if (intent.op === "release.cancel") {
@@ -1024,6 +1047,46 @@ export class ChatService {
       const found = await this.#get(token, "agenda.get", { itemId: args["itemId"] });
       if (found === undefined) return refuse("not_found", "no such agenda item");
       labels[String(args["itemId"])] = String(found["topic"]);
+    }
+    // Ongoing responsibilities (card P04): a responsibility is named by its title, a managed resource by its label, an incident by the responsibility's title and, when it has several, the words of its signature. Exactly one match, else the owner is asked.
+    if (intent.op === "responsibility.update" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
+      const pick = (what: string, field: string, words: string, items: { id: string; name: string }[]): { id: string } | ReturnType<typeof refuse> | { ok: false; kind: "ask"; question: string; options: string[]; field: string; choices: string[] } => {
+        const matches = items.filter((i) => words === "" || i.name.toLowerCase().includes(words));
+        if (matches.length === 0) return refuse("not_found", words === "" ? `there is no ${what} in that project` : `no ${what} in that project is called ${quotedText(words, 80)}`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: `Which ${what} do you mean?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.name.slice(0, 60)})`), field, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+        return { id: matches[0]!.id };
+      };
+      const words = (key: string): string | undefined | ReturnType<typeof refuse> => {
+        const v = args[key];
+        delete args[key];
+        if (v !== undefined && typeof v !== "string") return refuse("invalid_command", `${key} must be text`);
+        return v?.trim().toLowerCase();
+      };
+      const dutyTitle = intent.op === "responsibility.update" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
+      const resourceLabel = intent.op.startsWith("lease.") ? words("resourceLabel") : undefined;
+      const signature = intent.op === "incident.resolve" ? words("incidentSignature") : undefined;
+      for (const w of [dutyTitle, resourceLabel, signature]) if (typeof w === "object") return w;
+      if (intent.op === "responsibility.update" && args["responsibilityId"] === undefined) {
+        const listed = await this.#plainItems(token, "responsibility.list", { projectId });
+        const r = pick("responsibility", "responsibilityId", (dutyTitle as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["title"]) })));
+        if (!("id" in r)) return r;
+        args["responsibilityId"] = r.id;
+      } else if (intent.op === "incident.resolve" && args["incidentId"] === undefined) {
+        const listed = await this.#plainItems(token, "responsibility.incidents", { projectId, open: true });
+        const duties = dutyTitle === undefined ? undefined : await this.#plainItems(token, "responsibility.list", { projectId });
+        const ids = duties === undefined ? undefined : new Set(duties.filter((d) => String(d["title"]).toLowerCase().includes(dutyTitle as string)).map((d) => String(d["id"])));
+        const own = listed.filter((i) => ids === undefined || ids.has(String(i["responsibilityId"])));
+        const r = pick("open incident", "incidentId", (signature as string | undefined) ?? "", own.map((i) => ({ id: String(i["id"]), name: String(i["signature"]) })));
+        if (!("id" in r)) return r;
+        args["incidentId"] = r.id;
+      } else if (intent.op.startsWith("lease.") && args["resourceId"] === undefined) {
+        const listed = await this.#plainItems(token, "resource.list", { projectId, state: "bound" });
+        const r = pick("resource", "resourceId", (resourceLabel as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["label"]) })));
+        if (!("id" in r)) return r;
+        args["resourceId"] = r.id;
+      } else if (dutyTitle !== undefined || resourceLabel !== undefined || signature !== undefined) {
+        return refuse("invalid_command", "the message names the same thing twice over, as an ID and in words; which one is meant has to be settled.");
+      }
     }
     // A stand-up named by its title (or the only one of the project): exactly one whose title contains the words, else the owner is asked.
     if (intent.op === "standup.update") {
@@ -1574,6 +1637,11 @@ export class ChatService {
         // A task never assigned has no assignment revision to expect (that is how a first assignment is asked for).
         return item === undefined ? { ok: true } : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "responsibility": {
+        const item = typeof args["responsibilityId"] === "string" ? await this.#get(token, "responsibility.get", { responsibilityId: args["responsibilityId"] }) : undefined;
+        const revision = (item?.["item"] as { revision?: number } | undefined)?.revision ?? (item?.["revision"] as number | undefined);
+        return revision === undefined ? refuse("not_found", "no such responsibility") : { ok: true, name: "expectedRevision", value: revision + ahead(`responsibility:${args["responsibilityId"] as string}`) };
+      }
       case "agenda": {
         const item = typeof args["itemId"] === "string" ? await this.#get(token, "agenda.get", { itemId: args["itemId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
@@ -1737,6 +1805,13 @@ export class ChatService {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args: {} });
     if (!response.ok) { if (response.error.code === "forbidden" || response.error.code === "not_found") return []; throw new DomainError("unavailable", response.error.message); }
     return (response.result["items"] ?? []) as Record<string, unknown>[];
+  }
+
+  /** The `items` of a query that takes no paging arguments (the responsibility, incident and resource lists). */
+  async #plainItems(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+    const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args });
+    if (response.ok) return (response.result["items"] as Record<string, unknown>[] | undefined) ?? [];
+    throw new DomainError(response.error.code === "unauthenticated" ? "unauthenticated" : "unavailable", response.error.message);
   }
 
   /** Every item of a list operation, bounded (five pages). */
@@ -1915,6 +1990,7 @@ export class ChatService {
           if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
           args = { ...args, basedOn: await this.#decisionBase(token, sourceTurn, args, item.planBase, fresh.value as number) };
         }
+        if (SECRET_OPS.has(item.op) && this.#noSecrets.has(turnId)) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "unavailable", message: NO_SECRET_CHANNEL };
         const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args });
         if (!response.ok && response.error.code === "command_conflict" && item.op === "decision.record") {
           // The same turn was sent twice at once and the other copy recorded this step between the look and the send: it is done.
@@ -1923,6 +1999,7 @@ export class ChatService {
           if (recorded !== undefined && src?.turnId === (typeof item.args["sourceTurnId"] === "string" ? item.args["sourceTurnId"] : turnId)) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on ${quotedText(String(recorded["topic"] ?? "the gate"), 80)}.`], accepted: true, completed: true } as never;
         }
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
+        this.#reveal(turnId, secretOf(response.result));
         return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
       }
       case "propose": {
@@ -1961,7 +2038,8 @@ export class ChatService {
           } catch (error) { return refusal(item.i, error); }
         }
         try {
-          const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId, guard);
+          const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId, !this.#noSecrets.has(turnId), guard);
+          for (const secret of result.secrets ?? []) this.#reveal(turnId, secret);
           return result.applied ? { i: item.i, status: "applied", proposalId: item.proposalId, results: result.results, accepted: true, completed: result.results.every((r) => r.completed) } : { i: item.i, status: "refused", proposalId: item.proposalId, code: result.failure?.code ?? "invalid_command", message: result.failure?.message ?? "not applied", results: result.results };
         } catch (error) { return refusal(item.i, error); }
       }
@@ -2004,7 +2082,7 @@ export class ChatService {
           return { i: item.i, status: "answered", observedAt: this.#runner.now(), lines: [line(`${result.assigned.length} assigned, ${result.skipped.length} left`), ...result.assigned.map((a) => line(`${a.taskId} to ${a.owner}: ${a.reason}`, [{ kind: "task", id: a.taskId }]))] };
         }
         case "configure": {
-          const made = await service.configure(owner, { commandId, principalId: item.principalId!, routes: item.routes!, ...(item.expectedRevision === undefined ? {} : { expectedRevision: item.expectedRevision }) });
+          const made = await service.configure(owner, { commandId, principalId: item.principalId!, ...(item.routes === undefined ? {} : { routes: item.routes }), ...(item.expectedRevision === undefined ? {} : { expectedRevision: item.expectedRevision }) });
           return { i: item.i, status: "applied", op: "coordinator.configure", commandId, id: made.id, revision: made.revision };
         }
         case "start": case "pause": case "stop": {
@@ -2030,7 +2108,7 @@ export class ChatService {
     }));
   }
 
-  async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined, guard?: Guard): Promise<ApplyResult> {
+  async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined, allowSecrets = true, guard?: Guard): Promise<ApplyResult> {
     let found = PROPOSAL_ID.test(proposalId) ? await this.#runner.get("chat-proposal", proposalId) : undefined;
     let body = found?.body as unknown as ChatProposalBody | undefined;
     if (found === undefined || body === undefined || body.ownerId !== owner.id) throw new DomainError("not_found", "no such proposal");
@@ -2053,11 +2131,16 @@ export class ChatService {
     }
     const coordinatorToken = body.steps.some((s) => s.as === "coordinator") ? await this.#deps.coordinatorToken?.() : undefined;
     const results: ChatStepResult[] = [];
+    const secrets: RevealedSecret[] = [];
+    const withSecrets = <T extends object>(r: T): T => (secrets.length === 0 ? r : { ...r, secrets });
+    // A channel that keeps what it shows is refused before any step is sent, so a proposal that would make a credential is never half applied from it.
+    const secretStep = allowSecrets ? -1 : body.steps.findIndex((s) => SECRET_OPS.has(s.op));
+    if (secretStep >= 0) return { proposalId, applied: false, replayed: false, results, failure: { step: secretStep, code: "unavailable", message: NO_SECRET_CHANNEL } };
     for (const [index, step] of body.steps.entries()) {
       await guard?.();
       const args = substitute(step.args, results);
       const using = step.as === "coordinator" ? coordinatorToken : token;
-      if (using === undefined) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } };
+      if (using === undefined) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } });
       if (step.op === "decision.record" && step.as === undefined) {
         // A decision step is based on the version of its topic when it was shown, but decisions of the same message applied before it do not count as the topic having moved. A step already recorded (this apply run again) is answered from the record.
         const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, step.commandId)) });
@@ -2066,14 +2149,14 @@ export class ChatService {
           continue;
         }
         const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
-        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        if (!fresh.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } });
         args["basedOn"] = await this.#decisionBase(token, typeof args["sourceTurnId"] === "string" ? args["sourceTurnId"] : "", args, typeof args["basedOn"] === "number" ? args["basedOn"] : undefined, fresh.value as number);
       }
       if (step.op === "meeting.record.owner-respond" && isObject(args["alternative"])) {
         // The owner's alternative is based on the version of its topic when it is recorded, as a decision step is, and decisions of this very message do not count as the topic having moved.
         const alt = { ...(args["alternative"] as Record<string, unknown>) };
         const fresh = await this.#revisionFor(token, "decision", alt, undefined, new Map());
-        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        if (!fresh.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } });
         alt["basedOn"] = await this.#decisionBase(token, String((alt["source"] as { turnId?: unknown } | undefined)?.turnId ?? ""), alt, typeof alt["basedOn"] === "number" ? alt["basedOn"] : undefined, fresh.value as number);
         args["alternative"] = alt;
       }
@@ -2085,7 +2168,7 @@ export class ChatService {
         if (cur !== undefined && qb?.state === "open") args["expectedRevision"] = cur.revision;
         else if (cur !== undefined && qb?.state === "answered") {
           if (qb.answer === args["answer"]) { results.push({ op: step.op, id: args["questionId"], shown: ["The stand-up's question was already answered with these words."], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true }); continue; }
-          return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } };
+          return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: "invalid_command", message: "the stand-up's question was already answered" } });
         }
       }
       let response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
@@ -2096,7 +2179,9 @@ export class ChatService {
         args["expectedRevision"] = cur!.revision;
         response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
       }
-      if (!response.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } };
+      if (!response.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } });
+      const made = secretOf(response.result);
+      if (made !== undefined) secrets.push(made);
       results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
     }
     try {
@@ -2119,9 +2204,17 @@ export class ChatService {
       found = await this.#runner.get("chat-proposal", proposalId);
       body = found?.body as unknown as ChatProposalBody | undefined;
       if (body?.status !== "applied") throw error;
-      return { proposalId, applied: true, replayed: true, results: body.results ?? [] };
+      // Another copy recorded the proposal as applied first; a credential this copy made is still handed over (it is in no record, so this is its only showing).
+      return withSecrets({ proposalId, applied: true, replayed: true, results: body.results ?? [] });
     }
-    return { proposalId, applied: true, replayed: false, results };
+    return withSecrets({ proposalId, applied: true, replayed: false, results });
+  }
+
+  /** Keeps a secret an operation made, for the caller of this turn to take once. */
+  #reveal(turnId: string, secret: RevealedSecret | undefined): void {
+    if (secret === undefined) return;
+    const held = this.#revealed.get(turnId);
+    if (held === undefined) this.#revealed.set(turnId, [secret]); else held.push(secret);
   }
 
   async #discard(owner: Principal, proposalId: string, commandId: string, fromTurn: string | undefined): Promise<{ proposalId: string; replayed: boolean }> {
@@ -2258,6 +2351,14 @@ function recordOf(step: ChatStep): string | undefined {
     case "catalog.policy.change": return "catalog-policy";
     default: return undefined;
   }
+}
+
+/** The secret an operation's result carries for the owner (`secret: { label, value }`), if it has one. It is taken out here, so nothing that keeps the result keeps it. */
+function secretOf(result: JsonObject): RevealedSecret | undefined {
+  const s = result["secret"];
+  if (s === null || typeof s !== "object" || Array.isArray(s)) return undefined;
+  const { label, value } = s as { label?: unknown; value?: unknown };
+  return typeof label === "string" && typeof value === "string" && value !== "" ? { label: label.slice(0, 120), value } : undefined;
 }
 
 /** The plain lines an API result asks to be shown to the owner (a captured agenda topic), if it has any. */

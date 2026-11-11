@@ -234,8 +234,8 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     // The two answers are sized for the window below: each attempt's first call fits the startup share alone, both together do not, and after the compaction (the older part only extracted) the call fits again.
     const answer = await model([{ text: big(1, 700) }, { text: big(2, 650) }, { text: "continued" }]);
     const x = await rig(real, answer);
-    // 65,536 tokens (cards W06 and W10 merged: the completion rules, work.note, work.answer and the report put the fixed part at about 4,200 tokens; on 49,152 the compacted call no longer fit). At 65,536 Pi's background
-    // compaction threshold (window - 16,384 - 32,768) is 16,384, so the first two attempts are never compacted in the background.
+    // 65,536 tokens (cards W06 and W10 merged: the completion rules, work.note, work.answer and the report put the fixed part at about 4,200 tokens; on 49,152 the compacted call no longer fit). At 65,536 the worker's background
+    // compaction threshold (card CMP: window - reserve 8,192 - background 16,384) is 40,960, so the first two attempts are never compacted in the background.
     x.window.value = 65536;
     try {
       // The relay checks every call against the attempt that is current for its task (L05b fence), so each run is the real admitted attempt of its own task.
@@ -261,7 +261,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.ok(requestText(answer, 2).length < requestText(answer, 1).length + 12000, "and not the whole stored conversation again");
 
       // A call that no compaction can bring under the limit is refused at start: the attempt ends failed, the blocker is open, and the model is not called.
-      x.window.value = 1024;
+      x.window.value = 8192; // the smallest window the worker accepts (card CMP: a smaller one is refused at its start); the fixed part of a call alone is over its startup share
       const calls = answer.seen.length;
       const refused = await run(4, three.checkpoint);
       assert.equal(refused.status, "failed");

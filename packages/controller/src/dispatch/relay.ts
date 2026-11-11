@@ -26,7 +26,7 @@ export interface ModelEndpoint {
 
 export interface ModelRelayOptions {
   /** The owner's endpoint for a route (`provider/model`); `undefined` when the route has none (a call is then refused). */
-  readonly endpoint: (route: string) => ModelEndpoint | undefined;
+  readonly endpoint: (route: string) => ModelEndpoint | undefined | Promise<ModelEndpoint | undefined>;
   /** The fetch used to reach the endpoints (default: the global one). */
   readonly fetch?: typeof globalThis.fetch;
   /** The address the process uses (default `http://relay.invalid`). */
@@ -117,7 +117,7 @@ export class ModelRelay {
         const rest = request.url.slice(prefix.length).split(/[?#]/)[0]!;
         if (rest.split("/").some((s) => s === ".." || s === "." || s === "") || /%2e|%2f|%5c|\\/i.test(rest) || parsed.pathname !== `/${ALIAS}/${rest}`) refuse("the path is not allowed");
         if (!PATHS.has(rest) || parsed.search !== "") refuse("only the model API's own calls are allowed");
-        const endpoint = this.#options.endpoint(route);
+        const endpoint = await this.#options.endpoint(route);
         if (endpoint === undefined) refuse(`route ${route.slice(0, 60)} has no endpoint`);
         if (attempt.gate !== undefined && rest !== "messages/count_tokens") {
           let why: string | undefined;

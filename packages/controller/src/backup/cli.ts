@@ -2,7 +2,7 @@ import { FileBlobStore } from "../artifacts/index.js";
 import { PostgresStorage } from "../storage/postgres/index.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { copyFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { DeletionLedger, LEDGER_FILE } from "../retention/ledger.js";
 import { PasscodeRefused, RecoveryCodeInvalid, UnlockFailed, addPasscode, createKeyring, keyringFingerprint, parseKeyring, recoveryCodeOf, rotateKeyring, unlockWithPasscode, unlockWithRecovery, unlockWithRecoveryCode, type BackupKey, type Keyring } from "./crypto.js";
@@ -13,17 +13,19 @@ import { access } from "node:fs/promises";
 import { readManifest } from "./verify.js";
 import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup } from "./restore.js";
-import { verifyBackup } from "./verify.js";
+import { manifestDigestOf, verifyBackup } from "./verify.js";
+import { trustedKeyOf, type SignatureTrust } from "./signing.js";
 import { acquireDataLocks, type DataLock, type LockEnv } from "./data-lock.js";
 
 const USAGE = [
   "usage:",
   "  backup list <backups folder>",
-  "  backup verify <backup folder> [--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>] [--require-encrypted yes] [--allow-plain yes]",
+  "  backup verify <backup folder> [--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>] [--require-encrypted yes] [--allow-plain yes] [--trusted-signing-key-file <file>] [--manifest-digest <hex>]",
   "  backup encryption-setup <new keyring file> --passcode-file <file holding the passcode> --recovery-out <new recovery file> [--recovery-code-out <new file for the printable recovery code>]",
   "  backup encryption-add-passcode <keyring file> (--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>) --new-passcode-file <file holding the extra passcode>",
   "  backup encryption-rotate <keyring file> (--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>) --new-passcode-file <file> [--new-passcode-file-2 <file>] --recovery-out <new recovery file> [--recovery-code-out <new file>]   (removes or replaces a passcode: a new key for later backups)",
   "  backup restore <backup folder> [--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>] [--require-encrypted yes] [--allow-plain yes] (--sqlite <new database file> | --postgres <connection url> [--schema <name>]) [--pi-state <new folder for the agents' conversation stores>] [--artifacts <new artifact folder>]",
+  "--trusted-signing-key-file names a file of signing public keys you saved from backup.signing.status (one base64 key per line; not secret): the backup must then carry a valid signature of one of them. Without it the signature is not checked, and the output says so. --manifest-digest checks the backup against a digest you kept off the server.",
   "Secrets are only ever read from files (mode 600) and written to new files; none is taken on the command line or printed.",
   "Giving a passcode or recovery file means the backup must be encrypted. A folder that has held encrypted backups refuses a plain one unless you give --allow-plain yes.",
   "The passcode and recovery files are for the moment of the command: put them there, run it, and remove them; keep the recovery file off this machine.",
@@ -78,14 +80,15 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
     }
     if (command === "encryption-add-passcode" || command === "encryption-rotate") return await manageKey(command, folder, rest, print);
     if (command === "verify") {
-      const o = options(rest, ["passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain"]);
+      const o = options(rest, ["passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain", "trusted-signing-key-file", "manifest-digest"]);
       if (typeof o === "string") { print(o); print(USAGE); return 2; }
-      const check = await verifyBackup(folder, await unlockFrom(folder, o));
-      if (check.ok) { print(`ok: ${check.manifest!.name} (schema ${check.manifest!.schemaVersion}) matches its manifest`); return 0; }
+      const check = await verifyBackup(folder, { ...(await unlockFrom(folder, o)), ...(await signatureFrom(o)) });
+      if (check.ok && o.get("manifest-digest") !== undefined && manifestDigestOf(check.manifest!) !== o.get("manifest-digest")!.toLowerCase()) { print("problem: the manifest digest is not the one you gave: this is not the backup you kept the digest of"); return 1; }
+      if (check.ok) { print(`ok: ${check.manifest!.name} (schema ${check.manifest!.schemaVersion}) matches its manifest; manifest digest ${manifestDigestOf(check.manifest!)}`); if (check.signature !== undefined) print(check.signature.text); return 0; }
       for (const p of check.problems) print(`problem: ${p}`);
       return 1;
     }
-    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "pi-state", "passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain", "deletions"]);
+    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "pi-state", "passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain", "deletions", "trusted-signing-key-file", "manifest-digest"]);
     if (typeof opts === "string") { print(opts); print(USAGE); return 2; }
     if ((opts.get("sqlite") === undefined) === (opts.get("postgres") === undefined)) { print("give exactly one of --sqlite and --postgres"); return 2; }
     if (opts.get("schema") !== undefined && opts.get("postgres") === undefined) { print("--schema goes with --postgres"); return 2; }
@@ -106,7 +109,8 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       const blobs = opts.get("artifacts") === undefined ? undefined : await FileBlobStore.open({ directory: opts.get("artifacts")! });
       // Deletions the owner asked for after this backup was made are re-applied, so restoring an old backup does not bring a deleted record's text back.
       const ledgerPath = opts.get("deletions") ?? join(dirname(resolve(folder)), LEDGER_FILE);
-      const done = await restoreBackup(folder, storage, { ...(blobs === undefined ? {} : { blobs }), ...(opts.get("pi-state") === undefined ? {} : { piTarget: (id: string) => join(opts.get("pi-state")!, id) }), ...unlocked, deletions: await new DeletionLedger(ledgerPath).read() });
+      const done = await restoreBackup(folder, storage, { ...(await signatureFrom(opts)), ...(opts.get("manifest-digest") === undefined ? {} : { expectedManifestDigest: opts.get("manifest-digest")!.toLowerCase() }), ...(blobs === undefined ? {} : { blobs }), ...(opts.get("pi-state") === undefined ? {} : { piTarget: (id: string) => join(opts.get("pi-state")!, id) }), ...unlocked, deletions: await new DeletionLedger(ledgerPath).read() });
+      if (done.signature !== undefined) print(done.signature.text);
       print(`restored ${done.rows} rows${done.blobsRestored > 0 ? ` and ${done.blobsRestored} artifact files` : ""} from ${done.manifest.name}`);
       if (done.piFilesRestored > 0) print(`${done.piFilesRestored} conversation files of ${done.piStoresRestored} agent stores were put back`);
       if (done.deletionsReapplied > 0) print(`${done.deletionsReapplied} records deleted at your request after this backup was made were blanked or removed again`);
@@ -120,6 +124,17 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
     print(error instanceof RestoreRefused || error instanceof UnlockFailed || error instanceof PasscodeRefused || error instanceof RecoveryCodeInvalid || error instanceof SecretFileRefused ? error.message : error instanceof SyntaxError ? "failed: a file is not in the expected format" : `failed: ${error instanceof Error && /^(ENOENT|EEXIST|EACCES|EISDIR|ENOTDIR|EPERM)/.test(String((error as NodeJS.ErrnoException).code ?? "")) ? `the file system said ${(error as NodeJS.ErrnoException).code}` : "the command could not be completed"}`);
     return 1;
   }
+}
+
+/** The signing public keys the owner kept (card K01b3): a file of base64 keys, one per line (`#` lines and blanks are skipped). Public, so no mode is required; the key IDs are derived, never read. */
+async function signatureFrom(o: Map<string, string>): Promise<{ signatureTrust?: SignatureTrust }> {
+  const file = o.get("trusted-signing-key-file");
+  if (file === undefined) return {};
+  let text: string;
+  try { const info = await stat(file); if (!info.isFile() || info.size > 65_536) throw new Error("size"); text = await readFile(file, "utf8"); } catch { throw new RestoreRefused("the trusted signing key file cannot be read"); }
+  const keys = text.split("\n").map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#")).map((l) => { try { return trustedKeyOf(l); } catch { throw new RestoreRefused("the trusted signing key file holds a line that is not an Ed25519 public key"); } });
+  if (keys.length === 0) throw new RestoreRefused("the trusted signing key file holds no key");
+  return { signatureTrust: { keys } };
 }
 
 /** Writes a new file (refuses to overwrite one) readable by the owner alone. */

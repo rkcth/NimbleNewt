@@ -837,3 +837,34 @@ test("a compaction by the process tells the controller how much it replaced and 
   const again = (await broken.beforeCompact!({ key: "k", reason: "overflow", text: "z".repeat(30_000), messageCount: 12, signal: new AbortController().signal })) as { summary: string };
   assert.equal(again.summary, out.summary);
 });
+
+test("a model window under 8,192 tokens is refused at the start with a clear fault (card CMP)", async () => {
+  const { hooks } = scripted();
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: { ...offlineStart, model: { ...offlineStart.model, contextWindow: 4096 } } });
+  const fault = await h.next("fault");
+  assert.match(String(fault.message), /context window \(4096 tokens\) is too small.*at least 8192/);
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("on a 32,768-token window a normal tool turn makes no background summary call: exactly the two scripted model calls (card CMP)", async () => {
+  const { offline, hooks } = scripted();
+  let calls = 0;
+  offline.faux.setResponses([
+    () => { calls += 1; return fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "c1" }), { stopReason: "toolUse" }); },
+    () => { calls += 1; return fauxAssistantMessage("all done"); },
+    () => { calls += 1; return fauxAssistantMessage("an unscripted extra call (a summary)"); },
+  ]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: { ...offlineStart, model: { ...offlineStart.model, contextWindow: 32768 } } });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "do the thing " + "with some detail ".repeat(300) });
+  const bridge = await h.next("bridge");
+  h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa" } } } });
+  const res = await h.next("result");
+  assert.equal(res.status, "completed", JSON.stringify(res));
+  assert.equal(calls, 2, "no summary call was made between the scripted calls");
+  h.send({ t: "close" });
+  await h.done;
+});

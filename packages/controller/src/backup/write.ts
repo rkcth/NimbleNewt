@@ -6,6 +6,7 @@ import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, ty
 import type { FileBlobStore } from "../artifacts/index.js";
 import { copyPiState, type PiStateSource } from "./pi-state.js";
 import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupSeal, type Keyring } from "./crypto.js";
+import { SIGNATURE_FILE, type BackupSigner } from "./signing.js";
 import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
 
 export interface BackupOptions {
@@ -23,6 +24,8 @@ export interface BackupOptions {
   readonly encryption?: Keyring;
   /** The agents' own conversation stores on this machine (card K01h): their files go into the backup too. */
   readonly piState?: PiStateSource;
+  /** Signs the finished manifest (card K01b3): the signature file is written beside it before the folder gets its final name. A signer that fails fails the backup: none is written unsigned on an installation that signs. */
+  readonly signer?: BackupSigner;
 }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -87,6 +90,11 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
     const manifest: BackupManifest = cipher === undefined ? unsigned : { ...unsigned, mac: cipher.manifestMac(canonicalJson(unsigned as never)) };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);
     try { await manifestHandle.write(`${JSON.stringify(manifest, null, 2)}\n`); await manifestHandle.sync(); } finally { await manifestHandle.close(); }
+    if (options.signer !== undefined) {
+      const signature = await options.signer.sign(manifest);
+      const signatureHandle = await open(join(staging, SIGNATURE_FILE), "wx", 0o600);
+      try { await signatureHandle.write(`${JSON.stringify(signature)}\n`); await signatureHandle.sync(); } finally { await signatureHandle.close(); }
+    }
     await rename(staging, final);
     const dir = await open(options.root, "r").catch(() => undefined);
     if (dir !== undefined) { await dir.sync().catch(() => undefined); await dir.close(); }
