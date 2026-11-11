@@ -372,16 +372,104 @@ test("the views read status, blockers, cost and recovery; an unknown view is ref
   const w = await world();
   try {
     const s = await w.signIn();
-    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "recovery"]);
+    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "recovery"]);
     for (const name of s.reply.body.views as string[]) {
       const r = await w.call("GET", `/web/views/${name}`, { cookie: s.cookie });
       assert.equal(r.status, 200, `${name}: ${r.text}`);
       assert.ok(Object.keys(r.body.parts).length >= 1, name);
-      for (const part of Object.values(r.body.parts) as { error?: unknown }[]) assert.equal(part.error, undefined, `${name}: ${JSON.stringify(part)}`);
+      for (const [key, part] of Object.entries(r.body.parts) as [string, { error?: { code?: string } }][]) assert.ok(part.error === undefined || (name === "models" && key === "difficulty" && part.error.code === "not_found"), `${name}: ${JSON.stringify(part)}`);
     }
     assert.equal((await w.call("GET", "/web/views/shutdown", { cookie: s.cookie })).status, 404);
     assert.equal((await w.call("GET", "/web/views/constructor", { cookie: s.cookie })).status, 404);
     assert.equal((await w.call("GET", "/web/views/status/extra", { cookie: s.cookie })).status, 404);
+  } finally { await w.c.close(); }
+});
+
+test("the approvals and models views read the owner's records, and every part is either a record or the controller's plain error (card U08b)", async () => {
+  const w = await world();
+  try {
+    const s = await w.signIn();
+    const approvals = await w.call("GET", "/web/views/approvals", { cookie: s.cookie });
+    assert.equal(approvals.status, 200, approvals.text);
+    assert.deepEqual(Object.keys(approvals.body.parts), ["load", "proposals", "suggestion"]);
+    assert.equal(approvals.body.parts.load.item.days, 7);
+    assert.deepEqual(approvals.body.parts.proposals.items, []);
+    const models = await w.call("GET", "/web/views/models", { cookie: s.cookie });
+    assert.equal(models.status, 200, models.text);
+    assert.deepEqual(Object.keys(models.body.parts), ["routes", "controls", "state", "difficulty", "thinking"]);
+    assert.equal(models.body.parts.thinking.item.enabled, true, "collecting the thinking is on by default");
+    // No secret is part of any record the page reads.
+    assert.doesNotMatch(models.text + approvals.text, /sk-|secret|password|api[_-]?key/i);
+    assert.equal((await w.call("GET", "/web/views/models", {})).status, 401);
+  } finally { await w.c.close(); }
+});
+
+test("the Accept and Dismiss buttons run as the chat's own turn for their words: signed in, CSRF, one key, a fixed meaning, nothing read by the assistant (card U08b)", async () => {
+  let read = 0;
+  const interpreter = new ScriptedInterpreter(() => { read += 1; return []; });
+  const w = await world({}, interpreter);
+  try {
+    const s = await w.signIn();
+    const go = (id: string, action: string, o: { body?: unknown; key?: string | null; csrf?: boolean; cookie?: boolean; method?: string } = {}) =>
+      w.call(o.method ?? "POST", `/web/approvals/${id}/${action}`, { ...(o.cookie === false ? {} : { cookie: s.cookie }), ...(o.csrf === false ? {} : { csrf: s.csrf }), body: o.body ?? {}, headers: o.key === null ? {} : { "idempotency-key": o.key ?? "k-1" } });
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { cookie: false })).status, 401);
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { csrf: false })).status, 403, "a change carries the session's CSRF header");
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { key: null })).status, 400, "a decision needs its key");
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { key: "bad key!" })).status, 400);
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { method: "GET" })).status, 405);
+    assert.equal((await go("spr-aaaa%2Fbbb", "accept")).status, 400, "an ID is letters, digits, dashes and underscores");
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { body: { days: 3 } })).status, 400, "only a length a proposal offers");
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { body: { days: "7" } })).status, 400);
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { body: { switchProfile: "permanent" } })).status, 400, "the page cannot say anything else in the owner's name");
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "dismiss", { body: { reason: "free text" } })).status, 400);
+    assert.equal((await go("spr-aaaaaaaaaaaaaaaaaaaa", "forget")).status, 404);
+    // A proposal that is not there: the chat's own answer (a refusal in plain words), recorded under the key, and the same key answers the same turn.
+    const first = await go("spr-aaaaaaaaaaaaaaaaaaaa", "dismiss", { key: "k-2" });
+    assert.equal(first.status, 201, first.text);
+    assert.equal(first.body.text, "Dismiss standing-rule proposal spr-aaaaaaaaaaaaaaaaaaaa. Reason: turned down from the web page");
+    assert.equal(first.body.outcomes[0].status, "refused", first.text);
+    assert.match(String(first.body.outcomes[0].message), /no such standing-rule proposal/);
+    const second = await go("spr-aaaaaaaaaaaaaaaaaaaa", "dismiss", { key: "k-2" });
+    assert.equal(second.status, 200); assert.equal(second.body.replayed, true); assert.equal(second.body.turnId, first.body.turnId);
+    const acc = await go("spr-aaaaaaaaaaaaaaaaaaaa", "accept", { key: "k-3", body: { days: 30 } });
+    assert.equal(acc.status, 201, acc.text);
+    assert.match(acc.body.text, /^Accept standing-rule proposal spr-aaaaaaaaaaaaaaaaaaaa for 30 days$/);
+    assert.equal(read, 0, "the assistant was never asked: the meaning is fixed by the page's code");
+    // Every owner control of the page is also a chat command (nothing is reachable only by a button).
+    for (const op of ["approval.proposal.accept", "approval.proposal.dismiss"]) assert.ok(CHAT_OPS[op] !== undefined, op);
+  } finally { await w.c.close(); }
+});
+
+test("the switch for collecting the model's thinking is the chat's own command with a fixed meaning: signed in, CSRF, one key, only enabled true or false (card U09b on the U08b page)", async () => {
+  let read = 0;
+  const interpreter = new ScriptedInterpreter(() => { read += 1; return []; });
+  const w = await world({}, interpreter);
+  try {
+    const s = await w.signIn();
+    const go = (o: { body?: unknown; key?: string | null; csrf?: boolean; method?: string; path?: string } = {}) =>
+      w.call(o.method ?? "POST", o.path ?? "/web/thinking/collection", { cookie: s.cookie, ...(o.csrf === false ? {} : { csrf: s.csrf }), body: o.body ?? { enabled: false }, headers: o.key === null ? {} : { "idempotency-key": o.key ?? "t-1" } });
+    assert.equal((await go({ csrf: false })).status, 403);
+    assert.equal((await go({ key: null })).status, 400);
+    assert.equal((await go({ method: "GET" })).status, 405);
+    assert.equal((await go({ body: { enabled: "false" } })).status, 400);
+    assert.equal((await go({ body: {} })).status, 400);
+    assert.equal((await go({ body: { enabled: false, expectedRevision: 1 } })).status, 400, "the page says nothing but on or off");
+    assert.equal((await go({ path: "/web/thinking/collection/x" })).status, 404);
+    assert.equal((await go({ path: "/web/thinking" })).status, 404);
+    const off = await go({ key: "t-2" });
+    assert.equal(off.status, 201, off.text);
+    assert.equal(off.body.text, "Turn collecting the model's thinking off");
+    assert.equal(off.body.outcomes[0].status, "applied", off.text);
+    const seen = await w.call("GET", "/web/views/models", { cookie: s.cookie });
+    assert.equal(seen.body.parts.thinking.item.enabled, false);
+    // The same key again is the same turn: nothing runs twice, even after the setting was changed back.
+    const on = await go({ key: "t-3", body: { enabled: true } });
+    assert.equal(on.body.outcomes[0].status, "applied", on.text);
+    const again = await go({ key: "t-2" });
+    assert.equal(again.status, 200); assert.equal(again.body.replayed, true);
+    assert.equal((await w.call("GET", "/web/views/models", { cookie: s.cookie })).body.parts.thinking.item.enabled, true, "the replay did not switch it off again");
+    assert.equal(read, 0, "the assistant was never asked");
+    assert.ok(CHAT_OPS["thinking.collection.set"] !== undefined, "the switch is also a chat command");
   } finally { await w.c.close(); }
 });
 

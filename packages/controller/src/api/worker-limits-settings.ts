@@ -28,6 +28,8 @@ export interface LaunchRecord {
   readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[];
   readonly wallTimeMs: number;
   readonly reason?: string;
+  /** Card A08d: the environment revision the figures came from and whose each applied figure was (the agent's environment or the installation's), and what the environment asked for that the installation cut. Set by the controller, not the host. */
+  readonly environment?: { readonly revision?: number; readonly sources: { readonly [limit: string]: string }; readonly capped?: readonly { readonly limit: string; readonly asked: number; readonly applied: number }[] };
 }
 
 const text = (v: unknown, max: number): string => String(v ?? "").slice(0, max);
@@ -44,7 +46,13 @@ function cleanLaunch(raw: LaunchRecord, at: string): JsonObject {
   });
   const failed = (raw.failed ?? []).slice(0, MAX_ENTRIES).map((f) => ({ limit: text(f.limit, 30), enforced: f.enforced === "partial" ? "partial" : "none", detail: text(f.detail, 300) }));
   const stricter = (raw.stricter ?? []).slice(0, MAX_ENTRIES).map((x) => ({ limit: text(x.limit, 30), owner: Number.isSafeInteger(x.owner) ? x.owner : 0, applied: Number.isSafeInteger(x.applied) ? x.applied : 0, why: text(x.why, 300) }));
-  return { attemptId: raw.attemptId, ...(typeof raw.agentId === "string" && raw.agentId !== "" ? { agentId: raw.agentId.slice(0, 200) } : {}), ...(failed.length === 0 ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }), outcome: raw.outcome, requested: requested as unknown as JsonObject, bestEffort: raw.bestEffort === true, enforcement, wallTimeMs: Number.isSafeInteger(raw.wallTimeMs) ? raw.wallTimeMs : 0, ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }), at };
+  const env = raw.environment;
+  const environment = env === undefined || env === null || typeof env !== "object" ? undefined : {
+    ...(Number.isSafeInteger(env.revision) && env.revision! >= 0 ? { revision: env.revision } : {}),
+    sources: Object.fromEntries(Object.entries(env.sources ?? {}).slice(0, MAX_ENTRIES).map(([k, v]) => [text(k, 30), v === "environment" ? "environment" : "installation"])),
+    ...((env.capped ?? []).length === 0 ? {} : { capped: (env.capped ?? []).slice(0, MAX_ENTRIES).map((c) => ({ limit: text(c.limit, 30), asked: Number.isSafeInteger(c.asked) ? c.asked : 0, applied: Number.isSafeInteger(c.applied) ? c.applied : 0 })) }),
+  };
+  return { ...(environment === undefined ? {} : { environment: environment as unknown as JsonObject }), attemptId: raw.attemptId, ...(typeof raw.agentId === "string" && raw.agentId !== "" ? { agentId: raw.agentId.slice(0, 200) } : {}), ...(failed.length === 0 ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }), outcome: raw.outcome, requested: requested as unknown as JsonObject, bestEffort: raw.bestEffort === true, enforcement, wallTimeMs: Number.isSafeInteger(raw.wallTimeMs) ? raw.wallTimeMs : 0, ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }), at };
 }
 
 export interface WorkerLimitsSettingsBody {

@@ -3,11 +3,13 @@
 // stops a start that hangs, falls back to the last known good release and restarts, slowing down a crash loop. It reads the pointer, the release directory and launcher-state.json only; it never opens the
 // database, so it works when the database cannot. It is not part of any release (a release cannot name `launcher` as an artifact). Needs `npx tsc --build` first.
 //
+//   (the controller entry it runs is scripts/nimblenewt-controller.mjs, see docs/nimblenewt/maintenance-and-updates.md)
 //   node scripts/nimblenewt-launcher.mjs --root RELEASE_ROOT [--entry controller.js] [--switcher pointer|symlink] [-- extra controller arguments]
 //
 // Exit codes: 0 stopped (SIGTERM, SIGINT or SIGHUP to the launcher, or the controller exited 0 after its start was confirmed: a stop on purpose), 1 usage or unexpected error, 2 blocked (nothing safe to run;
 // see the log and release.status, the owner decides), 3 no release is active, 4 gave up after a crash loop (the owner's notice is written), 5 another launcher, or a controller a killed launcher left running, holds
-// this release root. A service manager should not restart the launcher on 0 or 2 (nothing changes until the owner acts) and may restart it on 1, 4 and 5 after its own delay.
+// this release root. A service manager should not restart the launcher on 0, 2, 3 or 4 (nothing changes until the owner acts; a crash loop was already slowed down and the owner told) and may restart it on 1
+// and 5 after its own delay (the service units of release/service-units.ts follow this; launchd and Task Scheduler cannot tell codes apart and retry any failure within their bounds).
 // The controller's side: exit 0 = stop on purpose (only after its start was confirmed; before, it is a failed start), exit 75 = restart me, anything else = a crash.
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -99,8 +101,9 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
   const supervisor = new Supervisor({
     launcher,
     root,
-    // The child's environment is this process's, unchanged: secrets reach it the way the service manager gave them. This launcher logs none of it.
-    child: (release) => ({ command: node, args: [join(release.dir, entry), ...passed], cwd: release.dir, env: io.env }),
+    // The child's environment is this process's: secrets reach it the way the service manager gave them. This launcher logs none of it. Two values are added so the controller's release wiring agrees with this launcher
+    // (scripts/nimblenewt-controller.mjs reads them): the release root and the pointer kind (the controller's own default differs from this launcher's).
+    child: (release) => ({ command: node, args: [join(release.dir, entry), ...passed], cwd: release.dir, env: { ...io.env, NIMBLENEWT_RELEASE_ROOT: root, NIMBLENEWT_RELEASE_SWITCHER: kind } }),
     pollMs: opts.poll,
     graceMs: opts.grace,
     backoff: { initialMs: opts.initial, maxMs: opts.max, stableMs: opts.stable, giveUpAfter: opts.giveUp },
