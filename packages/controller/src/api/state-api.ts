@@ -34,7 +34,7 @@ import type { RecoveryLadderService } from "../health/recovery-ladder.js";
 import type { StallService } from "../health/stall.js";
 import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
-import type { SetupReadinessService } from "../setup/index.js";
+import type { SetupProviderService, SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { ContextRouteSettingsService } from "../context/route-settings.js";
 import type { StartSizeService } from "../context/start-size.js";
@@ -147,6 +147,7 @@ export interface StateApiDeps {
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change" | "setBestEffort" | "enforced">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;
+  readonly setupProviders?: Pick<SetupProviderService, "add">;
   /** How long an undecided stall concern waits at each level of the supervisor ladder (owner decision 2026-10-30, supervisor ladder). */
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   /** Which recovery actions are allowed at which level (card V02c), and the recovery step itself. */
@@ -321,6 +322,7 @@ export class StateApi {
         ...(this.#deps.retentionSettings === undefined ? {} : { retentionSettings: this.#deps.retentionSettings }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.setup === undefined ? {} : { setup: this.#deps.setup }),
+        ...(this.#deps.setupProviders === undefined ? {} : { setupProviders: this.#deps.setupProviders }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),
         ...(this.#deps.recoveryLadder === undefined ? {} : { recoveryLadder: this.#deps.recoveryLadder }),
         ...(this.#deps.recoveryStep === undefined ? {} : { recoveryStep: this.#deps.recoveryStep }),

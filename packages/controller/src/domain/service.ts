@@ -5,11 +5,11 @@ import { derivedId } from "./ids.js";
 import { CommandRunner, defined, mapStorageError, view, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
 import {
   LIMITS, TRANSITIONS, onlyKnown, projectId as checkProjectId, repositories as checkRepositories, repositoryId as checkRepositoryId,
-  revision as checkRevision, taskId as checkTaskId, taskState, text,
-  type ProjectBody, type ProjectState, type Repository, type TaskBody, type TaskState, type View,
+  revision as checkRevision, taskId as checkTaskId, taskState, text, versionControl as checkVersionControl,
+  type ProjectBody, type VersionControl, type ProjectState, type Repository, type TaskBody, type TaskState, type View,
 } from "./model.js";
 
-export interface CreateProject extends CommandMeta { readonly name: string; readonly goal?: string; readonly repositories?: readonly Repository[] }
+export interface CreateProject extends CommandMeta { readonly name: string; readonly goal?: string; readonly repositories?: readonly Repository[]; /** Card U14. */ readonly versionControl?: VersionControl }
 export interface UpdateProject extends CommandMeta {
   readonly projectId: string;
   readonly expectedRevision: number;
@@ -18,6 +18,8 @@ export interface UpdateProject extends CommandMeta {
   readonly state?: ProjectState;
   /** New repositories only: removing one is not supported yet, because tasks may refer to it. */
   readonly addRepositories?: readonly Repository[];
+  /** Card U14: where the project is hosted and its CI; replaces the earlier answer. */
+  readonly versionControl?: VersionControl;
 }
 export interface CreateTask extends CommandMeta { readonly projectId: string; readonly title: string; readonly description?: string; readonly repositoryId?: string }
 export interface UpdateTask extends CommandMeta {
@@ -88,15 +90,16 @@ export class ProjectService {
 
   createProject(command: CreateProject): Promise<CommandResult> {
     return this.#runner.command("project.create", command, async (meta) => {
-      onlyKnown(command, ["commandId", "actor", "name", "goal", "repositories"]);
+      onlyKnown(command, ["commandId", "actor", "name", "goal", "repositories", "versionControl"]);
       const name = text(command.name, "name", { min: 1, max: LIMITS.name });
       const goal = command.goal === undefined ? "" : text(command.goal, "goal", { min: 0, max: LIMITS.goal, multiline: true });
       const repositories = command.repositories === undefined ? [] : checkRepositories(command.repositories, "repositories");
+      const vcs = command.versionControl === undefined ? undefined : checkVersionControl(command.versionControl, "versionControl");
       return {
-        payload: { name, goal, repositories: repositories as unknown as JsonObject[] },
+        payload: { name, goal, repositories: repositories as unknown as JsonObject[], ...(vcs === undefined ? {} : { versionControl: vcs as unknown as JsonObject }) },
         build: async () => {
           const id = derivedId("proj", meta.commandId);
-          const body: ProjectBody = { name, goal, state: "active", repositories, createdBy: meta.actor };
+          const body: ProjectBody = { name, goal, state: "active", repositories, createdBy: meta.actor, ...(vcs === undefined ? {} : { versionControl: vcs }) };
           return { ref: { kind: "project", id }, creates: true, changes: [{ type: "create", ref: { kind: "project", id }, body: body as unknown as JsonObject }], detail: { name } };
         },
       };
@@ -105,16 +108,17 @@ export class ProjectService {
 
   updateProject(command: UpdateProject): Promise<CommandResult> {
     return this.#runner.command("project.update", command, async () => {
-      onlyKnown(command, ["commandId", "actor", "projectId", "expectedRevision", "name", "goal", "state", "addRepositories"]);
+      onlyKnown(command, ["commandId", "actor", "projectId", "expectedRevision", "name", "goal", "state", "addRepositories", "versionControl"]);
       const id = checkProjectId(command.projectId);
       const expected = checkRevision(command.expectedRevision);
       const name = command.name === undefined ? undefined : text(command.name, "name", { min: 1, max: LIMITS.name });
       const goal = command.goal === undefined ? undefined : text(command.goal, "goal", { min: 0, max: LIMITS.goal, multiline: true });
       const state = command.state === undefined ? undefined : projectState(command.state);
       const added = command.addRepositories === undefined ? undefined : checkRepositories(command.addRepositories, "addRepositories");
-      if (name === undefined && goal === undefined && state === undefined && added === undefined) throw new DomainError("invalid_command", "an update must change at least one of name, goal, state or addRepositories", { field: "name" });
+      const vcs = command.versionControl === undefined ? undefined : checkVersionControl(command.versionControl, "versionControl");
+      if (name === undefined && goal === undefined && state === undefined && added === undefined && vcs === undefined) throw new DomainError("invalid_command", "an update must change at least one of name, goal, state, addRepositories or versionControl", { field: "name" });
       return {
-        payload: defined({ projectId: id, expectedRevision: expected, name, goal, state, addRepositories: added as unknown as JsonObject[] | undefined }),
+        payload: defined({ projectId: id, expectedRevision: expected, name, goal, state, addRepositories: added as unknown as JsonObject[] | undefined, versionControl: vcs as unknown as JsonObject | undefined }),
         build: async () => {
           const current = await this.#runner.existing("project", id, expected);
           const body = current.body as unknown as ProjectBody;
@@ -125,8 +129,8 @@ export class ProjectService {
             repositories = [...repositories, ...added];
             if (repositories.length > LIMITS.repositories) throw new DomainError("invalid_command", `a project has at most ${LIMITS.repositories} repositories`, { field: "addRepositories" });
           }
-          const next: ProjectBody = { ...body, ...defined({ name, goal, state }), repositories };
-          return { ref: { kind: "project", id }, creates: false, changes: [{ type: "update", ref: { kind: "project", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: defined({ name, state, repositoriesAdded: added?.length }) };
+          const next: ProjectBody = { ...body, ...defined({ name, goal, state, versionControl: vcs }), repositories };
+          return { ref: { kind: "project", id }, creates: false, changes: [{ type: "update", ref: { kind: "project", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: defined({ name, state, repositoriesAdded: added?.length, versionControl: vcs?.host }) };
         },
       };
     });

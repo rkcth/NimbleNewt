@@ -6,7 +6,7 @@ import type { ControllerStorage } from "../storage/types.js";
 export type ReadinessState = "done" | "default" | "missing" | "optional";
 
 export interface ReadinessItem {
-  readonly id: "owner" | "profile" | "project" | "model-route" | "host" | "notifications" | "agent" | "task";
+  readonly id: "owner" | "profile" | "project" | "version-control" | "model-route" | "host" | "notifications" | "agent" | "task" | "budgets";
   readonly label: string;
   readonly state: ReadinessState;
   /** Whether a first agent cannot work without it. */
@@ -15,7 +15,26 @@ export interface ReadinessItem {
   readonly detail: string;
   /** The operation or step that sets it up. */
   readonly how: string;
+  /**
+   * What the chat tells the owner about this step (card U14): the question in plain words, with the recommended answer and what declining it means. The first-run conversation
+   * works through the items in order and puts these to the owner one at a time; nothing is applied until the owner answers.
+   */
+  readonly guide: { readonly question: string; readonly recommended: string; readonly ifDeclined: string };
 }
+
+/** The plain-words guide of each step, kept apart from the records so a test can check that every item has one and that none of them names a secret. */
+export const SETUP_GUIDE: Readonly<Record<ReadinessItem["id"], ReadinessItem["guide"]>> = {
+  owner: { question: "You are the owner of this installation; your credential is kept in this computer's secret store, not in a file you have to guard.", recommended: "Nothing to decide; the launcher makes you the owner the first time it starts.", ifDeclined: "Nothing can be done without an owner." },
+  profile: { question: "How much should the team ask you before it acts? Strict asks at every consequential step. Derived lets what you say authorize what it reasonably needs, and still asks about anything wider. Autonomous acts within the rights you have given.", recommended: "Start with strict; after a few approvals the system offers derived.", ifDeclined: "It stays strict, which is safe: nothing consequential happens without you." },
+  project: { question: "What is your first project: its name, what it is for, and where its git repository is (a folder on this computer or an address)? A project may also start with no repository at all.", recommended: "Name it and point it at an existing repository.", ifDeclined: "Agents have nothing to work on until a project exists." },
+  "version-control": { question: "Where is that repository hosted, and which CI checks it: GitHub, GitLab, a server of your own (which one?), or nowhere (a local repository with no remote)? Nothing here assumes GitHub.", recommended: "Say what you use; if it has no remote say none.", ifDeclined: "The answer stays open; work is still done in the local repository and the project's required checks are the ones you name for landing." },
+  "model-route": { question: "Which model should the team use? Give a model server (a local one or a free route is a good start) and its address, and name the credential's name in the secret store if it needs a key. The team needs at least two routes on two different servers, so that losing one does not stop it.", recommended: "A local model plus one free or cheap cloud route as the backup.", ifDeclined: "A paid provider is left out; with no route at all the team cannot run, but the owner's records and views still work." },
+  host: { question: "Which machine runs the agents? This computer is the usual first choice.", recommended: "This computer.", ifDeclined: "Tasks can be created and assigned, but nothing runs until a host has announced itself." },
+  notifications: { question: "How do you want to hear from the team: the inbox only (nothing leaves this installation), or a named channel with digest times and quiet hours?", recommended: "The inbox to begin with.", ifDeclined: "The inbox stays the only place; nothing leaves the installation." },
+  agent: { question: "What should the first agent be called, and what role does it have (author, reviewer, integrator, qa, docs or director)?", recommended: "An author named for the work, with the rights to work in the first project only.", ifDeclined: "No work can be assigned." },
+  task: { question: "What is the first thing you want done?", recommended: "A small task you can check quickly.", ifDeclined: "The team waits for the first task; you can add one any time." },
+  budgets: { question: "Do you want a ceiling on what a task may spend or how long it may run? None is imposed unless you ask.", recommended: "Leave it off for now.", ifDeclined: "Nothing is held against any task." },
+};
 
 export interface Readiness {
   /** True when every required item is `done`. */
@@ -51,7 +70,7 @@ export class SetupReadinessService {
   async check(owner: Principal): Promise<Readiness> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not read the setup readiness`);
     const s = this.#storage;
-    const items: ReadinessItem[] = [];
+    const items: Omit<ReadinessItem, "guide">[] = [];
     const plural = (n: number, one: string, more: string, capped: boolean): string => `${capped ? "at least " : ""}${n} ${n === 1 ? one : more}`;
 
     const installation = await s.getAggregate({ kind: "installation", id: "installation" });
@@ -68,7 +87,7 @@ export class SetupReadinessService {
     const table = (await s.getAggregate({ kind: "routing-table", id: "routing" }))?.body as { providers?: Record<string, { enabled?: boolean }>; routes?: Record<string, unknown> } | undefined;
     const enabled = Object.entries(table?.providers ?? {}).filter(([, p]) => p.enabled === true).map(([name]) => name);
     const routes = Object.keys(table?.routes ?? {}).filter((r) => enabled.includes(r.split("/")[0]!));
-    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > 0 ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${enabled.length} enabled provider(s), ${routes.length} usable route(s)` : "the routing table has no route on an enabled provider", how: "ConfigurationService.bindRouting from a configuration document (not yet an API operation or chat step)" });
+    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > 0 ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${enabled.length} enabled provider(s), ${routes.length} usable route(s)` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher" });
 
     let hosts = 0; let announced = 0;
     const completeH = await this.#each("principal", (_id, body) => { if (body["kind"] === "host" && body["state"] === "active") hosts++; });
@@ -86,7 +105,13 @@ export class SetupReadinessService {
     const completeT = await this.#each("task", () => { tasks++; });
     items.push({ id: "task", label: "A first task", required: false, state: tasks > 0 ? "done" : "optional", detail: tasks === 0 ? "no task yet" : plural(tasks, "task", "tasks", !completeT), how: "task.create, task.transition, task.assign" });
 
+    // Where the repository is hosted and which CI checks it, per project (card U14): optional, so a project without an answer shows as open without stopping the first agent.
+    let asked = 0; const unasked: string[] = [];
+    await this.#each("project", (_id, body) => { if (body["state"] === "archived") return; if (body["versionControl"] === undefined) unasked.push(String(body["name"] ?? "")); else asked++; });
+    items.splice(items.findIndex((i) => i.id === "project") + 1, 0, { id: "version-control", label: "Version control host and CI of each project", required: false, state: projects === 0 ? "optional" : unasked.length === 0 ? "done" : "missing", detail: projects === 0 ? "no project yet" : unasked.length === 0 ? `${asked} project(s) with a host and CI recorded` : `${asked} of ${asked + unasked.length} project(s) have a host and CI recorded; open: ${unasked.slice(0, 5).map((n) => `"${n.slice(0, 60)}"`).join(", ")}${unasked.length > 5 ? ` and ${unasked.length - 5} more` : ""}`, how: "project.update with versionControl { host: github, gitlab, self-hosted or none; ci }" });
+    items.push({ id: "budgets", label: "Budgets and time limits", required: false, state: "default", detail: "none are imposed; a task with no budget has nothing held against it", how: "model-budget.set and the budget operations, only if you want a ceiling" });
+
     const next = items.find((i) => i.required && i.state !== "done")?.id;
-    return { ready: next === undefined, items, ...(next === undefined ? {} : { next }) };
+    return { ready: next === undefined, items: items.map((i) => ({ ...i, guide: SETUP_GUIDE[i.id] })), ...(next === undefined ? {} : { next }) };
   }
 }

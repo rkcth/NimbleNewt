@@ -90,6 +90,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "deliverable.review.start": { verb: "Start reviewing a deliverable", mode: "apply" },
   "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
   "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
+  // Guided setup (card U14): a provider decides where the team's data may go and what it may spend, so it is shown first in every profile. Only the NAME of a credential is ever in the chat; the key goes into the secret store on the machine.
+  "routing.provider.add": { verb: "Add or replace model providers (each: name, location local or cloud, endpoint address, models, contextTokens, paid, credentialName = the NAME of a secret, never a key); the team needs at least two routes on two different servers", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "workers.limits.besteffort": { verb: "Allow or forbid local agents to start when a limit cannot be fully enforced on this system (enable or disable best effort)", mode: "propose" },
   // Whether each model call is recorded against its generation and a late reply held back (card L05b): neither is a limit; both are on unless the owner turns them off.
@@ -535,6 +537,9 @@ export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation
 
 /** A defined event source (card H13f): its kind is a fixed choice, its name one the assistant may choose (or the one it names), and a single time is worked out from the owner's words (like a hand-off's return time); the definition is always shown first. What it looks at (`path`) or asks (`url`) must still be the owner's own words. */
 export const EVENT_SOURCE_EXEMPT: ReadonlySet<string> = new Set(["type", "sourceId", "at"]);
+
+/** Fixed choices of the guided setup that the owner need not spell out in these words: where a provider runs (`local` or `cloud`) and which forge hosts a repository (`github`, `gitlab`, `self-hosted`, `none`). Every other text (names, addresses, models) must be the owner's own. */
+export const SETUP_EXEMPT: ReadonlySet<string> = new Set(["location", "host"]);
 
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set(), alsoExempt: ReadonlySet<string> = new Set()): string | undefined {
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
