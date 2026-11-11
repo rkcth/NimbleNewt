@@ -446,14 +446,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.running`
 
-The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach. Each is named by attempt, call, task and agent, never by its input; at most 50 are listed, and `total` counts all of them.
+The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach: in this controller process and in any other controller process on the same store (`elsewhere: true`). Each is named by attempt, call, task and agent, never by its input; at most 50 are listed, and `total` counts all of them. `elsewhereUnknown: true` says calls in other processes could not be checked.
 
 Arguments:
 
 - `name`: the canonical tool name
 - `version`: major.minor.patch
 
-Result: `{ items: [{ attemptId, callId, taskId, agentId }], total }`.
+Result: `{ items: [{ attemptId, callId, taskId, agentId, elsewhere? }], total, elsewhereUnknown? }`.
 
 #### `catalog.revocations`
 

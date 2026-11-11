@@ -63,7 +63,7 @@ import { WebChatDoor, type WebChatOptions } from "../web/index.js";
 import { CatalogPolicyService, CatalogService } from "../catalog/index.js";
 import { AdmissionService } from "../admission/index.js";
 import { HostService } from "../hosts/index.js";
-import { ToolExecutionService, type BoundGateway, type BridgeRequest, type BridgeResponse, type ToolExecutionDeps } from "../toolbridge/index.js";
+import { RunningCallStore, ToolExecutionService, type BoundGateway, type BridgeRequest, type BridgeResponse, type ToolExecutionDeps } from "../toolbridge/index.js";
 import { CommandService, catalogSource } from "../commands/index.js";
 import { BUILTIN_COMMANDS } from "./operations.js";
 
@@ -75,10 +75,10 @@ import { ContextBranchService } from "../branches/index.js";
 import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
 import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
-import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
+import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, ReviewNotRun, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
 import { DependencyService, checkoutDependencyObserver, locallyPlaced, resumeProbeEnabled } from "../dependencies/index.js";
 import { ActivityService, ReplayLimitsService, ReplayService } from "../activity/index.js";
-import { BoundedReviewerModel, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
+import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
@@ -127,6 +127,8 @@ export interface StartOptions {
    * The host's raw model client for the reviewer roles (card W10 wiring): the HTTP client over the owner's recorded provider addresses in the launcher. The controller bounds it (`BoundedReviewerModel`: redacted, cut, one reply
    * size), puts it behind its routed and metered client and uses it for the second agent that questions a done, on the route the owner set (`report.reviewerRoute`, a setting reachable in chat; unset: no report is questioned and each
    * done's report says so). Ignored when `reportInterrogation` is given (that explicit composition stays as it was).
+   * The same bounded client is the resume reviewer (card L04d wiring) on its own owner setting (`resume.reviewerRoute`), unless `resumeReview` or `resume.review` is given: unset, unusable, at the daily cap or with a model
+   * that gives no verdict, the resume check records the review as not run and every change waits for the owner (never a `review_failed` hold, never a pass).
    */
   readonly reviewerModel?: ResumeReviewModel & Pick<ModelCall, "completeDetailed">;
   /**
@@ -716,7 +718,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The standing answer for running calls when a revoke names none (card T02c); an operator-given `tools.revocationPolicy` wins over it.
     const operatorPolicy = options.tools?.revocationPolicy;
     const catalogPolicy = CatalogPolicyService.withEpoch(storage, epoch, "finish", {}, operatorPolicy);
-    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), revocations: (owner, query) => catalogService.revocations(owner, query), running: async (_owner, name, version) => ({ calls: toolsLive?.runningCalls(name, version) ?? [], total: toolsLive?.runningTotal(name, version) ?? 0 }) };
+    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), revocations: (owner, query) => catalogService.revocations(owner, query), running: async (_owner, name, version) => (toolsLive === undefined ? { calls: [], total: 0 } : toolsLive.runningEverywhere(name, version)) };
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(catalogService)));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
@@ -889,23 +891,38 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(typeof options.resumeProbe === "object" ? options.resumeProbe : {}),
       onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
     });
+    // One bounded client over the host's raw reviewer client (card W10 wiring), shared by the resume reviewer and the second agent of a done, so the two share its slots.
+    const boundedReviewer = options.reviewerModel === undefined ? undefined : new BoundedReviewerModel(options.reviewerModel);
+    const resumeTask = async (taskId: string): Promise<{ title?: string; nextStep?: string } | undefined> => {
+      const task = await projects.getTask(taskId);
+      const latest = await continuations.latest(RESUME_READER, taskId).catch(() => undefined);
+      return task === undefined && latest === undefined ? undefined : { ...(task === undefined ? {} : { title: task.title }), ...(latest === undefined ? {} : { nextStep: latest.continuation.nextStep }) };
+    };
     // The reviewer's calls go through the controller's routed client (failures classified, blocked routes skipped) and are counted against the daily cap on the controller's own model calls (card L04d).
     const reviewModel = options.resumeReview === undefined ? undefined : new GuardedModelCall(options.resumeReview.model, { spend: ChatSpendService.withEpoch(storage, epoch), onSpendFailure: (error) => options.onInternalError?.(error) });
     const reviewer = options.resumeReview === undefined || reviewModel === undefined || options.resume?.review !== undefined ? undefined : new ResumeReviewer(reviewModel, {
       routes: options.resumeReview.routes ?? chatRoutes(routing, { role: options.resumeReview.role ?? "safety-supervisor" }),
-      ...(options.resumeReview.tellTask === false ? {} : {
-        task: async (taskId: string) => {
-          const task = await projects.getTask(taskId);
-          const latest = await continuations.latest(RESUME_READER, taskId).catch(() => undefined);
-          return task === undefined && latest === undefined ? undefined : { ...(task === undefined ? {} : { title: task.title }), ...(latest === undefined ? {} : { nextStep: latest.continuation.nextStep }) };
-        },
-      }),
+      ...(options.resumeReview.tellTask === false ? {} : { task: resumeTask }),
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the resume reviewer on ${route}: ${detail}`)); },
     });
+    // The shipped resume reviewer (card L04d wiring): with no explicit `resumeReview` or `resume.review`, the host's raw client (`reviewerModel`, what the launcher passes) is bounded, put behind the same routed,
+    // metered client and asked only on the route the owner set (`resume.reviewerRoute`, read at every review). It fails closed: when it cannot run (no route, an unusable route, the cap, a model that does not
+    // answer on any route) the check records the review as NOT RUN with why and every change waits for the owner, as with no reviewer at all; it never blocks a resume the old rule would let the owner decide.
+    const shippedResumeRoutes = reviewerRoute({ setting: () => configuration.installationValue(RESUME_REVIEWER_ROUTE_SETTING), routing, purpose: "resume" });
+    const shippedReviewer = reviewer !== undefined || options.resumeReview !== undefined || options.resume?.review !== undefined || boundedReviewer === undefined ? undefined
+      : new ResumeReviewer(new GuardedModelCall(boundedReviewer, { spend: ChatSpendService.withEpoch(storage, epoch), onSpendFailure: (error) => options.onInternalError?.(error) }), {
+        routes: shippedResumeRoutes, task: resumeTask,
+        onFailure: (route, detail) => { options.onInternalError?.(new Error(`the resume reviewer on ${route}: ${detail}`)); },
+      });
+    const shippedReview = shippedReviewer === undefined ? undefined : async (request: Parameters<ResumePorts["review"]>[0]): Promise<Awaited<ReturnType<ResumePorts["review"]>>> => {
+      // The route is read first so an unset or unusable one is said as such, before anything is put together for a model.
+      try { await shippedResumeRoutes(); } catch (error) { throw new ReviewNotRun(error instanceof Error ? error.message : String(error)); }
+      try { return await shippedReviewer.review(request); } catch (error) { throw new ReviewNotRun(`the resume reviewer gave no verdict: ${error instanceof Error ? error.message : String(error)}`); }
+    };
     // Card W10: the second agent's calls go through the same routed, metered client as the reviewer's, under the same daily cap.
     // The shipped composition (card W10 wiring): the host's raw client (`reviewerModel`) is bounded, put behind the same routed, metered client, and asked only on the route the owner set (`report.reviewerRoute`, read at every questioning).
     // With no route set the questioning is recorded as not run, never as passed. An explicit `reportInterrogation` of the host is used as it is, as before.
-    const reviewerClient = options.reportInterrogation !== undefined || options.reviewerModel === undefined ? undefined : new BoundedReviewerModel(options.reviewerModel);
+    const reviewerClient = options.reportInterrogation !== undefined ? undefined : boundedReviewer;
     const interrogator = options.reportInterrogation === undefined && reviewerClient === undefined ? undefined : new ReportInterrogator(new GuardedModelCall(options.reportInterrogation?.model ?? reviewerClient!, { spend: ChatSpendService.withEpoch(storage, epoch), onSpendFailure: (error) => options.onInternalError?.(error) }), {
       routes: options.reportInterrogation !== undefined ? (options.reportInterrogation.routes ?? chatRoutes(routing, { role: options.reportInterrogation.role ?? "safety-supervisor" })) : reviewerRoute({ setting: () => configuration.installationValue(REVIEWER_ROUTE_SETTING), routing }),
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the report interrogator on ${route}: ${detail}`)); },
@@ -913,6 +930,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const resumePorts: Partial<ResumePorts> = {
       ...(resumeProbe === undefined ? {} : { observe: resumeProbe }),
       ...(reviewer === undefined ? {} : { review: (request) => reviewer.review(request) }),
+      ...(shippedReview === undefined ? {} : { review: shippedReview }),
       ...options.resume,
     };
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: contextDependencies, blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage, resumePorts),
@@ -1199,9 +1217,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // The task, artifact and message requests of the bridge go through the API and the message service every client uses (card C09h: without them a worker's output and messages never reached the task or its activity).
         state: api, recall: dispatch.recall, messages, activity: (step) => activity.record(dispatch!.principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(jobRuns === undefined ? {} : { jobs, jobRuns }), ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded, bind: v.bindCall, admit: v.admitCall, requireStream: v.requireStream, record: v.record }; } }), revocationPolicy: () => catalogPolicy.effective(),
         // Card T02d: a revocation taken by another process pauses as the owner who revoked (read from the store, active principals only).
+        // Card T02d close-out: each running call is also on the durable record, so another controller process on this store lists it and the owner's revoke question and choice reach it.
+        runRecords: RunningCallStore.withEpoch(storage, epoch),
         revocationOwner: async (id) => { const p = await principals.get(id); return p === undefined || p.kind !== "owner" || p.state !== "active" ? undefined : { id: p.id, kind: p.kind, name: p.name, grants: p.grants }; },
       });
     }
+    // Records of runs a stopped (or fenced) controller could not remove are cleared once they can no longer be running. Best effort (never throws; one bounded look), waited for so it never races the close.
+    if (tools !== undefined) await tools.sweepRunRecords().catch(() => 0);
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
     let webChat: WebChatDoor | undefined;

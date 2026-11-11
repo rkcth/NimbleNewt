@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArtifactService, FileBlobStore } from "../../artifacts/index.js";
 import { buildWorld, type DispatchWorld } from "../../dispatch/testing/world.js";
-import type { DispatcherService } from "../../dispatch/dispatcher.js";
+import type { DispatcherDeps, DispatcherService } from "../../dispatch/dispatcher.js";
 import type { RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../../dispatch/ports.js";
 import type { EffectBridge } from "../../domain/effects.js";
 import type { Capabilities } from "../../hosts/index.js";
@@ -124,7 +124,7 @@ export interface RemoteWorld extends DispatchWorld {
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { thinkingMessages?: number; policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner" } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { thinkingMessages?: number; policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner"; /** The dispatcher's goal anchor (card W12); absent: none, as before. */ anchor?: DispatcherDeps["anchor"] } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
@@ -178,7 +178,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { thinking
       // A host the dispatcher never places on (idle hosts in a load test) is not added to it, which would rebuild the dispatcher for each one.
       if (hostOptions.dispatcher !== false) {
         workers.push(worker);
-        holder.dispatcher = w.restart({ workers, storeOwner: (agentId, attemptId) => remote.storeOwner(w.dispatcherPrincipal, agentId, attemptId) }, { bridges });
+        holder.dispatcher = w.restart({ workers, storeOwner: (agentId, attemptId) => remote.storeOwner(w.dispatcherPrincipal, agentId, attemptId), ...(o.anchor === undefined ? {} : { anchor: o.anchor }) }, { bridges });
         (w as { dispatcher: DispatcherService }).dispatcher = holder.dispatcher;
         (world as { current: DispatcherService }).current = holder.dispatcher;
       }

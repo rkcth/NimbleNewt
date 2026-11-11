@@ -40,7 +40,8 @@ export interface ResumeReviewerOptions {
   readonly onFailure?: (route: string, detail: string) => void;
 }
 
-export const RESUME_REVIEW_LIMITS = { perCall: 40, rationale: 300, text: 200, answer: 200_000 } as const;
+/** `prompt`: the most characters one call's user text holds; a piece of changes is made smaller to fit, so no bounded client ever cuts a change line or the closing list of ids (W10's bound is 24,000). */
+export const RESUME_REVIEW_LIMITS = { perCall: 40, rationale: 300, text: 200, answer: 200_000, prompt: 24_000 } as const;
 
 const SYSTEM = [
   "You review a paused task that is about to be resumed on another run. Some of what its earlier work relied on has changed since it stopped.",
@@ -82,8 +83,7 @@ export class ResumeReviewer {
     const routes = await this.#routes();
     if (!Array.isArray(routes) || routes.length === 0) throw new DomainError("unavailable", "the resume reviewer has no model route");
     const context = await this.#context(request.taskId);
-    for (let i = 0; i < judged.length; i += this.#perCall) {
-      const piece = judged.slice(i, i + this.#perCall);
+    for (const piece of this.#pieces(context, judged)) {
       const prompt = this.#prompt(context, piece);
       let last = "no route answered";
       let verdicts: Verdicts | undefined;
@@ -106,6 +106,18 @@ export class ResumeReviewer {
     const title = info?.title === undefined ? undefined : quotedLine(clipText(redactText(info.title), RESUME_REVIEW_LIMITS.text));
     const next = info?.nextStep === undefined ? undefined : quotedLine(clipText(redactText(info.nextStep), RESUME_REVIEW_LIMITS.text));
     return [`Task: ${title ?? JSON.stringify(taskId)}`, `Next step it recorded before stopping: ${next ?? "(not given)"}`].join("\n");
+  }
+
+  /** The changes in pieces of at most `perCall`, each small enough that its whole prompt fits `RESUME_REVIEW_LIMITS.prompt` (quoting can make a line several times its text). One change always fits alone. */
+  #pieces(context: string, changes: readonly DeltaItem[]): DeltaItem[][] {
+    const out: DeltaItem[][] = [];
+    let piece: DeltaItem[] = [];
+    for (const c of changes) {
+      if (piece.length > 0 && (piece.length >= this.#perCall || this.#prompt(context, [...piece, c]).length > RESUME_REVIEW_LIMITS.prompt)) { out.push(piece); piece = []; }
+      piece.push(c);
+    }
+    if (piece.length > 0) out.push(piece);
+    return out;
   }
 
   #prompt(context: string, changes: readonly DeltaItem[]): string {
