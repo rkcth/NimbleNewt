@@ -258,7 +258,7 @@ test("card A05b follow-up review: a directory on the way swapped for a link whil
   writeFileSync(join(outer, "elsewhere", "f"), "outside");
   symlinkSync(join(outer, "elsewhere"), join(d, "link"));
   // Another process swaps sub and the link back and forth as fast as it can.
-  const swapper = spawn(process.execPath, ["-e", `const fs=require("fs");const p=require("path");const d=${JSON.stringify(d)};const end=Date.now()+20000;for(;Date.now()<end;){try{fs.renameSync(p.join(d,"sub"),p.join(d,"sub.real"));fs.renameSync(p.join(d,"link"),p.join(d,"sub"));fs.renameSync(p.join(d,"sub"),p.join(d,"link"));fs.renameSync(p.join(d,"sub.real"),p.join(d,"sub"));}catch{}}`], { stdio: "ignore" });
+  const swapper = spawn(process.execPath, ["-e", `const fs=require("node:fs");const p=require("node:path");const d=${JSON.stringify(d)};const end=Date.now()+20000;for(;Date.now()<end;){try{fs.renameSync(p.join(d,"sub"),p.join(d,"sub.real"));fs.renameSync(p.join(d,"link"),p.join(d,"sub"));fs.renameSync(p.join(d,"sub"),p.join(d,"link"));fs.renameSync(p.join(d,"sub.real"),p.join(d,"sub"));}catch{}}`], { stdio: "ignore" });
   try {
     const { read } = over(d);
     const outside = sha("outside");
