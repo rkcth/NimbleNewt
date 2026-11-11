@@ -1417,10 +1417,16 @@ export class StatusService {
     if (this.#deps.standups?.ownerQuestions === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);
     if (by.kind === "owner" && (await this.#runner.get("project", projectId)) === undefined) return undefined;
-    const { open, answered } = await this.#deps.standups.ownerQuestions(by, projectId);
+    // A caller who may not read the project's meetings reads this as missing, as the other views do (not as a refusal).
+    const source = this.#deps.standups.ownerQuestions;
+    let read: Awaited<ReturnType<typeof source>>;
+    try { read = await this.#deps.standups.ownerQuestions(by, projectId); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined; throw error; }
+    const { open, answered } = read;
+    // Only the owner is the one being waited on; another reader (a manager, a host) sees whose answer it is.
+    const mine = by.kind === "owner";
     const lines: Line[] = [];
-    for (const q of open) lines.push(line(`Waiting for your answer, from the stand-up topic ${quoted(q.topic)}: ${quoted(q.question)} (asked ${q.askedAt}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
-    for (const q of answered) lines.push(line(`Answered, about ${quoted(q.topic)}: ${quoted(q.question)} Your answer: ${quoted(q.answer ?? "")} (${q.answeredAt ?? "no time recorded"}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
+    for (const q of open) lines.push(line(`${mine ? "Waiting for your answer" : "Waiting for the owner's answer"}, from the stand-up topic ${quoted(q.topic)}: ${quoted(q.question)} (asked ${q.askedAt}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
+    for (const q of answered) lines.push(line(`Answered, about ${quoted(q.topic)}: ${quoted(q.question)} ${mine ? "Your answer" : "The owner's answer"}: ${quoted(q.answer ?? "")} (${q.answeredAt ?? "no time recorded"}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
     if (lines.length === 0) lines.push(line("No stand-up has asked the owner anything in this project.", cite("project", projectId)));
     return { observedAt: this.#runner.now(), lines };
   }

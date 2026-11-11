@@ -549,4 +549,66 @@ for (const backend of backends) {
     assert.deepEqual(after.open.map((q) => q.topic), ["Release train"]);
     assert.deepEqual(after.answered.map((q) => [q.topic, q.answer]), [["Release notes", "Maya does"]]);
   });
+
+  suite("a shown-first answer to a stand-up's question still applies after the question was announced, and never overwrites an answered one (card M03h follow-up 1)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const made = await w.meetings.addAgendaItem(w.owner, { commandId: cid("cap"), projectId: a, topic: "Old API", urgency: "normal", intent: "discussion" } as never);
+    const item = (await w.meetings.agendaItem(w.owner, made.id))!;
+    await w.meetings.setAgendaState(w.owner, { commandId: cid("st"), itemId: item.id, expectedRevision: item.revision, to: "resolved", outcomeNote: "Talked it over.", ownerQuestion: "Which release is the last to carry the old API?" });
+    type Q = { id: string; revision: number; answer?: string; state: string };
+    const read = async () => ((await w.api.handle(w.ownerToken, { v: 1, op: "standup.owner-questions", args: { projectId: a } } as never)) as unknown as { result: { item: { open: Q[]; answered: Q[] } } }).result.item;
+    const before = (await read()).open[0]!;
+
+    // The answer is shown first (it names no question).
+    script["Tell the stand-up: version 2.0."] = [cmd("standup.answer-question", { answer: "version 2.0" }, "Tell the stand-up: version 2.0")];
+    const shown = only((await say(w, chat, "Tell the stand-up: version 2.0.")).outcomes);
+    assert.equal(shown.status, "proposed", JSON.stringify(shown));
+    // Meanwhile the question is announced: marking it told moves its revision without changing a word of it.
+    await w.meetings.markOwnerQuestionTold(w.owner, before.id);
+    assert.ok((await read()).open[0]!.revision > before.revision);
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: shown.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.deepEqual((await read()).answered.map((q) => q.answer), ["version 2.0"]);
+
+    // A second proposal for a question that was answered meanwhile (by another proposal) fails and leaves the answer as it was.
+    const made2 = await w.meetings.addAgendaItem(w.owner, { commandId: cid("cap"), projectId: a, topic: "Backups", urgency: "normal", intent: "discussion" } as never);
+    const item2 = (await w.meetings.agendaItem(w.owner, made2.id))!;
+    await w.meetings.setAgendaState(w.owner, { commandId: cid("st"), itemId: item2.id, expectedRevision: item2.revision, to: "resolved", outcomeNote: "Talked.", ownerQuestion: "Keep seven backups or thirty?" });
+    script["Tell the stand-up: thirty."] = [cmd("standup.answer-question", { answer: "thirty" }, "Tell the stand-up: thirty")];
+    const p1 = only((await say(w, chat, "Tell the stand-up: thirty.")).outcomes);
+    script["Tell the stand-up: seven."] = [cmd("standup.answer-question", { answer: "seven" }, "Tell the stand-up: seven")];
+    const p2 = only((await say(w, chat, "Tell the stand-up: seven.")).outcomes);
+    assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: p1.proposalId! })).applied, true);
+    const second = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: p2.proposalId! });
+    assert.equal(second.applied, false, JSON.stringify(second));
+    assert.match(String(second.failure?.message), /already answered/);
+    assert.deepEqual((await read()).answered.map((q) => q.answer).sort(), ["thirty", "version 2.0"]);
+  });
+
+  suite("the status answer about the stand-up's questions reads as missing for someone who may not read the project, and does not speak of 'your answer' to a reader who is not the owner (card M03h follow-up 2)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    const made = await w.meetings.addAgendaItem(w.owner, { commandId: cid("cap"), projectId: a, topic: "Old API", urgency: "normal", intent: "discussion" } as never);
+    const item = (await w.meetings.agendaItem(w.owner, made.id))!;
+    await w.meetings.setAgendaState(w.owner, { commandId: cid("st"), itemId: item.id, expectedRevision: item.revision, to: "resolved", outcomeNote: "Talked it over.", ownerQuestion: "Which release is the last to carry the old API?" });
+    const status = ctl.status();
+    const asOf = new Date().toISOString();
+    const stranger = { id: "agent:stranger", kind: "agent", name: "stranger", grants: [], asOf } as never;
+    const reader = { id: "agent:reader", kind: "agent", name: "reader", grants: [{ action: "meeting.read", project: a }], asOf } as never;
+    const text = (r: unknown): string => JSON.stringify(r);
+    assert.equal(await status.standupQuestionLines(stranger, { projectId: a }), undefined, "a caller who may not read the project's meetings reads it as missing");
+    const forReader = text(await status.standupQuestionLines(reader, { projectId: a }));
+    assert.match(forReader, /Waiting for the owner's answer/);
+    assert.doesNotMatch(forReader, /your answer/i);
+    assert.match(text(await status.standupQuestionLines(w.owner, { projectId: a })), /Waiting for your answer/);
+    // Once answered, the reader is told whose answer it is.
+    const q = (await w.meetings.ownerQuestions(w.owner, a)).open[0]!;
+    await w.meetings.answerOwnerQuestion(w.owner, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision, answer: "Release 2.0" });
+    const answered = text(await status.standupQuestionLines(reader, { projectId: a }));
+    assert.match(answered, /The owner's answer: .*Release 2\.0/);
+    assert.doesNotMatch(answered, /Your answer/);
+    assert.match(text(await status.standupQuestionLines(w.owner, { projectId: a })), /Your answer: .*Release 2\.0/);
+  });
 }
