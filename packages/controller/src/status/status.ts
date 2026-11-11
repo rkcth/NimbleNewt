@@ -1289,7 +1289,7 @@ export class StatusService {
     const branch = v["workspace.landing.branch"]?.value, permit = v["workspace.landing.requirePermit"]?.value, defaults = v["workspace.landing.protectDefaults"]?.value, paths = v["workspace.landing.protectedPaths"]?.value;
     const listed = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === "string") : [];
     return { observedAt: this.#runner.now(), lines: [
-      line("Where finished work lands: one policy for the whole installation (there is no per-project landing branch yet).", c),
+      line("Where finished work lands: the review permit and protected paths are one policy for the whole installation; the landing branch below is the installation default, and a project with its own landing branch set by you lands there instead.", c),
       line(typeof branch === "string" ? `Landing branch: ${shown(branch, 200)} (you set it). A landing is refused while the shared workspace is on another branch.` : "Landing branch: none set, so nothing lands until you name one.", c),
       line(permit === false ? "Review permit: not required (you set it); commits land without the review gate's commit permit." : `Review permit: required (${mark("workspace.landing.requirePermit")}); only commits made through the review gate land.`, c),
       line(defaults === false ? "Built-in protected files (CI configuration, hooks, ownership and package manager files): off (you set it)." : `Built-in protected files (CI configuration, hooks, ownership and package manager files): kept for your review (${mark("workspace.landing.protectDefaults")}).`, c),
