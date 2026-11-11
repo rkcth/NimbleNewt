@@ -572,7 +572,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
@@ -779,6 +779,18 @@ export class ChatService {
       if (!plan.ok) return refuse("invalid_transition", `the database cannot be moved now: ${plan.findings.filter((f) => f.severity === "error").map((f) => f.text).join("; ")}`);
       args["confirm"] = plan.token;
       fillNotes.push(`Transfer plan, worked out just now (${plan.direction}, to ${plan.to.name}): ${plan.totalRows} records; room: about ${plan.bytesNeeded} bytes needed, ${plan.freeBytes === undefined ? "free room at the destination not known" : `${plan.freeBytes} free at the destination`}; ${plan.claimsReleased} claims are released; ${plan.uncertainEffects} uncertain actions stay uncertain. Steps: ${plan.steps.join(" ")} Warnings: ${plan.findings.filter((f) => f.severity === "warning").map((f) => f.text).join(" ") || "none"}`);
+    }
+    // Removing a left-over copy is proposed with what the controller finds at the destination NOW; the token comes from that look, never from the interpreter's words.
+    if (intent.op === "database.transfer.wipe") {
+      delete args["confirm"];
+      const wanted = args["target"];
+      if (typeof wanted !== "string") return refuse("invalid_command", "At which destination should the left-over copy be removed? Nothing in your message names one; the database transfer status lists the names.");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "database.transfer.wipeplan", args: { target: wanted } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const plan = found.result["item"] as { token: string; target: { name: string }; leftoverOf: string; cleanable: boolean; findings: { severity: string; text: string }[]; steps: string[] };
+      if (!plan.cleanable) return refuse("invalid_transition", `nothing can be removed there: ${plan.findings.map((f) => f.text).join("; ")}`);
+      args["confirm"] = plan.token;
+      fillNotes.push(`What is at ${plan.target.name}, found just now: ${plan.findings.map((f) => f.text).join(" ")} Steps: ${plan.steps.join(" ")}`);
     }
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];

@@ -1181,6 +1181,26 @@ Arguments:
 
 Result: `{ item: { token, direction, from, to, schemaVersion, rows, totalRows, bytes, bytesNeeded, freeBytes?, uncertainEffects, intendedEffects, claimsReleased, ok, findings: [{ severity, text }], steps } }`; `ok: false` means an error finding blocks the transfer.
 
+#### `database.transfer.wipeplan`
+
+Owner only: what removing a copy left at a transfer destination by a transfer that did not finish would do, and the `token` that confirms it. Refuses (with the reason) when the destination is empty, is the controller database, belongs to a switched transfer or cannot be emptied from here. Changes nothing.
+
+Arguments:
+
+- `target`: the destination's name, as database.transfer.status lists it
+
+Result: `{ item: { token, target, leftoverOf, cleanable, findings, steps } }`.
+
+#### `database.transfer.settings`
+
+Owner only: whether the controller database may be moved at all (`enabled`) and whether the host restarts the controller onto the new database by itself after a move or a rollback (`restart`; `restartOffered` says whether the host can at all).
+
+Arguments:
+
+- none
+
+Result: `{ item: { enabled, restart, restartOffered } }`.
+
 #### `backup.list`
 
 Owner only: the complete backups, newest first, and whether the last one failed.
@@ -4034,7 +4054,7 @@ Arguments:
 - `target`: the target's name
 - `confirm`: the token from database.transfer.preview
 
-Result: `{ item: { id, direction, to, rows, claimsReleased, uncertainEffects, restartRequired: true, findings } }`.
+Result: `{ item: { id, direction, to, rows, claimsReleased, uncertainEffects, restartRequired: true, restart, findings } }`; `restart` is `scheduled` (the host restarts the controller onto the new database by itself in a moment), `off` (the host offers it and the owner turned it off with database.transfer.set) or `not-offered` (the host restarts it when it chooses). The same command sent again, also to the controller restarted on the new database, is answered with the recorded result and `replayed: true`. A copy left by an earlier transfer that did not finish is emptied first (the preview says so).
 
 #### `database.transfer.rollback`
 
@@ -4044,7 +4064,29 @@ Arguments:
 
 - none
 
-Result: `{ item: { id, to, restartRequired: true } }`.
+Result: `{ item: { id, to, restartRequired: true, restart } }`; `restart` as for database.transfer.apply. The same command sent again is answered with the recorded result.
+
+#### `database.transfer.wipe`
+
+Owner only, a destructive action: removes the copy a transfer that did not finish left at a destination (its controller tables and, for PostgreSQL, the schema made for it), so the owner does not have to empty it by hand. Never touches the controller database in use or a database any controller has owned. `confirm` must be the token of database.transfer.wipeplan. The chat only proposes this.
+
+Arguments:
+
+- `target`: the destination's name
+- `confirm`: the token from database.transfer.wipeplan
+
+Result: `{ item: { target, removed } }`.
+
+#### `database.transfer.set`
+
+Owner only: turns database transfers on or off (`enabled`) and/or the host's automatic restart after a move or rollback on or off (`restart`). Only the fields given change. Turning transfers off refuses new ones; it does not undo one.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `restart` (optional): true or false
+
+Result: `{ item: { enabled, restart, restartOffered } }`.
 
 #### `message.send`
 

@@ -225,6 +225,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   failed_event: { keys: ["handlingId"], about: "one failed event in detail" },
   timeline: { keys: ["projectId", "agent", "since", "limit"], about: "a project's timeline, or one agent's (since: a time with its zone such as 2026-11-01T08:00:00Z, or a date meaning midnight UTC)" },
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
+  database_transfer: { keys: [], about: "which database the controller runs on, the databases it can be moved to, the last move and whether the host restarts the controller onto a new database by itself" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
@@ -295,6 +296,7 @@ export type StatusRequest =
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
+  | { readonly kind: "database_transfer" }
   | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
@@ -371,6 +373,8 @@ export interface StatusDeps {
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
   /** Whether the installation could be stopped now (card L06). Absent: the view is not offered. */
+  /** Where the controller database lives and what a move did (card F04m). Owner only. Absent: the view is not offered. */
+  readonly databaseTransfer?: { status(): Promise<{ readonly source: { readonly name: string; readonly kind: string }; readonly targets: readonly { readonly name: string; readonly kind: string }[]; readonly journal?: { readonly id: string; readonly phase: string; readonly to: { readonly name: string }; readonly note?: string; readonly failure?: { readonly reason: string; readonly destinationClean: boolean }; readonly restart?: { readonly state: string; readonly reason?: string } } }>; settings(): Promise<{ readonly enabled: boolean; readonly restart: boolean; readonly restartOffered: boolean }> };
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
   readonly stops?: Pick<StopService, "cleanupSpend">;
@@ -597,6 +601,7 @@ export class StatusService {
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
       case "timeline": { onlyKnown(request, ["kind", "projectId", "agent", "since", "limit"]); return this.timelineLines(by, request); }
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
+      case "database_transfer": { onlyKnown(request, ["kind"]); return this.databaseTransferLines(by); }
       case "stop_cleanup": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.stopCleanupLines(by, request); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
@@ -1053,6 +1058,23 @@ export class StatusService {
     const lines: Line[] = found.items.map((r) => line(`${shown(r.name, 80)} ${shown(r.version, 20)} was revoked at ${shown(r.at, 40)} by ${shown(r.revokedBy, 80)}: ${shown(r.reason, 200)}.`, cite("catalog-revocation", derivedId("cav", `${r.name}|${r.version}`))));
     if (found.total > found.items.length) lines.push(line(`${found.total - found.items.length} more revocation(s) are not shown.`, cite("installation", "installation")));
     if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more revocations than this list shows.", cite("installation", "installation")));
+    return { observedAt: at, lines };
+  }
+
+  async databaseTransferLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.databaseTransfer === undefined || by.kind !== "owner") return undefined;
+    const at = this.#runner.now();
+    const st = await this.#deps.databaseTransfer.status(), se = await this.#deps.databaseTransfer.settings();
+    const here = cite("installation", "installation");
+    const lines: Line[] = [line(`The controller database is ${shown(st.source.name)} (${shown(st.source.kind)}). It can be moved to: ${st.targets.length === 0 ? "nowhere (no destination is configured)" : st.targets.map((t) => `${shown(t.name)} (${shown(t.kind)})`).join(", ")}.`, here)];
+    lines.push(line(se.enabled ? "Moving the database is allowed." : "Moving the database is switched off.", here));
+    lines.push(line(!se.restartOffered ? "The host restarts the controller itself after a move only if it was set up to; it was not, so the restart is yours." : se.restart ? "After a move the host restarts the controller onto the new database by itself." : "After a move the controller waits for you to restart it (the automatic restart is off).", here));
+    const j = st.journal;
+    if (j !== undefined) {
+      lines.push(line(`The last move (${shown(j.id)}) to ${shown(j.to.name)}: ${shown(j.phase)}${j.note === undefined ? "" : `, ${shown(j.note)}`}.`, here));
+      if (j.failure !== undefined) lines.push(line(`It failed: ${shown(j.failure.reason)}. ${j.failure.destinationClean ? "The destination is clean." : "A partial copy may be left at the destination; ask to remove it."}`, here));
+      if (j.restart !== undefined) lines.push(line(j.restart.state === "failed" ? `The host could not restart the controller (${shown(j.restart.reason ?? "no reason given")}); restart it yourself.` : "The host was asked to restart the controller onto the database it moved to.", here));
+    }
     return { observedAt: at, lines };
   }
 
