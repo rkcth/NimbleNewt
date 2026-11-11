@@ -257,7 +257,7 @@ export interface ToolOperationBody {
   readonly generation: number;
   readonly tool: ToolIdentity;
   /** What was asked, without the payload: a digest of the arguments, their size, and a redacted short summary (nothing at all for a restricted tool). */
-  readonly invocation: { readonly argsDigest: string; readonly bytes: number; readonly summary: string; readonly restricted: boolean };
+  readonly invocation: { readonly argsDigest: string; readonly bytes: number; readonly summary: string; readonly restricted: boolean; /** An effect call's effect (kind, target, input) digest, card H12a. */ readonly effectDigest?: string };
   /** Whether the call only looks (the catalogue puts its tool in the `inspect` class). Judged by the controller, never by the worker's say-so. */
   readonly readOnly: boolean;
   /** The controller-approved manifest of the tool version says a restart may run the call again from the start (card T06). Set by the controller from the catalogue, never by the worker. */

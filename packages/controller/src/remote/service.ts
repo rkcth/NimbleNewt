@@ -1220,7 +1220,17 @@ export class RemoteWorkerService {
     const kind = typeof effect.kind === "string" && effect.kind.length >= 1 && effect.kind.length <= 100 ? effect.kind : invalid("effect.kind", "must be an effect kind of 1 to 100 characters");
     const target = typeof effect.target === "string" && effect.target.length >= 1 && effect.target.length <= 500 ? effect.target : invalid("effect.target", "must be a target of 1 to 500 characters");
     const input = effect.input !== null && typeof effect.input === "object" && !Array.isArray(effect.input) ? effect.input as JsonObject : invalid("effect.input", "must be an object");
-    if (Buffer.byteLength(JSON.stringify(input)) > EFFECT_INPUT_BYTES) invalid("effect.input", `must be at most ${EFFECT_INPUT_BYTES} bytes`);
+    let encoded: string;
+    try { encoded = canonicalJson(input); } catch { return invalid("effect.input", "must be plain JSON"); }
+    if (Buffer.byteLength(encoded) > EFFECT_INPUT_BYTES) invalid("effect.input", `must be at most ${EFFECT_INPUT_BYTES} bytes`);
+    // What the bridge runs is what was judged: the policy, the protected-branch check and an approval see the tool name and its arguments, so the worker may not name another bridge or other input
+    // (a call judged as one tool must not run a different kind's bridge, and arguments naming one branch must not push another).
+    const tool = (request as { tool?: unknown }).tool;
+    if (tool === null || typeof tool !== "object" || (tool as { name?: unknown }).name !== kind) invalid("effect.kind", "must be the name of the tool the call is made with");
+    const args = (request as { args?: unknown }).args;
+    let argsEncoded: string | undefined;
+    try { argsEncoded = args !== null && typeof args === "object" && !Array.isArray(args) ? canonicalJson(args as JsonObject) : undefined; } catch { argsEncoded = undefined; }
+    if (argsEncoded !== encoded) invalid("effect.input", "must be the call's arguments");
     const b = await this.#running(host, sessionId, attemptId, placement);
     this.#needsConfirmation(b, "any tool call");
     const bridges = this.#deps.bridges;

@@ -50,10 +50,11 @@ for (const backend of backends) {
     assert.equal(viaCall.state, "confirmed");
     assert.equal(log.applied, 2);
     assert.equal((await c.ops(attemptId)).length, 2);
-    // The same call ID with another effect is not the same call and does not apply anything.
-    // The same call ID with other figures is still that call: it is answered from the record and nothing is applied.
-    assert.deepEqual(await attempt.effect(PUSH("p1"), { ...EFFECT, input: { branch: "feature-z" } }), first);
+    // The same call ID naming another effect is not that call: it is refused (not answered with the first call's result) and nothing is applied.
+    await wireRefuses("command_conflict", () => attempt.effect(PUSH("p1"), { ...EFFECT, target: "other-repo" }), 409);
+    await wireRefuses("command_conflict", () => attempt.effect(PUSH("p1", "feature-z"), { ...EFFECT, input: { branch: "feature-z" } }), 409);
     assert.equal(log.applied, 2);
+    assert.equal((await c.ops(attemptId)).length, 2);
   });
 
   suite("the controller runs only its own bridges: an unknown kind, a prototype name and a malformed effect record and run nothing", async (c) => {
@@ -62,9 +63,24 @@ for (const backend of backends) {
     await autonomous(c);
     const r1 = await c.host("r1");
     const { attemptId, attempt, placement } = await c.started(r1, "Push it", { tools: ["git-push"] });
-    await wireRefuses("invalid_command", () => attempt.effect(PUSH("a"), { ...EFFECT, kind: "format-disk" }), 400, (e) => assert.match(e.message, /no bridge/));
-    await wireRefuses("invalid_command", () => attempt.effect(PUSH("b"), { ...EFFECT, kind: "constructor" }), 400);
+    const named = (callId: string, name: string) => ({ ...PUSH(callId), tool: { name, version: "2.0" } });
+    await wireRefuses("invalid_command", () => attempt.effect(named("a", "format-disk"), { ...EFFECT, kind: "format-disk" }), 400, (e) => assert.match(e.message, /no bridge/));
+    let k = 0;
+    for (const proto of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "Git-Push", "GIT-PUSH", "git\u2010push", "git-push\u0000", " git-push"]) {
+      await wireRefuses("invalid_command", () => attempt.effect(named(`b${k++}`, proto), { ...EFFECT, kind: proto }), 400);
+    }
+    for (const bad of [42, null, ["git-push"], { name: "git-push" }, true]) await wireRefuses("invalid_command", () => attempt.effect(PUSH(`n${k++}`), { ...EFFECT, kind: bad as never }), 400);
     await wireRefuses("invalid_command", () => attempt.effect(PUSH("c"), { ...EFFECT, kind: "" }), 400);
+    // The bridge is the one for the tool that was judged: a git-push call cannot run another kind's bridge, even one the controller has.
+    const deployLog: Log = { applied: 0, reconciled: 0 };
+    c.bridges["deploy"] = bridge(deployLog);
+    await wireRefuses("invalid_command", () => attempt.effect(PUSH("k"), { ...EFFECT, kind: "deploy" }), 400, (e) => assert.match(e.message, /tool/));
+    assert.equal(deployLog.applied, 0);
+    // The bridge runs what was judged: arguments naming one branch cannot carry input that pushes another.
+    await wireRefuses("invalid_command", () => attempt.effect(PUSH("i"), { ...EFFECT, input: { branch: "main" } }), 400, (e) => assert.match(e.message, /arguments/));
+    // The cap is on bytes, not characters: 22 000 three-byte characters are 66 000 bytes.
+    const wide = { branch: "feature-x", note: "\u20ac".repeat(22_000) };
+    await wireRefuses("invalid_command", () => attempt.effect({ ...PUSH("w"), args: wide }, { ...EFFECT, input: wide }), 400, (e) => assert.match(e.message, /bytes/));
     await wireRefuses("invalid_command", () => attempt.effect(PUSH("d"), { ...EFFECT, input: [] as never }), 400);
     await wireRefuses("invalid_command", () => attempt.effect(PUSH("e"), { ...EFFECT, input: { blob: "x".repeat(70_000) } }), 400);
     // A field the contract does not have (a bridge, an address, a credential) is refused, not ignored.
@@ -96,6 +112,9 @@ for (const backend of backends) {
     const protectedPush = await attempt.effect({ ...PUSH("m1", "main"), branchProtected: true }, { ...EFFECT, input: { branch: "main" } });
     assert.equal(protectedPush.state, "awaiting-approval", "a push to main waits for the owner");
     assert.equal(log.applied, 0);
+    // The parked call asked again with another target is another effect: refused, so an approval of the first can never run it.
+    await wireRefuses("command_conflict", () => attempt.effect({ ...PUSH("m1", "main"), branchProtected: true }, { ...EFFECT, target: "other-repo", input: { branch: "main" } }), 409);
+    assert.equal((await attempt.effect({ ...PUSH("m1", "main"), branchProtected: true }, { ...EFFECT, input: { branch: "main" } })).state, "awaiting-approval");
     const read = await attempt.call({ callId: "r1", tool: { name: "read-file", version: "1.0.0" }, args: {} }, { kind: "local", run: async () => ({ text: "x" }) });
     assert.equal(read.state, "refused", "this agent holds no read-file grant");
     // A pause of the task: no new effect starts.
