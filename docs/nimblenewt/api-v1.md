@@ -326,7 +326,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workers.limits.enforced`
 
-What the launches of one local agent attempt came to (owner only): per launch (last ten) whether it started or was refused, the limits asked for, how each was enforced (full, partial or none, by what mechanism), whether best effort was allowed, the wall-clock limit, `failed` (for a refusal: the limits that could not be enforced) and `stricter` (where the host's own start-up figure was stricter than the owner's and so applied). The newest 20 attempts of each agent are kept.
+What the launches of one local agent attempt came to (owner only): per launch (last ten) whether it started or was refused, the limits asked for, how each was enforced (full, partial or none, by what mechanism), whether best effort was allowed, the wall-clock limit, `failed` (for a refusal: the limits that could not be enforced) and `stricter` (where the host's own start-up figure was stricter than the owner's and so applied) and `environment` (the agent's environment revision the figures came from, whose each applied figure was - the agent's environment or the limits you set for all agents - and any figure the environment asked for that your limits cut: an environment can only tighten, never raise). The newest 20 attempts of each agent are kept.
 
 Arguments:
 

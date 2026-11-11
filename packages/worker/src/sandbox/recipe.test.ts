@@ -54,7 +54,7 @@ test("a mount may not contain or sit inside a protected path", () => {
   assert.ok(normalizeRecipe(base(), [secret]).revision);
 });
 
-test("nothing inside kernel or runtime state, the superuser's files or another user's home can be mounted", { skip: process.platform === "win32" }, () => {
+test("nothing inside kernel or runtime state, the superuser's files or another user's home can be mounted", { skip: process.platform === "win32" ? "POSIX paths" : false }, () => {
   for (const inner of ["/proc/self/environ", "/proc/1/environ", "/sys/kernel", "/run/user", "/root/.bashrc"]) {
     try { realpathSync(inner); } catch { continue; }
     refused({ ...base(), readOnly: [{ host: inner, guest: "/inputs/x" }] }, [], /inside|symbolic link|another user/);

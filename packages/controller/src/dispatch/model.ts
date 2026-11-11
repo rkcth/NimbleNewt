@@ -35,6 +35,24 @@ export interface Frozen {
   readonly ending?: true;
 }
 
+/** What an attempt's launch was told to limit and how far the host did (card A08d). Plain JSON, bounded. */
+export interface LaunchLimitsRecord {
+  /** The effective figures given to the host in the dispatch contract (a limit not here is not limited). */
+  readonly limits: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number; readonly wallTimeMs?: number };
+  /** Whose each applied figure is: the agent's environment or the installation's. */
+  readonly sources: { readonly [limit: string]: "environment" | "installation" };
+  /** Figures the environment asked for that the installation's limit cut. */
+  readonly capped?: readonly { readonly limit: string; readonly asked: number; readonly applied: number }[];
+  /** The environment revision the attempt is pinned to, when it has one. */
+  readonly environmentRevision?: number;
+  /** Set by the host's launch report: whether the process started or the launch was refused, whether the owner allowed best effort, and how far each limit was enforced. */
+  readonly outcome?: "started" | "refused";
+  readonly bestEffort?: boolean;
+  readonly enforcement?: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[];
+  readonly reason?: string;
+  readonly at: string;
+}
+
 export interface DispatchBody {
   readonly attemptId: string;
   readonly taskId: string;
@@ -112,6 +130,8 @@ export interface DispatchBody {
   readonly recipeRevision?: string;
   /** The recipe the attempt runs with now (reach and limits, as the dispatcher last stated them): every start, resume, move and restart builds its recipe from this, never from the defaults. */
   readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number } };
+  /** The limits the attempt's launch ran under (card A08d): the figures, whose each is, what the environment asked for that the installation cut, the environment revision they came from, and (once the host has launched) how far each was enforced. */
+  readonly launchLimits?: LaunchLimitsRecord;
   /**
    * How the attempt's last turn ended (card W02): the worker's classification of its last reply (`unknown` when the worker did not say), the length of that reply's visible text when it said, and when the dispatcher recorded it.
    * A completed turn whose kind is not `normal` (and whose agent did not end the attempt with work.end) is a stop before the work was said to be done (card W03, `stoppedEarly`).

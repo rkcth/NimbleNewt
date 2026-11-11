@@ -34,7 +34,7 @@ export interface LauncherProvider {
 }
 
 export interface LauncherConfig {
-  readonly installation: { readonly name: string; readonly dataDir: string };
+  readonly installation: { readonly name: string; readonly dataDir: string; /** Where agents' checkouts live (the configuration's `installation.workspaces`): each path's file system is checked at start like the data directory's. A relative path is taken from the data directory. */ readonly workspaces?: Readonly<Record<string, { readonly path: string }>> };
   readonly controller: { readonly storage: { readonly kind: "sqlite"; readonly path: string } | { readonly kind: "postgres"; readonly url: { readonly secret: string }; readonly maxConnections: number; readonly schema?: string }; readonly databaseTransfer?: { readonly targets: readonly unknown[] } };
   readonly models: { readonly providers: Readonly<Record<string, LauncherProvider>> };
   /** The approval profile the configuration names (card U14b). Used once, for an installation that has no approval policy record yet; the owner changes it by chat afterwards. The grants and the limits of the document are not read (see the notes). */
@@ -120,11 +120,17 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   if (!isAbsolute(config.installation.dataDir)) print(`The data directory ${config.installation.dataDir} is not an absolute path; ${dataDir} is used.`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const notes: string[] = [];
+  // Every secret the controller sends or connects with is looked up by a NAME the configuration or the owner's records give. The owner's credential is never one of them: a provider key, a database address or a
+  // transfer target named like it would hand the owner's token to a model server or a database (letter case ignored, as the stores ignore it).
+  const named = async (name: string): Promise<string | undefined> => {
+    if (name.toLowerCase().startsWith(OWNER_SECRET)) throw new Error(`the secret name "${name.slice(0, 80)}" is reserved for the owner's credential, which is never sent to a model server or a database; name another secret`);
+    return secrets.resolve(name);
+  };
 
   let storage: StorageChoice;
   if (config.controller.storage.kind === "sqlite") storage = { kind: "sqlite", path: resolve(dataDir, config.controller.storage.path) };
   else {
-    const url = await secrets.resolve(config.controller.storage.url.secret);
+    const url = await named(config.controller.storage.url.secret);
     if (url === undefined) throw new Error(`the configuration chooses PostgreSQL and names the secret "${config.controller.storage.url.secret}" for its address, but the secret store has none by that name; put it there first (nimblenewt secret set ${config.controller.storage.url.secret})`);
     storage = { kind: "postgres", url, maxConnections: config.controller.storage.maxConnections, ...(config.controller.storage.schema === undefined ? {} : { schema: config.controller.storage.schema }) };
   }
@@ -142,7 +148,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     endpoint: (route): ModelEndpoint | undefined => {
       const e = endpoints.get(route.slice(0, route.indexOf("/")));
       if (e === undefined) return undefined;
-      return { url: e.endpoint, ...(e.credentialName === undefined ? {} : { headers: async () => { const key = await secrets.resolve(e.credentialName!); if (key === undefined) throw new Error(`the secret "${e.credentialName}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+      return { url: e.endpoint, ...(e.credentialName === undefined ? {} : { headers: async () => { const key = await named(e.credentialName!); if (key === undefined) throw new Error(`the secret "${e.credentialName}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
     },
   });
   /** A route's endpoint for the worker host's relay: read from the records at each call, the key from the secret store by name at each call. */
@@ -154,7 +160,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     const record = (await live.services.setupProviders.endpoints()).find((e) => e.provider === provider);
     if (record === undefined) return undefined;
     const name = record.credentialName;
-    return { url: record.endpoint, ...(record.kind === undefined ? {} : { kind: record.kind }), ...(name === undefined ? {} : { headers: async () => { const key = await secrets.resolve(name); if (key === undefined) throw new Error(`the secret "${name}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+    return { url: record.endpoint, ...(record.kind === undefined ? {} : { kind: record.kind }), ...(name === undefined ? {} : { headers: async () => { const key = await named(name); if (key === undefined) throw new Error(`the secret "${name}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
   };
   const routes = async (): Promise<readonly string[]> => {
     if (live === undefined) return [];
@@ -166,14 +172,24 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   };
   const interpreter = new ModelInterpreter(model, routes);
 
+  // The configuration's workspace folders reach the start-up file system check (card F04h: "the worker-side start-up and U01 must pass workspaceRoots"); an explicit option from the host wins. A relative path
+  // means the data directory's, not whatever the process was started in (the release launcher starts it in the release directory). `~` is not expanded (as for the data directory), so it is said.
+  const configuredWorkspaces = options.start?.workspaceRoots !== undefined ? [] : Object.entries(config.installation.workspaces ?? {}).map(([name, w]) => ({ name, path: resolve(dataDir, w.path), given: w.path }));
+  for (const w of configuredWorkspaces) if (w.given.startsWith("~")) print(`The workspace folder ${w.given} (installation.workspaces.${w.name}) starts with ~, which is not expanded; ${w.path} is checked.`);
   const baseStart: StartOptions = {
     ...(options.start ?? {}),
+    ...(configuredWorkspaces.length === 0 ? {} : { workspaceRoots: configuredWorkspaces.map((w) => w.path) }),
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
-    ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => secrets.resolve(name) } }),
+    ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),
     chat: { interpreter },
     ...(options.serve === undefined ? {} : { conversationTransport: options.serve }),
   };
-  let controller = await startController(baseStart);
+  let controller: Controller;
+  try { controller = await startController(baseStart); } catch (error) {
+    // The start-up check has printed the refusal; when workspace folders from the configuration were checked, say where they came from, since nothing else names them (they were not checked before card 17).
+    if ((error as Error)?.name === "UnsupportedEnvironmentError" && configuredWorkspaces.length > 0) print(`The workspace folders checked above come from the configuration (installation.workspaces: ${configuredWorkspaces.map((w) => `${w.name} = ${w.path}`).join(", ").slice(0, 600)}). Move a refused folder to a supported local file system, remove it from the configuration, or start with --allow-unsupported-environment.`);
+    throw error;
+  }
   live = controller;
   let hostPlan: LocalHostPlan | undefined;
   try {
