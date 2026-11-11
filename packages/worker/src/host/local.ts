@@ -37,7 +37,7 @@ export interface HostOrder {
 
 /**
  * The goal anchor this order's process re-inserts after every context cut (W12 follow-up, remote workers): the block in the order's own content whose digest the dispatch contract names, exactly as the controller's local path
- * (`dispatch-compose.ts` `contextFor`) picks it. Nothing new travels: a remote worker already receives the content and the sealed contract in its offer, and `honorContract` has refused an order whose named block is not there.
+ * (`dispatch-compose.ts` `contextFor`) picks it. Nothing new travels: a remote worker already receives the content and the sealed contract in its offer, and the controller's placement check (`checkContract` in `RemoteService.place`) has refused an order whose named block is not there (the worker's `honorContract` does not look; a missing block here simply gives no anchor).
  * Only the named block is taken (a task text may carry a block of its own that checks out; it is not the controller's), it must check out on its own and fit the channel's bound. `undefined` otherwise: the process then starts as before.
  */
 export function orderAnchor(order: Pick<HostOrder, "content" | "contract">): string | undefined {
