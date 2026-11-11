@@ -2010,6 +2010,17 @@ Arguments:
 
 Result: `{ projectId, items, redactions, next?, partial? }`.
 
+#### `lease.list`
+
+The maintenance leases of a project's managed resources: who holds each, why, until when, whether it ran out unreleased (`expired`), how many times another agent was blocked and the last few blocks (who, when, why), how a holding ended (validation result and response) and from whom a lease was taken over.
+
+Arguments:
+
+- `projectId`: the project
+- `resourceId` (optional): only this resource
+
+Result: `{ items }`.
+
 #### `service.observe`
 
 What the service reports now about one resource: its system version, its state and the time it was looked at. Needs the same right as operating on the resource.
@@ -5513,6 +5524,37 @@ Arguments:
 - `taskId`: the task
 
 Result: `{ taskId, restored, conflicts, conflictDetails }` (a reason for each conflict).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lease.acquire`
+
+Takes (or, for the holder, renews) the maintenance lease on a resource a responsibility manages, before changing it. Only one agent holds it at a time: if another agent holds it the answer is `status: blocked` with the holder and the time, and the attempt is recorded visibly on the lease. A lease that ran out unreleased is taken over and the previous holder recorded. For the answerable agent, the owner or a holder of `responsibility.write`; a paused responsibility starts no new maintenance.
+
+Arguments:
+
+- `resourceId`: the managed resource's ID
+- `purpose`: what the maintenance is for
+- `minutes` (optional): how long, 1 to 1440 (default 60)
+- `commandId`: required
+
+Result: `{ status: granted | blocked, lease }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lease.release`
+
+Gives back a maintenance lease with the result of validating the change: `validation` passed or failed. A failed validation needs `onFailure`: `rollback` (only when the responsibility permits the action `rollback`) or `escalate` (opens an incident and escalates it at once to the responsibility's escalation target or the owner). Both are recorded in the responsibility's history. The owner may instead release another agent's lease by force: give only `evidence` (the reason), no `validation`.
+
+Arguments:
+
+- `resourceId`: the resource
+- `validation` (optional): `passed` or `failed` (leave out only for the owner's forced release)
+- `evidence`: what shows the result, or the reason for a forced release
+- `onFailure` (optional): `rollback` or `escalate`, with a failed validation
+- `commandId`: required
+
+Result: `{ lease, response?, incidentId? }`.
 
 Completion: finished when accepted (`completed: true`).
 
