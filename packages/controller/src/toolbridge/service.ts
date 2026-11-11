@@ -172,7 +172,8 @@ const sameValue = (written: unknown, sent: unknown): boolean => {
   if (written !== null && sent !== null && typeof written === "object" && typeof sent === "object" && !Array.isArray(written) && !Array.isArray(sent)) {
     const a = written as Record<string, unknown>, b = sent as Record<string, unknown>;
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-    for (const k of keys) if (!sameValue(a[k], b[k])) return false;
+    // Own members only: a `__proto__` member (JSON.parse makes it an own property) on one side must not be matched against the other side's prototype.
+    for (const k of keys) if (!sameValue(Object.hasOwn(a, k) ? a[k] : undefined, Object.hasOwn(b, k) ? b[k] : undefined)) return false;
     return true;
   }
   return written === sent;

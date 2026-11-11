@@ -12,7 +12,7 @@ import type { Capabilities } from "../../hosts/index.js";
 import type { Principal } from "../../security/index.js";
 import type { ControllerStorage, JsonObject } from "../../storage/types.js";
 import { RemoteWorkerClient, type RemoteWorkerClientOptions } from "../client.js";
-import type { VersionRange } from "../protocol.js";
+import type { ToolBridgeAnswer, VersionRange } from "../protocol.js";
 import { WorkerTransport, type WorkerTransportOptions } from "../server.js";
 import { adoptable } from "../host.js";
 import { RemoteWorkerService, type PlacementPolicyFor, type RelocationPolicyFor, type Requirements } from "../service.js";
@@ -117,6 +117,8 @@ export interface RemoteWorld extends DispatchWorld {
   readonly confirmWindow: { ms: number | undefined };
   /** The controller's bridges for effect calls from remote workers (card H12a); a test adds its own by kind. The dispatcher settles an effect it finds after a restart through the same ones. */
   readonly bridges: Record<string, EffectBridge>;
+  /** The controller's tool bridge for a remote worker's tool requests (card L05e): every request the service passes on is logged (the credential, the attempt the gateway is bound to, the request); `handle` answers it (default: ok with the call ID). */
+  readonly toolBridge: { readonly calls: { token: string; attemptId: string; request: { op: string; callId: string; args?: unknown } }[]; handle: (token: string, attemptId: string, request: { op: string; callId: string; args?: unknown }) => Promise<ToolBridgeAnswer> };
   done(): Promise<void>;
 }
 
@@ -135,9 +137,11 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const failLaunchRecords = { count: 0 };
   const confirmWindow: { ms: number | undefined } = { ms: undefined };
   const bridges: Record<string, EffectBridge> = {};
+  const toolBridge: RemoteWorld["toolBridge"] = { calls: [], handle: async (_t, _a, request) => ({ ok: true, result: { callId: request.callId } }) };
   const security: RemoteWorld["security"] = { detected: [], reports: [], available: true };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts, bridges,
+    toolBridge: { handle: async (token, gateway, request) => { toolBridge.calls.push({ token, attemptId: gateway.attemptId, request }); return toolBridge.handle(token, gateway.attemptId, request); } },
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id), liveAttempts: (by) => holder.dispatcher.liveAttempts(by) },
     reaccept: async () => reaccept.mode,
     detect: (source, event) => { security.detected.push({ source, event }); },
@@ -154,7 +158,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport, bridges, reaccept, security, notices, launches, patience, failLaunchRecords, confirmWindow,
+    remote, artifacts, blobs, transport, bridges, toolBridge, reaccept, security, notices, launches, patience, failLaunchRecords, confirmWindow,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },

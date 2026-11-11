@@ -68,6 +68,10 @@ export const REMOTE_LIMITS = {
   /** Workspace requests (card H12m) waiting for one host at once, and the largest detail an answer may carry, in bytes of JSON. */
   workspaceAsks: 4,
   workspaceDetailBytes: 4000,
+  /** The largest body of a tool bridge request (card L05e): the bridge's own argument limit is 64 KB of canonical JSON, and the task credential and the wrapper are small. */
+  toolBytes: 160 * 1024,
+  /** The longest task credential a bridge request may carry, in characters (the controller authenticates it; a longer one cannot be one). */
+  toolTokenChars: 512,
 } as const;
 
 // ---- wire shapes -----------------------------------------------------------------------------------------------------------------
@@ -116,3 +120,8 @@ export interface WorkspaceAsk {
 /** What the host answers: the same typed outcomes a local host gives (done, or a refusal with its reason). */
 /** `failed`: the host's port threw, so the work may be half done (the controller records it as failed, as it does a local host's throw), not a refusal that changed nothing. */
 export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string; readonly failed?: true };
+
+/** A tool bridge request as the worker's tool extension made it (card L05e): the same shape the controller's `ToolExecutionService.handle` takes, restated here because the worker side imports nothing of the controller. */
+export interface ToolBridgeRequest { readonly op: string; readonly callId: string; readonly args?: JsonObject }
+/** The controller's answer to it: a result, or a refusal with a code (a refusal is an answer, not a failed request). */
+export type ToolBridgeAnswer = { readonly ok: true; readonly result: JsonObject } | { readonly ok: false; readonly code: string; readonly message: string };

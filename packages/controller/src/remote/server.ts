@@ -278,11 +278,12 @@ export class WorkerTransport {
     const placementOf = (body: Record<string, unknown>): unknown => body["placement"];
     if (parts.length === 4 && c !== "checkpoint" && c !== "control" && c !== "artifacts") {
       allowed("POST");
-      const body = await this.#body(req);
+      const body = await this.#body(req, c === "tool" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.toolBytes) : undefined);
       const p = placementOf(body);
-      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
+      this.#only(body, { tool: ["placement", "token", "request"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
+        case "tool": this.#key(req); return { status: 200, body: await svc.toolBridge(host, session, attempt, p, body["token"], body["request"]) };
         case "begin": return { status: 200, body: await svc.begin(host, session, attempt, p, body["request"] as never) };
         case "effect": return { status: 200, body: await svc.effect(host, session, attempt, p, body["request"] as never, body["effect"] as never) };
         case "report": return { status: 200, body: await svc.report(host, session, attempt, p, body["operationId"] as string, body["outcome"] as never) };

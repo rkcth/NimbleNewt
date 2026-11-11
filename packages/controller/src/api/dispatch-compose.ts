@@ -26,10 +26,9 @@ import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
-import type { StallEvent, StallService } from "../health/index.js";
+import type { StallService } from "../health/index.js";
+import { relayMonitor } from "./relay-monitor.js";
 
-/** The characters per token the relay assumes when it sizes a prompt for stall detection: low on purpose, so the estimate errs on the large side (card V01b). */
-const RELAY_CHARS_PER_TOKEN = 3;
 /** Who the local worker's security hook reports as (card U11d): a host principal with no grants of its own; it can only report. */
 const LOCAL_HOST_REPORTER: Principal = { id: "host:local-worker", kind: "host", name: "local-worker", grants: [] };
 import { EffectService } from "../domain/effects.js";
@@ -507,32 +506,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   })();
   // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
   const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
-  const monitorOf = reporter === undefined ? undefined : (order: WorkOrder): RelayMonitor => {
-    // Reports are sent one after another so they arrive in order; each call has its own request ID, and every report names the attempt, so a leftover process of an earlier attempt is fenced.
-    let queue: Promise<unknown> = Promise.resolve(); let calls = 0; let seq = 0;
-    // The share of the prompt the cache served on the attempt's latest finished call: the next call, which repeats most of that prompt, is expected to be served about as much (card V01c).
-    let expectedShare: number | undefined;
-    const send = (event: StallEvent): void => {
-      const commandId = `relay:${order.attemptId}:${++seq}`;
-      queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, attemptId: order.attemptId, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found" || (error.code === "invalid_command" && /is not the open request/.test(error.message))))) i.onError?.(error); });
-    };
-    const tokensOf = (chars: number): number => Math.ceil(chars / RELAY_CHARS_PER_TOKEN);
-    return {
-      started: ({ requestChars }) => {
-        const requestId = `${order.attemptId}:${++calls}`;
-        send({ type: "request_started", requestId, promptTokens: tokensOf(requestChars), ...(order.route === "" ? {} : { route: order.route }), ...(expectedShare === undefined ? {} : { cachedShare: expectedShare }) });
-        let seenOutput = false; let tokens = 0;
-        return {
-          firstOutput: () => { seenOutput = true; send({ type: "first_output", requestId }); },
-          // A rough count: the bytes of the stream over the same characters per token. The provider's own count arrives with the end of the call.
-          progress: (bytes) => { tokens = tokensOf(bytes); send({ type: "output_progress", requestId, tokens }); },
-          // The relay is waiting on the controller's own store, not on the model: a repeat of the last count keeps the stall clock from blaming the model for that wait (it is bounded by the store timeout).
-          waiting: (on) => { if (on && seenOutput) send({ type: "output_progress", requestId, tokens }); },
-          finished: (call) => { if (call.ok && call.inputTokens !== undefined && call.inputTokens > 0 && call.cachedTokens !== undefined) expectedShare = Math.min(1, Math.max(0, call.cachedTokens / call.inputTokens)); send({ type: "request_finished", requestId, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
-        };
-      },
-    };
-  };
+  const monitorOf = reporter === undefined ? undefined : (order: WorkOrder & { readonly hostId?: string }): RelayMonitor => relayMonitor(order, reporter, (error) => i.onError?.(error));
   if (i.options.local !== undefined) {
     const limits = checkLocalWorkerLimits(i.options.local.limits);
     const guards = controllerGuards({
@@ -673,8 +647,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         principal, hosts, artifacts,
         ...(i.securityReport === undefined ? {} : { reportSecurity: i.securityReport }),
         ...(i.detect === undefined ? {} : { detect: i.detect }),
-        // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The route is not known here, so a remote call adds no reading of a route's speed.
-        ...(monitorOf === undefined ? {} : { monitor: (a: { attemptId: string; taskId: string; generation: number }) => monitorOf({ ...a, route: "" } as unknown as WorkOrder) }),
+        // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The placement kept the order's route and the host (card L05e), so a remote call adds its reading of the route's speed on that host.
+        ...(monitorOf === undefined ? {} : { monitor: (a: { attemptId: string; taskId: string; generation: number; route?: string; hostId: string }) => monitorOf({ ...a, route: a.route ?? "" } as unknown as WorkOrder) }),
+        ...(i.toolBridge === undefined ? {} : { toolBridge: i.toolBridge }),
         ...(i.options.remote.monitorProgressMs === undefined ? {} : { monitorProgressMs: i.options.remote.monitorProgressMs }),
         streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id), liveAttempts: (by) => d().liveAttempts(by) },

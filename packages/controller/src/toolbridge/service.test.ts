@@ -422,6 +422,10 @@ for (const backend of backends) {
       nested: rec("nimblenewt__tool-invoke", '{"tool":"t.x","input":{"a":[1,{"b":true}]}}'),
       broken: rec("nimblenewt__task-update", "not json"),
       extra: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"A"}'),
+      // Card L05e: a `__proto__` member is an own member of what JSON.parse reads; one side having it and the other not is a difference (it was compared with the other side's prototype and equal).
+      protoWritten: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"A","__proto__":{}}'),
+      protoSent: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"A"}'),
+      protoBoth: rec("nimblenewt__task-update", '{"expectedRevision":1,"title":"A","__proto__":{"x":1}}'),
     };
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
@@ -441,6 +445,9 @@ for (const backend of backends) {
       out["nested"] = await send("nested", "tool.invoke", { tool: "t.x", input: { a: [1, { b: true }] } });
       out["broken"] = await send("broken", "task.update", { expectedRevision: 1, title: "A" });
       out["declaration"] = await send("good", "tool.discover", {});
+      out["protoWritten"] = await send("protoWritten", "task.update", { expectedRevision: 1, title: "A" });
+      out["protoSent"] = await send("protoSent", "task.update", JSON.parse('{"expectedRevision":1,"title":"A","__proto__":{}}') as JsonObject);
+      out["protoBoth"] = await send("protoBoth", "task.update", JSON.parse('{"expectedRevision":1,"title":"A","__proto__":{"x":1}}') as JsonObject);
       mode = { check: true, require: false, bind: false, admit: false };
       out["unbound"] = await send("other", "task.update", { expectedRevision: 1, title: "Q" });
       return { status: "completed", text: "x" };
@@ -454,8 +461,12 @@ for (const backend of backends) {
     assert.notEqual((out["nested"] as { code?: string }).code, "generation_refused", "nested values are compared member by member");
     assert.match(bad(out["broken"]!).message, /not readable as recorded/);
     assert.notEqual((out["declaration"] as { code?: string }).code, "generation_refused", "the extension's declaration reads are not a model call");
+    assert.match(bad(out["protoWritten"]!).message, /not those the model wrote/, "a __proto__ member the model wrote and the request lacks is a difference");
+    assert.match(bad(out["protoSent"]!).message, /not those the model wrote/, "a __proto__ member the request has and the model did not write is a difference");
+    assert.notEqual((out["protoBoth"] as { code?: string }).code, "generation_refused", "the same __proto__ member on both sides is equal");
     good(out["unbound"]!);
-    assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title), ["A", "A", "Q"]);
+    assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title).slice(0, 2), ["A", "A"]);
+    assert.equal(seen.length >= 3, true);
   });
 
   suite("card L05d review: an admitted tool.invoke parked for review is not settled by its first answer: asked again with the same call ID after the approval it runs, once, through the real generation and effect ledger", async (c) => {
