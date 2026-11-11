@@ -55,12 +55,28 @@ export interface ReleaseHostRunnerOptions {
 export const RELEASE_RUNNER_LIMITS = { concurrency: 4, summary: 500, tries: 6, cancelKeep: 256, seconds: 24 * 3600 } as const;
 const SHA = /^[0-9a-f]{64}$/;
 const WORD = /^[A-Za-z0-9._@/+-]{1,128}$/;
-const clean = (s: string): string => [...s].filter((c) => { const n = c.codePointAt(0)!; return n >= 0x20 && n !== 0x7f && !(n >= 0x80 && n <= 0x9f) && n !== 0x2028 && n !== 0x2029; }).join("").slice(0, RELEASE_RUNNER_LIMITS.summary);
+/** The controller's own rules for names in the hash maps, the suite revision and an OS version: a payload outside them is not a release job, and a value outside them would make the report refused. */
+const NAME = /^[A-Za-z0-9][A-Za-z0-9._@/+-]{0,127}$/;
+const REVISION = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
+const OS_VERSION = /^[A-Za-z0-9._-]{1,40}$/;
+/** One line, no control characters, at most `max` UTF-16 units and never cut inside a surrogate pair (the controller counts UTF-16 units and refuses a lone surrogate). */
+const clean = (s: string, max: number = RELEASE_RUNNER_LIMITS.summary): string => {
+  let out = "";
+  for (const c of s) {
+    const n = c.codePointAt(0)!;
+    if (n < 0x20 || n === 0x7f || (n >= 0x80 && n <= 0x9f) || n === 0x2028 || n === 0x2029 || (n >= 0xd800 && n <= 0xdfff)) continue;
+    if (out.length + c.length > max) break;
+    out += c;
+  }
+  return out;
+};
+/** A bounded setting: a missing, non-numeric or out-of-range value never lifts the bound. */
+const bounded = (v: number | undefined, fallback: number, max: number): number => { const n = Math.trunc(Number(v ?? fallback)); return Number.isFinite(n) ? Math.max(1, Math.min(max, n)) : fallback; };
 const same = (a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean => {
   const ka = Object.keys(a).sort(), kb = Object.keys(b).sort();
   return ka.length === kb.length && ka.every((k, i) => k === kb[i] && a[k] === b[k]);
 };
-const isMap = (v: unknown): v is Record<string, string> => typeof v === "object" && v !== null && !Array.isArray(v) && Object.entries(v).every(([k, x]) => k.length > 0 && k.length <= 256 && typeof x === "string" && SHA.test(x)) && Object.keys(v).length <= 100;
+const isMap = (v: unknown): v is Record<string, string> => typeof v === "object" && v !== null && !Array.isArray(v) && Object.entries(v).every(([k, x]) => NAME.test(k) && typeof x === "string" && SHA.test(x)) && Object.keys(v).length <= 100;
 
 /**
  * The release-test host's side (card X09b remainder): the runnable program the controller's job protocol was waiting for. Each `tick` fetches this machine's open jobs and the attempts the controller ended without a result,
@@ -69,10 +85,22 @@ const isMap = (v: unknown): v is Record<string, string> => typeof v === "object"
  * suite and sends nothing), or turn a suite that threw, ran out of time or counted no passing test into a pass. A job picked up by an earlier run of this process (a restart) is not run again and not guessed at: it is
  * reported as a failed test with no counts so the platform is free for a retry (the host cannot know what the destructive test already changed). Only the log's digest leaves the machine.
  */
+const pause = (ms: number, s: AbortSignal): Promise<void> => new Promise((r) => {
+  if (s.aborted) { r(); return; }
+  // The listener is removed when the wait ends, so a loop that runs for months does not pile listeners on its signal.
+  const done = (): void => { clearTimeout(t); s.removeEventListener("abort", done); r(); };
+  const t = setTimeout(done, ms);
+  s.addEventListener("abort", done, { once: true });
+});
+
 export class ReleaseHostRunner {
   readonly #o: ReleaseHostRunnerOptions;
   readonly #running = new Map<string, AbortController>();
   readonly #done = new Set<string>();
+  /** Attempts whose pick-up got no clear answer: the suite never started here, so a pick-up the controller did record is not a restart (it is picked up again, which changes nothing, and run). */
+  readonly #unstarted = new Set<string>();
+  /** Reports that met only transient errors: sent again, with the same key, while the controller still lists the job (a lost result must not turn into a timeout that hides a real failure). */
+  readonly #unsent = new Map<string, { [k: string]: Json }>();
   readonly #tasks = new Set<Promise<void>>();
   readonly #platform: { os: string; arch: string };
   #stopped = false;
@@ -83,7 +111,7 @@ export class ReleaseHostRunner {
   }
 
   get running(): readonly string[] { return [...this.#running.keys()]; }
-  get #limit(): number { return Math.max(1, Math.min(RELEASE_RUNNER_LIMITS.concurrency, Math.trunc(this.#o.concurrency ?? 1))); }
+  get #limit(): number { return bounded(this.#o.concurrency, 1, RELEASE_RUNNER_LIMITS.concurrency); }
   #trouble(id: string | undefined, what: string, error?: unknown): void { try { this.#o.onTrouble?.(id, what, error); } catch { /* a listener never stops the host */ } }
 
   /** One look at the controller. Starts what may run now and returns; `settled()` waits for the runs. */
@@ -91,20 +119,24 @@ export class ReleaseHostRunner {
     if (this.#stopped) return;
     let work: Awaited<ReturnType<ReleaseHostRunnerOptions["client"]["releaseWork"]>>;
     try { work = await this.#o.client.releaseWork(); } catch (e) { this.#trouble(undefined, "the job list could not be fetched", e); return; }
-    for (const id of work.cancel.slice(0, RELEASE_RUNNER_LIMITS.cancelKeep)) this.#running.get(id)?.abort(new Error("the controller ended this attempt"));
-    for (const job of work.jobs) {
+    for (const id of Array.isArray(work?.cancel) ? work.cancel.slice(0, RELEASE_RUNNER_LIMITS.cancelKeep) : []) { if (typeof id !== "string") continue; this.#running.get(id)?.abort(new Error("the controller ended this attempt")); this.#unsent.delete(id); }
+    for (const job of Array.isArray(work?.jobs) ? work.jobs : []) {
       if (this.#stopped) return;
-      const id = job.attemptId;
-      if (typeof id !== "string" || !WORD.test(id) || this.#running.has(id) || this.#done.has(id)) continue;
-      const p = job.payload as { [k: string]: Json };
-      const suiteJob = this.#read(id, p);
+      const id = job?.attemptId;
+      if (typeof id !== "string" || !WORD.test(id)) continue;
+      const unsent = this.#unsent.get(id);
+      if (unsent !== undefined && !this.#running.has(id)) { await this.#resend(id, unsent); continue; }
+      if (this.#running.has(id) || this.#done.has(id)) continue;
+      const p = job.payload;
+      const suiteJob = typeof p === "object" && p !== null && !Array.isArray(p) ? this.#read(id, p as { [k: string]: Json }) : (this.#trouble(id, "the job is not shaped as a release test; left alone"), undefined);
       if (suiteJob === undefined) continue;
-      if (job.pickedUpAt !== undefined) { this.#remember(id); await this.#lost(id, suiteJob); continue; }
+      if (job.pickedUpAt !== undefined && !this.#unstarted.has(id)) { this.#remember(id); await this.#lost(id, suiteJob); continue; }
       if (this.#running.size >= this.#limit) break;
       let picked = false;
       this.#running.set(id, new AbortController());
       try { await this.#o.client.releasePickUp(id, `release-pickup-${id}`); picked = true; } catch (e) { this.#trouble(id, "the pick-up was refused", e); }
-      if (!picked) { this.#running.delete(id); continue; }
+      if (!picked) { this.#running.delete(id); this.#unstarted.add(id); if (this.#unstarted.size > 2000) this.#unstarted.delete(this.#unstarted.values().next().value as string); continue; }
+      this.#unstarted.delete(id);
       const task = this.#run(id, suiteJob).finally(() => { this.#tasks.delete(task); });
       this.#tasks.add(task);
     }
@@ -114,8 +146,13 @@ export class ReleaseHostRunner {
   async settled(): Promise<void> { while (this.#tasks.size > 0) await Promise.all([...this.#tasks]); }
 
   /** Loops `tick` until the signal aborts; a stop aborts the running suites (their attempts end by the controller's timeout, never as a pass). */
-  async serve(signal: AbortSignal, everyMs: number = 15_000, wait: (ms: number, s: AbortSignal) => Promise<void> = (ms, s) => new Promise((r) => { const t = setTimeout(r, ms); s.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); })): Promise<void> {
-    while (!signal.aborted) { await this.tick(); await wait(Math.max(1000, everyMs), signal); }
+  async serve(signal: AbortSignal, everyMs: number = 15_000, wait: (ms: number, s: AbortSignal) => Promise<void> = pause): Promise<void> {
+    const every = Number.isFinite(everyMs) ? Math.max(1000, everyMs) : 15_000;
+    while (!signal.aborted && !this.#stopped) {
+      // A look that throws (a malformed answer, a bug) is told and the loop goes on after the usual wait: it neither ends the host nor spins.
+      try { await this.tick(); } catch (e) { this.#trouble(undefined, "a look at the controller failed", e); }
+      await wait(every, signal);
+    }
     this.stop();
     await this.settled();
   }
@@ -129,7 +166,7 @@ export class ReleaseHostRunner {
     const cell = p["cell"] as { os?: unknown; arch?: unknown } | undefined;
     const limits = p["limits"] as { timeoutSeconds?: unknown; memoryMb?: unknown } | undefined;
     const ok = p["capability"] === "release-test" && p["attemptId"] === id && typeof p["candidateId"] === "string" && typeof p["sourceCommit"] === "string" && /^[0-9a-f]{40}$/.test(p["sourceCommit"] as string)
-      && typeof p["suiteRevision"] === "string" && isMap(p["artifacts"]) && isMap(p["dependencyLocks"])
+      && typeof p["candidateId"] === "string" && WORD.test(p["candidateId"] as string) && typeof p["suiteRevision"] === "string" && REVISION.test(p["suiteRevision"] as string) && isMap(p["artifacts"]) && isMap(p["dependencyLocks"])
       && Number.isInteger(limits?.timeoutSeconds) && (limits!.timeoutSeconds as number) > 0 && (limits!.timeoutSeconds as number) <= RELEASE_RUNNER_LIMITS.seconds && Number.isInteger(limits?.memoryMb) && (limits!.memoryMb as number) > 0;
     if (!ok) { this.#trouble(id, "the job is not shaped as a release test; left alone"); return undefined; }
     if (cell?.os !== this.#platform.os || cell?.arch !== this.#platform.arch) { this.#trouble(id, `the job is for ${String(cell?.os)}/${String(cell?.arch)}, this machine is ${this.#platform.os}/${this.#platform.arch}; left alone`); return undefined; }
@@ -141,7 +178,8 @@ export class ReleaseHostRunner {
     const timer = setTimeout(() => control.abort(new Error("the job's time limit passed on the host")), job.timeoutSeconds * 1000);
     let result: ReleaseSuiteResult | undefined;
     let failure: string | undefined;
-    try { result = await this.#o.suite(job, control.signal); } catch (e) { failure = `the suite stopped: ${e instanceof Error ? e.message : "unknown"}`; }
+    // Ended (cancel, stop) while the pick-up was answered: the destructive suite is not started at all.
+    if (!control.signal.aborted) { try { result = await this.#o.suite(job, control.signal); } catch (e) { failure = `the suite stopped: ${e instanceof Error ? e.message : "unknown"}`; } }
     clearTimeout(timer);
     this.#remember(id);
     try {
@@ -165,6 +203,11 @@ export class ReleaseHostRunner {
   }
 
   /** A job a previous run of this process picked up: reported as failed with no counts, so the platform can be retried. */
+  async #resend(id: string, body: { [k: string]: Json }): Promise<void> {
+    this.#unsent.delete(id);
+    try { await this.#post(id, body); } catch (e) { this.#trouble(id, "the report was not accepted", e); }
+  }
+
   async #lost(id: string, job: ReleaseSuiteJob): Promise<void> {
     try { await this.#send(id, job, { passed: 0, failed: 0, skipped: 0 }, "fail", "the host restarted before the test finished; not run again", this.#digest("")); } catch (e) { this.#trouble(id, "the report was not accepted", e); }
   }
@@ -179,14 +222,27 @@ export class ReleaseHostRunner {
     if (logDigest === undefined) return;
     const body: { [k: string]: Json } = {
       sourceCommit: job.sourceCommit, suiteRevision: job.suiteRevision, artifactHashes: { ...job.artifacts }, dependencyLockHashes: { ...job.dependencyLocks },
-      environment: { os: this.#platform.os, arch: this.#platform.arch, ...(typeof osVersion === "string" && osVersion.length > 0 && osVersion.length <= 64 ? { osVersion: clean(osVersion) } : {}) },
-      outcome, counts: { passed: counts.passed, failed: counts.failed, skipped: counts.skipped }, logDigest, summary: clean(typeof summary === "string" ? summary : ""),
+      environment: { os: this.#platform.os, arch: this.#platform.arch, ...(typeof osVersion === "string" && OS_VERSION.test(osVersion) ? { osVersion } : {}) },
+      outcome, counts: { passed: counts.passed, failed: counts.failed, skipped: counts.skipped }, logDigest, summary: this.#summary(summary, outcome),
     };
-    const tries = Math.max(1, Math.min(RELEASE_RUNNER_LIMITS.tries, Math.trunc(this.#o.reportTries ?? 3)));
+    if (osVersion !== undefined && body["environment"] !== undefined && (body["environment"] as { osVersion?: string }).osVersion === undefined) this.#trouble(id, "the suite's OS version is not a version the controller takes; sent without it");
+    await this.#post(id, body);
+  }
+
+  /** The controller needs a non-blank summary: an empty or unprintable one is replaced, so a real result is never refused for its wording. */
+  #summary(summary: unknown, outcome: "pass" | "fail"): string {
+    const s = clean(typeof summary === "string" ? summary : "");
+    return s.trim().length > 0 ? s : outcome === "pass" ? "passed (the suite gave no summary)" : "failed (the suite gave no summary)";
+  }
+
+  async #post(id: string, body: { [k: string]: Json }): Promise<void> {
+    const tries = bounded(this.#o.reportTries, 3, RELEASE_RUNNER_LIMITS.tries);
     const sleep = this.#o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     for (let n = 1; ; n++) {
-      try { await this.#o.client.releaseReport(id, body, `release-report-${id}`); return; } catch (e) {
-        const transient = !(e instanceof WorkerRequestError) || e.status >= 500 || e.status === 429;
+      try { await this.#o.client.releaseReport(id, body, `release-report-${id}`); this.#unsent.delete(id); return; } catch (e) {
+        // A transient answer: the controller or the network is down, busy, or the attempt's records moved at the same moment (stale_revision: "report again"). The same key makes a repeat land once.
+        const transient = !(e instanceof WorkerRequestError) || e.status >= 500 || e.status === 429 || e.code === "stale_revision";
+        if (transient && n >= tries) { this.#unsent.set(id, body); if (this.#unsent.size > RELEASE_RUNNER_LIMITS.cancelKeep) this.#unsent.delete(this.#unsent.keys().next().value as string); }
         if (!transient || n >= tries) throw e;
         await sleep(Math.min(30_000, 1000 * 2 ** (n - 1)));
       }

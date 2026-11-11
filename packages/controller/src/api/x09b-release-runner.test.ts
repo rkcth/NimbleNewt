@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { getEventListeners } from "node:events";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ScriptedInterpreter } from "../chat/index.js";
@@ -46,6 +47,11 @@ async function rig() {
   assert.ok((await call("release.host", { hostId: "host:rig", os: "linux", arch: "x64" }, id("rh"))).ok);
   return { c, client, call, id, submit, start, state };
 }
+/** Fails fast with a message instead of hanging until the runner's timeout when a guard is broken (a suite that is never aborted, a job that should not have started). */
+const within = async <T>(p: Promise<T>, what: string, ms = 5000): Promise<T> => {
+  let t: NodeJS.Timeout | undefined;
+  try { return await Promise.race([p, new Promise<never>((_, reject) => { t = setTimeout(() => reject(new assert.AssertionError({ message: `${what} did not settle within ${ms} ms` })), ms); })]); } finally { clearTimeout(t); }
+};
 const trouble = (): { list: string[]; fn: (a: string | undefined, w: string) => void } => { const list: string[] = []; return { list, fn: (a, w) => { list.push(`${a ?? "-"}: ${w}`); } }; };
 
 test("a host runner takes a job, runs the operator's suite, reports the measured result once, and the gate sees only that (card X09b remainder)", async () => {
@@ -139,7 +145,7 @@ test("a cancel stops the suite and nothing is reported; the time limit stops it 
     assert.deepEqual(runner.running, [attemptId]);
     assert.equal(seen!.aborted, false);
     assert.ok((await call("release.cancel", { attemptId, reason: "no longer needed" }, id("cx"))).ok);
-    await runner.tick(); await runner.settled();
+    await runner.tick(); await within(runner.settled(), "the cancelled suite");
     assert.equal(seen!.aborted, true, "the work the controller ended is stopped");
     assert.equal((await state(cand))[0].state, "interrupted", "never a pass, and nothing was reported over the cancel");
     assert.ok(t.list.some((x) => x.includes("ended without a report")));
@@ -147,7 +153,7 @@ test("a cancel stops the suite and nothing is reported; the time limit stops it 
     const cand2 = await submit("d");
     await start(cand2, linux, { timeoutSeconds: 1 });
     const r2 = new ReleaseHostRunner({ client, platform: linux, onTrouble: t.fn, suite });
-    await r2.tick(); await r2.settled();
+    await r2.tick(); await within(r2.settled(), "the suite past its time limit");
     const a2 = (await state(cand2))[0];
     assert.equal(a2.state, "failed");
     assert.match(a2.result.summary, /time limit passed on the host/);
@@ -156,7 +162,7 @@ test("a cancel stops the suite and nothing is reported; the time limit stops it 
     const att3 = await start(cand3);
     const r3 = new ReleaseHostRunner({ client, platform: linux, onTrouble: t.fn, suite });
     await r3.tick(); await new Promise((r) => setTimeout(r, 30));
-    r3.stop(); await r3.settled();
+    r3.stop(); await within(r3.settled(), "the stopped suite");
     assert.equal((await state(cand3))[0].state, "issued");
     assert.equal(att3, (await state(cand3))[0].id);
     await r3.tick();
@@ -175,7 +181,7 @@ test("a job for another platform, a malformed one, or one over the concurrency l
     const gate = new Promise<void>((r) => { release = r; });
     const ran: string[] = [];
     const runner = new ReleaseHostRunner({ client, platform: linux, onTrouble: t.fn, suite: async (job) => { ran.push(job.attemptId); await gate; return good(job); } });
-    await runner.tick(); await runner.settled();
+    await runner.tick(); await within(runner.settled(), "a job for another platform (it must not start)");
     assert.deepEqual(ran, []);
     assert.equal((await state(cand, "win32"))[0].pickedUpAt, undefined, "not even picked up");
     assert.ok(t.list.some((x) => x.includes("left alone")));
@@ -187,15 +193,15 @@ test("a job for another platform, a malformed one, or one over the concurrency l
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(runner.running.length, 1);
     assert.equal((await state(c2))[0].pickedUpAt === undefined || (await state(c1))[0].pickedUpAt === undefined, true, "only one was picked up");
-    release(); await runner.settled();
-    await runner.tick(); await runner.settled();
+    release(); await within(runner.settled(), "the one running job");
+    await runner.tick(); await within(runner.settled(), "the second job");
     assert.deepEqual(ran.sort(), [a1, a2].sort());
     // restart: picked up by someone else's run, not in this process's memory
     const c3 = await submit("3");
     const a3 = await start(c3);
     await client.releasePickUp(a3);
     const fresh = new ReleaseHostRunner({ client, platform: linux, onTrouble: t.fn, suite: async () => { throw new Error("must not run"); } });
-    await fresh.tick(); await fresh.settled();
+    await fresh.tick(); await within(fresh.settled(), "the restarted host");
     const e = (await state(c3))[0];
     assert.equal(e.state, "failed");
     assert.deepEqual(e.result.counts, { passed: 0, failed: 0, skipped: 0 });
@@ -234,4 +240,121 @@ test("a report that fails for a while is retried with the same key and lands onc
     await down.tick();
     assert.ok(t.list.some((x) => x.includes("could not be fetched")));
   } finally { await c.close(); }
+});
+
+test("a lost pick-up answer is not a restart; a report the controller asks to repeat (stale_revision) or cannot take for a while is sent again with its key until it lands (review fixes)", async () => {
+  const { c, client, submit, start, state } = await rig();
+  try {
+    const t = trouble();
+    // The pick-up commits on the controller but its answer is lost: the next look sees it picked up, and must run it, not report "host restarted".
+    let dropPickUp = true;
+    const ran: string[] = [];
+    const lossy = {
+      releaseWork: () => client.releaseWork(), releaseReport: (a: string, r: { [k: string]: any }, k?: string) => client.releaseReport(a, r, k),
+      releasePickUp: async (a: string, k?: string) => { const r = await client.releasePickUp(a, k); if (dropPickUp) { dropPickUp = false; throw new Error("socket hang up"); } return r; },
+    };
+    const r1 = new ReleaseHostRunner({ client: lossy as never, platform: linux, onTrouble: t.fn, suite: async (job) => { ran.push(job.attemptId); return good(job); } });
+    const cand = await submit("a");
+    const att = await start(cand);
+    await r1.tick(); await within(r1.settled(), "first look");
+    assert.deepEqual(ran, []);
+    assert.ok((await state(cand))[0].pickedUpAt !== undefined, "the controller did record the pick-up");
+    await r1.tick(); await within(r1.settled(), "second look");
+    assert.deepEqual(ran, [att], "the job is run, not reported as a restart");
+    assert.equal((await state(cand))[0].state, "passed");
+
+    // stale_revision is a request to report again, not a refusal.
+    let staleOnce = true;
+    const stale = { ...lossy, releasePickUp: (a: string, k?: string) => client.releasePickUp(a, k), releaseReport: async (a: string, r: { [k: string]: any }, k?: string) => { if (staleOnce) { staleOnce = false; throw new WorkerRequestError(409, "stale_revision", "the attempt changed at the same moment; report again"); } return client.releaseReport(a, r, k); } };
+    const r2 = new ReleaseHostRunner({ client: stale as never, platform: linux, onTrouble: t.fn, sleep: async () => undefined, suite: async (job) => good(job, { counts: { passed: 3, failed: 1, skipped: 0 } }) });
+    const cand2 = await submit("b");
+    await start(cand2);
+    await r2.tick(); await within(r2.settled(), "stale report");
+    assert.equal((await state(cand2))[0].state, "failed", "the real failure landed");
+
+    // The controller is down for longer than the tries: the failure is kept and sent on a later look (same key), so it is not lost to a timeout.
+    let down = true, sent = 0;
+    const keys = new Set<string>();
+    const outage = { ...stale, releaseReport: async (a: string, r: { [k: string]: any }, k?: string) => { sent++; keys.add(k!); if (down) throw new WorkerRequestError(503, "unavailable", "restarting"); return client.releaseReport(a, r, k); } };
+    let suiteRuns = 0;
+    const r3 = new ReleaseHostRunner({ client: outage as never, platform: linux, onTrouble: t.fn, sleep: async () => undefined, suite: async (job) => { suiteRuns++; return good(job, { counts: { passed: 3, failed: 2, skipped: 0 } }); } });
+    const cand3 = await submit("c");
+    await start(cand3);
+    await r3.tick(); await within(r3.settled(), "report during the outage");
+    assert.equal(sent, 3);
+    assert.equal((await state(cand3))[0].state, "issued");
+    down = false;
+    await r3.tick(); await within(r3.settled(), "report after the outage");
+    assert.equal((await state(cand3))[0].state, "failed", "the kept failure landed");
+    assert.equal(suiteRuns, 1, "the suite is not run again");
+    assert.equal(keys.size, 1, "one key for every try");
+    await r3.tick(); await within(r3.settled(), "a further look");
+    assert.equal(sent, 4, "nothing more is sent once it landed");
+  } finally { await c.close(); }
+});
+
+test("a blank or long summary and an odd OS version never get a real result refused; a bad setting never lifts the limits; a job ended during its pick-up never starts (review fixes)", async () => {
+  const { c, client, submit, start, state } = await rig();
+  try {
+    const t = trouble();
+    const variants: Partial<ReleaseSuiteResult>[] = [
+      { summary: "" }, { summary: "\u0007\u2028  " }, { summary: "x".repeat(499) + "\u{1F600}" + "y" }, { osVersion: "Ubuntu 22.04 LTS" },
+    ];
+    for (const [i, v] of variants.entries()) {
+      const runner = new ReleaseHostRunner({ client, platform: linux, onTrouble: t.fn, suite: async (job) => good(job, v) });
+      const cand = await submit(String(i));
+      await start(cand);
+      await runner.tick(); await within(runner.settled(), `variant ${i}`);
+      const a = (await state(cand))[0];
+      assert.equal(a.state, "passed", `variant ${i}: ${JSON.stringify(t.list.slice(-2))}`);
+      assert.ok(a.result.summary.trim().length > 0 && a.result.summary.length <= 500 && !/[\ud800-\udbff](?![\udc00-\udfff])/.test(a.result.summary), `variant ${i}`);
+    }
+
+    // concurrency: NaN must not mean "no limit"
+    let open = 0, most = 0, letGo!: () => void;
+    const held = new Promise<void>((r) => { letGo = r; });
+    const busy = new ReleaseHostRunner({ client, platform: linux, concurrency: Number.NaN, suite: async (job) => { open++; most = Math.max(most, open); await held; open--; return good(job); } });
+    for (const x of ["4", "5", "6"]) await start(await submit(x));
+    await Promise.all([busy.tick(), busy.tick(), busy.tick()]);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(busy.running.length, 1, "overlapping looks with a NaN setting still run one");
+    letGo();
+    for (let k = 0; k < 3; k++) { await within(busy.settled(), "the held jobs"); await busy.tick(); }
+    await within(busy.settled(), "the held jobs");
+    assert.equal(most, 1);
+
+    // NaN tries: bounded, not endless
+    let tries = 0;
+    const r2 = new ReleaseHostRunner({ client: { ...client, releaseWork: () => client.releaseWork(), releasePickUp: (a: string, k?: string) => client.releasePickUp(a, k), releaseReport: async () => { tries++; throw new WorkerRequestError(503, "unavailable", "x"); } } as never, platform: linux, reportTries: Number.NaN, sleep: async () => undefined, suite: async (job) => good(job) });
+    await start(await submit("7"));
+    await r2.tick(); await within(r2.settled(), "NaN tries");
+    assert.equal(tries, 3);
+
+    // ended while the pick-up was answered: the suite never starts
+    let started = 0;
+    let r3!: ReleaseHostRunner;
+    r3 = new ReleaseHostRunner({ client: { releaseWork: () => client.releaseWork(), releaseReport: (a: string, r: any, k?: string) => client.releaseReport(a, r, k), releasePickUp: async (a: string, k?: string) => { const x = await client.releasePickUp(a, k); r3.stop(); return x; } } as never, platform: linux, suite: async (job) => { started++; return good(job); } });
+    await start(await submit("8"));
+    await r3.tick(); await within(r3.settled(), "stopped during pick-up");
+    assert.equal(started, 0);
+  } finally { await c.close(); }
+});
+
+test("serve keeps looking after a look throws, does not pile listeners on its signal, and ends when the signal aborts", async () => {
+  let looks = 0;
+  const ac = new AbortController();
+  const told: string[] = [];
+  const runner = new ReleaseHostRunner({ client: { releaseWork: async () => { looks++; if (looks === 2) return null as never; if (looks >= 30) ac.abort(); return { jobs: [], cancel: [] }; }, releasePickUp: async () => ({ pickedUpAt: "" }), releaseReport: async () => undefined } as never, platform: linux, onTrouble: (_a, w) => { told.push(w); }, suite: async () => { throw new Error("no"); } });
+  let most = 0;
+  const wait = (ms: number, s: AbortSignal): Promise<void> => { most = Math.max(most, getEventListeners(s, "abort").length); return new Promise((r) => setImmediate(r)); };
+  await within(runner.serve(ac.signal, 1000, wait), "serve");
+  assert.ok(looks >= 30, `looked ${looks} times`);
+  // The default wait: many short waits leave no listener behind.
+  const ac2 = new AbortController();
+  let n = 0;
+  const r2 = new ReleaseHostRunner({ client: { releaseWork: async () => { if (++n >= 3) ac2.abort(); return { jobs: [], cancel: [] }; }, releasePickUp: async () => ({ pickedUpAt: "" }), releaseReport: async () => undefined } as never, platform: linux, suite: async () => { throw new Error("no"); } });
+  const t0 = Date.now();
+  await within(r2.serve(ac2.signal, 1000), "default serve", 10_000);
+  assert.ok(Date.now() - t0 >= 1900, "waited between looks");
+  assert.equal(getEventListeners(ac2.signal, "abort").length, 0, "no listener left on the signal");
 });
