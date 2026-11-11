@@ -136,7 +136,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     if (have === undefined && wanted.length > 0) {
       try {
         const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
-        notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller, such as 8,192 or 16,384).`);
+        notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller: under about 32,768 tokens tasks may stop with a context blocker, and under 8,192 the route is refused).`);
       } catch (error) {
         notes.push(`The model providers in the configuration were not registered yet: ${error instanceof DomainError ? error.message : "a registration problem"}`);
       }
