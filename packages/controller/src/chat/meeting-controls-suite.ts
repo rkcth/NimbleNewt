@@ -104,7 +104,8 @@ export function defineMeetingControlTests(backendName: string): void {
       script["Start the vote on the nightly build motion again."] = [cmd(OPEN, { motionTopic: "nightly build" }, "vote on the nightly build motion again")];
       const again = only((await say(w, chat, "Start the vote on the nightly build motion again.")).outcomes);
       assert.equal(again.status, "refused", JSON.stringify(again));
-      assert.match(String(again.message), /no motion waiting for a vote is about/);
+      // Its state is said, rather than a "no such motion".
+      assert.match(String(again.message), /motion 1 .* is voting, not a motion waiting for a vote/);
     });
 
     suite("several motions that fit are asked about, and an ID the owner did not say is the model's own", async (w, script, room) => {
@@ -204,6 +205,57 @@ export function defineMeetingControlTests(backendName: string): void {
       assert.equal((await call(w, w.ownerToken, "meeting.owner-controls", {})).result.item.unfinished.length, 0);
       script["Finish the nightly task rename again."] = [cmd(APPLY, { decisionTopic: "nightly task" }, "finish the nightly task rename again")];
       assert.equal(only((await say(w, chat, "Finish the nightly task rename again.")).outcomes).status, "refused");
+    });
+
+    suite("the owner's pick from the question of which motion or meeting is carried on (review)", async (w, script, room) => {
+      const { recordId } = await room.meeting("Infrastructure sync");
+      const other = await room.meeting("Infrastructure review");
+      const a = await room.motion(recordId, "Move the nightly build to one in the morning.");
+      const b = await room.motion(recordId, "Move the weekly build to Sunday.");
+      const chat = w.chat();
+      script["Open the vote on the build motion."] = [cmd(OPEN, { motionTopic: "build motion" }, "vote on the build motion")];
+      const first = await say(w, chat, "Open the vote on the build motion.");
+      assert.equal(only(first.outcomes).status, "asked");
+      script["The weekly one."] = [{ kind: "answer", turnId: first.turnId, choice: b.id, evidence: "The weekly one", basis: "owner" }];
+      const picked = only((await say(w, chat, "The weekly one.")).outcomes);
+      assert.equal(picked.status, "proposed", JSON.stringify(picked));
+      await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: picked.proposalId! });
+      assert.equal(await room.state(b.id), "voting");
+      assert.equal(await room.state(a.id), "proposed");
+      script["End the infrastructure meeting."] = [cmd(FINISH, { meetingTopic: "infrastructure" }, "end the infrastructure meeting")];
+      const second = await say(w, chat, "End the infrastructure meeting.");
+      assert.equal(only(second.outcomes).status, "asked");
+      script["The review."] = [{ kind: "answer", turnId: second.turnId, choice: other.recordId, evidence: "The review", basis: "owner" }];
+      const ending = only((await say(w, chat, "The review.")).outcomes);
+      assert.equal(ending.status, "proposed", JSON.stringify(ending));
+      await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: ending.proposalId! });
+      assert.equal(await room.recordState(other.recordId), "ended");
+      assert.equal(await room.recordState(recordId), "open");
+    });
+
+    suite("a motion whose vote is open is not offered for tabling, and words that fit a motion in another state never act on a looser fit (review)", async (w, script, room) => {
+      const { recordId } = await room.meeting("Sync");
+      const coffee = await room.motion(recordId, "Buy a bigger coffee machine.");
+      const printer = await room.motion(recordId, "Replace the printer.");
+      await room.vote(coffee.id);
+      const chat = w.chat();
+      // The records service tables only a motion not yet put to a vote: proposing it would fail after the owner confirms.
+      script["Table the coffee machine motion."] = [cmd(TABLE, { motionTopic: "coffee machine" }, "table the coffee machine motion")];
+      const tabled = only((await say(w, chat, "Table the coffee machine motion.")).outcomes);
+      assert.equal(tabled.status, "refused", JSON.stringify(tabled));
+      assert.match(String(tabled.message), /voting/);
+      // The nightly build motion waits for a vote while the weekly build one is being voted on: counting "the nightly build" vote is not counting the weekly one.
+      const nightly = await room.motion(recordId, "Move the nightly build to one in the morning.");
+      const weekly = await room.motion(recordId, "Move the weekly build to Sunday.");
+      await room.records.closeVote(w.owner, { commandId: cid("cl"), motionId: coffee.id });
+      await room.vote(weekly.id);
+      script["Count the vote on the nightly build."] = [cmd(CLOSE, { motionTopic: "nightly build" }, "count the vote on the nightly build")];
+      const counted = only((await say(w, chat, "Count the vote on the nightly build.")).outcomes);
+      assert.equal(counted.status, "refused", JSON.stringify(counted));
+      assert.match(String(counted.message), /proposed/);
+      assert.equal(await room.state(weekly.id), "voting");
+      assert.equal(await room.state(nightly.id), "proposed");
+      assert.equal(await room.state(printer.id), "proposed");
     });
 
     suite("only the owner reads what can be acted on, and the controls are chat commands with a line of their own", async (w, _script, room) => {

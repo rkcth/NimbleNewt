@@ -662,7 +662,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -674,7 +674,8 @@ export class ChatService {
     }
     args[asked.field] = choice;
     // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word, as is the platform (or chip) they name for a host: it counts as said, like the project-creation answers.
-    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
+    // A motion or meeting picked from the question of a meeting control (card M02h) is likewise the owner's own choice.
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -684,7 +685,7 @@ export class ChatService {
    * still do something to, narrowed to the project in focus. Every significant word must fit, else at least one; several fits ask which, none refuses. An ID the owner did not say or pick from the question is the model's own: with
    * several candidates the owner is asked. The version of the motion a vote is opened on is read here, never said. Returns a refusal or question, or nothing when `args` now holds what the operation takes.
    */
-  async #resolveMeetingControl(token: string, op: string, args: Record<string, unknown>, labels: Record<string, string>, projectId: string | undefined, words: string): Promise<(Resolved & { ok: false }) | undefined> {
+  async #resolveMeetingControl(token: string, op: string, args: Record<string, unknown>, labels: Record<string, string>, notes: string[], projectId: string | undefined, words: string): Promise<(Resolved & { ok: false }) | undefined> {
     const wordsKey = op === "meeting.record.finish" ? "meetingTopic" : op === "meeting.record.apply" ? "decisionTopic" : "motionTopic";
     const idKey = op === "meeting.record.finish" ? "recordId" : op === "meeting.record.apply" ? "decisionId" : "motionId";
     const named = args[wordsKey];
@@ -698,13 +699,14 @@ export class ChatService {
     type Candidate = { id: string; projectId: string; text: string; label: string; version?: number };
     const meetings = (listed?.["meetings"] as { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; topic?: string; state: string; version: number }[] }[] | undefined) ?? [];
     const unfinished = (listed?.["unfinished"] as { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[] | undefined) ?? [];
-    const states = op === "meeting.record.open-vote" ? ["proposed"] : op === "meeting.record.close-vote" ? ["voting"] : ["proposed", "voting"];
+    // The states the operation acts on, as the records service checks them: a vote opens on a proposed motion, closes when open, and only a motion not yet put to a vote can be tabled.
+    const states = op === "meeting.record.close-vote" ? ["voting"] : ["proposed"];
     const all: Candidate[] = op === "meeting.record.finish"
       ? meetings.map((m) => ({ id: m.id, projectId: m.projectId, text: m.title, label: m.title.slice(0, 80) }))
       : op === "meeting.record.apply"
         ? unfinished.map((d) => ({ id: d.id, projectId: d.projectId, text: `${d.text} ${d.topic ?? ""}`, label: `${d.text.slice(0, 80)}; ${d.left} change${d.left === 1 ? "" : "s"} left to carry out` }))
         : meetings.flatMap((m) => m.motions.filter((x) => states.includes(x.state)).map((x) => ({ id: x.id, projectId: m.projectId, text: `${x.text} ${x.topic ?? ""} ${m.title}`, label: `motion ${x.number} in ${m.title.slice(0, 40)}: ${x.text.slice(0, 60)}`, version: x.version })));
-    const what = op === "meeting.record.finish" ? "open meeting" : op === "meeting.record.apply" ? "meeting decision with changes left to carry out" : op === "meeting.record.open-vote" ? "motion waiting for a vote" : op === "meeting.record.close-vote" ? "motion with a vote open" : "motion that is open";
+    const what = op === "meeting.record.finish" ? "open meeting" : op === "meeting.record.apply" ? "meeting decision with changes left to carry out" : op === "meeting.record.open-vote" ? "motion waiting for a vote" : op === "meeting.record.close-vote" ? "motion with a vote open" : "motion not yet put to a vote";
     const candidates = projectId === undefined ? all : all.filter((c) => c.projectId === projectId);
     const tooMany = `More records exist than could be read at once, and the words do not say which one. Which ${what} is it?`;
     if (candidates.length === 0) return refuse("not_found", cut ? `More records exist than could be read at once, and none of those read is a ${what}; which one is meant cannot be told from the words.` : all.length > 0 ? `no ${what} in that project` : `there is no ${what}`);
@@ -721,12 +723,19 @@ export class ChatService {
     } else {
       const typed = typeof named === "string" ? named : "";
       let matches = candidates.filter((c) => decisionWordsMatch(typed, c.text, true));
+      if (matches.length === 0 && op !== "meeting.record.finish" && op !== "meeting.record.apply") {
+        // Every word fits a motion in another state (its vote already open, or not open yet): that motion is the one meant, so a looser fit on some other motion is not taken in its place.
+        const elsewhere = meetings.filter((m) => projectId === undefined || m.projectId === projectId).flatMap((m) => m.motions.filter((x) => !states.includes(x.state) && decisionWordsMatch(typed, `${x.text} ${x.topic ?? ""} ${m.title}`, true)));
+        if (elsewhere.length > 0) return refuse("invalid_command", `${elsewhere.length === 1 ? `motion ${elsewhere[0]!.number} (${quotedText(elsewhere[0]!.text, 60)}) is` : "the motions those words fit are"} ${[...new Set(elsewhere.map((x) => x.state))].join(" or ")}, not a ${what}; nothing was proposed.`);
+      }
       if (matches.length === 0) matches = candidates.filter((c) => decisionWordsMatch(typed, c.text, false));
       if (matches.length === 0) return refuse("not_found", cut ? tooMany : `no ${what} is about ${quotedText(typed, 80)}`);
       if (matches.length > 1) return ask(matches);
       chosen = matches[0]!;
       args[idKey] = chosen.id;
     }
+    // Only part of the records was read: another that fits may be among the rest.
+    if (cut) notes.push("Not everything you can act on in meetings could be read; check this is the one you mean.");
     labels[chosen.id] = chosen.label;
     if (op === "meeting.record.open-vote") args["expectedVersion"] = chosen.version;
     // A motion is tabled for a reason: the owner's own words when they gave one, else their message.
@@ -1159,7 +1168,7 @@ export class ChatService {
     }
     // The owner's other meeting controls (card M02h): the motion, meeting or decision is found among those the records list for the owner, by the owner's words.
     if (MEETING_CONTROLS.has(intent.op)) {
-      const refused = await this.#resolveMeetingControl(token, intent.op, args, labels, projectId, words);
+      const refused = await this.#resolveMeetingControl(token, intent.op, args, labels, fillNotes, projectId, words);
       if (refused !== undefined) return refused;
     }
     // A meeting named by its words (the one planned meeting of the project whose title contains them, or the only one) and an agent named by its name: both are resolved from the records, and anything unclear asks.
