@@ -84,6 +84,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
   // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30).
   // Moving a host's work re-plays running attempts, so it is shown first too, whatever words the owner used to ask: no wording makes it apply on its own.
+  // Signing a browser out of the web chat only narrows who is in (card U07b): it applies at once, which is what a lost phone needs. It signs nobody out of the terminal chat.
+  "web.access.revoke": { verb: "Sign a browser out of the web chat (browser: the owner's words for it, such as iPhone) or every browser (all true: a lost phone)", mode: "apply" },
   "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },
   "host.move-work": { verb: "Move the work off a host", mode: "propose" },
   // Reviewing and deciding on a deliverable (card Q01): the owner's decision on the work. Accepting or rejecting is first shown in every profile (provisional: it lets dependent work go on); starting a review changes nothing else.

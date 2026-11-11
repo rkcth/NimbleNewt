@@ -4,11 +4,11 @@ Written 2026-11-10 (card U07). The web chat is the owner's chat in a phone brows
 
 ## What you get
 
-- One page (`/`) with five views next to the chat: Status, Needs you, Blockers, Cost and Recovery, plus a list of the browsers signed in.
+- One page (`/`) with five views next to the chat: Status, Needs you, Blockers, Cost and Recovery, plus a **Settings** view: how the web chat is set up (address, network, proxy, limits and the address the page sees you as), the signed-in browsers with a sign-out for each, a pairing code for another browser and sign-out of all the others.
 - Everything the chat does is reachable by free text, as everywhere else in NimbleNewt. The page adds buttons for what is awkward to type on a phone: Apply and Discard on a proposal, quick questions, and the Pause and Resume recovery orders. Recovery orders are typed commands, so they work when the assistant (the model) is down.
 - If the connection drops (the phone sleeps, you walk out of range), what you wrote waits in an outbox on the phone and is sent again when the connection returns, **with the same message id**. The controller records each message under that id, so the second send returns the first answer and runs nothing twice. An approval is sent under its own key in the same way.
 - Sign-in is the owner's credential, or a one-time pairing code made from a browser that is already signed in (so you never type the long credential on a phone). The cookie is `HttpOnly` and `SameSite=Strict`, and `Secure` over HTTPS. The credential is held in the controller's memory only, never in the page, a record or a log.
-- A session ends by idle time (24 hours), by an absolute limit (7 days), by sign-out, when you sign it out from another browser (**Browsers** tab), when you rotate the owner's credential (checked on every request) and when the controller restarts. Failed sign-ins are counted per network address.
+- A session ends by idle time (24 hours), by an absolute limit (7 days), by sign-out, when you sign it out from another browser (**Browsers** tab), when you rotate the owner's credential (checked on every request) and when the controller restarts. Failed sign-ins are counted per client address and over all addresses together (see [Sign-in limits and the proxy](#sign-in-limits-and-a-trusted-proxy)).
 
 ## Wiring it
 
@@ -62,8 +62,28 @@ For WireGuard, ZeroTier, Nebula, a home LAN with a VPN into it, or any network t
 
 ## Option C: a reverse proxy on the same machine, or an SSH tunnel
 
-- Caddy or nginx on the machine, listening only on the private address and terminating TLS, in front of the loopback listener: as Option A, with the proxy in place of Tailscale Serve. Pass the client's `Host` header through. The controller never trusts `X-Forwarded-For`, so all clients share the proxy's address for the sign-in allowance.
+- Caddy or nginx on the machine, listening only on the private address and terminating TLS, in front of the loopback listener: as Option A, with the proxy in place of Tailscale Serve. Pass the client's `Host` header through. Unless you name the proxy in `trustedProxy` (next section), the controller never reads `X-Forwarded-For`, so all clients share the proxy's address for the sign-in allowance.
 - A laptop can use `ssh -L 8787:127.0.0.1:8787 machine` and open `http://localhost:8787/` (loopback binding, no proxy, no `publicHosts`): the cookie is then not `Secure`, which is fine because nothing leaves the SSH connection.
+
+## Sign-in limits and a trusted proxy
+
+Behind a proxy on this machine every connection comes from the proxy's own address, so by default all clients share one sign-in allowance (10 failures a minute): a stranger on your tailnet who keeps guessing can make the owner wait a minute. To give each client its own allowance, name the proxy:
+
+```js
+webChat: {
+  /* host, network, behindTlsProxy, publicHosts, assets as above */
+  trustedProxy: { addresses: ["127.0.0.1", "::1"], header: "x-forwarded-for" },   // off unless you give it
+}
+```
+
+- **Off by default.** Without `trustedProxy` no forwarded header is ever read.
+- **Only from the proxy itself.** The header is read only when the connecting address is one of `addresses`. Any other connection can write any header it likes and is ignored. `addresses` are plain IP literals (no names, ranges or ports) on this machine or a private network (loopback or private; for a loopback listener, loopback), at most 8. A public, wildcard or unparseable address is refused at start.
+- **One header.** `header` is `x-forwarded-for` (default) or `x-real-ip`; the other is never read. For `x-forwarded-for` the client is the **rightmost entry that is not one of your proxy addresses** (what a proxy appends is the part you can trust; whatever a client wrote to the left is ignored, so rotating junk entries gains nothing). Several header lines count as one list. Anything that is not a plain address (a name, a port, an empty hop, a repeated `x-real-ip`, more than 20 hops) makes the request fall back to the proxy's own shared bucket: a garbled header can never choose an address.
+- **Your proxy must set the header itself** (`tailscale serve` and Caddy's `reverse_proxy` do; for nginx use `proxy_set_header X-Forwarded-For $remote_addr;`). A proxy that passes through whatever the client sent lets a client pick its own address; the global ceiling below still bounds that.
+- An IPv6 client is counted by its /64, so a prefix cannot be rotated.
+- The **Settings** view shows the address the page sees you as and whether it came from the proxy header: open it from your phone to check the proxy is wired right.
+
+The limiter has two levels: failures per client address (default 10 a minute) and a generous ceiling over all addresses (default 100 a minute, `limits.failedLoginsGlobalPerMinute`), so a flood from many addresses (or from behind a proxy that hides them) still cannot guess without bound. A **valid pairing code is not a guess** (50 bits, once, five minutes) and signs in whatever the counters say, so when the sign-in is under attack make a pairing code from a signed-in browser or on the machine (`controller.webChat.createPairing(ownerToken)`) and use that. The owner's credential is the path a full counter closes, until the minute passes. The terminal chat is a different door and is never affected. Sign-in bodies are also read only a few at a time (8 per address, 64 in all), so a slow sender cannot hold every reader.
 
 ## Check that nothing is public
 
@@ -80,7 +100,9 @@ Do these once, and again after any network change:
 - **Lost phone:** from any other signed-in browser, **Browsers**, then **Sign out all other browsers** (this also cancels every unused pairing code); or rotate the owner's credential (`PrincipalService.issueCredential`), which ends every session on its next request; or restart the controller. In code, `controller.webChat.revokeAll(ownerId)`.
 - **Credential rotation** means the pairing and sign-in use the new credential from then on.
 - **The transcript** on the phone (your messages and the answers, last 100) is in the browser's local storage so a reload resumes. Signing out removes it. A phone whose storage is blocked still works, but cannot resume after a reload.
-- **Limits** (`webChat.limits`, `webChat.session`): 16 KiB request bodies, 300 requests a minute per session, 10 failed sign-ins a minute per address, 20 sessions, 24 h idle, 7 days absolute, a pairing code lives 5 minutes.
+- **A request that is already running when its session is revoked** is stopped before it changes anything: the chat looks at the session (and the owner's credential) again before it records a turn, before each step of a plan, before each step of an applied proposal and before a discard. Steps that were already taken stay taken (they were authorised when they ran, and a proposal applied again carries on from where it stopped).
+- **Sign a browser out in chat**, in any words ("sign my phone out", "log everything out of the web chat"), from the terminal chat or any other browser. One browser is matched by a word from its name (`Safari on iPhone`, `Firefox on Windows`); several matches are asked about, none is refused. "Which browsers are signed in?" answers from the same list. A pairing code is never shown in chat (the chat keeps its turns); make one on the Settings view or on the machine. The address, network and proxy are set when the controller starts and are not chat-changeable.
+- **Limits** (`webChat.limits`, `webChat.session`): 16 KiB request bodies, 300 requests a minute per session, 10 failed sign-ins a minute per client address and 100 in all, 8 / 64 sign-in bodies read at once, 20 sessions, 24 h idle, 7 days absolute, a pairing code lives 5 minutes.
 
 ## What this does not do
 
