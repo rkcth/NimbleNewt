@@ -119,6 +119,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Moving the controller database fences the current one and needs a restart: always a proposal with the exact preview shown first, never applied from an interpreter's words, in every profile (card F04e). Rolling it back is a proposal too.
   "database.transfer.apply": { verb: "Move the controller database (fences the current one; needs a restart)", mode: "propose" },
   "database.transfer.rollback": { verb: "Roll back a database transfer", mode: "propose" },
+  // Removing the copy an unfinished move left at a destination is a deletion: shown first in every profile, with what is there. The settings turn moves on or off and the host's automatic restart after one (card F04m).
+  "database.transfer.wipe": { verb: "Remove the copy a database move that did not finish left at a destination", mode: "propose" },
+  "database.transfer.set": { verb: "Change whether the database may be moved (enabled) and whether the host restarts the controller by itself after a move (restart)", mode: "propose" },
   "backup.restore.cancel": { verb: "Withdraw a prepared restore", mode: "apply" },
   // Release staging and activation (card K02). Staging copies verified files and changes nothing running, so it applies at once. Activating and rolling back change what runs: always shown first, the owner's word is the confirmation.
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).

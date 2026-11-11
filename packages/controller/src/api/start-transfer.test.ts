@@ -315,3 +315,114 @@ test("a PostgreSQL controller moves to a SQLite file named in the configuration,
     rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+const chatOf = (say: Record<string, unknown[]>) => ({ interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) });
+const rolePlay = async (c: Awaited<ReturnType<typeof startController>>, token: string, say: Record<string, unknown[]>, id: string, text: string, intent: Record<string, unknown>) => {
+  say[text] = [{ ...intent, evidence: text, basis: "owner" }];
+  return (await c.chat!.submit(token, { messageId: id, text })).outcomes as any[];
+};
+
+test("the host restarts the controller onto the new database by itself once the move is answered, and the very message that did the move can be sent again to the restarted controller (card F04m)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfh-"));
+  const say: Record<string, unknown[]> = {};
+  const oldPath = join(d, "c.sqlite"), newPath = join(d, "moved.sqlite"), state = join(d, "state");
+  const events: Array<{ reason: string; to: string }> = [];
+  let current: Awaited<ReturnType<typeof startController>> | undefined;
+  let restarted!: () => void;
+  const done = new Promise<void>((r) => { restarted = r; });
+  const open = async (path: string, other: { name: string; path: string }, restart: boolean) => startController({ storage: { kind: "sqlite", path }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: chatOf(say),
+    transfer: { stateDirectory: state, targets: [{ ...(await sqliteTarget({ name: other.name, path: other.path, open: () => SqliteStorage.open({ path: other.path }) })), freeBytes: async () => 1e12 }],
+      ...(restart ? { restart: { delayMs: 30, run: async (e: { reason: string; to: string }) => { events.push(e); await current!.close(); current = await open(newPath, { name: "previous", path: oldPath }, true); restarted(); } } } : {}) } } as never);
+  current = await open(oldPath, { name: "moved", path: newPath }, true);
+  try {
+    const boot = await current.services.principals.bootstrapOwner({ name: "rob" });
+    await current.api.handle(boot.token, { v: 1, op: "project.create", commandId: "p1", args: { name: "Garden" } } as never);
+    const ask = "move the database to moved";
+    const shown = await rolePlay(current, boot.token, say, "m1", ask, { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
+    const proposalId = shown[0].proposalId as string;
+    const yes = "yes, move it";
+    const answer = await rolePlay(current, boot.token, say, "m2", yes, { kind: "apply_proposal", proposalId });
+    assert.equal(answer[0].status, "applied", JSON.stringify(answer));
+    assert.match(answer[0].results[0].shown.join(" "), /moved to moved\. The host restarts the controller onto it in a moment/, "the owner is told the host restarts it");
+    assert.equal(events.length, 0, "not before the answer is out");
+    await done;
+    assert.deepEqual(events.map((e) => e.reason), ["switched"]);
+    // The restarted controller runs on the new database with the data, and the barrier is down: the owner can work at once.
+    assert.ok(JSON.stringify(await current.api.handle(boot.token, { v: 1, op: "project.list", args: {} } as never)).includes("Garden"));
+    assert.equal(((await current.api.handle(boot.token, { v: 1, op: "project.create", commandId: "p2", args: { name: "After" } } as never)) as any).ok, true);
+    // The message was resent (the client never saw an answer that the old database could keep): the move is not run again and the owner is told it was made.
+    const resent = (await current.chat!.submit(boot.token, { messageId: "m2", text: yes })).outcomes as any[];
+    assert.equal(resent[0].status, "applied", JSON.stringify(resent));
+    assert.match(resent[0].results[0].shown.join(" "), /This was already done: the database was moved to moved/);
+    assert.equal((await readAuthority(state))?.active.name, "moved");
+    // The owner asks where the database lives, in free words.
+    const where = await rolePlay(current, boot.token, say, "m3", "where does my data live now?", { kind: "status", request: { kind: "database_transfer" } });
+    const lines = JSON.stringify(where[0].lines);
+    assert.match(lines, /The controller database is/); assert.match(lines, /restarts the controller onto the new database by itself/); assert.match(lines, /last move .* to moved: switched/);
+  } finally { await current?.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("the owner turns the automatic restart off and on by chat in their own words; off, the move leaves the controller waiting for a restart (card F04m)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfo-"));
+  const say: Record<string, unknown[]> = {};
+  const newPath = join(d, "moved.sqlite");
+  const events: unknown[] = [];
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: chatOf(say), transfer: { stateDirectory: d, targets: [{ ...(await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) })), freeBytes: async () => 1e12 }], restart: { delayMs: 20, run: (e: unknown) => { events.push(e); } } } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const stop = "please don't restart yourself after you move the database, I'll do it";
+    const proposed = await rolePlay(c, boot.token, say, "s1", stop, { kind: "command", op: "database.transfer.set", args: { restart: false } });
+    assert.equal(proposed[0].status, "proposed", JSON.stringify(proposed));
+    const applied = await rolePlay(c, boot.token, say, "s2", "yes, please do that", { kind: "apply_proposal", proposalId: proposed[0].proposalId });
+    assert.equal(applied[0].status, "applied", JSON.stringify(applied));
+    const lines = JSON.stringify((await rolePlay(c, boot.token, say, "s3", "how are database moves set up?", { kind: "status", request: { kind: "database_transfer" } }))[0].lines);
+    assert.match(lines, /automatic restart is off/);
+    // A value that is not true or false is refused, and a non-owner may not change it.
+    const bad = await c.api.handle(boot.token, { v: 1, op: "database.transfer.set", commandId: "bad", args: { restart: "maybe" } } as never) as any;
+    assert.equal(bad.error.code, "invalid_command");
+    const moved = await rolePlay(c, boot.token, say, "s4", "move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
+    const done = await rolePlay(c, boot.token, say, "s5", "go ahead and move it", { kind: "apply_proposal", proposalId: moved[0].proposalId });
+    assert.match(done[0].results[0].shown.join(" "), /automatic restart is off: restart the controller yourself/);
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(events.length, 0, "the host was not asked to restart");
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("a copy a failed move left at the destination is removed by chat, in the owner's words, after a plan that shows what is there; the next move then goes through (card F04m)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfw-"));
+  const say: Record<string, unknown[]> = {};
+  const newPath = join(d, "moved.sqlite");
+  let fail = true, canEmpty = false;
+  const base = await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) });
+  const target = { ...base, freeBytes: async () => 1e12, discard: async () => { if (!canEmpty) throw new Error("not allowed yet"); rmSync(newPath, { force: true }); rmSync(`${newPath}-wal`, { force: true }); rmSync(`${newPath}-shm`, { force: true }); } };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: chatOf(say), transfer: { stateDirectory: d, targets: [target], inject: async (p: string) => { if (fail && p === "copy:audit") throw new Error("the disk went away"); } } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const first = await rolePlay(c, boot.token, say, "w1", "move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
+    const failed = await rolePlay(c, boot.token, say, "w2", "yes do it", { kind: "apply_proposal", proposalId: first[0].proposalId });
+    assert.notEqual(failed[0].status, "applied", JSON.stringify(failed));
+    assert.equal(existsSync(newPath), true, "a partial copy was left (it could not be emptied)");
+    fail = false;
+    const lines = JSON.stringify((await rolePlay(c, boot.token, say, "w3", "what happened with my database move?", { kind: "status", request: { kind: "database_transfer" } }))[0].lines);
+    assert.match(lines, /failed/); assert.match(lines, /ask to remove it/);
+    // Nothing to remove at a place that holds no copy: refused with the reason.
+    const wipe = "throw away the half-finished copy at moved";
+    const plan = await rolePlay(c, boot.token, say, "w4", wipe, { kind: "command", op: "database.transfer.wipe", args: { target: "moved" } });
+    assert.equal(plan[0].status, "proposed", JSON.stringify(plan));
+    assert.match(JSON.stringify(plan[0]), /left by a transfer that did not finish/);
+    // The destination refuses at first; the owner is told and the copy stays.
+    const refused = await rolePlay(c, boot.token, say, "w5", "yes, remove it", { kind: "apply_proposal", proposalId: plan[0].proposalId });
+    assert.notEqual(refused[0].status, "applied", JSON.stringify(refused)); assert.equal(existsSync(newPath), true);
+    canEmpty = true;
+    const removed = await rolePlay(c, boot.token, say, "w6", "try removing it again", { kind: "apply_proposal", proposalId: plan[0].proposalId });
+    assert.equal(removed[0].status, "applied", JSON.stringify(removed)); assert.equal(existsSync(newPath), false);
+    const again = await rolePlay(c, boot.token, say, "w7", "remove the copy at moved", { kind: "command", op: "database.transfer.wipe", args: { target: "moved" } });
+    assert.notEqual(again[0].status, "proposed", "an empty destination has nothing to remove"); assert.match(JSON.stringify(again), /nothing can be removed|is empty|nothing to remove/);
+    const move = await rolePlay(c, boot.token, say, "w8", "now move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
+    const ok = await rolePlay(c, boot.token, say, "w9", "yes, please do that", { kind: "apply_proposal", proposalId: move[0].proposalId });
+    assert.equal(ok[0].status, "applied", JSON.stringify(ok));
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});

@@ -1,6 +1,7 @@
 import { dirname, isAbsolute } from "node:path";
 import { canon } from "../backup/canon.js";
 import type { StatsFs } from "node:fs";
+import { rm } from "node:fs/promises";
 import type { ControllerStorage } from "../storage/types.js";
 import { PostgresStorage, discardPostgresTransferCopy, postgresDatabaseBytes } from "../storage/postgres/index.js";
 import { pendingHolder, postgresFingerprint, sqliteFingerprint, type TransferTarget } from "./transfer.js";
@@ -152,8 +153,9 @@ export async function transferTargetsFromConfig(entries: readonly unknown[], dep
         open: () => hiding(url, async () => { const store = await pg.openStorage(url, schema); if (store.createdSchema) created = true; return store; }),
         // The server's own figure for the database, against the cap the configuration gives: PostgreSQL cannot tell a client how much disk is left, so without a cap nothing is claimed.
         freeBytes: maxBytes === undefined ? async () => undefined : () => hiding(url, async () => Math.max(0, maxBytes - (await pg.databaseBytes(url)))),
-        discard: (transferId) => hiding(url, async () => {
-          if (!created) throw new Error(`the schema ${schema} was not created by this controller's own open, so it is not dropped; empty it by hand`);
+        discard: (transferId, options) => hiding(url, async () => {
+          // A leftover of an earlier run (the controller was restarted since) was not created by this process's open; the transfer proved it is a copy of a transfer that never switched, and the drop itself re-checks the state row under a lock.
+          if (!created && options?.leftover !== true) throw new Error(`the schema ${schema} was not created by this controller's own open, so it is not dropped; empty it by hand`);
           await pg.discardCopy(url, schema, pendingHolder(transferId));
           created = false; // a schema of this name made later is someone else's until an open of this target creates it again
         }),
@@ -169,6 +171,17 @@ export async function transferTargetsFromConfig(entries: readonly unknown[], dep
     names.add(name); places.set(fingerprint, i);
     out.push({
       name, kind: "sqlite", fingerprint, open: () => deps.openStorage(path),
+      // Only a file that holds a transfer's copy (its pending mark, or a state row no controller has owned) is removed, with its journal files; a database a controller used is refused.
+      discard: async (transferId) => {
+        const store = await deps.openStorage(path);
+        let ours = false;
+        try {
+          const snap = await store.snapshot();
+          try { const state = (await snap.read("state", { limit: 1 }))[0]; ours = state !== undefined && (state["holder"] === pendingHolder(transferId) || (state["holder"] === null && Number(state["epoch"]) === 0)); } finally { await snap.close(); }
+        } finally { await store.close(); }
+        if (!ours) throw new Error("the file holds another copy or a database in use (its state row is not this transfer's), so nothing was removed");
+        for (const f of [path, `${path}-wal`, `${path}-shm`]) await rm(f, { force: true });
+      },
       // The room of the file system the file will be on: the folder may not exist yet, so probe the nearest existing directory at or above the path's folder.
       freeBytes: async () => {
         let probe: string;

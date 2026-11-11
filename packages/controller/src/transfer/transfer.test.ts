@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -11,7 +11,7 @@ import { commitStateRowWhileWaiting, foreignChangeSurvives, makeForeignChange, s
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { SNAPSHOT_TABLES, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../storage/snapshot.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
-import { DatabaseTransferService, acquireStateLock, withStateLock, assertNotFenced, guardStart, postgresFingerprint, readAuthority, readJournal, recordFirstStart, sqliteFingerprint, sqliteTarget, type TransferOptions, type TransferPoint, type TransferTarget } from "./index.js";
+import { DatabaseTransferService, INTEGRITY_KEY_FILE, writeAuthority, expectEpochOnFirstTake, acquireStateLock, withStateLock, assertNotFenced, guardStart, postgresFingerprint, readAuthority, readJournal, recordFirstStart, sqliteFingerprint, sqliteTarget, type TransferOptions, type TransferPoint, type TransferTarget } from "./index.js";
 
 const AT = "2026-10-31T10:00:00.000Z";
 let serverPromise: Promise<TestServer> | undefined;
@@ -204,7 +204,7 @@ test("a crash after the fence is settled at the next start: fenced first and jou
         await assertNotFenced(st(f), source, f.src); // admitted although the holder says transferred-out
         // An authority file that names another database withdraws the admission (the files are read again under the lock).
         const authorityFile = join(st(f), "storage-authority.json");
-        writeFileSync(authorityFile, JSON.stringify({ format: 1, generation: 9, active: { kind: "sqlite", fingerprint: target.fingerprint, name: "elsewhere" }, transferId: "xfer-other", since: AT }));
+        await writeAuthority(st(f), { format: 1, generation: 9, active: { kind: "sqlite", fingerprint: target.fingerprint, name: "elsewhere" }, transferId: "xfer-other", since: AT });
         await assert.rejects(assertNotFenced(st(f), source, f.src), /not the authoritative one/);
         rmSync(authorityFile);
         // ... and the normal epoch take puts a normal holder back.
@@ -524,7 +524,7 @@ test("a transfer to a destination that was left partial, failed or abandoned nev
     await assert.rejects(guardStart(st(f), { fingerprint: target.fingerprint }), /did not complete/);
     await guardStart(st(f), { fingerprint: await sqliteFingerprint(f.srcPath) });
     // A second transfer is refused until the partial copy is emptied.
-    assert.match((await (await service(f, [target])).preview("sqlite2")).findings.map((x) => x.text).join("|"), /not empty|already holds/);
+    assert.match((await (await service(f, [target])).preview("sqlite2")).findings.map((x) => x.text).join("|"), /not empty|already holds|left by a transfer that did not finish/);
   } finally { await finish(f); }
   const g = await fixture();
   try {
@@ -876,5 +876,331 @@ test("what a destination's store says when the preview probes it reaches the own
     const broken = { snapshot: async () => { throw new Error(`relation missing on ${address} (probe-pw)`); }, close: async () => undefined } as unknown as ControllerStorage;
     const target: TransferTarget = { name: "pg", kind: "postgres", fingerprint: "postgres:db.example.com:5433/nimble#x", open: async () => broken, redact: (text) => text.split(address).join("[address hidden]").split("probe-pw").join("[address hidden]") };
     await assert.rejects((await service(f, [target])).preview("pg"), (e: Error) => { assert.match(e.message, /relation missing on \[address hidden\]/); assert.ok(!e.message.includes("probe-pw") && !e.message.includes("postgres://"), e.message); return true; });
+  } finally { await finish(f); }
+});
+
+// ------------------------------------------------------------------------------------------ card F04m: hand-over
+
+test("the journal and the authority file carry an integrity mark; a file changed by anything else, a stripped mark or a lost key is rejected; files an earlier version wrote are marked, not refused (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const svc = await service(f, [target]);
+    await svc.apply("sqlite2", (await svc.preview("sqlite2")).token);
+    const authorityPath = join(st(f), "storage-authority.json"), journalPath = join(st(f), "database-transfer-journal.json");
+    for (const path of [authorityPath, journalPath]) assert.match(JSON.parse(readFileSync(path, "utf8")).integrity, /^hmac-sha256:[0-9a-f]{64}$/, path);
+    if (process.platform !== "win32") assert.equal(statSync(join(st(f), INTEGRITY_KEY_FILE)).mode & 0o777, 0o600);
+    assert.equal((await readAuthority(st(f)))?.generation, 1, "an untouched file reads, and the mark is not part of what is returned");
+    assert.equal("integrity" in ((await readAuthority(st(f))) as object), false);
+    const original = readFileSync(authorityPath, "utf8");
+    // Edited by hand: the generation is changed.
+    writeFileSync(authorityPath, original.replace('"generation": 1', '"generation": 7'));
+    await assert.rejects(readAuthority(st(f)), /does not match its integrity mark/);
+    await assert.rejects(guardStart(st(f), { fingerprint: target.fingerprint }), /does not match its integrity mark/);
+    // Pointed at the source by hand, with the old mark kept.
+    const forged = JSON.parse(original); forged.active = { ...forged.previous };
+    writeFileSync(authorityPath, JSON.stringify(forged));
+    await assert.rejects(guardStart(st(f), { fingerprint: await sqliteFingerprint(f.srcPath) }), /integrity mark/);
+    // The mark taken off.
+    const stripped = JSON.parse(original); delete stripped.integrity;
+    writeFileSync(authorityPath, JSON.stringify(stripped));
+    await assert.rejects(readAuthority(st(f)), /has no integrity mark/);
+    // Restored: reads again. The journal is judged the same way.
+    writeFileSync(authorityPath, original);
+    assert.equal((await readAuthority(st(f)))?.generation, 1);
+    const journalText = readFileSync(journalPath, "utf8");
+    writeFileSync(journalPath, journalText.replace('"phase": "switched"', '"phase": "failed"'));
+    await assert.rejects(readJournal(st(f)), /does not match its integrity mark/);
+    await assert.rejects(guardStart(st(f), { fingerprint: target.fingerprint }), /integrity mark/);
+    writeFileSync(journalPath, journalText);
+    // A lost key leaves marked files that cannot be checked.
+    const keyPath = join(st(f), INTEGRITY_KEY_FILE), key = readFileSync(keyPath);
+    rmSync(keyPath);
+    await assert.rejects(readAuthority(st(f)), /key file is missing/);
+    writeFileSync(keyPath, key);
+    assert.equal((await readAuthority(st(f)))?.generation, 1);
+    // Files from before the mark existed: accepted while there is no key, and marked by the first write that makes one.
+    rmSync(keyPath);
+    for (const path of [authorityPath, journalPath]) { const old = JSON.parse(readFileSync(path, "utf8")); delete old.integrity; writeFileSync(path, JSON.stringify(old, null, 2)); }
+    assert.equal((await readAuthority(st(f)))?.generation, 1, "an unmarked file with no key is an old file");
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+    await guardStart(st(f), { fingerprint: target.fingerprint });
+    await withStateLock(st(f), async () => { await guardStart(st(f), { fingerprint: target.fingerprint }); });
+    // A write by this version makes the key and marks the other file too.
+    const live = await target.open();
+    try { await assertNotFenced(st(f), { fingerprint: target.fingerprint }, live); const { epoch } = await live.acquireEpoch({ holder: "c2", at: AT }); await live.applyOperation(op("restart-record", epoch, { audit: [{ type: "host.recorded", detail: {} }] })); await recordFirstStart(st(f), { fingerprint: target.fingerprint }, live); } finally { await live.close(); }
+    assert.equal(existsSync(keyPath), true);
+    assert.match(JSON.parse(readFileSync(authorityPath, "utf8")).integrity, /^hmac-sha256:/, "the other file is marked when the key is made");
+    assert.equal((await readAuthority(st(f)))?.generation, 1);
+    assert.ok((await readJournal(st(f)))?.firstStart?.digests?.["operations"]);
+    // A key that is not a key is refused rather than replaced.
+    writeFileSync(keyPath, "not a key");
+    await assert.rejects(readAuthority(st(f)), /is not a valid key/);
+  } finally { await finish(f); }
+});
+
+test("making the integrity key survives a stop at any step: a key being put in place is read, files not yet marked with it are accepted, and the next write finishes the step; a half-written key never appears under the key's name (card F04m review)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const svc = await service(f, [target]);
+    await svc.apply("sqlite2", (await svc.preview("sqlite2")).token);
+    const authorityPath = join(st(f), "storage-authority.json"), journalPath = join(st(f), "database-transfer-journal.json");
+    const keyPath = join(st(f), INTEGRITY_KEY_FILE), pendingPath = `${keyPath}.new`;
+    const marked = { authority: readFileSync(authorityPath, "utf8"), journal: readFileSync(journalPath, "utf8") };
+    // Stopped after the pending key was placed and the journal marked with it, before the authority file was marked and before the key was promoted.
+    const key = readFileSync(keyPath, "utf8");
+    rmSync(keyPath); writeFileSync(pendingPath, key, { mode: 0o600 });
+    { const old = JSON.parse(marked.authority); delete old.integrity; writeFileSync(authorityPath, JSON.stringify(old, null, 2)); }
+    assert.equal((await readAuthority(st(f)))?.generation, 1, "an unmarked file is still an old file while the key is being put in place");
+    assert.equal((await readJournal(st(f)))?.phase, "switched", "a file marked with the key being put in place reads");
+    await guardStart(st(f), { fingerprint: target.fingerprint });
+    // A mark that does not match the key being put in place is rejected, as with the key itself.
+    writeFileSync(journalPath, marked.journal.replace('"phase": "switched"', '"phase": "failed"'));
+    await assert.rejects(readJournal(st(f)), /does not match its integrity mark/);
+    writeFileSync(journalPath, marked.journal);
+    // The next write finishes: the same key becomes the key, the other file is marked, the pending name is gone.
+    await writeAuthority(st(f), (await readAuthority(st(f)))!);
+    assert.equal(readFileSync(keyPath, "utf8"), key, "the key put in place is the one the files were marked with");
+    assert.equal(existsSync(pendingPath), false);
+    assert.match(JSON.parse(readFileSync(authorityPath, "utf8")).integrity, /^hmac-sha256:/);
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+    if (process.platform !== "win32") assert.equal(statSync(keyPath).mode & 0o777, 0o600);
+    // Stopped before anything was marked, in a folder with no key at all: the first write makes the key through the pending name and leaves no temp file.
+    rmSync(keyPath);
+    for (const path of [authorityPath, journalPath]) { const old = JSON.parse(readFileSync(path, "utf8")); delete old.integrity; writeFileSync(path, JSON.stringify(old, null, 2)); }
+    await writeAuthority(st(f), (await readAuthority(st(f)))!);
+    assert.match(readFileSync(keyPath, "utf8"), /^[0-9a-f]{64}\n$/);
+    assert.deepEqual(readdirSync(st(f)).filter((n) => n.includes(INTEGRITY_KEY_FILE)), [INTEGRITY_KEY_FILE]);
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+  } finally { await finish(f); }
+});
+
+/** A copy left behind: the copy fails part way and the target cannot empty it (as a configured SQLite entry could not). */
+async function leaveACopy(f: Fixture, path: string): Promise<{ target: TransferTarget; discards: Array<{ id: string; leftover: boolean | undefined }>; refuse: { on: boolean } }> {
+  const discards: Array<{ id: string; leftover: boolean | undefined }> = [];
+  const refuse = { on: true };
+  const base = await sqliteTarget({ name: "sqlite2", path, open: () => SqliteStorage.open({ path }) });
+  const target: TransferTarget = { ...base, discard: async (id, options) => {
+    discards.push({ id, leftover: options?.leftover });
+    if (refuse.on) throw new Error("the file system refused");
+    for (const p of [path, `${path}-wal`, `${path}-shm`]) rmSync(p, { force: true });
+  } };
+  const broken = await service(f, [target], { inject: async (p) => { if (p === "copy:deliveries") throw new Error("disk went away"); } });
+  await assert.rejects(broken.apply("sqlite2", (await broken.preview("sqlite2")).token), /partial copy was not removed/);
+  return { target, discards, refuse };
+}
+
+test("a copy an earlier transfer left is emptied by the next one; the plan says so and the owner does not empty anything (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.dir, "dest.sqlite");
+    const { target, discards, refuse } = await leaveACopy(f, path);
+    const first = await readJournal(st(f));
+    assert.equal(first?.phase, "failed"); assert.equal(first?.failure?.destinationClean, false);
+    refuse.on = false; discards.length = 0;
+    const svc = await service(f, [target]);
+    const plan = await svc.preview("sqlite2");
+    assert.equal(plan.ok, true, JSON.stringify(plan.findings));
+    assert.ok(plan.findings.some((x) => x.severity === "warning" && /left by a transfer that did not finish .*emptied first/.test(x.text)), JSON.stringify(plan.findings));
+    const before = await rows(f.src);
+    const done = await svc.apply("sqlite2", plan.token);
+    assert.equal(done.restartRequired, true);
+    assert.deepEqual(discards, [{ id: first!.id, leftover: true }], "the old transfer's copy is the one emptied");
+    const dest = await target.open();
+    try { const after = await rows(dest); for (const t of SNAPSHOT_TABLES) assert.equal(after[t]!.length, before[t]!.length, t); } finally { await dest.close(); }
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+  } finally { await finish(f); }
+});
+
+test("when the left-over copy cannot be emptied the new transfer stops, says so, and the source is as it was (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const { target } = await leaveACopy(f, join(f.dir, "dest.sqlite"));
+    const svc = await service(f, [target]);
+    const before = await rows(f.src);
+    await assert.rejects(svc.apply("sqlite2", (await svc.preview("sqlite2")).token), /copy left by transfer .* was not removed from the destination \(the file system refused\)/);
+    assert.deepEqual(await rows(f.src), before); assert.equal(f.barrier.held, false);
+    assert.equal(await readAuthority(st(f)), undefined);
+  } finally { await finish(f); }
+});
+
+test("the owner's wipe of a left-over copy: a plan with a token, a wrong token refused, the copy removed, and the journal says the destination is clean; nothing is removed that is not a left-over copy (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.dir, "dest.sqlite");
+    const { target, refuse } = await leaveACopy(f, path);
+    const svc = await service(f, [target]);
+    const plan = await svc.wipePreview("sqlite2");
+    assert.equal(plan.cleanable, true); assert.match(plan.findings[0]!.text, /left by a transfer that did not finish/);
+    await assert.rejects(svc.wipe("sqlite2", "0".repeat(32)), /does not match the plan/);
+    await assert.rejects(svc.wipe("nope", plan.token), /no database called nope/);
+    refuse.on = false;
+    const gone = await svc.wipe("sqlite2", plan.token);
+    assert.equal(gone.target, "sqlite2"); assert.equal(existsSync(path), false);
+    const j = await readJournal(st(f));
+    assert.equal(j?.phase, "failed"); assert.equal(j?.failure?.destinationClean, true);
+    await assert.rejects(svc.wipePreview("sqlite2"), /is empty; there is nothing to remove/);
+    // The destination is a real database a controller owned: refused, whatever the journal says.
+    const used = await sqlTarget(f, "used.sqlite", "used");
+    const open = await used.open();
+    try { await open.acquireEpoch({ holder: "c9", at: AT }); } finally { await open.close(); }
+    const svc2 = await service(f, [used]);
+    const refused = await svc2.wipePreview("used");
+    assert.equal(refused.cleanable, false); assert.match(refused.findings[0]!.text, /a controller has already owned it/);
+    await assert.rejects(svc2.wipe("used", refused.token), /already owned/);
+    // The destination of a switched transfer, not yet started, is not a left-over: the authority names it.
+    const live = await sqlTarget(f, "live.sqlite", "live");
+    const svc3 = await service(f, [live]);
+    await svc3.apply("live", (await svc3.preview("live")).token);
+    const svc4 = new DatabaseTransferService({ storage: f.src, source: { kind: "sqlite", fingerprint: "sqlite:/elsewhere", name: "elsewhere" }, targets: () => [live], stateDirectory: st(f), barrier: new MaintenanceBarrier(), now: () => new Date(AT) });
+    const kept = await svc4.wipePreview("live");
+    assert.equal(kept.cleanable, false); assert.match(kept.findings[0]!.text, /authority file names it/);
+    await assert.rejects(svc4.wipe("live", kept.token), /authority file names it/);
+    assert.equal(existsSync(join(f.dir, "live.sqlite")), true);
+  } finally { await finish(f); }
+});
+
+test("the same command sent again after the move is answered with what was recorded and moves nothing again, also from the controller restarted on the new database (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    let opens = 0;
+    const counted: TransferTarget = { ...target, open: async () => { opens += 1; return target.open(); } };
+    const svc = await service(f, [counted]);
+    const plan = await svc.preview("sqlite2");
+    const first = await svc.apply("sqlite2", plan.token, "cmd-move-1");
+    assert.equal(first.replayed, undefined);
+    const journal = await readJournal(st(f));
+    assert.equal(journal?.appliedBy, "cmd-move-1");
+    const seen = opens;
+    const again = await svc.apply("sqlite2", plan.token, "cmd-move-1");
+    assert.equal(again.replayed, true); assert.equal(again.id, first.id); assert.equal(again.to, "sqlite2"); assert.equal(again.rows, first.rows);
+    assert.equal(opens, seen, "nothing was opened or copied again");
+    // The controller on the new database gets the very same command (a message resent after the restart): the target is now the database in use, which a new move would refuse.
+    const { svc: onNew } = await startOnDestination(f, target, { targets: () => [target] });
+    const resent = await onNew.apply("sqlite2", plan.token, "cmd-move-1");
+    assert.equal(resent.replayed, true); assert.equal(resent.id, first.id);
+    await assert.rejects(onNew.apply("sqlite2", plan.token, "cmd-other"), /that is the database in use now/);
+    // The rollback is replayed the same way.
+    const back = await onNew.rollback("cmd-back-1");
+    assert.equal(back.replayed, undefined);
+    assert.equal((await onNew.rollback("cmd-back-1")).replayed, true);
+    assert.equal((await readJournal(st(f)))?.rolledBackBy, "cmd-back-1");
+  } finally { await finish(f); }
+});
+
+test("the host's restart: asked once after the answer when it opted in and the owner has not turned it off; a refusal by the host is written down; without an opt-in nothing is scheduled (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const events: Array<{ reason: string; transferId: string; to: string }> = [];
+    let enabled = true;
+    const target = await sqlTarget(f, "dest.sqlite");
+    const svc = await service(f, [target], { restart: { run: (e) => { events.push(e); }, delayMs: 20 }, restartEnabled: async () => enabled });
+    const done = await svc.apply("sqlite2", (await svc.preview("sqlite2")).token, "cmd-1");
+    assert.equal(done.restart, "scheduled");
+    assert.equal(events.length, 0, "not before the answer is out");
+    assert.equal((await readJournal(st(f)))?.restart?.state, "requested");
+    await new Promise((r) => setTimeout(r, 120));
+    assert.deepEqual(events, [{ reason: "switched", transferId: done.id, to: "sqlite2" }]);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(events.length, 1, "once");
+    // The controller on the new database rolls back; the owner has turned the restart off.
+    enabled = false;
+    const g = await startOnDestination(f, target, { restart: { run: (e) => { events.push(e); }, delayMs: 20 }, restartEnabled: async () => enabled });
+    const back = await g.svc.rollback("cmd-b");
+    assert.equal(back.restart, "off");
+    // The move's "requested" note does not survive into the rolled-back journal, so neither the status nor a resent rollback says the host was asked (review fix).
+    assert.equal((await readJournal(st(f)))?.restart, undefined);
+    assert.equal((await g.svc.rollback("cmd-b")).restart, "not-offered");
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(events.length, 1);
+  } finally { await finish(f); }
+  const g = await fixture();
+  try {
+    const target = await sqlTarget(g, "dest.sqlite");
+    const refusing = await service(g, [target], { restart: { run: () => { throw new Error("no supervisor to restart me"); }, delayMs: 10 } });
+    await refusing.apply("sqlite2", (await refusing.preview("sqlite2")).token);
+    await new Promise((r) => setTimeout(r, 150));
+    const j = await readJournal(st(g));
+    assert.equal(j?.restart?.state, "failed"); assert.match(j?.restart?.reason ?? "", /no supervisor/);
+    assert.equal(j?.phase, "switched", "a refused restart does not undo the move");
+  } finally { await finish(g); }
+  const h = await fixture();
+  try {
+    const target = await sqlTarget(h, "dest.sqlite");
+    const plain = await service(h, [target]);
+    assert.equal((await plain.apply("sqlite2", (await plain.preview("sqlite2")).token)).restart, "not-offered");
+    assert.equal((await readJournal(st(h)))?.restart, undefined);
+  } finally { await finish(h); }
+  const i = await fixture();
+  try {
+    const target = await sqlTarget(i, "dest.sqlite");
+    const events: unknown[] = [];
+    const svc = await service(i, [target], { restart: { run: (e) => { events.push(e); }, delayMs: 50 } });
+    await svc.apply("sqlite2", (await svc.preview("sqlite2")).token);
+    svc.dispose();
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(events.length, 0, "a controller that is closing asks for no restart");
+  } finally { await finish(i); }
+});
+
+test("a write that bumps neither the audit nor the delivery counter is found by the rollback check (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const first = await service(f, [target]);
+    await first.apply("sqlite2", (await first.preview("sqlite2")).token);
+    const { svc, live, epoch } = await startOnDestination(f, target);
+    // A command with no audit record and no message: both counters stay where they were.
+    await live.applyOperation(op("quiet-write", epoch));
+    await assert.rejects(svc.rollback(), /recorded work since it started \(operations changed\)/);
+    assert.equal((await readAuthority(st(f)))?.active.fingerprint, target.fingerprint, "the move stands");
+    assert.equal((await readJournal(st(f)))?.phase, "switched");
+  } finally { await finish(f); }
+});
+
+test("the first take of the epoch fails when something took it after the holder check read it; later takes pass (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    const seen = await f.src.currentEpoch();
+    const ok = expectEpochOnFirstTake(f.src, seen);
+    const taken = await ok.acquireEpoch({ holder: "start", at: AT });
+    assert.equal(taken.epoch, seen + 1);
+    assert.equal((await ok.acquireEpoch({ holder: "again", at: AT })).epoch, seen + 2, "only the first take is guarded");
+    assert.equal(typeof ok.snapshot, "function"); await (await ok.snapshot()).close();
+    // A second start got in between.
+    const stale = expectEpochOnFirstTake(f.src, seen);
+    await assert.rejects(stale.acquireEpoch({ holder: "late", at: AT }), /another start or a database transfer took this database while this one was starting/);
+    assert.equal(expectEpochOnFirstTake(f.src, undefined), f.src);
+  } finally { await finish(f); }
+});
+
+test("a PostgreSQL copy left by a controller that has since restarted is emptied by the next transfer and by the owner's wipe, though this process did not create the schema (card F04m)", async () => {
+  const f = await fixture();
+  try {
+    // First run: the copy fails part way (after rows were written) and the schema is left because the drop is refused.
+    const first = await configuredPg(f);
+    const broken = { ...first.target, discard: async () => { throw new Error("refused for the test"); } };
+    const svcA = await service(f, [broken], { inject: async (p) => { if (p === "copy:deliveries") throw new Error("the connection dropped"); } });
+    await assert.rejects(svcA.apply("pg", (await svcA.preview("pg")).token), /partial copy was not removed/);
+    assert.equal(await postgresSchemaExists(first.url, first.schema), true);
+    // A new process: the target is built again from the same entry; its open did not create the schema.
+    const [again] = await transferTargetsFromConfig([{ name: "pg", kind: "postgres", url: { secret: "transfer.pg-url" }, schema: first.schema }], {
+      openStorage: (path) => SqliteStorage.open({ path }), statfs: async () => { throw new Error("not used"); },
+      postgres: postgresTargetDeps(async (name) => (name === "transfer.pg-url" ? first.url : undefined)),
+    });
+    const svcB = await service(f, [again!]);
+    const wipePlan = await svcB.wipePreview("pg");
+    assert.equal(wipePlan.cleanable, true, JSON.stringify(wipePlan.findings));
+    // The owner's wipe removes it.
+    await svcB.wipe("pg", wipePlan.token);
+    assert.equal(await postgresSchemaExists(first.url, first.schema), false, "the schema made for the copy is gone");
+    assert.equal((await readJournal(st(f)))?.failure?.destinationClean, true);
+    // And the next move simply works.
+    const plan = await svcB.preview("pg");
+    assert.equal(plan.ok, true, JSON.stringify(plan.findings));
+    await svcB.apply("pg", plan.token);
+    assert.equal((await readAuthority(st(f)))?.active.kind, "postgres");
   } finally { await finish(f); }
 });

@@ -14,7 +14,7 @@ const enoent = (p: string): never => { const e: NodeJS.ErrnoException = new Erro
 const temp = (): string => mkdtempSync(join(tmpdir(), "nn-tgts-"));
 const done = (dir: string): void => { rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); };
 
-test("configuration entries become working SQLite targets: names, fingerprints, an openable store, no discard (card F04l)", async () => {
+test("configuration entries become working SQLite targets: names, fingerprints, an openable store, a discard that removes only a left-over copy (cards F04l, F04m)", async () => {
   const dir = temp();
   try {
     const one = join(dir, "one.sqlite");
@@ -26,10 +26,17 @@ test("configuration entries become working SQLite targets: names, fingerprints, 
     assert.deepEqual(targets.map((t) => [t.name, t.kind]), [["one", "sqlite"], ["two-2", "sqlite"]]);
     assert.equal(targets[0]!.fingerprint, `sqlite:${await canon(one)}`);
     assert.equal(targets[1]!.fingerprint, `sqlite:${await canon(two)}`);
-    assert.equal(targets[0]!.discard, undefined, "no discard: the host empties a failed destination");
     const store = await targets[0]!.open();
     await store.close();
     assert.ok(existsSync(one), "open() made a SQLite database at the entry's path");
+    // An empty file no controller owned (or the pending copy of the named transfer) is removed with its journal files; a database a controller used never is.
+    await targets[0]!.discard!("xfer-1", { leftover: true });
+    assert.equal(existsSync(one), false, "an empty destination file is removed");
+    const used = await targets[0]!.open();
+    await used.acquireEpoch({ holder: "controller", at: "2026-11-10T10:00:00.000Z" });
+    await used.close();
+    await assert.rejects(targets[0]!.discard!("xfer-1", { leftover: true }), /another copy or a database in use/);
+    assert.ok(existsSync(one), "a database a controller owned stays");
   } finally { done(dir); }
 });
 
