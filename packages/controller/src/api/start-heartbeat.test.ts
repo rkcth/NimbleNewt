@@ -17,13 +17,27 @@ test("a controller started under the launcher (heartbeat variables in its enviro
   const lines: string[] = [];
   try {
     const file = join(d, "hb.json");
+    let closed = false;
     const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: { [HEARTBEAT_ENV.file]: file, [HEARTBEAT_ENV.token]: TOKEN, [HEARTBEAT_ENV.intervalMs]: "1000" }, print: (l) => lines.push(l), facts: supported, filesystem: ext4, features: [], harnesses: [] });
     try {
       let r = await readHeartbeat(file);
       for (let i = 0; i < 100 && r.kind !== "beat"; i++) { await new Promise((x) => setTimeout(x, 30)); r = await readHeartbeat(file); }
       assert.equal(r.kind, "beat");
       assert.equal((r as { record: { token: string } }).record.token, TOKEN);
-    } finally { await c.close(); }
+      // A clean stop that takes a while (here the database closing for 2.5 s) keeps beating until it is done: the launcher must not take a slow, orderly stop for a hang.
+      const store = c.storage as unknown as { close: () => Promise<void> };
+      const realClose = store.close.bind(store);
+      store.close = async () => { await new Promise((x) => setTimeout(x, 2500)); await realClose(); };
+      const seqAt = async (): Promise<number> => { const b = await readHeartbeat(file); return b.kind === "beat" ? b.record.seq : -1; };
+      closed = true;
+      const closing = c.close();
+      await new Promise((x) => setTimeout(x, 300));
+      const early = await seqAt();
+      await new Promise((x) => setTimeout(x, 1800));
+      const late = await seqAt();
+      await closing;
+      assert.ok(late > early, `the beat continues while the stop is in progress (${early} -> ${late})`);
+    } finally { if (!closed) await c.close(); }
     const after = await readHeartbeat(file);
     await new Promise((x) => setTimeout(x, 1300));
     assert.deepEqual(await readHeartbeat(file), after, "closed: no more beats");

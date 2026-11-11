@@ -27,6 +27,9 @@ const behavior = ${JSON.stringify(behavior)};
 appendFileSync(process.env.NN_PIDS + "/" + id + ".pids", process.pid + "\\n");
 const confirm = async () => { try { await launcher.confirm(id); } catch {} };
 const keep = () => setInterval(() => {}, 1000);
+appendFileSync(process.env.NN_PIDS + "/" + id + ".env", (process.env.NIMBLENEWT_HEARTBEAT_FILE ?? "none") + "\\n");
+const hb = async () => { const { HeartbeatWriter } = await import(process.env.NN_HB); return HeartbeatWriter.start({ file: process.env.NIMBLENEWT_HEARTBEAT_FILE, token: process.env.NIMBLENEWT_HEARTBEAT_TOKEN, intervalMs: Number(process.env.NIMBLENEWT_HEARTBEAT_INTERVAL_MS) }); };
+const busy = (ms) => { const end = Date.now() + ms; while (Date.now() < end) {} };
 if (behavior === "exit0") process.exit(0);
 if (behavior === "secret") console.log(process.env.NN_SECRET);
 if (behavior === "orphan-crash") {
@@ -52,6 +55,18 @@ else if (behavior === "restart-once") {
   appendFileSync(process.env.NN_PIDS + "/" + id + ".gpids", g.pid + "\\n");
   keep();
 } else if (behavior === "hang") keep();
+else if (behavior === "beat") { await confirm(); await hb(); keep(); }
+else if (behavior === "slow-beat") { await confirm(); await hb(); setInterval(() => busy(2500), 3000); keep(); }
+else if (behavior === "hang-always") { await confirm(); await hb(); setTimeout(() => { for (;;) {} }, 1000); keep(); }
+else if (behavior === "hang-once") {
+  // A controller with its own SIGTERM handler (exit 0, as a clean stop would): while its loop is blocked the handler cannot run; once the block ends it does.
+  const { existsSync, writeFileSync } = await import("node:fs");
+  const mark = process.env.NN_PIDS + "/" + id + ".hung";
+  process.on("SIGTERM", () => process.exit(0));
+  await confirm(); await hb();
+  if (!existsSync(mark)) { writeFileSync(mark, "1"); setTimeout(() => busy(12000), 1000); }
+  keep();
+}
 else if (behavior === "slow-confirm") { setTimeout(confirm, 800); keep(); }
 else if (behavior.startsWith("crash-after:")) { await confirm(); setTimeout(() => process.exit(1), Number(behavior.slice(12))); keep(); }
 else { await confirm(); keep(); }
@@ -111,7 +126,7 @@ async function world(body: (w: World) => Promise<void>): Promise<void> {
       const ac = new AbortController();
       const sup = new Supervisor({
         launcher, signal: ac.signal, pollMs: 10, graceMs: 2000, stdio: "ignore",
-        child: (release) => ({ command: process.execPath, args: [join(release.dir, "controller.js")], env: { ...process.env, NN_ROOT: root, NN_DIST: DIST, NN_ACTIVATION: pathToFileURL(join(import.meta.dirname, "activation.js")).href, NN_PIDS: pids, NN_SECRET: SECRET } }),
+        child: (release) => ({ command: process.execPath, args: [join(release.dir, "controller.js")], env: { ...process.env, NN_ROOT: root, NN_DIST: DIST, NN_ACTIVATION: pathToFileURL(join(import.meta.dirname, "activation.js")).href, NN_PIDS: pids, NN_SECRET: SECRET, NN_HB: pathToFileURL(join(import.meta.dirname, "heartbeat.js")).href } }),
         log: (l) => lines.push(l), onEvent: (e) => events.push(e),
         sleep: async (ms) => { delays.push(ms); },
         ...extra,
@@ -454,4 +469,111 @@ test("one launcher per release root: a second one exits 5 and starts nothing whi
     assert.ok(two !== undefined, "a stale file is replaced");
     await two.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** The liveness tests run the heartbeat on a clock five times faster than real time: the 30 s minimum threshold is 6 s of real time, the writer still beats every real second. */
+const FAST = { monotonic: (): number => performance.now() * 5, pollMs: 50, staleAfterMs: 30_000, intervalMs: 1000 } as const;
+const runFiles = (w: World): string[] => { try { return readdirSync(join(w.root, "run")).sort(); } catch { return []; } };
+
+test("a confirmed controller that beats and then blocks its event loop is found hung, stopped and started again; the owner is told; nothing is quarantined; a SIGTERM handler's exit 0 is not a stop on purpose (K02 heartbeat)", async () => {
+  await world(async (w) => {
+    const a = await w.release("hang-once", "hang-once");
+    await w.point(a);
+    const run = w.start({ graceMs: 12_000, heartbeat: FAST });
+    await w.waitFor("the restart after the hang", () => w.events.filter((e) => e.kind === "started").length === 2 && w.pidsOf(a).length === 2, 60_000);
+    const [first, second] = w.pidsOf(a);
+    await w.waitFor("the hung child to be gone", () => !alive(first!));
+    assert.ok(alive(second!), "the same release runs again");
+    assert.deepEqual(kinds(w).filter((k) => k !== "judged"), [`started:${a.id}`, "hung", "stopping", `exited:${a.id}`, "waiting", `started:${a.id}`], JSON.stringify(w.events));
+    const hung = w.events.find((e) => e.kind === "hung") as { quietMs: number; thresholdMs: number };
+    assert.equal(hung.thresholdMs, 30_000);
+    assert.ok(hung.quietMs >= 30_000);
+    assert.equal((w.events.find((e) => e.kind === "stopping") as { why: string }).why, "hung");
+    assert.equal((w.events.find((e) => e.kind === "exited") as { code: number | null }).code, 0, "the handler ran once the block ended and exited 0");
+    assert.deepEqual(w.events.find((e) => e.kind === "waiting"), { kind: "waiting", ms: 1000, failures: 1 }, `counted as a short run: ${JSON.stringify(w.events)}`);
+    const st = w.state();
+    assert.equal(st.known.id, a.id, "still the last known good");
+    assert.deepEqual(st.failed, [], "never quarantined");
+    assert.ok(st.notices.some((n: any) => n.kind === "failed_start" && n.release === a.id && n.fallback === true && /stopped responding/.test(n.reason)), "the owner's notice");
+    assert.ok(w.lines.some((l) => /is hung: no sign of life/.test(l)));
+    // each start had its own private file under <root>/run; the hung one's is gone
+    const envLines = (): string[] => { try { return readFileSync(join(w.pids, `${a.id}.env`), "utf8").split("\n").filter(Boolean); } catch { return []; } };
+    await w.waitFor("the second start's environment", () => envLines().length === 2);
+    const files = envLines();
+    assert.notEqual(files[0], files[1], "a new file and token per start");
+    for (const f of files) assert.ok(f.startsWith(join(w.root, "run", "heartbeat-")), f);
+    await w.waitFor("the new start's first beat", () => runFiles(w).length === 1);
+    assert.deepEqual(runFiles(w), [files[1]!.slice(join(w.root, "run").length + 1)], JSON.stringify({ files, run: runFiles(w) }));
+    run.stop();
+    assert.equal((await run.done).code, SUPERVISOR_EXIT.stopped);
+    assert.deepEqual(runFiles(w), [], "removed when the child is gone");
+  });
+});
+
+test("a controller that beats normally, one that beats slowly under load, and one that never beats (an older release) are never stopped (K02 heartbeat)", async () => {
+  const one = (tag: string, behavior: string, check: (w: World) => void) => world(async (w) => {
+    const a = await w.release(tag, behavior);
+    await w.point(a);
+    const run = w.start({ heartbeat: FAST });
+    await w.waitFor("the confirmation", () => w.state().known?.id === a.id);
+    // 10 s of real time is 50 s on the heartbeat's clock: well past the 30 s threshold
+    await new Promise((r) => setTimeout(r, 10_000));
+    assert.deepEqual(kinds(w), [`started:${a.id}`], `${tag}: nothing but the start`);
+    assert.ok(alive(w.pidsOf(a)[0]!));
+    check(w);
+    run.stop();
+    assert.equal((await run.done).code, SUPERVISOR_EXIT.stopped);
+    assert.deepEqual(runFiles(w), []);
+  });
+  await Promise.all([
+    one("beat", "beat", (w) => assert.equal(runFiles(w).length, 1, "it beats")),
+    one("slow", "slow-beat", (w) => assert.equal(runFiles(w).length, 1, "it beats")),
+    one("never", "confirm", (w) => assert.deepEqual(runFiles(w), [], "no beat: unsupported, left alone")),
+  ]);
+});
+
+test("a controller that always hangs, or (with firstBeatMs) never beats, ends in the crash-loop exit 4 through the backoff; never quarantined; the launcher's own heartbeat variables replace inherited ones; heartbeat off sets none (K02 heartbeat)", async () => {
+  await Promise.all([
+    world(async (w) => {
+      const a = await w.release("always", "hang-always");
+      await w.point(a);
+      const run = w.start({ graceMs: 500, heartbeat: FAST, backoff: { giveUpAfter: 2 } });
+      const result = await run.done;
+      assert.equal(result.code, SUPERVISOR_EXIT.crashLoop);
+      assert.equal(w.events.filter((e) => e.kind === "hung").length, 2);
+      assert.deepEqual(w.delays, [1000]);
+      assert.deepEqual(w.state().failed, []);
+      assert.equal(w.state().known.id, a.id);
+      assert.ok(w.state().notices.some((n: any) => n.kind === "failed_start" && n.fallback === false && /gave up/.test(n.reason)), "the crash-loop notice");
+      assert.deepEqual(runFiles(w), []);
+    }),
+    world(async (w) => {
+      const a = await w.release("silent", "confirm");
+      await w.point(a);
+      const run = w.start({ graceMs: 500, heartbeat: { ...FAST, firstBeatMs: 1 }, backoff: { giveUpAfter: 2 } });
+      const result = await run.done;
+      assert.equal(result.code, SUPERVISOR_EXIT.crashLoop);
+      const hung = w.events.filter((e) => e.kind === "hung") as { thresholdMs: number }[];
+      assert.equal(hung.length, 2);
+      assert.equal(hung[0]!.thresholdMs, 30_000, "a first beat is never required sooner than the stale limit");
+      assert.deepEqual(w.state().failed, []);
+    }),
+    world(async (w) => {
+      const a = await w.release("inherit", "confirm");
+      await w.point(a);
+      const victim = join(w.root, "victim.json");
+      const base = { ...process.env, NN_ROOT: w.root, NN_DIST: DIST, NN_ACTIVATION: pathToFileURL(join(import.meta.dirname, "activation.js")).href, NN_PIDS: w.pids, NIMBLENEWT_HEARTBEAT_FILE: victim, NIMBLENEWT_HEARTBEAT_TOKEN: "planted-token-123" };
+      const run = w.start({ heartbeat: FAST, child: (release) => ({ command: process.execPath, args: [join(release.dir, "controller.js")], env: base }) });
+      await w.waitFor("the confirmation", () => w.state().known?.id === a.id);
+      run.stop();
+      await run.done;
+      const off = w.start({ heartbeat: false, child: (release) => ({ command: process.execPath, args: [join(release.dir, "controller.js")], env: base }) });
+      await w.waitFor("the second start", () => w.pidsOf(a).length === 2);
+      off.stop();
+      await off.done;
+      const files = readFileSync(join(w.pids, `${a.id}.env`), "utf8").split("\n").filter(Boolean);
+      assert.ok(files[0]!.startsWith(join(w.root, "run", "heartbeat-")), "the launcher's own file, not the inherited one");
+      assert.equal(files[1], "none", "heartbeat off: no variables at all");
+    }),
+  ]);
 });

@@ -5,6 +5,7 @@ import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { HEARTBEAT_ENV, HEARTBEAT_STALE_BOUNDS, HeartbeatError, planLiveness, sweepHeartbeats, type HungResult, type LivenessPlan } from "./heartbeat.js";
 import type { Launcher, WatchdogResult } from "./launcher.js";
 
 /**
@@ -34,8 +35,13 @@ import type { Launcher, WatchdogResult } from "./launcher.js";
  *   runs again (with a full window) at the next launch.
  * - Logs name release IDs, process IDs, exit codes, signals and the launcher's own reasons only: never the environment, the arguments' values or the child's output (the child's output goes where `stdio` says).
  *
- * Known gap: a last known good that hangs (runs, but stops working) is never detected: its start counts as confirmed, so the watchdog has nothing to judge, and the launcher only sees exits. Detecting it needs a
- * liveness signal from the controller (a heartbeat), which is a change to the controller.
+ * - Liveness (card K02 heartbeat, `heartbeat.ts`): every child gets a private heartbeat file under `<root>/run` (`planLiveness`) and a watch beside the startup watchdog. It counts only once the start is
+ *   confirmed (the last known good at once, since `prepare()` pre-marks it). A `hung` verdict (the counter stood still for the threshold) stops the child with the same SIGTERM -> SIGKILL ladder, writes the owner's
+ *   notice (`Launcher.noteHung`) and starts the same release again through `prepare()`; the hang counts as a short run whatever its length, so a controller that always hangs ends in the crash-loop exit 4. A hang
+ *   never quarantines a release and never changes the last known good. A child that never beats is `unsupported` (an older release) and left running, unless `heartbeat.firstBeatMs` says a beat must come.
+ *   A heartbeat that cannot be prepared (an unsafe directory) only turns it off for that start. The file and any temporary are removed when the child is gone, on every path.
+ *
+ * Known gap: a controller whose event loop turns but whose work is stuck (a deadlocked await, a wedged worker thread) is not "hung" by this measure.
  */
 export const SUPERVISOR_EXIT = { stopped: 0, blocked: 2, noRelease: 3, crashLoop: 4, locked: 5 } as const;
 /** The controller's side of the contract: the exit codes that mean something to the launcher. Any other code (and any signal) is a crash. */
@@ -50,7 +56,8 @@ export type SupervisorEvent =
   | { readonly kind: "started"; readonly releaseId: string; readonly pid: number | undefined; readonly fellBackFrom?: string }
   | { readonly kind: "exited"; readonly releaseId: string; readonly code: number | null; readonly signal: string | null; readonly spawnFailed: boolean; readonly ranMs: number }
   | { readonly kind: "judged"; readonly releaseId: string; readonly verdict: WatchdogResult["action"]; readonly reason?: string }
-  | { readonly kind: "stopping"; readonly releaseId: string; readonly why: "watchdog" | "shutdown" }
+  | { readonly kind: "stopping"; readonly releaseId: string; readonly why: "watchdog" | "shutdown" | "hung" }
+  | { readonly kind: "hung"; readonly releaseId: string; readonly quietMs: number; readonly thresholdMs: number }
   | { readonly kind: "killed"; readonly releaseId: string }
   | { readonly kind: "leftovers"; readonly releaseId: string; readonly killed: boolean }
   | { readonly kind: "waiting"; readonly ms: number; readonly failures: number }
@@ -75,6 +82,12 @@ export interface SupervisorOptions {
   readonly monotonic?: () => number;
   /** Waits between restarts, ending early on abort (replaceable in tests). */
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * The liveness heartbeat (on by default; `false` turns it off). `dir` defaults to `<release root>/run`. `staleAfterMs` (default 120 s, at least 30 s) and the writer's `intervalMs` (default 5 s, 1 to 60 s) are
+   * bounded in `heartbeat.ts`; `firstBeatMs` (unset by default: a child that never beats is left alone) makes a confirmed start that has not beaten within it count as hung. `monotonic` defaults to this
+   * supervisor's clock; `pollMs` to a sixth of the threshold, at most 5 s.
+   */
+  readonly heartbeat?: false | { readonly dir?: string; readonly staleAfterMs?: number; readonly intervalMs?: number; readonly firstBeatMs?: number; readonly pollMs?: number; readonly monotonic?: () => number };
 }
 
 export interface SupervisorResult { readonly code: number; readonly reason: string }
@@ -93,7 +106,7 @@ const signallable = (pgid: number | undefined): pgid is number => pgid !== undef
 const groupAlive = (pgid: number): boolean => { try { process.kill(-pgid, 0); return true; } catch { return false; } };
 
 interface Exit { readonly code: number | null; readonly signal: string | null; readonly spawnFailed: boolean }
-type Outcome = { readonly kind: "shutdown" } | { readonly kind: "gone"; readonly exit: Exit; readonly judged: boolean };
+type Outcome = { readonly kind: "shutdown" } | { readonly kind: "gone"; readonly exit: Exit; readonly judged: boolean; readonly hung: boolean };
 
 /** The lock that keeps one launcher per release root. `fd` (POSIX only) is handed to the controller so an orphaned controller keeps the root locked. */
 export interface RootLock { readonly fd: number | undefined; close(): Promise<void> }
@@ -151,6 +164,22 @@ export class Supervisor {
   #emit(e: SupervisorEvent): void { try { this.#o.onEvent?.(e); } catch { /* an observer never stops the launcher */ } }
   #end(code: number, reason: string): SupervisorResult { this.#emit({ kind: "ended", code, reason }); this.#say(`launcher ends (${code}): ${reason}`); return { code, reason }; }
   #grace(): number { return Math.min(MAX_TIMER_MS, Math.max(0, this.#o.graceMs ?? 10_000)); }
+  #heartbeatDir(): string | undefined { const h = this.#o.heartbeat; return h === false ? undefined : resolve(h?.dir ?? join(this.#o.root ?? this.#o.launcher.root, "run")); }
+
+  /** Prepares the heartbeat for one start; undefined (logged) when it is off or cannot be prepared: the child then runs without it, as an older release would. */
+  async #liveness(releaseId: string): Promise<LivenessPlan | undefined> {
+    const h = this.#o.heartbeat;
+    const dir = this.#heartbeatDir();
+    if (h === false || dir === undefined) return undefined;
+    try {
+      return await planLiveness({ dir, releaseId, monotonic: h?.monotonic ?? this.#mono, ...(h?.staleAfterMs === undefined ? {} : { staleAfterMs: h.staleAfterMs }), ...(h?.intervalMs === undefined ? {} : { intervalMs: h.intervalMs }),
+        // A first beat may never be required sooner than a stall would be judged.
+        ...(h?.firstBeatMs === undefined ? {} : { firstBeatMs: Math.max(h.firstBeatMs, h.staleAfterMs ?? 0, HEARTBEAT_STALE_BOUNDS.min) }) });
+    } catch (error) {
+      this.#say(`the liveness heartbeat is off for this start: ${error instanceof HeartbeatError ? error.message : "its directory cannot be prepared"}`);
+      return undefined;
+    }
+  }
 
   async run(): Promise<SupervisorResult> {
     const o = this.#o;
@@ -159,6 +188,9 @@ export class Supervisor {
       lock = await lockRoot(o.root);
       if (lock === undefined) return this.#end(SUPERVISOR_EXIT.locked, "another launcher, or a controller a launcher started, is still running for this release root; nothing was started");
       this.#lockFd = lock.fd;
+      // Holding the lock, no controller of another launcher writes here: what earlier starts left (a launcher killed outright never cleaned up) goes.
+      const dir = this.#heartbeatDir();
+      if (dir !== undefined) await sweepHeartbeats(dir).catch(() => 0);
     }
     try { return await this.#loop(); } finally { this.#lockFd = undefined; await lock?.close(); }
   }
@@ -187,10 +219,11 @@ export class Supervisor {
         if (await this.#confirmed(d.releaseId)) return this.#end(SUPERVISOR_EXIT.stopped, `${d.releaseId} stopped on purpose (exit 0 after its start was confirmed); not restarted`);
         this.#say(`${d.releaseId} exited 0 before its start was confirmed: a failed start`);
       } else if (!e.spawnFailed && e.signal === null && e.code === CONTROLLER_EXIT.restart) this.#say(`${d.releaseId} asked to be restarted`);
-      failures = ranMs >= stableMs ? 0 : failures + 1;
+      // A hang counts as a short run however long the run was: a controller that always hangs after a while is a loop too, and must end in the visible exit 4, not restart forever.
+      failures = !outcome.hung && ranMs >= stableMs ? 0 : failures + 1;
       if (failures >= giveUpAfter) {
-        const reason = `${failures} runs in a row ended within ${stableMs} ms`;
-        try { await o.launcher.noteCrashLoop(d.releaseId, `${failures} times in a row within ${Math.round(stableMs / 1000)} s of starting`); } catch { this.#say("the crash-loop notice could not be written"); }
+        const reason = `${failures} runs in a row ended within ${stableMs} ms or hung`;
+        try { await o.launcher.noteCrashLoop(d.releaseId, `${failures} times in a row within ${Math.round(stableMs / 1000)} s of starting or by hanging`); } catch { this.#say("the crash-loop notice could not be written"); }
         return this.#end(SUPERVISOR_EXIT.crashLoop, `${reason}; giving up so the loop is visible`);
       }
       if (failures > 0) {
@@ -226,16 +259,25 @@ export class Supervisor {
 
   /** Starts one child and returns when it is gone (it exited, or was stopped after a verdict or a shutdown), with nothing of its process group left. */
   async #runOne(release: RunningRelease, fellBackFrom: string | undefined): Promise<Outcome> {
+    const spec = this.#o.child(release);
+    const live = await this.#liveness(release.releaseId);
+    try { return await this.#runChild(release, fellBackFrom, spec, live); } finally { await live?.cleanup().catch(() => undefined); }
+  }
+
+  async #runChild(release: RunningRelease, fellBackFrom: string | undefined, spec: ChildSpec, live: LivenessPlan | undefined): Promise<Outcome> {
     const o = this.#o;
-    const spec = o.child(release);
     const posix = process.platform !== "win32";
+    // The heartbeat variables come from this launcher only: inherited ones (from whoever started the launcher) are dropped, so the child never writes where someone else pointed it.
+    const env: NodeJS.ProcessEnv = { ...(spec.env ?? process.env) };
+    for (const k of Object.values(HEARTBEAT_ENV)) delete env[k];
+    Object.assign(env, live?.env ?? {}, { NIMBLENEWT_RUNNING_RELEASE: release.releaseId });
     const startedAt = this.#mono();
     let child: ChildProcess | undefined;
     let exited = false;
     const out = o.stdio ?? "inherit";
     const exit = new Promise<Exit>((resolve) => {
       try {
-        child = spawn(spec.command, [...spec.args], { cwd: spec.cwd ?? release.dir, env: { ...(spec.env ?? process.env), NIMBLENEWT_RUNNING_RELEASE: release.releaseId }, stdio: ["ignore", out, out, ...(this.#lockFd === undefined ? [] : [this.#lockFd])], detached: posix, windowsHide: true });
+        child = spawn(spec.command, [...spec.args], { cwd: spec.cwd ?? release.dir, env, stdio: ["ignore", out, out, ...(this.#lockFd === undefined ? [] : [this.#lockFd])], detached: posix, windowsHide: true });
       } catch { exited = true; resolve({ code: null, signal: null, spawnFailed: true }); return; }
       // `exited` is set in the very callback that reaps the child, so the leader is never signalled after its pid could have been given to another process.
       child.once("error", () => { if (!exited) { exited = true; resolve({ code: null, signal: null, spawnFailed: true }); } });
@@ -253,9 +295,9 @@ export class Supervisor {
       if (r.status !== 0 && !exited) { try { child?.kill(sig); } catch { /* already gone */ } }
     };
     /** SIGTERM to the child's group, SIGKILL to what is left after the grace. */
-    const stop = async (why: "watchdog" | "shutdown"): Promise<Exit> => {
+    const stop = async (why: "watchdog" | "shutdown" | "hung"): Promise<Exit> => {
       this.#emit({ kind: "stopping", releaseId: release.releaseId, why });
-      this.#say(`stopping ${release.releaseId} (${why === "watchdog" ? "the startup watchdog judged it failed" : "shutdown"})`);
+      this.#say(`stopping ${release.releaseId} (${why === "watchdog" ? "the startup watchdog judged it failed" : why === "hung" ? "the liveness heartbeat found it hung" : "shutdown"})`);
       const wasGone = exited;
       signalRunning("SIGTERM");
       const grace = this.#grace();
@@ -295,6 +337,18 @@ export class Supervisor {
       this.#say(`the startup watchdog could not run: ${error instanceof Error ? error.name : "error"}`);
       return undefined;
     });
+    // The liveness watch: resolves only with a hang (never on abort or an error, which leave the child to the exit and the watchdog).
+    const never = new Promise<never>(() => undefined);
+    const hungP: Promise<HungResult> = live === undefined || exited ? never : live.watch({ confirmed: () => this.#confirmed(release.releaseId), signal: controller.signal, ...(o.heartbeat === false || o.heartbeat?.pollMs === undefined ? {} : { pollMs: o.heartbeat.pollMs }) })
+      .then((h) => h ?? never, () => never);
+    const hungStop = async (h: HungResult): Promise<Exit> => {
+      this.#emit({ kind: "hung", releaseId: release.releaseId, quietMs: h.quietMs, thresholdMs: h.thresholdMs });
+      this.#say(`${release.releaseId} is hung: ${h.reason}`);
+      const e = await stop("hung");
+      // The owner's notice; never a quarantine, never a change to the last known good: the same release is started again (through the backoff).
+      try { await o.launcher.noteHung(release.releaseId, h.reason); } catch { this.#say("the hang notice could not be written"); }
+      return e;
+    };
     const shutdown = async (): Promise<Outcome> => {
       const result = await stop("shutdown");
       this.#gone(release, result, startedAt);
@@ -302,11 +356,14 @@ export class Supervisor {
       return { kind: "shutdown" };
     };
     try {
-      const first = await Promise.race([exit.then((e) => ({ at: "exit" as const, e })), verdict.then((v) => ({ at: "verdict" as const, v })), shutdownP]);
+      const hungAt = hungP.then((h) => ({ at: "hung" as const, h }));
+      const first = await Promise.race([exit.then((e) => ({ at: "exit" as const, e })), verdict.then((v) => ({ at: "verdict" as const, v })), shutdownP, hungAt]);
       if (first.at === "shutdown") return await shutdown();
       let result: Exit;
       let judged = false;
+      let hung = false;
       if (first.at === "exit") { result = first.e; await leftovers(); }
+      else if (first.at === "hung") { judged = true; hung = true; result = await hungStop(first.h); }
       else {
         const v = first.v;
         if (v !== undefined && v.action !== "none") this.#emit({ kind: "judged", releaseId: release.releaseId, verdict: v.action, ...("reason" in v ? { reason: v.reason } : {}) });
@@ -315,14 +372,14 @@ export class Supervisor {
           result = await stop("watchdog");
         } else {
           // Confirmed, late, or nothing to judge: the child runs until it ends (or the launcher is told to stop).
-          const next = await Promise.race([exit.then((e) => ({ at: "exit" as const, e })), shutdownP]);
+          const next = await Promise.race([exit.then((e) => ({ at: "exit" as const, e })), shutdownP, hungAt]);
           if (next.at === "shutdown") return await shutdown();
-          result = next.e;
-          await leftovers();
+          if (next.at === "hung") { judged = true; hung = true; result = await hungStop(next.h); }
+          else { result = next.e; await leftovers(); }
         }
       }
       this.#gone(release, result, startedAt);
-      return { kind: "gone", exit: result, judged };
+      return { kind: "gone", exit: result, judged, hung };
     } finally {
       controller.abort();
       o.signal?.removeEventListener("abort", onShutdown);

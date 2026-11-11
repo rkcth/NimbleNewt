@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants as fsc } from "node:fs";
-import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 /**
@@ -28,7 +28,7 @@ import { performance } from "node:perf_hooks";
  * renamed over it (a rename replaces a symlink, it never follows it); the reader refuses a symlink (`O_NOFOLLOW` and `lstat`), anything but a regular file of at most `HEARTBEAT_MAX_BYTES`, and a file owned by
  * another user. A symlink among the parent directory's own ancestors is not checked (the directory itself is).
  *
- * Supervisor hook (to be wired when K02a merges; this module does not import the supervisor): see `planLiveness`.
+ * Supervisor hook: `planLiveness`, wired into `Supervisor` (`supervisor.ts`, option `heartbeat`).
  */
 
 export const HEARTBEAT_ENV = { file: "NIMBLENEWT_HEARTBEAT_FILE", token: "NIMBLENEWT_HEARTBEAT_TOKEN", intervalMs: "NIMBLENEWT_HEARTBEAT_INTERVAL_MS" } as const;
@@ -37,6 +37,10 @@ export const HEARTBEAT_INTERVAL_BOUNDS = { min: 1_000, max: 60_000 } as const;
 export const DEFAULT_HEARTBEAT_STALE_MS = 120_000;
 export const HEARTBEAT_STALE_BOUNDS = { min: 30_000, max: 3_600_000 } as const;
 export const HEARTBEAT_MAX_BYTES = 512;
+/** Every record is padded to this size (JSON allows the trailing spaces), so a record can be overwritten in place without the file growing or shrinking. */
+export const HEARTBEAT_RECORD_BYTES = 128;
+/** The names `planLiveness` gives its files and the writer its temporaries (`sweepHeartbeats` removes leftovers of either). */
+const FILE_NAME = /^heartbeat-[0-9a-f]{12}\.json(\.\d{1,10}\.tmp)?$/;
 const TOKEN = /^[A-Za-z0-9_-]{8,64}$/;
 const getuid = (): number | undefined => (typeof process.getuid === "function" ? process.getuid() : undefined);
 
@@ -89,7 +93,8 @@ export async function readHeartbeat(file: string): Promise<HeartbeatRead> {
     if (l instanceof Error) return { kind: "unusable", why: "the file cannot be examined" };
     if (l.isSymbolicLink()) return { kind: "unusable", why: "the file is a symbolic link" };
     if (!l.isFile()) return { kind: "unusable", why: "the file is not a regular file" };
-    const handle = await open(file, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0));
+    // O_NONBLOCK: a FIFO swapped in after the lstat must not block the reader (it is then refused by the fstat below).
+    const handle = await open(file, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0) | (fsc.O_NONBLOCK ?? 0));
     try {
       const st = await handle.stat();
       if (!st.isFile()) return { kind: "unusable", why: "the file is not a regular file" };
@@ -164,14 +169,39 @@ export class HeartbeatWriter {
   }
 
   async #write(): Promise<void> {
-    const text = `${JSON.stringify({ v: 1, seq: this.#seq, token: this.#token, intervalMs: this.#intervalMs })}\n`;
+    const json = JSON.stringify({ v: 1, seq: this.#seq, token: this.#token, intervalMs: this.#intervalMs });
+    const text = `${json.padEnd(HEARTBEAT_RECORD_BYTES - 1, " ")}\n`;
+    try { await this.#replace(text); } catch (error) {
+      // A full disk (or a directory that no longer takes new files) cannot hold a new file, but the record already there can be overwritten in place: the same size, so no new space is needed. Without this a
+      // controller on a full disk would look hung and be restarted again and again, while it may be the one telling the owner that the disk is full.
+      if (!(await this.#overwrite(text))) throw error;
+    }
+  }
+
+  /** The usual write: a new file created exclusively (never through a link), then renamed over the target (a rename replaces a link, it never follows it). */
+  async #replace(text: string): Promise<void> {
     const tmp = `${this.#file}.${process.pid}.tmp`;
     const stale = await lstat(tmp).catch(() => undefined);
     if (stale !== undefined) { if (!stale.isFile()) throw Object.assign(new Error("tmp"), { code: "EEXIST" }); await unlink(tmp); }
     // Exclusive creation with O_NOFOLLOW: never writes through a link someone put there.
     const handle = await open(tmp, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | (fsc.O_NOFOLLOW ?? 0), 0o600);
-    try { await handle.writeFile(text); } finally { await handle.close(); }
-    try { await rename(tmp, this.#file); } catch (error) { await unlink(tmp).catch(() => undefined); throw error; }
+    try {
+      try { await handle.writeFile(text); } finally { await handle.close(); }
+      await rename(tmp, this.#file);
+    } catch (error) { await unlink(tmp).catch(() => undefined); throw error; }
+  }
+
+  /** The fallback: overwrites the existing record in place, only when it is a regular file of this user with one link and exactly one record's size (the file this writer put there). */
+  async #overwrite(text: string): Promise<boolean> {
+    let handle;
+    try { handle = await open(this.#file, fsc.O_WRONLY | (fsc.O_NOFOLLOW ?? 0) | (fsc.O_NONBLOCK ?? 0)); } catch { return false; }
+    try {
+      const st = await handle.stat();
+      const uid = getuid();
+      if (!st.isFile() || st.nlink !== 1 || (uid !== undefined && st.uid !== uid) || st.size !== Buffer.byteLength(text)) return false;
+      const { bytesWritten } = await handle.write(text, 0, "utf8");
+      return bytesWritten === Buffer.byteLength(text);
+    } catch { return false; } finally { await handle.close().catch(() => undefined); }
   }
 
   /** Stops the timer and waits for a write in progress. The file is left (the launcher removes it). */
@@ -232,7 +262,12 @@ export class HeartbeatMonitor {
     if (r.kind !== "beat") {
       if (this.#lastSeq === undefined) {
         // Nothing of this start was ever seen: an old release without a writer, or one that has not begun to write.
-        if (this.#o.firstBeatMs !== undefined && now - this.#beganAt! >= this.#o.firstBeatMs && now >= this.#beganAt!) return { state: "hung", quietMs: now - this.#beganAt!, thresholdMs: this.#o.firstBeatMs, lastSeq: 0 };
+        const limit = this.#o.firstBeatMs;
+        if (limit !== undefined) {
+          // The same rule as for a counter that stands still: a pause of this checker or a clock jump (either way) starts the wait again instead of judging.
+          if (gap < 0 || gap > limit / 2 || now < this.#beganAt!) this.#beganAt = now;
+          else if (now - this.#beganAt! >= limit) return { state: "hung", quietMs: Math.round(now - this.#beganAt!), thresholdMs: limit, lastSeq: 0 };
+        }
         return { state: "unsupported", reason: r.kind === "missing" ? "no heartbeat file" : r.why };
       }
       this.#blind = true;
@@ -242,7 +277,8 @@ export class HeartbeatMonitor {
     if (rec.token !== this.#o.token) { if (this.#lastSeq !== undefined) this.#blind = true; return { state: "unknown", reason: "the file belongs to another start" }; }
     this.#interval = rec.intervalMs;
     if (this.#lastSeq === undefined || rec.seq > this.#lastSeq) { this.#lastSeq = rec.seq; this.#lastAdvance = now; this.#blind = false; return { state: "alive", seq: rec.seq }; }
-    if (rec.seq < this.#lastSeq) { this.#blind = true; return { state: "unknown", reason: "the counter went backwards" }; }
+    // Backwards (a torn read, say): the new value is the baseline from now on, or a later hang below the old value would never be judged; the quiet time is counted again.
+    if (rec.seq < this.#lastSeq) { this.#lastSeq = rec.seq; this.#blind = true; return { state: "unknown", reason: "the counter went backwards" }; }
     // Unchanged. A jump of the clock (either way) or a pause of this checker: count again from here.
     const threshold = this.thresholdMs();
     if (gap < 0 || gap > threshold / 2 || this.#blind || now < this.#lastAdvance) {
@@ -289,7 +325,7 @@ const sleepFor = (ms: number, signal?: AbortSignal): Promise<void> => new Promis
 });
 
 /**
- * Supervisor hook. For each child the supervisor starts:
+ * Supervisor hook (wired in `Supervisor.#runOne`). For each child the supervisor starts:
  *
  * ```ts
  * const live = await planLiveness({ dir: join(root, "run"), releaseId });
@@ -333,8 +369,28 @@ export async function planLiveness(o: LivenessOptions): Promise<LivenessPlan> {
       return undefined;
     },
     async cleanup() {
-      const st = await lstat(file).catch(() => undefined);
-      if (st !== undefined && !st.isDirectory()) await unlink(file).catch(() => undefined);
+      // The file and any temporary the writer left (a controller killed in the middle of a write leaves `<file>.<pid>.tmp`).
+      const base = basename(file);
+      for (const name of await readdir(dir).catch((): string[] => [])) {
+        if (name !== base && !(name.startsWith(`${base}.`) && name.endsWith(".tmp"))) continue;
+        const st = await lstat(join(dir, name)).catch(() => undefined);
+        if (st !== undefined && !st.isDirectory()) await unlink(join(dir, name)).catch(() => undefined);
+      }
     },
   };
+}
+
+/**
+ * Removes heartbeat files and temporaries left in `dir` by earlier starts (a launcher killed outright never ran `cleanup`). Only the launcher that holds the release root's lock may call it: no controller of another
+ * launcher can then be writing there. Touches only names this module makes, never a directory. Returns how many were removed.
+ */
+export async function sweepHeartbeats(dir: string): Promise<number> {
+  let removed = 0;
+  for (const name of await readdir(dir).catch((): string[] => [])) {
+    if (!FILE_NAME.test(name)) continue;
+    const st = await lstat(join(dir, name)).catch(() => undefined);
+    if (st === undefined || st.isDirectory()) continue;
+    try { await unlink(join(dir, name)); removed++; } catch { /* gone already */ }
+  }
+  return removed;
 }

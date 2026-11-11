@@ -46,6 +46,11 @@ export interface LauncherNotice {
   readonly to?: string;
   /** Whether a last known good other than the failed release existed (a failed start with none left nothing running: always Urgent). */
   readonly fallback: boolean;
+  /**
+   * `hung`: the release was running and stopped responding (the liveness heartbeat); it was restarted, nothing was set aside. Its own key, so the crash-loop notice that may follow a run of hangs is not swallowed by
+   * it. An optional field rather than a new kind: a controller of an older release keeps a field it does not know, but drops a kind it does not know.
+   */
+  readonly cause?: "hung";
   readonly reason: string;
   readonly at: string;
   readonly sentAt?: string;
@@ -116,7 +121,7 @@ function validNotice(n: unknown): boolean {
   const optionalText = (k: string): boolean => r[k] === undefined || typeof r[k] === "string";
   return (r["kind"] === "fell_back" || r["kind"] === "failed_start") && typeof r["release"] === "string" && CANDIDATE_ID.test(r["release"]) && typeof r["fallback"] === "boolean" && typeof r["reason"] === "string" && typeof r["at"] === "string"
     && (r["to"] === undefined || (typeof r["to"] === "string" && CANDIDATE_ID.test(r["to"]))) && optionalText("sentAt") && optionalText("closedAt") && optionalText("settledAt")
-    && (r["closedBy"] === undefined || r["closedBy"] === "acknowledged" || r["closedBy"] === "confirmed");
+    && (r["closedBy"] === undefined || r["closedBy"] === "acknowledged" || r["closedBy"] === "confirmed") && (r["cause"] === undefined || r["cause"] === "hung");
 }
 /** The file changed under a change made from what was read before (another process wrote it): the change is made again from the new content. */
 class LauncherConflict extends LauncherStateError { constructor() { super(`${LAUNCHER_FILE} was changed by another process at the same moment`); this.name = "LauncherConflict"; } }
@@ -146,6 +151,8 @@ export class Launcher {
   /** The file's text as the change in progress read it (null: there was none); a write is made only if the file still holds it. */
   #basis: string | null | undefined;
   constructor(o: LauncherOptions) { this.#o = o; }
+  /** The release root this launcher reads (the supervisor keeps its liveness files under `<root>/run`). */
+  get root(): string { return this.#o.root; }
   #now(): string { return (this.#o.now ?? (() => new Date().toISOString()))(); }
   #mono(): number { return (this.#o.monotonic ?? (() => performance.now()))(); }
   #dir(id: string): string { return join(this.#o.root, "releases", id); }
@@ -355,7 +362,7 @@ export class Launcher {
       const s = await this.#load();
       const at = this.#now();
       const text = `it stopped responding (${reason}) and the launcher restarted it`.slice(0, 200);
-      await this.#write({ ...s, notices: withNotice(s, { kind: "failed_start", release: releaseId, fallback: true, reason: text, at }) }, { at, kind: "failed", release: releaseId, reason: text });
+      await this.#write({ ...s, notices: withNotice(s, { kind: "failed_start", release: releaseId, fallback: true, cause: "hung", reason: text, at }) }, { at, kind: "failed", release: releaseId, reason: text });
     });
   }
 
@@ -467,7 +474,7 @@ export type WatchdogResult =
   | { readonly action: "late"; readonly releaseId: string; readonly reason: string };
 
 const stopped = (signal?: AbortSignal): boolean => signal?.aborted === true;
-export const noticeKey = (n: Pick<LauncherNotice, "kind" | "release">): string => `${n.kind}|${n.release}`;
+export const noticeKey = (n: Pick<LauncherNotice, "kind" | "release" | "cause">): string => `${n.kind}|${n.release}${n.cause === undefined ? "" : `|${n.cause}`}`;
 
 /**
  * The notices with one more. One notice per kind and release while it is open: a repeat (the same block found again at every launch while nothing runs) adds nothing. A closed notice (acknowledged by the owner, or
@@ -480,7 +487,7 @@ function withNotice(s: LauncherState, n: Omit<LauncherNotice, "sentAt" | "closed
   const key = noticeKey(n);
   if (list.some((x) => noticeKey(x) === key && x.closedAt === undefined)) return list;
   // A fall-back says more than the failed start the watchdog noted a moment before it, so a failed-start notice nobody has been told yet is folded into it.
-  const folded = (x: LauncherNotice): boolean => n.kind === "fell_back" && x.kind === "failed_start" && x.release === n.release && x.sentAt === undefined && x.closedAt === undefined;
+  const folded = (x: LauncherNotice): boolean => n.kind === "fell_back" && x.kind === "failed_start" && x.cause === undefined && x.release === n.release && x.sentAt === undefined && x.closedAt === undefined;
   const next: LauncherNotice[] = [...list.filter((x) => noticeKey(x) !== key && !folded(x)), n];
   const order: ((x: LauncherNotice) => boolean)[] = [(x) => x.settledAt !== undefined, (x) => x.closedAt !== undefined && x.sentAt === undefined, (x) => x.sentAt !== undefined, () => true];
   while (next.length > LAUNCHER_LIMITS.notices) {
