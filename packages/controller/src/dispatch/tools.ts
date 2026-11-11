@@ -22,6 +22,8 @@ const ENVIRONMENTS = ["development", "testing", "staging", "customer-live"];
 const MAX_ARGS = 64 * 1024;
 const SETTLE_TURNS = 5;
 const TOLD_MAX = 1000;
+/** How long the controller's reading of a target's version may take by default (card A05b). */
+const TARGET_VERSION_MS = 10_000;
 /** Classes whose calls run inside the worker's sandbox or look at things; every other class acts on the outside and goes through the ledger and a bridge. */
 const LOCAL_CLASSES = new Set(["inspect", "workspace-edit", "unknown"]);
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -354,13 +356,13 @@ export class ToolPath {
     let review: { id: string; cleared: boolean };
     try {
       review = await this.#deps.reviews.request(agent, {
-        commandId: `rev:${ready.opId}`, taskId: d.taskId, operation: this.#operation(ready),
+        commandId: `rev:${ready.opId}`, taskId: d.taskId, operation: await this.#operation(ready),
         note: `${c.tool.name} ${c.tool.version}: ${verdict.decision.reasons[0] ?? verdict.decision.via}`.slice(0, 900),
         ...(verdict.ownerOnly ? { ownerOnly: true } : {}),
         context: { toolVersion: `${c.tool.name}@${c.tool.version}`.slice(0, 100), authoritySource: `the task assignment (attempt ${d.attemptId})`, expectedEffects: [clip(c.summary, 200)] },
       });
     } catch (error) {
-      if (error instanceof DomainError && (error.code === "invalid_command" || error.code === "forbidden")) return this.#refuse(ready, `the approval could not be asked for: ${error.message}`, []);
+      if (error instanceof DomainError && (error.code === "invalid_command" || error.code === "forbidden" || error.code === "review_invalid")) return this.#refuse(ready, `the approval could not be asked for: ${error.message}`, []);
       throw error;
     }
     // A review waiting for the owner goes to the owner's attention queue (best effort: the review is the record, a failed notice is not an error).
@@ -372,9 +374,22 @@ export class ToolPath {
     return { done: true, result: { state: "awaiting-approval", operationId: ready.opId, reviewId: review.id, reason: `waiting for ${verdict.ownerOnly ? "the owner's" : "a reviewer's"} approval: ${verdict.decision.reasons[0] ?? verdict.decision.via}` } };
   }
 
-  #operation(ready: Ready): { name: string; args: JsonObject; script?: string; target: { kind: string; id: string } } {
+  /** The operation as it is now. The target's version, when the controller can read one, comes from the controller's own hook and is read each time (card A05b); the agent cannot name it. */
+  async #operation(ready: Ready): Promise<{ name: string; args: JsonObject; script?: string; target: { kind: string; id: string; version?: string } }> {
     const { c, d } = ready;
-    return { name: c.tool.name, args: c.args, ...(c.script === undefined ? {} : { script: c.script }), target: c.target ?? { kind: "task", id: d.taskId } };
+    const target = c.target ?? { kind: "task", id: d.taskId };
+    const read = this.#deps.targetVersion;
+    if (read === undefined) return { name: c.tool.name, args: c.args, ...(c.script === undefined ? {} : { script: c.script }), target };
+    const limit = this.#deps.targetVersionMs ?? TARGET_VERSION_MS;
+    let version: string | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      // A reading that never answers is an unreadable version (fail closed), not a call held forever.
+      version = await Promise.race([read(target, d.taskId), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("no answer")), limit); })]);
+    } catch {
+      throw new DomainError("review_invalid", `the version of ${target.kind} ${target.id} could not be read, so the approval cannot be checked against it`, { field: "operation" });
+    } finally { if (timer !== undefined) clearTimeout(timer); }
+    return { name: c.tool.name, args: c.args, ...(c.script === undefined ? {} : { script: c.script }), target: version === undefined ? target : { ...target, version } };
   }
 
   // ---- a call that already has an operation ---------------------------------------------------------------------------------
@@ -430,9 +445,9 @@ export class ToolPath {
     if (verdict.kind === "refused") return this.#closeParked(ready, verdict.reason);
     if (verdict.kind !== "allow") return this.#closeParked(ready, "the call could not be judged");
     try {
-      await reviews.admit(ready.agent, { commandId: `adm:${ready.opId}`, requestId: op.reviewId!, operation: this.#operation(ready) });
+      await reviews.admit(ready.agent, { commandId: `adm:${ready.opId}`, requestId: op.reviewId!, operation: await this.#operation(ready) });
     } catch (error) {
-      if (error instanceof DomainError && (error.code === "review_invalid" || error.code === "forbidden")) return this.#closeParked(ready, `the approval no longer admits the call: ${error.message}`);
+      if (error instanceof DomainError && (error.code === "review_invalid" || error.code === "forbidden" || error.code === "invalid_command")) return this.#closeParked(ready, `the approval no longer admits the call: ${error.message}`);
       throw error;
     }
     const next: ToolOperationBody = { ...op, state: "in-progress", diagnostics: [...op.diagnostics, "approved"].slice(-DISPATCH_LIMITS.diagnostics) };

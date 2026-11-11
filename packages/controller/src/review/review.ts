@@ -37,7 +37,11 @@ export interface Operation {
   readonly args: JsonObject;
   /** The script or program text, when the operation runs one. */
   readonly script?: string;
-  readonly target: { readonly kind: string; readonly id: string };
+  /**
+   * The target by kind and ID, and optionally the version of its content the executor read (a commit, a content digest, a revision). A version is supplied by the TRUSTED executor, never taken from
+   * the agent; when present it is part of the binding, so the target changing between approval and execution makes the approval refuse. An operation reviewed with no version admits only with none.
+   */
+  readonly target: { readonly kind: string; readonly id: string; readonly version?: string };
 }
 
 /** What a verdict is bound to, kept in parts so a change can be named. */
@@ -48,7 +52,7 @@ export interface Binding {
   readonly name: string;
   readonly argsDigest: string;
   readonly scriptDigest: string | null;
-  readonly target: { readonly kind: string; readonly id: string };
+  readonly target: { readonly kind: string; readonly id: string; readonly version?: string };
   /** A digest of the grants and restrictions that bear on this action for the requester at the time. */
   readonly policyDigest: string;
 }
@@ -124,12 +128,19 @@ export type Unavailable = Availability | "host-lost";
 
 export type AdmitResult = { readonly admitted: true; readonly requestId: string; readonly replayed: boolean };
 
-export const REVIEW_LIMITS = { args: 8 * 1024, script: 16 * 1024, note: 1000, reason: 1000, name: 80, targetId: 200, defaultMinutes: 30, maxHours: 24 } as const;
+export const REVIEW_LIMITS = { args: 8 * 1024, script: 16 * 1024, note: 1000, reason: 1000, name: 80, targetId: 200, targetVersion: 200, defaultMinutes: 30, maxHours: 24 } as const;
 const REVIEW_ID = /^rev-[a-z2-7]{20}$/;
 const NAME = /^[a-z][a-z0-9._-]{0,79}$/;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+
+/** A target version is one short printable token (a commit ID, `sha256:...`, a revision number): no spaces, control characters or anything that looks like a credential. */
+function targetVersion(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > REVIEW_LIMITS.targetVersion || !/^[A-Za-z0-9][A-Za-z0-9._:@+=\/-]*$/.test(value)) return invalid(field, `must be 1 to ${REVIEW_LIMITS.targetVersion} characters of letters, digits and . _ : @ + = / - (a commit, digest or revision)`);
+  if (redactText(value) !== value) return invalid(field, "looks like a credential or key; those are not recorded in a review");
+  return value;
+}
 
 function checkOperation(value: unknown, field = "operation"): Operation {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid(field, "must be an object");
@@ -146,10 +157,11 @@ function checkOperation(value: unknown, field = "operation"): Operation {
   if (script !== undefined && redactText(script) !== script) invalid(`${field}.script`, "looks like it holds a credential or key; those are not recorded in a review");
   const t = e["target"];
   if (t === null || typeof t !== "object" || Array.isArray(t)) return invalid(`${field}.target`, "must be an object with kind and id");
-  for (const key of Object.keys(t)) if (key !== "kind" && key !== "id") invalid(`${field}.target.${key}`, "is not a target field");
+  for (const key of Object.keys(t)) if (key !== "kind" && key !== "id" && key !== "version") invalid(`${field}.target.${key}`, "is not a target field");
   const target = {
     kind: typeof (t as Record<string, unknown>)["kind"] === "string" && KIND.test((t as { kind: string }).kind) ? (t as { kind: string }).kind : invalid(`${field}.target.kind`, "must be lower-case words joined by hyphens"),
     id: text((t as Record<string, unknown>)["id"], `${field}.target.id`, { min: 1, max: REVIEW_LIMITS.targetId }),
+    ...((t as Record<string, unknown>)["version"] === undefined ? {} : { version: targetVersion((t as Record<string, unknown>)["version"], `${field}.target.version`) }),
   };
   return { name, args, ...(script === undefined ? {} : { script }), target };
 }
@@ -416,10 +428,11 @@ export class ReviewService {
         if (actual.argsDigest !== body.binding.argsDigest) changed.push("the arguments");
         if (actual.scriptDigest !== body.binding.scriptDigest) changed.push("the script");
         if (actual.target.kind !== body.binding.target.kind || actual.target.id !== body.binding.target.id) changed.push("the target");
+        else if (actual.target.version !== body.binding.target.version) changed.push("the target's version");
         if (actual.policyDigest !== body.binding.policyDigest) changed.push("the grants or restrictions that bear on it");
         if (changed.length > 0) throw new DomainError("review_invalid", `this is not the reviewed operation: ${changed.join(", ")} changed`, { field: "operation" });
         // The approval adds no capability: the executor must itself be allowed to do this, on this target, now.
-        if (!allows(fresh, toolAction(operation.name), body.binding.projectId, { resource: operation.target }) && !allows(fresh, toolAction(operation.name), body.binding.projectId, { resource: { kind: "task", id: body.binding.taskId } })) {
+        if (!allows(fresh, toolAction(operation.name), body.binding.projectId, { resource: { kind: operation.target.kind, id: operation.target.id } }) && !allows(fresh, toolAction(operation.name), body.binding.projectId, { resource: { kind: "task", id: body.binding.taskId } })) {
           throw new DomainError("forbidden", `${executor.id} no longer holds the grant for ${toolAction(operation.name)}; an approval does not give one`);
         }
         const ref: AggregateRef = { kind: "review", id };
