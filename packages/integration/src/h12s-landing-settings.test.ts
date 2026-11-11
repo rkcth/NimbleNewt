@@ -208,11 +208,19 @@ for (const backend of ["sqlite", "postgres"] as const) {
       try {
         const unreadable = await land(B);
         assert.equal(unreadable.result.state, "refused", JSON.stringify(unreadable));
-        assert.match(unreadable.result.summary, /no landing branch set/);
+        assert.match(unreadable.result.summary, /could not read the landing settings/, "an unreadable policy is said as such, not as an unset branch");
         assert.match(await lookAtLanding(), /cannot be read right now, so every landing is refused/);
       } finally { Object.assign(cfg, kept); }
       assert.match((await land(B)).result.summary, /not on the landing branch "main"/, "readable again: the owner's policy applies again");
       assert.equal(sharedState(), beforeB);
+
+      // ---- one more protected folder in plain words: the full new list keeps docs/ (it is in force) and the new folder is the owner's (card H12s third review) ----------
+      await setInChat("Also keep the scripts folder for my review.", "workspace.landing.protectedPaths", ["docs/", "scripts/"]);
+      assert.match(await lookAtLanding(), /Your extra protected paths, kept for your review: "?docs\/"?, "?scripts\/"?\./);
+      // A list that leaves paths out names each one before the owner agrees (here it is left unanswered).
+      const narrowing = await say("Only protect ci/ from now on.", { set: "workspace.landing.protectedPaths", value: ["ci/"] });
+      assert.equal(narrowing.outcomes[0].status, "proposed", JSON.stringify(narrowing));
+      assert.match(narrowing.reply.join("\n"), /these 2 entries are no longer in it: "docs\/", "scripts\/"/, narrowing.reply.join("\n"));
       for (const f of finishes) f();
       await c.dispatch.dispatcher.idle();
     } finally { for (const f of finishes) f(); await c.close(); try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing to open */ } rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

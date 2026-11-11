@@ -215,7 +215,8 @@ export class WorkspaceHost {
   async #land(call: HostWorkspaceCall, where: CheckoutLocation): Promise<HostWorkspaceOutcome> {
     const git = this.#options.git;
     let policy: LandingPolicy | undefined;
-    try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId }); } catch { policy = undefined; }
+    // A policy that cannot be read refuses the landing (nothing is guessed), and says so: telling the owner "no branch is set" when one is set but unreadable would send them to set it again.
+    try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId }); } catch { return no("this host could not read the landing settings (workspace.landing.*), so nothing was landed; a landing is refused until they can be read"); }
     if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return no("this host has no landing branch set for the project (workspace.landing.branch), so nothing was landed");
     const nothing = (landed: boolean, extra: { [key: string]: HostJson } = {}): HostWorkspaceOutcome => ({ ok: true, summary: "the checkout holds no change from its base; nothing to land", detail: { written: 0, kept: 0, skipped: 0, changed: false, landed, ...extra } });
     const treeProblem = async (): Promise<{ problem: string; head?: string } | { head: string }> => {
