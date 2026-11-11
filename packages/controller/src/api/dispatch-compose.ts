@@ -513,6 +513,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
   const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
   const monitorOf = reporter === undefined ? undefined : (order: WorkOrder & { readonly hostId?: string }): RelayMonitor => relayMonitor(order, reporter, (error) => i.onError?.(error));
+  // The store that keeps the thinking of the task's current attempt, for a local host's process (card U09b) and a remote host's (card U09c): one store, one set of bounds and cleaning.
+  const thinkingStore = ThinkingStore.withEpoch(storage, epoch, ro);
   // The host's launch report goes to the owner's launch record (with what the dispatcher gave the launch and whose each figure was, card A08d) and onto the attempt's own record. The attempt's note is best effort: a note that
   // cannot be written never undoes a launch the host has made.
   const recordLaunch = async (record: LaunchRecord): Promise<void> => {
@@ -591,7 +593,6 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         await context.recordProcessCompaction(principal, { taskId: order.taskId, attemptId: order.attemptId, key: `pc-${createHash("sha256").update(`${order.attemptId}\0${note.digest}`).digest("hex").slice(0, 40)}`, ...note }); } catch (error) { i.onError?.(error); }
     };
     // The thinking the task's own process reported (card U09b): kept for the owner (bounded, cleaned, redacted, switchable), only for the task's current attempt, and only up to the process's own message bounds. A failure is reported and changes nothing for the attempt.
-    const thinkingStore = ThinkingStore.withEpoch(storage, epoch, ro);
     const recordThinking = async (order: WorkOrder, blocks: readonly ReportedThinking[]): Promise<void> => {
       try {
         const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(order.taskId), i.assignments.getAttempt(order.attemptId)]);
@@ -676,6 +677,15 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The placement kept the order's route and the host (card L05e), so a remote call adds its reading of the route's speed on that host.
         ...(monitorOf === undefined ? {} : { monitor: (a: { attemptId: string; taskId: string; generation: number; route?: string; hostId: string }) => monitorOf({ ...a, route: a.route ?? "" } as unknown as WorkOrder) }),
         ...(i.toolBridge === undefined ? {} : { toolBridge: i.toolBridge }),
+        // The thinking a remote host's process reported (card U09c): kept by the same store as a local process's, and only while the attempt is still the task's current one at the placement's generation (anything else is dropped, `stale`). The text is never logged or put in an error.
+        thinking: async (a, blocks) => {
+          try {
+            const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(a.taskId), i.assignments.getAttempt(a.attemptId)]);
+            if (assignment === undefined || attempt === undefined || assignment.state !== "assigned" || assignment.activeAttemptId !== a.attemptId || assignment.generation !== a.generation || attempt.state !== "active") return { kept: 0, reason: "stale" };
+            const r = await thinkingStore.record(principal, { projectId: a.projectId, taskId: a.taskId, agent: a.agentId.startsWith("agent:") ? a.agentId : `agent:${a.agentId}`, attemptId: a.attemptId, blocks });
+            return { kept: r.kept, ...(r.reason === undefined ? {} : { reason: r.reason }) };
+          } catch (error) { i.onError?.(error); return { kept: 0, reason: "unavailable" }; }
+        },
         ...(i.options.remote.monitorProgressMs === undefined ? {} : { monitorProgressMs: i.options.remote.monitorProgressMs }),
         streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id), liveAttempts: (by) => d().liveAttempts(by) },
