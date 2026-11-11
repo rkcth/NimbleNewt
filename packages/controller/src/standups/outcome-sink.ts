@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { cut, type OutcomeSink } from "./shared.js";
-import type { OwnerQuestionSink } from "./standups.js";
+import type { OwnerQuestionSink, PreparationSink } from "./standups.js";
 import { MEETING_LIMITS } from "../meetings/meetings.js";
 
 /**
@@ -63,6 +63,28 @@ export function ownerQuestionSink(deps: {
       try { await deps.notify({ commandId: `oqn:${n.key}`, questionId: n.questionId, projectId: n.projectId, detail: cut(short, 200) }); } catch { return false; }
       if (n.source?.kind === "chat-turn") { try { await deps.followUp(n.source.id, { key: `oqn:${n.key}`, text }); } catch { /* the notification is filed; the turn note is a convenience */ } }
       return true;
+    },
+  };
+}
+
+/**
+ * The advance notice of a stand-up to an agent (card M03h): a controller notice, filed as advice against the task the agent works on, that says when the stand-up is and that its brief is made from the records. It never wakes,
+ * starts or resumes anything (the recipient reads it at a boundary). It answers `false` when nothing was filed, so the preparation does not record the agent as told and asks again at its next run: an agent that holds no
+ * live task (there is nothing running that needs to reach a boundary; its brief is made all the same), a notice that cannot be filed now (the agent may not read that task, the task is gone) and a recipient whose inbox is
+ * full (`unavailable`: an agent that holds a ready or blocked task and is not running reads no notices, and a daily stand-up must not let its full inbox stop the briefs of everyone in the project). Any other failure (a
+ * storage error) is raised and the preparation tries again at the next tick. The notice's key is the command ID, so a retry files it once; the same key already used for another task (the agent's task changed between a
+ * notice that was filed and a preparation record that was not written) is `command_conflict`, and the agent was told: that is `true`, not a failure that would stop every later preparation.
+ */
+export function preparationNoticeSink(messages: { noticeFromController(command: { commandId: string; taskId: string; to: string; purpose: string; text: string }): Promise<unknown> }): PreparationSink {
+  return {
+    notify: async (n) => {
+      if (n.taskId === undefined) return false;
+      try { await messages.noticeFromController({ commandId: `spn:${n.key}`, taskId: n.taskId, to: n.agent, purpose: "A stand-up is coming", text: n.message }); return true; }
+      catch (error) {
+        if (error instanceof DomainError && error.code === "command_conflict") return true;
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found" || error.code === "invalid_command" || error.code === "unavailable")) return false;
+        throw error;
+      }
     },
   };
 }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { improvementOutcomeSink, ownerQuestionSink } from "./outcome-sink.js";
+import { DomainError } from "../domain/errors.js";
+import { improvementOutcomeSink, ownerQuestionSink, preparationNoticeSink } from "./outcome-sink.js";
 
 test("an improvement's outcome is filed against its own task once per key; one without a task is not filed and says so (card M03d)", async () => {
   const sent: { commandId: string; taskId: string; to: string; purpose: string; text: string }[] = [];
@@ -51,4 +52,20 @@ test("a question a stand-up asked the owner is told by a short notification keye
   assert.equal(await sink.raise({ key: "sqn-c", questionId: "sqn-c", projectId: "proj-1", topic: "Logging", question: "Which level?" }), true);
   assert.equal(turns.length, 1);
   assert.equal(notes.length, 4);
+});
+
+test("the advance notice of a stand-up is filed against the agent's task once per key; what was not filed answers false (no task, a notice that cannot be filed now, a full inbox) so it is not recorded as told; the key already used for another task counts as told; any other failure is raised (card M03h)", async () => {
+  const sent: { commandId: string; taskId: string; to: string; purpose: string; text: string }[] = [];
+  let failure: Error | undefined;
+  const sink = preparationNoticeSink({ noticeFromController: async (c) => { if (failure !== undefined) throw failure; sent.push(c); } });
+  const n = { key: "mto-a:agent:agt-x:prepare", occurrenceId: "mto-a", projectId: "proj-a", agent: "agent:agt-x", startsAt: "2026-11-12T09:00:00.000Z", coversFrom: "2026-11-11T09:00:00.000Z", message: "Stand-up at 2026-11-12T09:00:00.000Z. Reach a safe boundary." };
+  assert.equal(await sink.notify(n), false);
+  assert.deepEqual(sent.map((x) => [x.commandId, x.taskId, x.to, x.text]), []);
+  assert.equal(await sink.notify({ ...n, taskId: "task-1" }), true);
+  assert.deepEqual(sent.map((x) => [x.commandId, x.taskId, x.to, x.text]), [["spn:mto-a:agent:agt-x:prepare", "task-1", "agent:agt-x", n.message]]);
+  for (const code of ["forbidden", "not_found", "invalid_command", "unavailable"] as const) { failure = new DomainError(code, "that agent cannot be told about that task now"); assert.equal(await sink.notify({ ...n, taskId: "task-1" }), false, code); }
+  failure = new DomainError("command_conflict", "command ID spn:... was already used for a different command");
+  assert.equal(await sink.notify({ ...n, taskId: "task-2" }), true, "filed before, on the task the agent held then");
+  assert.equal(sent.length, 1);
+  for (const error of [new DomainError("stale_revision", "the inbox changed"), new Error("storage down")]) { failure = error; await assert.rejects(sink.notify({ ...n, taskId: "task-1" }), (e) => e === error); }
 });

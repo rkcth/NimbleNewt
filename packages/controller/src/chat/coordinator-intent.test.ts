@@ -39,3 +39,18 @@ test("the state-API commands for the coordinator have a free-word equivalent the
   assert.match(system, /routing profile/);
   assert.match(system, /taking it off its agent/);
 });
+
+test("the owner can ask in free words which agents there are and which one is the coordinator: the model is told the status kind, its keys and the words, and the operation summary names it (card U03c)", async () => {
+  const { OPERATIONS } = await import("../api/index.js");
+  const { STATUS_KINDS } = await import("../status/index.js");
+  assert.deepEqual(STATUS_KINDS["agents"]!.keys, ["state", "limit"]);
+  const summary = OPERATIONS.find((o) => o.name === "status.ask")!.summary;
+  assert.match(summary, /`agents` \(the agents with the coordinator marked and its lifecycle state/);
+  let system = "";
+  const interpreter = new ModelInterpreter({ complete: async (_route, request) => { system = request.system; return "[{\"kind\":\"none\",\"reason\":\"x\"}]"; } }, () => ["r"]);
+  await interpreter.interpret({ text: "hello", quoted: [], focus: {}, proposals: [] });
+  assert.ok(system.includes("agents(state, limit) - "), "the kind and its keys are in the list the model reads");
+  assert.match(system, /read the status kind agents/);
+  assert.match(system, /which one is the coordinator/);
+  assert.match(system, /is the coordinator running or paused\?/);
+});

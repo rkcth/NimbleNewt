@@ -258,6 +258,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
+  agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
@@ -282,6 +283,14 @@ export interface StandupSummaryView {
 
 /** The parts of a stand-up brief the status answer reads (a brief is a record kept by the stand-up service; this is only the view of it). */
 export interface OwnerQuestionView { readonly id: string; readonly revision: number; readonly topic: string; readonly question: string; readonly askedAt: string; readonly answer?: string; readonly answeredAt?: string }
+/** One agent as the `agents` answer reads it (card U03c): the parts of the agent record it shows. */
+export interface AgentRowView { readonly id: string; readonly revision: number; readonly friendlyName: string; readonly roles: readonly string[]; readonly teamId?: string; readonly state: string }
+/** The coordinator as the `agents` answer reads it (card U03c): the owner's view of `CoordinatorService.get`. */
+export interface CoordinatorRowView {
+  readonly id: string; readonly revision: number; readonly principalId: string; readonly state: string;
+  readonly hosted?: { readonly agentId: string };
+  readonly lifecycle?: { readonly heldBy: readonly { readonly scope: { readonly kind: string; readonly id: string }; readonly observed?: string; readonly reason?: string; readonly by?: string }[] };
+}
 export interface StandupBriefView {
   readonly id: string; readonly revision: number; readonly occurrenceId: string; readonly agent: string;
   readonly accomplishments: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
@@ -336,6 +345,7 @@ export type StatusRequest =
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "standup_questions"; readonly projectId: string }
+  | { readonly kind: "agents"; readonly state?: string; readonly limit?: number }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "reconnect"; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
@@ -493,6 +503,14 @@ export interface StatusDeps {
     ownerQuestions?(viewer: Principal, projectId: string): Promise<{ open: readonly OwnerQuestionView[]; answered: readonly OwnerQuestionView[] }>;
     overview?(viewer: Principal, projectId: string, page?: { limit?: number; includeEnded?: boolean }): Promise<{ items: readonly StandupSummaryView[]; more?: boolean; ended?: number } | undefined>;
   };
+  /**
+   * The agents and the coordinator (card U03c): the `agents` view. `list` is the agent service's own list, so the right to read agents is the one `agent.list` needs; `coordinator` is the owner's read of the coordinator,
+   * asked only for the owner (never for a task credential), as `agent.list` marks it. Absent: the view is not offered.
+   */
+  readonly agents?: {
+    list(viewer: Principal, query: { state?: "active" | "retired"; limit?: number }): Promise<{ items: readonly AgentRowView[]; next?: string }>;
+    coordinator?(owner: Principal): Promise<CoordinatorRowView | undefined>;
+  };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text?: string; topic?: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
@@ -534,6 +552,8 @@ export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, s
 const REPLAY_LINE_ITEMS = 12;
 /** How many names of one stand-up's roster the stand-ups answer lists before counting the rest (card M03h): a roster may hold 50 principals. */
 const STANDUP_ROSTER_LISTED = 10;
+/** The ID of the one coordinator record (`COORDINATOR_ID` in chat/coordinator.ts), cited when there is none or it cannot be read. */
+const COORDINATOR_RECORD = "coordinator:main";
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const HANDLING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const TASK_ID_IN_TEXT = /task-[a-z2-7]{20}/g;
@@ -720,6 +740,7 @@ export class StatusService {
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
       case "standup_questions": { onlyKnown(request, ["kind", "projectId"]); return this.standupQuestionLines(by, request); }
+      case "agents": { onlyKnown(request, ["kind", "state", "limit"]); return this.agentLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
@@ -1581,6 +1602,50 @@ export class StatusService {
     for (const q of open) lines.push(line(`${mine ? "Waiting for your answer" : "Waiting for the owner's answer"}, from the stand-up topic ${quoted(q.topic)}: ${quoted(q.question)} (asked ${q.askedAt}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
     for (const q of answered) lines.push(line(`Answered, about ${quoted(q.topic)}: ${quoted(q.question)} ${mine ? "Your answer" : "The owner's answer"}: ${quoted(q.answer ?? "")} (${q.answeredAt ?? "no time recorded"}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
     if (lines.length === 0) lines.push(line("No stand-up has asked the owner anything in this project.", cite("project", projectId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The agents in plain lines with the coordinator marked and its lifecycle state (card U03c), for the owner who asks in chat. Read only, from the agent and coordinator records; each line cites its records.
+   * The rules are `agent.list`'s: whoever may not read agents reads this as missing, and only the owner (not a task credential) is told which agent is the coordinator. An agent's name, roles and team are
+   * words someone else wrote, so they are shown quoted and clipped, and so is a pause's reason; the figures and states are the controller's. At most 50 agents are listed (default 20), and a longer list says so.
+   */
+  async agentLines(by: Principal, request: { state?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const source = this.#deps.agents;
+    if (source === undefined) return undefined;
+    if (request.state !== undefined && request.state !== "active" && request.state !== "retired") invalid("state", "must be active or retired");
+    const state: "active" | "retired" = request.state === "retired" ? "retired" : "active";
+    const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    let listed: Awaited<ReturnType<typeof source.list>>;
+    // One more than the page is asked for, so a list of exactly `limit` agents is not said to have more (the agent list gives `next` whenever a page is full).
+    try { listed = await source.list(by, { state, limit: limit + 1 }); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined; throw error; }
+    const more = listed.items.length > limit || listed.next !== undefined;
+    listed = { items: listed.items.slice(0, limit), ...(more ? { next: listed.next ?? listed.items[limit]!.id } : {}) };
+    // Only the owner who is not a task credential is told which agent is the coordinator; a coordinator that cannot be read marks nothing (the list still works).
+    const mayMark = by.kind === "owner" && by.taskScope === undefined && source.coordinator !== undefined;
+    let coordinator: CoordinatorRowView | undefined;
+    let coordinatorKnown = false;
+    if (mayMark) { try { coordinator = await source.coordinator!(by); coordinatorKnown = true; } catch { coordinator = undefined; } }
+    const hostedId = coordinator?.hosted?.agentId;
+    const coordinatorWords = (c: CoordinatorRowView): string => {
+      const held = (c.lifecycle?.heldBy ?? []).slice(0, 3).map((h) => `${shown(h.scope.kind, 20)} ${shown(h.scope.id, 60)}${h.observed === undefined ? "" : `, reported ${shown(h.observed, 20)}`}${h.reason === undefined ? "" : `, reason ${quoted(h.reason, 120)}`}${h.by === undefined ? "" : `, by ${shown(h.by, 60)}`}`);
+      const more = (c.lifecycle?.heldBy.length ?? 0) - held.length;
+      return `${shown(c.state, 20)}${held.length === 0 ? "" : `, held by the pause on ${held.join("; ")}${more > 0 ? ` and ${more} more` : ""}`}`;
+    };
+    const lines: Line[] = [line(`${listed.items.length}${listed.next === undefined ? "" : " or more"} ${state} agent${listed.items.length === 1 && listed.next === undefined ? "" : "s"}${listed.next === undefined ? "" : ` (the first ${listed.items.length}; ask with a larger limit for more)`}.`, cite("agents", state))];
+    const seen = new Set<string>();
+    for (const a of listed.items) {
+      seen.add(a.id);
+      const mark = a.id === hostedId && coordinator !== undefined;
+      const roles = a.roles.slice(0, 5).map((r) => shown(r, 40));
+      lines.push(line(`${quoted(a.friendlyName, 80)} (${shown(a.id, 60)}): ${shown(a.state, 20)}${roles.length === 0 ? "" : `, roles ${roles.join(", ")}${a.roles.length > roles.length ? ` and ${a.roles.length - roles.length} more` : ""}`}${a.teamId === undefined ? "" : `, team ${shown(a.teamId, 60)}`}${mark ? `. This agent is the coordinator: ${coordinatorWords(coordinator!)}` : ""}.`, cite("agent", a.id, a.revision), ...(mark ? [cite("coordinator", coordinator!.id, coordinator!.revision)] : [])));
+    }
+    if (coordinator !== undefined) {
+      if (hostedId === undefined) lines.push(line(`The coordinator is not an agent: it runs under ${shown(coordinator.principalId, 80)} and is ${coordinatorWords(coordinator)}.`, cite("coordinator", coordinator.id, coordinator.revision)));
+      else if (!seen.has(hostedId)) lines.push(line(`The coordinator is the agent ${shown(hostedId, 60)}, which is not in this list: ${coordinatorWords(coordinator)}.`, cite("coordinator", coordinator.id, coordinator.revision), cite("agent", hostedId)));
+    } else if (coordinatorKnown) lines.push(line("No coordinator is set up.", cite("coordinator", COORDINATOR_RECORD)));
+    // A coordinator that could not be read is said to be so: the owner who asks whether it runs is not left to read silence as "none".
+    else if (mayMark) lines.push(line("Which agent is the coordinator could not be read just now; ask again shortly.", cite("coordinator", COORDINATOR_RECORD)));
     return { observedAt: this.#runner.now(), lines };
   }
 
