@@ -802,7 +802,7 @@ export class DatabaseTransferService {
     // The same command sent again (a message resent after the restart, a proposal applied twice) is answered with what was recorded, also by the controller that now runs on the new database.
     const done = commandId === undefined ? undefined : await readJournal(this.#o.stateDirectory);
     if (done !== undefined && commandId !== undefined && done.appliedBy === commandId && done.phase === "switched" && done.summary !== undefined) {
-      return { id: done.id, direction: done.summary.direction, to: done.summary.to, rows: done.summary.rows, claimsReleased: 0, uncertainEffects: 0, restartRequired: true, restart: done.restart === undefined ? "not-offered" : "scheduled", replayed: true, findings: [] };
+      return { id: done.id, direction: done.summary.direction, to: done.summary.to, rows: done.summary.rows, claimsReleased: 0, uncertainEffects: 0, restartRequired: true, restart: done.restart?.state === "requested" ? "scheduled" : "not-offered", replayed: true, findings: [] };
     }
     return withStateLock(this.#o.stateDirectory, () => this.#apply(targetName, confirm, commandId));
   }
@@ -934,7 +934,7 @@ export class DatabaseTransferService {
   async rollback(commandId?: string): Promise<{ id: string; to: string; restartRequired: true; restart: RestartState; replayed?: true }> {
     await this.#enabled();
     const done = commandId === undefined ? undefined : await readJournal(this.#o.stateDirectory);
-    if (done !== undefined && commandId !== undefined && done.rolledBackBy === commandId && done.phase === "rolled-back") return { id: done.id, to: done.from.name, restartRequired: true, restart: done.restart === undefined ? "not-offered" : "scheduled", replayed: true };
+    if (done !== undefined && commandId !== undefined && done.rolledBackBy === commandId && done.phase === "rolled-back") return { id: done.id, to: done.from.name, restartRequired: true, restart: done.restart?.state === "requested" ? "scheduled" : "not-offered", replayed: true };
     return withStateLock(this.#o.stateDirectory, () => this.#rollback(commandId));
   }
 
@@ -975,7 +975,9 @@ export class DatabaseTransferService {
       await writeJson(join(this.#o.stateDirectory, AUTHORITY_FILE), { format: 1, generation: authority.generation + 1, active: journal.from, previous: journal.to, transferId: journal.id, since: this.#now() } satisfies StorageAuthority);
       await this.#at("rollback:authority");
       restart = await this.#planRestart();
-      await this.#journal(rolling, { phase: "rolled-back", note: "rolled back by the owner before the new database recorded any work", ...(commandId === undefined ? {} : { rolledBackBy: commandId }), ...(restart.journal === undefined ? {} : { restart: restart.journal }) });
+      // The move's restart note is replaced by the rollback's own (or dropped): a rollback with the restart off must not read as one the host was asked to make.
+      const { restart: _moveRestart, ...rolled } = rolling;
+      await this.#journal(rolled as TransferJournal, { phase: "rolled-back", note: "rolled back by the owner before the new database recorded any work", ...(commandId === undefined ? {} : { rolledBackBy: commandId }), ...(restart.journal === undefined ? {} : { restart: restart.journal }) });
     } catch (error) {
       if (release !== undefined && !fenced) { /* a refusal before the fence leaves the controller running; a lifted fence leaves it deposed */
         if (!(error instanceof DomainError && /must be restarted/.test(error.message))) await release().catch(() => undefined); else this.#release = release;

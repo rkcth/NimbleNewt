@@ -1110,6 +1110,9 @@ test("the host's restart: asked once after the answer when it opted in and the o
     const g = await startOnDestination(f, target, { restart: { run: (e) => { events.push(e); }, delayMs: 20 }, restartEnabled: async () => enabled });
     const back = await g.svc.rollback("cmd-b");
     assert.equal(back.restart, "off");
+    // The move's "requested" note does not survive into the rolled-back journal, so neither the status nor a resent rollback says the host was asked (review fix).
+    assert.equal((await readJournal(st(f)))?.restart, undefined);
+    assert.equal((await g.svc.rollback("cmd-b")).restart, "not-offered");
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(events.length, 1);
   } finally { await finish(f); }
