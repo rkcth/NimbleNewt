@@ -70,9 +70,9 @@ export interface LocalHostContext {
   readonly fetch?: typeof globalThis.fetch;
 }
 
-/** What the builder made: the start options to add (`dispatch.local`, harnesses, tools), what to do once the controller is up, and how to free what it made. */
+/** What the builder made: the start options to add (`dispatch.local`, harnesses, tools, and the environment runtime when the host can change environments), what to do once the controller is up, and how to free what it made. */
 export interface LocalHostPlan {
-  readonly start: Pick<StartOptions, "dispatch" | "harnesses" | "tools">;
+  readonly start: Pick<StartOptions, "dispatch" | "harnesses" | "tools" | "maintenance">;
   /** Enrolls the host with the owner's authority, announces it and sets its capacity. Returns notes for the owner. */
   readonly attach: (controller: Controller, owner: Principal) => Promise<readonly string[]>;
   /** Frees what was made before the controller took it over (safe to call more than once). */
