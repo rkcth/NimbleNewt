@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **251 of 361 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **255 of 361 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -111,12 +111,12 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 81% | 18 of 22 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 32 of 33 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 65% | 13 of 20 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓░░░` 82% | 41 of 50 |
-| Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 8 of 9 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓▓░░░░` 70% | 14 of 20 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 42 of 50 |
+| Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓░░░` 78% | 25 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
@@ -286,7 +286,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 32 of 33</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 33 of 33</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -319,7 +319,7 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C07n** · P35 · Check the first call on a route whose window the controller does not know _(needs C07l)_
 - [x] **C07o** · P35 · Check the first call and the stored conversation for attempts on remote worker hosts _(needs C07l)_
 - [x] **C07p** · P35 · Mark and keep what is cut from an attempt's hand-off note and resume note _(needs C07l)_
-- [ ] **C07q** · P35 · Use the controller's summariser for compaction and keep the compaction lineage bounded _(needs C07l)_
+- [x] **C07q** · P35 · Use the controller's summariser for compaction and keep the compaction lineage bounded _(needs C07l)_
 - [x] **C09f** · P35 · Record activity: approvals, messages, artifact versions, chat _(needs C09e)_
 - [x] **C09g** · P36 · Record activity: artifact versions, chat, explanation index _(needs C09f)_
 - [x] **C09h** · P37 · Record activity: local worker artifacts, chat access, explanation index _(needs C09g, H12k)_
@@ -359,7 +359,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓░░░░░ 13 of 20</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓░░░░ 14 of 20</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -380,14 +380,14 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [ ] **U14** · P33 · First-run setup assistant: guided configuration through chat before the first agent exists _(needs U03, U03b, U10, H11, A07c, P08, F02, F09, R01, H12k)_
 - [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [x] **U11b** · P34 · Notification levels, the Needs you view and escalation to Urgent by age _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
-- [ ] **U11c** · P35 · Finish notification levels: Urgent triggers, critical path, answering in place, digest rule _(needs U11b)_
+- [x] **U11c** · P35 · Finish notification levels: Urgent triggers, critical path, answering in place, digest rule _(needs U11b)_
 - [ ] **U11d** · P36 · Finish notification levels: critical path, Urgent for stopped work, remaining triggers, answering in place _(needs U11c)_
 - [ ] **U09b** · P38 · Finish the replay: web view, producers, composed thinking and rerun _(needs U09, U07, K06c, P07, C09h)_
 
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓░░░ 41 of 50</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 42 of 50</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -416,7 +416,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H13e** · P29 · Finish event watching: real sources, chat _(needs H13d)_
 - [x] **H02b** · P30 · Fence a remote handle's controls by placement and close every failed startup _(needs H02)_
 - [x] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
-- [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
+- [x] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
 - [x] **H12d** · P30 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06, H12l)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [x] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
@@ -445,14 +445,14 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 </details>
 
 <details>
-<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 8 of 9</summary>
+<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 9 of 9</summary>
 
 Durable conversations between agents, delivery classes, and the MCP conversation adapter.
 
 - [x] **U02** · P24 · Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 - [x] **U02b** · P25 · Implement the conversation transport and remote exposure _(needs U02)_
 - [x] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
-- [ ] **T05b** · P27 · Finish the MCP conversation door: stock-client conformance, resources and stdio _(needs T05)_
+- [x] **T05b** · P27 · Finish the MCP conversation door: stock-client conformance, resources and stdio _(needs T05)_
 - [x] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 - [x] **U12b** · P30 · Deliver informational messages at check-ins and show agent questions in chat _(needs U02, S08, L05, M01)_
 - [x] **U12c** · P32 · Finish agent messages: owner questions in chat, stand-up boundary _(needs U12b, M03b)_
