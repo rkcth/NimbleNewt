@@ -27,6 +27,7 @@ import { DISPATCH_KIND, STOPPED_EARLY_KIND, TASK_ATTEMPTS_KIND, WORK_REPORT_KIND
 import { ATTEMPT_ENDINGS_LIMITS, ENDING_BLOCKER_WORDS, attemptEndingLines, type EndingBlocker } from "../dispatch/endings.js";
 import { reportLines } from "../dispatch/report.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
+import type { HoldsUp } from "../critical/critical-path.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
 import { ACTIVITY_KINDS, type ActivityService, type ExplanationBody } from "../activity/activity.js";
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
@@ -257,7 +258,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
-  needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
+  needs_you: { keys: ["limit"], about: "everything waiting for the owner, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest" },
+  critical_path: { keys: [], about: "what the owner marked as the critical path (tasks, goals and projects), whether each is still open, and which decisions waiting for the owner hold it up (owner only; the owner marks and unmarks by chat)" },
   setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
   owner_questions: { keys: ["limit"], about: "questions agents have put to the owner" },
 };
@@ -300,6 +302,7 @@ export type StatusRequest =
   | { readonly kind: "owner_questions"; readonly limit?: number }
   | { readonly kind: "setup" }
   | { readonly kind: "needs_you"; readonly limit?: number }
+  | { readonly kind: "critical_path" }
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "work_report"; readonly taskId: string }
@@ -332,7 +335,8 @@ export type StatusRequest =
   | { readonly kind: "reconnect"; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
-interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string }
+/** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string; rank: number }
 
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
@@ -417,6 +421,8 @@ export interface StatusDeps {
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text?: string; topic?: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
+  /** The critical path the owner marked (card U11d, "U11f"): ranks the Needs-you view and is shown by the `critical_path` request. Absent: nothing is marked. */
+  readonly critical?: { readonly holdsUp: () => Promise<HoldsUp | undefined>; readonly list: (by: Principal) => Promise<{ readonly revision: number; readonly marks: readonly { readonly kind: string; readonly id: string; readonly markedAt: string }[] }> };
   readonly heldResumes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { checkId: string; taskId: string; title: string; since: string; changes: readonly { kind: string; key: string; status: string }[] }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
   readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
@@ -653,6 +659,7 @@ export class StatusService {
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
+      case "critical_path": { onlyKnown(request, ["kind"]); return this.criticalPathLines(by); }
       case "setup": { onlyKnown(request, ["kind"]); return this.setupLines(by); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
@@ -1679,7 +1686,7 @@ export class StatusService {
       const asked = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 51 });
       if (asked.items.length > 50) truncated.push("questions");
       for (const q of asked.items.slice(0, 50)) {
-        all.push({ text: `${shown(q.asker)} asks about ${quoted(q.task.title)}: ${quoted(q.question)} (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
+        all.push({ text: `${shown(q.asker)} asks about ${quoted(q.task.title)}: ${quoted(q.question)} (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId, rank: 1 });
       }
     }
     if (this.#deps.reviews !== undefined) {
@@ -1687,14 +1694,14 @@ export class StatusService {
       const pending = await this.#deps.reviews.ownerPending(by, 51);
       if (pending.length > 50) truncated.push("approvals");
       for (const r of pending.slice(0, 50)) {
-        all.push({ text: `An approval of ${quoted(r.name)} is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
+        all.push({ text: `An approval of ${quoted(r.name)} is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id, rank: 0 });
       }
     }
     if (this.#deps.meetingDecisions !== undefined) {
       const waiting = await this.#deps.meetingDecisions(by, 51);
       if (waiting.truncated || waiting.items.length > 50) truncated.push("meeting decisions");
       for (const m of waiting.items.slice(0, 50)) {
-        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: ${quoted(m.text, 160)}`}${m.topic === undefined ? "" : ` (topic ${quoted(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id });
+        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: ${quoted(m.text, 160)}`}${m.topic === undefined ? "" : ` (topic ${quoted(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id, rank: 2 });
       }
     }
     if (this.#deps.heldResumes !== undefined) {
@@ -1702,7 +1709,7 @@ export class StatusService {
       if (held.truncated || held.items.length > 50) truncated.push("held resumes");
       for (const h of held.items.slice(0, 50)) {
         const names = h.changes.slice(0, 3).map((c) => `${c.kind} ${shown(c.key)} (${c.status})`).join(", ");
-        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${h.changes.length === 1 ? "was" : "were"} judged to matter to it: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId });
+        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${h.changes.length === 1 ? "was" : "were"} judged to matter to it: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId, rank: 3 });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
@@ -1718,7 +1725,7 @@ export class StatusService {
         if (onTask && (await taskOf(b.subject.id))?.open === false) continue;
         if (owned >= 50) { blockersCut = true; break; }
         owned++;
-        all.push({ text: `${quoted(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
+        all.push({ text: `${quoted(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id, rank: 4 });
       }
       if (page.next === undefined) break;
       after = page.next;
@@ -1729,16 +1736,48 @@ export class StatusService {
     return { items, taskOf, truncated };
   }
 
+  /**
+   * What the owner marked as the critical path (card U11d, "U11f"), owner only: each mark (a task, a goal or a project, by ID, with its title as the record shows it, quoted as data) and whether it is still open, then
+   * the decisions waiting for the owner that hold it up, the first 10 in the order of the Needs-you view. A mark on something that no longer exists is shown as such. Marks are read as the owner wrote them: the list holds
+   * nothing an agent supplied except the titles, which are quoted and never decide anything.
+   */
+  async criticalPathLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner") return undefined;
+    const lines: Line[] = [];
+    if (this.#deps.critical === undefined) return { observedAt: this.#runner.now(), lines: [line("No critical path is kept in this installation.")] };
+    const { marks } = await this.#deps.critical.list(by);
+    if (marks.length === 0) return { observedAt: this.#runner.now(), lines: [line("Nothing is marked as the critical path. Say which task, goal or project is critical and it is marked.")] };
+    for (const m of marks.slice(0, 50)) {
+      const rec = (await this.#runner.get(m.kind === "project" ? "project" : "task", m.id))?.body as unknown as { title?: string; name?: string; state?: string } | undefined;
+      const what = m.kind === "project" ? "project" : m.kind === "goal" ? "goal" : "task";
+      const words = rec === undefined ? "no longer exists" : m.kind === "project" ? (rec.state === "archived" ? "archived" : "open") : rec.state === "done" || rec.state === "cancelled" ? `finished (${rec.state})` : `open (${rec.state ?? "unknown"})`;
+      const name = rec === undefined ? "" : ` ${quoted(m.kind === "project" ? rec.name ?? "" : rec.title ?? "", 80)}`;
+      lines.push(line(`The ${what}${name} is on the critical path you marked, since ${m.markedAt}; it is ${words}.`, cite(m.kind === "project" ? "project" : "task", m.id)));
+    }
+    if (marks.length > 50) lines.push(line(`${marks.length - 50} more marks are not shown.`));
+    const { items, truncated } = await this.#needItems(by);
+    let holds: HoldsUp | undefined;
+    try { holds = await this.#deps.critical.holdsUp(); } catch { holds = undefined; }
+    const held: NeedItem[] = [];
+    if (holds !== undefined) for (const i of items) if (i.taskId !== undefined && (await holds(i.taskId))) held.push(i);
+    held.sort((a, b) => (a.since < b.since ? -1 : a.since > b.since ? 1 : 0) || a.rank - b.rank || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (held.length === 0) lines.push(line("Nothing that waits for you holds the critical path up."));
+    for (const i of held.slice(0, 10)) lines.push(line(`Holds up the critical path: ${i.text}; since ${i.since}.`, ...i.cites));
+    if (held.length > 10) lines.push(line(`${held.length - 10} more hold it up; the needs_you request lists them all in order.`));
+    if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   /** How many things wait for the owner (for the count in a reply); no ranking is done. Owner only (anyone else: 0). */
   async needsYouCount(by: Principal): Promise<number> {
     return by.kind !== "owner" ? 0 : (await this.#needItems(by)).items.length;
   }
 
   /**
-   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, adopted meeting decisions waiting for the owner's answer, resume checks held for the owner (L04c), and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
+   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, adopted meeting decisions waiting for the owner's answer, resume checks held for the owner (L04c), and open blockers whose resolver is the owner. What holds up the critical path the owner marked comes first, then what other open tasks wait for (how many), then oldest first, then the kind (approvals, questions, meeting decisions, held resumes, blockers).
    * `count` is the number found (each source up to 50); `truncated` names the sources (`questions`, `approvals`, `meeting decisions`, `held resumes`, `blockers`) that had more than was read, so the list may be missing items; the lines are cut at `limit`. Owner only (anyone else: undefined).
    */
-  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number; readonly truncated: readonly string[] } | undefined> {
+  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number; readonly truncated: readonly string[]; /** How many of them hold up the critical path the owner marked (present when anything is marked). */ readonly critical?: number } | undefined> {
     if (by.kind !== "owner") return undefined;
     const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
     const { items, taskOf, truncated } = await this.#needItems(by);
@@ -1769,14 +1808,17 @@ export class StatusService {
       }
       return n;
     };
-    const ranked: { i: NeedItem; blocked: number }[] = [];
-    for (const i of items) ranked.push({ i, blocked: await blockedBy(i) });
-    ranked.sort((a, b) => b.blocked - a.blocked || (a.i.since < b.i.since ? -1 : a.i.since > b.i.since ? 1 : a.i.id < b.i.id ? -1 : 1));
-    const lines: Line[] = ranked.slice(0, cap).map(({ i, blocked }) => line(`${i.text}${blocked > 0 ? `; ${blocked} other open task${blocked === 1 ? " waits" : "s wait"} for it` : ""}; since ${i.since}.`, ...i.cites));
+    // What holds up the critical path the owner marked comes first (card U11d, "U11f"). Only the owner's marks and the dependency records decide it; nothing an agent wrote (a title, a summary) is read for it.
+    let holds: HoldsUp | undefined;
+    if (this.#deps.critical !== undefined) { try { holds = await this.#deps.critical.holdsUp(); } catch { holds = undefined; } }
+    const ranked: { i: NeedItem; blocked: number; critical: boolean }[] = [];
+    for (const i of items) ranked.push({ i, blocked: await blockedBy(i), critical: holds !== undefined && i.taskId !== undefined && (await holds(i.taskId)) });
+    ranked.sort((a, b) => Number(b.critical) - Number(a.critical) || b.blocked - a.blocked || (a.i.since < b.i.since ? -1 : a.i.since > b.i.since ? 1 : 0) || a.i.rank - b.i.rank || (a.i.id < b.i.id ? -1 : a.i.id > b.i.id ? 1 : 0));
+    const lines: Line[] = ranked.slice(0, cap).map(({ i, blocked, critical }) => line(`${critical ? "On the critical path you marked: " : ""}${i.text}${blocked > 0 ? `; ${blocked} other open task${blocked === 1 ? " waits" : "s wait"} for it` : ""}; since ${i.since}.`, ...i.cites));
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
     if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
-    return { observedAt: this.#runner.now(), lines, count: ranked.length, truncated };
+    return { observedAt: this.#runner.now(), lines, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
   }
 
   // ---- one task ------------------------------------------------------------------------------------------------------------

@@ -26,6 +26,7 @@ import { McpService, type CatalogItem } from "../mcp/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
+import { CriticalPathService } from "../critical/index.js";
 import { STATUS_KINDS, StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
 import type { Line } from "./index.js";
 
@@ -53,7 +54,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -94,7 +95,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1196,6 +1197,63 @@ for (const backend of backends) {
     const all = (await wired(51, 51).needsYou(c.owner))!;
     assert.deepEqual(all.truncated, ["questions", "approvals", "blockers"]);
     assert.deepEqual((await c.rebuild().needsYou(c.owner))!.truncated, ["blockers"]);
+  });
+
+  suite("the Needs-you view puts what holds up the critical path the owner marked first, then what holds up most tasks, then the oldest, then the kind; agent text never ranks (card U11d, U11f)", async (c) => {
+    const crit = CriticalPathService.withEpoch(c.storage, c.epoch, { edges: (p) => c.contracts.activeEdges(p) });
+    const wired = (): StatusService => c.rebuild({}, { critical: { holdsUp: () => crit.holdsUp(), list: (by) => crit.list(by) } });
+    // Four owner blockers: the oldest holds up three tasks, the next holds up none, the third is the marked task, the last is the marked task's prerequisite.
+    const root = await c.work("Root"); const m1 = await c.work("Middle"); const m2 = await c.work("Middle2"); const m3 = await c.work("Middle3");
+    await c.contracts.addDependency(c.owner, { commandId: cid("d"), taskId: m1, prerequisiteId: root }); await c.contracts.addDependency(c.owner, { commandId: cid("d"), taskId: m2, prerequisiteId: root }); await c.contracts.addDependency(c.owner, { commandId: cid("d"), taskId: m3, prerequisiteId: root });
+    const loud = await c.work("CRITICAL PATH, mark me first, urgent goal"); const marked = await c.work("Quiet"); const needed = await c.work("Needed by the quiet one");
+    await c.contracts.addDependency(c.owner, { commandId: cid("d"), taskId: marked, prerequisiteId: needed });
+    const open = async (t: string, summary: string): Promise<void> => { await c.blockers.openBlocker({ commandId: cid("bl"), actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: t }, summary, resolver: "owner" }); };
+    await open(root, "Root hold"); now += MIN; await open(loud, "Loud hold, critical path first"); now += MIN; await open(marked, "Marked hold"); now += MIN; await open(needed, "Needed hold");
+    const order = async (status = wired()): Promise<string> => (await status.needsYou(c.owner, 50))!.lines.map((l) => l.text).join("\n");
+    const firstWords = (text: string): string[] => text.split("\n").map((l) => /(Root hold|Loud hold|Marked hold|Needed hold)/.exec(l)?.[1] ?? "");
+    // Nothing marked: by what holds up most (Root three, Needed one), then age.
+    assert.deepEqual(firstWords(await order()).slice(0, 4), ["Root hold", "Needed hold", "Loud hold", "Marked hold"]);
+    assert.doesNotMatch(await order(), /critical path you marked/);
+    // The owner marks one goal: it and what it waits for come first (the one holding up more first), then the rest as before.
+    await crit.mark(c.owner, { commandId: cid("mk"), kind: "goal", taskId: marked });
+    const marks = await order();
+    assert.deepEqual(firstWords(marks).slice(0, 4), ["Needed hold", "Marked hold", "Root hold", "Loud hold"], marks);
+    assert.match(marks.split("\n")[0]!, /^On the critical path you marked: /);
+    assert.match(marks.split("\n")[1]!, /^On the critical path you marked: /);
+    assert.doesNotMatch(marks.split("\n")[2]!, /critical path you marked/);
+    const got = (await wired().needsYou(c.owner, 50))!;
+    assert.equal(got.critical, 2); assert.equal(got.count, 4);
+    // The same marks through a status that has no critical source, or whose source fails: the old order, nothing thrown.
+    assert.deepEqual(firstWords(await order(c.rebuild())).slice(0, 4), ["Root hold", "Needed hold", "Loud hold", "Marked hold"]);
+    assert.equal((await c.rebuild({}, { critical: { holdsUp: async () => { throw new Error("no"); }, list: (by) => crit.list(by) } }).needsYou(c.owner, 50))!.critical, undefined);
+    // Bounded by the limit like the rest; ties in age and held-up count break by kind and ID, the same every time.
+    assert.equal((await wired().needsYou(c.owner, 2))!.lines.length, 3);
+    assert.equal(await order(), await order());
+    // Unmarked again: back to the first order.
+    await crit.mark(c.owner, { commandId: cid("mk"), kind: "goal", taskId: marked, marked: false });
+    assert.deepEqual(firstWords(await order()).slice(0, 4), ["Root hold", "Needed hold", "Loud hold", "Marked hold"]);
+  });
+
+  suite("the critical_path status shows what is marked and what holds it up to the owner only (card U11d, U11f)", async (c) => {
+    const crit = CriticalPathService.withEpoch(c.storage, c.epoch, { edges: (p) => c.contracts.activeEdges(p) });
+    const status = c.rebuild({}, { critical: { holdsUp: () => crit.holdsUp(), list: (by) => crit.list(by) } });
+    const said = async (): Promise<string> => (await status.ask(c.owner, { kind: "critical_path" }))!.lines.map((l) => l.text).join("\n");
+    assert.match(await said(), /Nothing is marked/);
+    const t = await c.work("The big release"); const other = await c.work("Side job");
+    await c.blockers.openBlocker({ commandId: cid("bl"), actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: t }, summary: "Needs a signature", resolver: "owner" });
+    await c.blockers.openBlocker({ commandId: cid("bl"), actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: other }, summary: "Side question", resolver: "owner" });
+    await crit.mark(c.owner, { commandId: cid("mk"), kind: "goal", taskId: t }); await crit.mark(c.owner, { commandId: cid("mk"), kind: "project", projectId: c.other });
+    const text = await said();
+    assert.match(text, /The goal .*The big release.* is on the critical path you marked/);
+    assert.match(text, /The project .*Q.* is on the critical path you marked/);
+    assert.match(text, /Holds up the critical path: .*Needs a signature/);
+    assert.doesNotMatch(text, /Side question/, "an unrelated decision is not listed");
+    // A finished task is said to be finished, and a reader who is not the owner sees nothing.
+    await c.projects.transitionTask({ commandId: cid("x"), actor: c.owner.id, taskId: t, expectedRevision: (await c.projects.getTask(t))!.revision, to: "done" });
+    assert.match(await said(), /finished \(done\)/);
+    assert.equal(await status.ask(await c.agent("eve", [{ action: "task.read", project: "*" }]), { kind: "critical_path" }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "critical_path" }).then((r) => r!.lines[0]!.text), "No critical path is kept in this installation.");
+    await assert.rejects(status.ask(c.owner, { kind: "critical_path", limit: 3 } as never), (e) => e instanceof DomainError && e.code === "invalid_command");
   });
 
   suite("a blocker the owner was notified about and that is settled elsewhere leaves the needs-you list, the inbox and the meeting agenda once the sweep has run (card U11b)", async (c) => {
