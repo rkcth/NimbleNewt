@@ -995,6 +995,16 @@ Arguments:
 
 Result: `{ item: { meetings: [{ id, projectId, title, chair?, motions: [{ id, number, text, topic?, state, version }] }], unfinished: [{ id, projectId, text, topic?, left, applying }], truncated } }`.
 
+#### `meeting.owner-outcomes`
+
+The meetings whose outcomes are still to be handed back (card M05): per meeting record, the concluded motions that answer an agenda topic and are not yet returned, `deferred` on those that decided nothing (tabled, failed, no quorum, void), for returning them and asking the owner about the deferred ones; owner only (not a task-scoped credential). `truncated: true` means more exist than were read.
+
+Arguments:
+
+- `limit` (optional): 1 to 50, default 50
+
+Result: `{ item: { meetings: [{ id, projectId, title, motions: [{ id, number, text, state, deferred }] }], truncated } }`.
+
 #### `meeting.record.plan`
 
 The project's latest plan from a meeting.
@@ -3750,14 +3760,15 @@ Result: `{ builds, overviewFailed? }`.
 
 #### `meeting.record.outcomes`
 
-Returns the outcomes to the conversations they came from.
+Returns the outcomes to the conversations they came from. With `askOwner` (owner, host or service holding meeting.manage; never an agent, an outside app or a task credential) a decision the meeting deferred also puts a question to the owner (at most 10 open per project; past that the outcome is returned without the question and listed in `notAsked`). The owner's answer is written back onto this meeting record and shown on the next stand-up agenda.
 
 Arguments:
 
 - `recordId`: the meeting record's ID
+- `askOwner`: true to put a question to the owner for every decision the meeting deferred, or a list of { motionId, question? } (words made from the motion when left out); owner, host or service only, never an agent or a task credential
 - `commandId`: required
 
-Result: `{ returned, pending }`.
+Result: `{ returned, pending, asked, notAsked }`.
 
 #### `meeting.record.sweep`
 

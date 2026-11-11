@@ -17,7 +17,8 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { clean, invalid, optionalPlain, plain, whole } from "../standups/shared.js";
 import { ATTENDANCE_LIMITS, type MeetingDecision } from "./attendance.js";
-import { authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody } from "./meetings.js";
+import { MEETING_LIMITS, authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody, type OwnerQuestionBody } from "./meetings.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import {
   ENTRY_TAGS, FINAL_MOTION_STATES,
   type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type UnloggedIndexBody, type OwnerResponse,
@@ -208,7 +209,7 @@ export interface RecordOptions extends RunnerOptions {
 
 export const RECORD_LIMITS = {
   text: 4000, reason: 500, entries: 1000, systemEntries: 50, motions: 30, trail: 60, tagged: 100, corrections: 100, changes: 10, versions: 20, sources: 5, openRecords: 100, patchBytes: 4000,
-  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8,
+  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8, askOwner: 10, ownerAnswers: 10,
 } as const;
 
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -1250,6 +1251,34 @@ export class MeetingRecordService {
     return { meetings, unfinished, truncated: truncated || (await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
   }
 
+  /**
+   * The meetings whose outcomes are still to be handed back (card M05), for the owner who wants to return them and, if they like, be asked about the decisions that were deferred: for each record (open or ended) the concluded motions that
+   * answer an agenda topic and are not yet returned, with `deferred` set on those that were not decided (tabled, failed, no quorum, void). Owner only (not a task credential). Reads at most 10 pages of 100 records; `truncated` says more exist.
+   */
+  async ownerOutcomes(by: Principal, limit = 50): Promise<{ meetings: { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; state: MotionState; deferred: boolean }[] }[]; truncated: boolean }> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) return { meetings: [], truncated: false };
+    const meetings: { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; state: MotionState; deferred: boolean }[] }[] = [];
+    let after: string | undefined;
+    for (let pages = 0; pages < 10; pages++) {
+      const page = await this.#runner.list("meeting-record", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const a of page) {
+        after = a.id;
+        const rec = a.body as unknown as RecordBody;
+        const motions: { id: string; number: number; text: string; state: MotionState; deferred: boolean }[] = [];
+        for (const motionId of rec.motions) {
+          const m = known<MotionBody>(await this.#runner.get("meeting-motion", motionId));
+          if (m === undefined || m.agendaItemId === undefined || m.outcomeReturned === true || !FINAL_MOTION_STATES.includes(m.state)) continue;
+          motions.push({ id: motionId, number: m.number, text: safeSlice(m.text, 300), state: m.state, deferred: m.state !== "adopted" && m.state !== "rejected" });
+        }
+        if (motions.length === 0) continue;
+        if (meetings.length >= limit) return { meetings, truncated: true };
+        meetings.push({ id: a.id, projectId: rec.projectId, title: safeSlice(rec.title, 120), motions });
+      }
+      if (page.length < 100) return { meetings, truncated: false };
+    }
+    return { meetings, truncated: (await this.#runner.list("meeting-record", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
+  }
+
   /** Tells the observer of every change that has reached a final state; each is told again on a repeat of the apply, which the observer's stable command IDs make harmless. */
   async #announceChanges(decisionId: string): Promise<void> {
     if (this.#options.onChange === undefined) return;
@@ -1553,17 +1582,37 @@ export class MeetingRecordService {
     return out;
   }
 
-  /** Hands each concluded motion's outcome back to the agenda item it answered (and so to the conversation that item came from), through M03's path. The caller is the owner or a manager (M01's rule for changing an item). Safe to repeat. */
-  async returnOutcomes(by: Principal, command: { recordId: string }): Promise<{ returned: string[]; pending: string[] }> {
-    onlyKnown(command, ["recordId"]);
+  /**
+   * Hands each concluded motion's outcome back to the agenda item it answered (and so to the conversation that item came from), through M03's path. The caller is the owner or a manager (M01's rule for changing an item). Safe to repeat.
+   *
+   * `askOwner` (card M05) puts a question to the owner for a decision that was deferred (a motion that was tabled, failed, found no quorum or was voided): `true` for every such motion, or a list of `{ motionId, question? }` (the words are
+   * the caller's, else they are made from the motion). Only the owner, a host or a service holding `meeting.manage` may ask, never an agent, an outside app or a task credential, and a refused caller changes nothing. The question is the
+   * agenda item's own (`setAgendaState`), so it is bounded there (10 open per project): a meeting that would pass the cap still returns its outcome, without the question, and says so in `notAsked`. A repeat asks nothing twice.
+   */
+  async returnOutcomes(by: Principal, command: { recordId: string; askOwner?: boolean | readonly { motionId: string; question?: string }[] }): Promise<{ returned: string[]; pending: string[]; asked: string[]; notAsked: { motionId: string; reason: string }[] }> {
+    onlyKnown(command, ["recordId", "askOwner"]);
     const recordId = this.#recordId(command.recordId);
     const meetings = this.#deps.meetings;
     if (meetings === undefined) throw new DomainError("unavailable", "the meeting service is not available here");
     const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
     // Settling each item goes through `setAgendaState`, where a task credential's management grant does not reach other agents' topics (M03h follow-up): such a credential is refused here, before any motion is marked returned.
     if (rec === undefined || !this.#controls(by, rec)) throw forbidden(by, "return that meeting's outcomes");
+    const plan = this.#askPlan(command.askOwner);
+    // The same rule `setAgendaState` applies to a question for the owner, checked here first so that nothing moves for a caller who may not ask.
+    if (plan !== undefined && (by.kind === "agent" || by.kind === "client" || by.taskScope !== undefined || !allows(by, "meeting.manage", rec.projectId))) throw forbidden(by, "ask the owner a question for a meeting");
+    if (plan !== undefined && typeof command.askOwner === "object") {
+      for (const named of plan.words.keys()) {
+        const m = rec.motions.includes(named) ? known<MotionBody>(await this.#runner.get("meeting-motion", named)) : undefined;
+        if (m === undefined) throw new DomainError("not_found", `motion ${named} is not in that meeting`, { field: "askOwner" });
+        if (m.state === "adopted" || m.state === "rejected") throw new DomainError("invalid_command", `motion ${m.number} was decided (${m.state}), so nothing about it was deferred to ask the owner`, { field: "askOwner" });
+        if (m.agendaItemId === undefined) throw new DomainError("invalid_command", `motion ${m.number} answers no agenda topic, so there is nothing to attach a question to`, { field: "askOwner" });
+      }
+    }
     const returned: string[] = [];
     const pending: string[] = [];
+    const asked: string[] = [];
+    const notAsked: { motionId: string; reason: string }[] = [];
+    let open: number | undefined;
     for (const motionId of rec.motions) {
       const found = await this.#runner.get("meeting-motion", motionId);
       const m = known<MotionBody>(found);
@@ -1574,12 +1623,40 @@ export class MeetingRecordService {
       const d = m.decisionId === undefined ? undefined : known<DecisionRecordBody>(await this.#runner.get("meeting-decision", m.decisionId));
       const decided = m.state === "adopted" || m.state === "rejected";
       const note = d === undefined ? `Motion ${m.number}: ${m.state}. ${m.voidReason ?? "Nothing was decided."}` : `Motion ${m.number} was ${d.outcome} (yes ${d.tally?.yes ?? 0}, no ${d.tally?.no ?? 0}). ${d.scope === "recommendation" && d.outcome === "adopted" ? "It is a recommendation: nothing was done because of it." : ""}`.trim();
+      const wants = !decided && plan !== undefined && (plan.all || plan.words.has(motionId));
+      let question: string | undefined;
+      if (wants) {
+        if (open === undefined) open = await meetings.ownerQuestions(by, rec.projectId).then((q) => q.open.length, () => 0);
+        if (open >= MEETING_LIMITS.ownerQuestionsOpen) notAsked.push({ motionId, reason: `${MEETING_LIMITS.ownerQuestionsOpen} questions to the owner are already open in this project; the outcome is returned without a question` });
+        else {
+          // The made words quote an agent's topic and motion: each excerpt is one line (a line of its own cannot pass for the system speaking), cut between whole characters (a split pair is refused as text, which
+          // would fail the whole hand-back on every try), and anything credential-shaped the cut or the joining could form is redacted rather than refused.
+          const excerpt = (s: string, n: number): string => safeSlice(s.replace(/\s+/g, " ").trim(), n);
+          const reason = excerpt(m.voidReason ?? "", 120);
+          question = plan.words.get(motionId) ?? redactText(safeSlice(`On "${excerpt(ib.topic, 80)}": motion ${m.number} ("${excerpt(m.text, 160)}") ended ${m.state}${reason === "" ? "" : ` (${reason})`}, so nothing was decided. How should the team go on?`, MEETING_LIMITS.ownerQuestion));
+          open += 1;
+        }
+      }
+      // Whether the item's question was asked in this very meeting (by an earlier try of this hand-back, whoever made it), not one left on the topic by an earlier meeting.
+      const askedHere = async (): Promise<boolean> => {
+        if (ib.ownerQuestionId === undefined) return false;
+        const q = known<OwnerQuestionBody>(await this.#runner.get("owner-question", ib.ownerQuestionId));
+        return q !== undefined && q.agendaItemId === m.agendaItemId && q.occurrenceId === rec.occurrenceId;
+      };
+      let settled = false;
       try {
-        if (ib.state === "scheduled" || ib.state === "discussed" || ib.state === "deferred") {
+        // An undecided motion whose topic is already deferred (by an earlier try of this hand-back, this caller's or another's, or by another motion) moves nothing: deferring it again is not a move and would be refused.
+        if (ib.state === "scheduled" || ib.state === "discussed" || (decided && ib.state === "deferred")) {
+          settled = true;
+          // A repeat after the motion could not be marked returned finds the item already moved by this very command (same ID, the revision since changed): that settling stands and is not made again, nor is its question.
           await meetings.setAgendaState(by, decided
             ? { commandId: `ret-${motionId}`, itemId: m.agendaItemId, expectedRevision: item.revision, to: "resolved", outcomeRef: m.decisionId ?? motionId, outcomeNote: note.slice(0, 1000) }
-            : { commandId: `ret-${motionId}`, itemId: m.agendaItemId, expectedRevision: item.revision, to: "deferred", reason: (m.voidReason ?? `the motion ended ${m.state}`).slice(0, 500), nextStep: "it is on the next meeting's agenda", ...{} });
-        }
+            : { commandId: `ret-${motionId}`, itemId: m.agendaItemId, expectedRevision: item.revision, to: "deferred", reason: (m.voidReason ?? `the motion ended ${m.state}`).slice(0, 500), nextStep: question === undefined ? "it is on the next meeting's agenda" : "the owner was asked; it is on the next meeting's agenda with the question", ...(question === undefined ? {} : { ownerQuestion: question }) }).catch(async (error: unknown) => {
+            // Only an item that is no longer waiting in the meeting can have been moved by an earlier try of this command; a conflict on a scheduled item is a real one.
+            if (!(error instanceof DomainError) || error.code !== "command_conflict" || ib.state === "scheduled") throw error;
+            settled = question !== undefined && await askedHere();
+          });
+        } else if (question !== undefined) settled = await askedHere();
         await this.#retrying(() => this.#runner.command("meeting.motion.returned", { commandId: `mtg-returned:${motionId}`, actor: by.id }, async () => ({
           payload: { motionId },
           build: async () => {
@@ -1588,12 +1665,32 @@ export class MeetingRecordService {
           },
         })));
         returned.push(motionId);
+        if (question !== undefined && settled) asked.push(motionId);
+        // Another motion or an earlier hand-back already settled this topic (resolved, deferred or queued again) without a question of this meeting, so there is no state change to hang one on.
+        else if (question !== undefined) { notAsked.push({ motionId, reason: `the topic is already ${ib.state}, settled by another motion or an earlier hand-back of this meeting, so it takes no question` }); open = (open ?? 1) - 1; }
       } catch (error) {
         if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "unavailable")) pending.push(motionId);
         else throw error;
       }
     }
-    return { returned, pending };
+    return { returned, pending, asked, notAsked };
+  }
+
+  /** What `askOwner` means: absent or false, nothing; true, every deferred motion with made words; a list, those motions with the caller's words or made ones. */
+  #askPlan(value: unknown): { all: boolean; words: Map<string, string | undefined> } | undefined {
+    if (value === undefined || value === false) return undefined;
+    if (value === true) return { all: true, words: new Map() };
+    if (!Array.isArray(value) || value.length === 0 || value.length > RECORD_LIMITS.askOwner) throw new DomainError("invalid_command", `askOwner is true, or a list of 1 to ${RECORD_LIMITS.askOwner} motions`, { field: "askOwner" });
+    const words = new Map<string, string | undefined>();
+    for (const one of value as unknown[]) {
+      if (one === null || typeof one !== "object" || Array.isArray(one)) throw new DomainError("invalid_command", "askOwner lists motions as { motionId, question? }", { field: "askOwner" });
+      onlyKnown(one as Record<string, unknown>, ["motionId", "question"]);
+      const { motionId, question } = one as { motionId?: unknown; question?: unknown };
+      if (typeof motionId !== "string" || !MOTION_ID.test(motionId)) throw new DomainError("invalid_command", "askOwner names a motion by its ID", { field: "askOwner" });
+      if (words.has(motionId)) throw new DomainError("invalid_command", `motion ${motionId} is listed twice in askOwner`, { field: "askOwner" });
+      words.set(motionId, question === undefined ? undefined : plain(question, "question", MEETING_LIMITS.ownerQuestion));
+    }
+    return { all: false, words };
   }
 
   /**

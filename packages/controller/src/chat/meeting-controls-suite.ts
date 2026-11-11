@@ -14,6 +14,7 @@ const CLOSE = "meeting.record.close-vote";
 const TABLE = "meeting.record.table";
 const FINISH = "meeting.record.finish";
 const APPLY = "meeting.record.apply";
+const OUTCOMES = "meeting.record.outcomes";
 
 interface Room {
   records: MeetingRecordService;
@@ -21,7 +22,7 @@ interface Room {
   /** A meeting with the three agents joined; returns the record's ID. */
   meeting(title: string, project?: string): Promise<{ recordId: string; project: string }>;
   /** A motion moved in that meeting (one retitling change when `change` is set). */
-  motion(recordId: string, text: string, o?: { topic?: string; change?: string }): Promise<{ id: string; taskId?: string }>;
+  motion(recordId: string, text: string, o?: { topic?: string; change?: string; agendaItemId?: string }): Promise<{ id: string; taskId?: string }>;
   vote(motionId: string, value?: "yes" | "no"): Promise<void>;
   state(motionId: string): Promise<string>;
   recordState(recordId: string): Promise<string>;
@@ -66,7 +67,7 @@ export function defineMeetingControlTests(backendName: string): void {
               taskId = await w.task(project, o.change);
               changes.push({ kind: "task.update", agent: crew[0]!.principal.id, target: { kind: "task", id: taskId }, expectedRevision: (await w.projects.getTask(taskId))!.revision, patch: { title: `${o.change} v2` }, summary: `retitle ${o.change}` });
             }
-            const id = (await records.move(crew[1]!.principal, { commandId: cid("mv"), recordId, text, ...(o.topic === undefined && o.change === undefined ? {} : { topic: o.topic ?? "build tasks" }), changes } as never)).id;
+            const id = (await records.move(crew[1]!.principal, { commandId: cid("mv"), recordId, text, ...(o.topic === undefined && o.change === undefined ? {} : { topic: o.topic ?? "build tasks" }), ...(o.agendaItemId === undefined ? {} : { agendaItemId: o.agendaItemId }), changes } as never)).id;
             return { id, ...(taskId === undefined ? {} : { taskId }) };
           },
           vote: async (motionId, value = "yes") => {
@@ -258,13 +259,71 @@ export function defineMeetingControlTests(backendName: string): void {
       assert.equal(await room.state(printer.id), "proposed");
     });
 
+    suite("the owner has a finished meeting hand its outcomes back and ask them about what was left open, in their own words; the answer is written onto the meeting's record (card M05)", async (w, script, room) => {
+      const topic = (await w.meetings.addAgendaItem(w.owner, { commandId: cid("it"), projectId: room.project, topic: "Pick the cache size", question: "How big?", urgency: "urgent", intent: "delegated-decision" })).id;
+      const { recordId } = await room.meeting("Infrastructure sync");
+      const moved = (await room.motion(recordId, "Make the cache four gigabytes, as the benchmark shows.", { agendaItemId: topic })).id;
+      await room.records.table(w.owner, { commandId: cid("t"), motionId: moved, reason: "no benchmark yet" });
+      const chat = w.chat();
+      const ask = "Hand back what the infrastructure sync decided, and ask me about the things it left open.";
+      script[ask] = [cmd(OUTCOMES, { meetingTopic: "infrastructure", askOwner: true }, "ask me about the things it left open")];
+      const proposed = only((await say(w, chat, ask)).outcomes);
+      assert.equal(proposed.status, "proposed", JSON.stringify(proposed));
+      assert.match(String(proposed.preview), /Hand a meeting's outcomes back/);
+      assert.match(String(proposed.preview), /puts a question to you/);
+      assert.match(String(proposed.preview), /Infrastructure sync/);
+      assert.match((await chat.getProposal(w.ownerToken, proposed.proposalId!))!.reason, /puts a question to you/);
+      assert.equal((await w.meetings.ownerQuestions(w.owner, room.project)).open.length, 0, "nothing is asked before the owner agrees");
+      await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposed.proposalId! });
+      const open = (await w.meetings.ownerQuestions(w.owner, room.project)).open;
+      assert.equal(open.length, 1);
+      assert.match(open[0]!.question, /tabled/);
+      assert.equal((await room.records.motion(w.owner, moved) as unknown as { outcomeReturned?: boolean }).outcomeReturned, true);
+      // The owner's answer (in chat it is the stand-up answer command, tested with the stand-up commands) goes onto the meeting's record.
+      const reply = "In project A, about the cache size: yes, run the benchmark first.";
+      await w.meetings.answerOwnerQuestion(w.owner, { commandId: cid("an"), questionId: open[0]!.id, expectedRevision: open[0]!.revision, answer: reply });
+      const notes = ((await room.records.record(w.owner, recordId)) as unknown as { ownerAnswers?: { answer: string }[] }).ownerAnswers!;
+      assert.deepEqual(notes.map((n) => n.answer), [reply]);
+    });
+
+    suite("asking by chat is refused when the meeting deferred nothing or the wish is not a plain yes, and an agent cannot ask through the API (card M05)", async (w, script, room) => {
+      const topic = (await w.meetings.addAgendaItem(w.owner, { commandId: cid("it"), projectId: room.project, topic: "Pick the editor", question: "Which?", urgency: "urgent", intent: "discussion" })).id;
+      const { recordId } = await room.meeting("Infrastructure sync");
+      const m = await room.motion(recordId, "Use the new editor everywhere.", { agendaItemId: topic });
+      await room.vote(m.id);
+      await room.records.closeVote(w.owner, { commandId: cid("cl"), motionId: m.id });
+      assert.equal(await room.state(m.id), "adopted");
+      const chat = w.chat();
+      script["Hand back the infrastructure sync outcomes and ask me, yes."] = [cmd(OUTCOMES, { meetingTopic: "infrastructure", askOwner: "yes" }, "ask me")];
+      const odd = only((await say(w, chat, "Hand back the infrastructure sync outcomes and ask me, yes.")).outcomes);
+      assert.equal(odd.status, "refused", JSON.stringify(odd));
+      assert.match(String(odd.message), /askOwner is true or false/);
+      // The meeting decided everything, so there is nothing left open to ask about.
+      script["Hand back the infrastructure sync outcomes and ask me about the open things."] = [cmd(OUTCOMES, { meetingTopic: "infrastructure", askOwner: true }, "ask me about the open things")];
+      const nothing = only((await say(w, chat, "Hand back the infrastructure sync outcomes and ask me about the open things.")).outcomes);
+      assert.equal(nothing.status, "refused", JSON.stringify(nothing));
+      assert.match(String(nothing.message), /deferred nothing/);
+      // Without the wish to be asked the same words are a plain proposal.
+      script["Hand back the infrastructure sync outcomes."] = [cmd(OUTCOMES, { meetingTopic: "infrastructure" }, "Hand back the infrastructure sync outcomes")];
+      const plain = only((await say(w, chat, "Hand back the infrastructure sync outcomes.")).outcomes);
+      assert.equal(plain.status, "proposed", JSON.stringify(plain));
+      assert.match(String(plain.preview), /nothing is asked of you/);
+      // An agent with the right to manage meetings may not make a meeting ask the owner, whatever it sends.
+      const mgr = await w.agent("mgr2", [{ action: "meeting.manage", project: "*" }]);
+      const refused = await call(w, mgr.token, "meeting.record.outcomes", { recordId, askOwner: true });
+      assert.equal(refused.ok, false);
+      assert.equal(refused.error.code, "forbidden");
+      assert.equal((await call(w, mgr.token, "meeting.owner-outcomes", {})).ok, false, "the list is the owner's");
+      assert.equal((await call(w, w.ownerToken, "meeting.owner-outcomes", {})).ok, true);
+    });
+
     suite("only the owner reads what can be acted on, and the controls are chat commands with a line of their own", async (w, _script, room) => {
       await room.meeting("Sync");
       const refused = await call(w, room.agentToken, "meeting.owner-controls", {});
       assert.equal(refused.ok, false);
       assert.equal((await call(w, w.ownerToken, "meeting.owner-controls", { limit: 0 })).ok, false);
       assert.equal((await call(w, w.ownerToken, "meeting.owner-controls", {})).ok, true);
-      for (const op of [OPEN, CLOSE, TABLE, FINISH, APPLY]) {
+      for (const op of [OPEN, CLOSE, TABLE, FINISH, APPLY, OUTCOMES]) {
         assert.equal(CHAT_OPS[op]?.mode, "propose", `${op} is always shown first`);
         assert.ok(acceptedArgs(op) !== undefined, `${op} is a chat command`);
         assert.doesNotMatch(String(proposalReason(op, {}, false, { profile: "derived", said: true, quoted: false })), /capabilities/, `${op} has its own reason`);
@@ -272,6 +331,7 @@ export function defineMeetingControlTests(backendName: string): void {
       }
       assert.ok(!acceptedArgs(OPEN)!.includes("limitMinutes"), "the length of a vote is not chat's to set");
       assert.ok(acceptedArgs(TABLE)!.includes("motionTopic") && acceptedArgs(FINISH)!.includes("meetingTopic") && acceptedArgs(APPLY)!.includes("decisionTopic"));
+      assert.ok(acceptedArgs(OUTCOMES)!.includes("meetingTopic") && acceptedArgs(OUTCOMES)!.includes("askOwner") && acceptedArgs(OUTCOMES)!.includes("recordId"));
     });
   }
 }
