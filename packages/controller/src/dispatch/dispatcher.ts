@@ -1749,7 +1749,7 @@ export class DispatcherService {
   }
 
   /** A ready resume check that holds changes judged to matter waits for the owner. The owner is told once (the command ID is the check's), in words that match the stored check. */
-  async #holdForReview(attemptId: string, title: string, projectId: string, check: { id: string }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
+  async #holdForReview(attemptId: string, title: string, projectId: string, check: { id: string; verdicts?: Readonly<Record<string, { notReviewed?: string }>> }, relevant: readonly { id: string; kind: string; key: string; status: string }[]): Promise<string> {
     // The title and the change keys are the owner's and the agents' text: secret-shaped parts are redacted BEFORE anything is cut (a credential cut short no longer matches its pattern, and the
     // notification redacts only what it is given), and control characters become spaces (a tab in a key would make the notification refuse the detail, and the owner would never be told).
     const plain = (s: string): string => redactText(s).replace(/[\u0000-\u001f\u007f]/g, " ");
@@ -1757,15 +1757,18 @@ export class DispatcherService {
     const more = relevant.length > 3 ? ` and ${relevant.length - 3} more` : "";
     // The owner is shown the task by its title (quoted, on one line, cut short), never by its ID; what changed is cut to the room left, so what to do always fits in the notice's 200 characters.
     // Every cut keeps a character whole (never half of a surrogate pair): ill-formed text is refused by the notification, and the owner would never be told.
-    const head = `"${clipText(plain(title), HELD_TITLE)}" is held before it resumes: ${relevant.length} change(s) since it stopped matter to it: `;
+    // A change no second agent judged (card L04d wiring: no reviewer route, an unusable one, the cap, no verdict) is said to be unreviewed, never to matter.
+    const unreviewed = relevant.filter((i) => check.verdicts?.[i.id]?.notReviewed !== undefined).length;
+    const why = unreviewed === 0 ? "matter to it" : unreviewed === relevant.length ? "had no second-agent review" : `need you (${unreviewed} not reviewed)`;
+    const head = `"${clipText(plain(title), HELD_TITLE)}" is held before it resumes: ${relevant.length} change(s) since it stopped ${why}: `;
     const tail = " Approve to let it go on, or decline to release it.";
     const what = `${names}${more}.`;
     const room = NOTICE_DETAIL - head.length - tail.length;
     await this.#deps.notifications?.emitFromController({
       commandId: `dpa-ntf:resume-review:${check.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-check", id: check.id }, projectId,
-      detail: clipText(`${head}${what.length <= room ? what : `${clipText(what, room - 3)}...`}${tail}`, NOTICE_DETAIL),
+      detail: clipText(`${head}${what.length <= room ? what : room > 3 ? `${clipText(what, room - 3)}...` : ""}${tail}`, NOTICE_DETAIL),
     }).catch((error: unknown) => this.#options.onError?.(error));
-    return clipText(`the resume check ${check.id} is ready but holds ${relevant.length} change(s) judged to matter (${names}${more}); attempt ${attemptId} waits until the owner approves the resume (resume.approve) or declines it, which releases the task (resume.decline)`, 500);
+    return clipText(`the resume check ${check.id} is ready but holds ${relevant.length} change(s) ${unreviewed === 0 ? "judged to matter" : unreviewed === relevant.length ? "no second agent reviewed" : `judged to matter or not reviewed (${unreviewed} not reviewed)`} (${names}${more}); attempt ${attemptId} waits until the owner approves the resume (resume.approve) or declines it, which releases the task (resume.decline)`, 500);
   }
 
   /** The owner's notice that a resume is held is closed once the check is done (approved) or cancelled, so the inbox never says a task waits that does not. Best effort; nothing open is a no-op. */
