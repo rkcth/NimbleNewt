@@ -24,6 +24,7 @@ export function startNoticeText(n: LauncherNotice, ownerLevel: StartFailureLevel
   const level: NotificationLevel = n.fallback ? ownerLevel : "urgent";
   const label = n.kind === "fell_back"
     ? `${level === "urgent" ? "Urgent: " : ""}release ${n.release} failed to start; the launcher fell back to release ${n.to ?? "the last known good"}`
+    : n.cause === "hung" ? `${level === "urgent" ? "Urgent: " : ""}release ${n.release} stopped responding and the launcher restarted it`
     : n.fallback ? `${level === "urgent" ? "Urgent: " : ""}release ${n.release} did not start in time and is set aside`
       : `Urgent: release ${n.release} failed to start and no other release is known to work`;
   return { level, label };
