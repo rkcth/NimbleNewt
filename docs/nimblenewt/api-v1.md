@@ -240,6 +240,18 @@ Result: `{ item }`: `revision`, `maxRounds` (the owner's, or null), `default`, `
 
 Completion: finished when accepted (`completed: true`).
 
+#### `coordinator.get`
+
+The coordinator, as the owner reads it (owner only): its principal, its model routes in the order tried (the primary first, then the fallbacks), the order the owner last gave and, when the principal is an agent record (a hosted coordinator, card U03c), the agent it runs as and where (`hosted: { agentId, host }`). For a hosted coordinator `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` lists the pause gates that hold it (its own, a team's, the installation's) with what each reported; pausing, stopping or resuming the agent, or a team above it, therefore changes this at once. Its grants are the agent's grants (`grant.list` with its principal) and are revoked like any agent's. `item` is null when no coordinator is set up.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `id`, `revision`, `principalId`, `routes`, `state`, `hosted?`, `lifecycle?: { agent, state, heldBy: [{ scope, observed?, reason?, by? }] }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `host.quiet.get`
 
 What happens when a host stops reporting while it holds work (owner only): the owner is warned first, and the work is re-placed after a grace period unless the owner turns that off. Shows the owner's figures, the defaults and the effective ones.
