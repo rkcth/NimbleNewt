@@ -23,6 +23,8 @@ function sensitiveName(name: string): boolean {
  */
 const PRIVATE_KEY_BLOCK = new RegExp(CREDENTIAL_PATTERNS.find((p) => p.name === "private key block")!.pattern.source, "g");
 export function redactText(text: string): string {
+  // A caller's `error.message` can be anything at run time: never throw while hiding a secret.
+  if (typeof text !== "string") text = String(text ?? "");
   // A whole private key block written as such is one mark (as before); every other shape is found by the scan, which matches all of CREDENTIAL_PATTERNS through its folded views (a URL keeps its scheme, user and host).
   const out = text.replace(PRIVATE_KEY_BLOCK, REDACTED);
   return replaceSpans(out, scanSecrets(out), REDACTED);

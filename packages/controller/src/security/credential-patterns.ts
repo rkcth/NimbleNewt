@@ -17,15 +17,20 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
   { name: "API key (sk-)", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
   { name: "GitHub token", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g },
   { name: "GitHub fine-grained token", pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g },
-  { name: "AWS access key", pattern: /\bAKIA[0-9A-Z]{16}\b/g },
+  // The prefix in any letter case (`AkIa…`), the body upper case as AWS writes it: a derived ID is 20 lower-case base32 characters, and `cmp-akia…` or `cmp-asia…` must stay.
+  { name: "AWS access key", pattern: /\b(?:[Aa][Kk][Ii][Aa]|[Aa][Ss][Ii][Aa]|ABIA|ACCA)[0-9A-Z]{16}\b/g },
   { name: "private key block", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
   { name: "URL with embedded password", pattern: /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@]+:[^\s@/]+@/gi },
-  { name: "JSON web token", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
-  { name: "Slack token", pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}/g },
+  { name: "JSON web token", pattern: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  { name: "Slack token", pattern: /\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,}/g },
   { name: "Google API key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g },
   { name: "Stripe key", pattern: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g },
   { name: "npm token", pattern: /\bnpm_[A-Za-z0-9]{36}\b/g },
-  { name: "named secret assignment", pattern: /\b(?:password|passwd|secret|api[-_]?key|token)\s*[=:]\s*\S{4,}/gi },
+  // Hugging Face, GitLab, Docker Hub, DigitalOcean and Shopify tokens: a fixed prefix whose body can lack a digit or be lower-case hex, which the high-entropy rule leaves alone.
+  { name: "service token", pattern: /\b(?:hf_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|dckr_pat_[A-Za-z0-9_-]{24,}|do[opr]_v1_[a-f0-9]{64}|shp(?:at|ca|pa|ss)_[a-fA-F0-9]{32})\b/g },
+  { name: "basic auth header", pattern: /\bauthorization["']?\s*[:=]\s*["']?Basic\s+[A-Za-z0-9+/]{4,}={0,2}/gi },
+  // The name may end a longer one (`DB_PASSWORD=`, `client_secret:`, `"password": "…"`, `_authToken=`): a letter or digit right before it, as in `inputToken`, still does not count.
+  { name: "named secret assignment", pattern: /(?<![A-Za-z0-9])(?:password|passwd|secret|api[-_]?key|token|auth[-_]?token|access[-_]?key|secret[-_]?key|private[-_]?key|pwd(?=\s*=))["']?\s*[=:]\s*\S{4,}/gi },
 ];
 
 /**

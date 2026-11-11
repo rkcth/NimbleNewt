@@ -213,3 +213,47 @@ test("no false positives over the product's own text: no non-test source file of
   const hits = files.flatMap((f) => { const t = readFileSync(f, "utf8"); return scanSecrets(t).filter((s) => s.name === "high-entropy key").map((s) => `${f}: ${t.slice(s.start, s.end)}`); });
   assert.deepEqual(hits, []);
 });
+
+// Clean-context review of the scanner (card 20): misses, false positives and slow inputs found by probing with invented keys.
+test("review: env-style, JSON and header secrets are redacted; the extra token shapes are caught", () => {
+  const key40 = "Q7vXk2Lp9Rz4Tm8Wn3Yb6Hc1Jd5Fg0Ks+Ua/Ve7Xq";
+  assert.equal(redactText(`AWS_SECRET_ACCESS_KEY=${key40}`).includes(key40), false, "an AWS secret key in an env line");
+  assert.equal(redactText(`AWS_KEY_VALUE=${key40}`), "AWS_KEY_VALUE=[redacted]", "a random value after `=` is not hidden from the entropy rule by the `=`");
+  assert.equal(redactText(`AccountName=a;AccountKey=${key40}${key40};x=1`).includes(key40), false, "an Azure account key after `=`");
+  for (const line of ["DB_PASSWORD=CorrectHorse99", "CLIENT_SECRET=1Lai5gLopTAYRtiV", "export GITHUB_TOKEN=BOIkmxpxyMwU", "client_secret=107e8cd259969ece8161a61fa51c2da75a475bb6b46764951900e3a4a872714d", "//registry.npmjs.org/:_authToken=l9nfsjUq4JbAog", "Server=db;Uid=sa;Pwd=Sup3rS3cret!;"]) {
+    assert.ok(redactText(line).includes("[redacted]"), line);
+    assert.ok(findCredentialShapes(line).length > 0, line);
+  }
+  assert.equal(redactText(`{"password":"hunter2hunter2"}`).includes("hunter2"), false, "a JSON password field");
+  assert.equal(redactText("Authorization: Basic YWRtaW46aHVudGVyMnBhc3M="), "[redacted]", "a basic auth header");
+  for (const id of ["cmp-a3t55exqmtopjlcotzmj", "cmp-akia55exqmtopjlcotz", "task-asia55exqmtopjlcotz"]) assert.equal(redactText(id), id, `a derived ID ${id} is not an AWS key`);
+  assert.equal(redactText("k AkIaSAHKAWQZLR57OSJK k"), "k [redacted] k", "a mixed-case AWS prefix");
+  assert.equal(redactText("inputToken = count + 1; max_tokens: 4096; TOKEN_COUNT=5"), "inputToken = count + 1; max_tokens: 4096; TOKEN_COUNT=5", "names that only contain the word stay");
+  for (const k of ["ASIASAHKAWQZLR57OSJK", "xapp-1-A0123BCDE-1234567890123-abcdef0123456789", "glpat-" + "WzFy0jJxuG3LjXeMHiOj", "hf_A" + "bCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh", "dckr_p" + "at_2oYsTiONjXKBNHoPGihWy5ovooZ", `dop_v1_${"ab12".repeat(16)}`, `shpat_${"9f3a".repeat(8)}`]) assert.equal(redactText(`k ${k} k`), "k [redacted] k", k);
+});
+
+test("review: a combining mark on a key's letter or a lone carriage return does not hide it; the text without a key keeps its marks", () => {
+  const key = "ghp_Ooqu0fABOEpBsr8nsW4bAurCh4Zf6XxX5u1O";
+  assert.equal(redactText(`k ${key.slice(0, 15)}́${key.slice(15)} k`), "k [redacted] k");
+  assert.equal(redactText(`k ${[...key].map((c, i) => (i % 8 === 7 ? `${c}̀` : c)).join("")} k`), "k [redacted] k");
+  assert.equal(redactText(`k ${key.slice(0, 18)}\r${key.slice(18)} k`), "k [redacted]\r[redacted] k");
+  assert.equal(redactText("café and ño"), "café and ño");
+});
+
+test("review: go.sum hashes and SSH public keys are not keys", () => {
+  for (const s of ["github.com/foo/bar v1.2.3 h1:Fim8MVMXHoJgOPO7rM5fN+udh9vLDKbvQn1bIYe9F1P=", "x sha256:Fim8MVMXHoJgOPO7rM5fN+udh9vLDKbvQn1bIYe9F1P=", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIQ8Zt3VvKpR0aW7yX2mN5bC9dE1fG4hJ6kL rob@host", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7q8Zt3VvKpR0aW7yX2mN5bC9dE1fG4hJ6kL0 rob@host"]) assert.equal(redactText(s), s, s);
+  assert.equal(redactText("use q8Zt3VvKpR0aW7yX2mN5bC9dE1fG4hJ6kL0sT3uV8wY z"), "use [redacted] z", "an unlabelled key still goes");
+});
+
+test("review: inputs that took quadratic time are linear (a base64 dump with no key END, `eyJ-` repeated), and a non-string never throws", () => {
+  const dump = "TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsuIFRoZSBxdWljayBicm93bg\n".repeat(8000); // ~480 KB: about 20 s before
+  let t = performance.now();
+  redactText(dump);
+  assert.ok(performance.now() - t < 5000, `base64 dump took ${performance.now() - t} ms`);
+  t = performance.now();
+  redactText("eyJ-".repeat(60_000)); // 240 KB: about a minute before
+  assert.ok(performance.now() - t < 5000, `eyJ- took ${performance.now() - t} ms`);
+  const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+  assert.equal(redactText(`ok\n${body}\n${body}\n-----END PRIVATE KEY-----\nnext step\n-----END PRIVATE KEY-----`), "ok\n[redacted]\n[redacted]\n-----END PRIVATE KEY-----\nnext step\n-----END PRIVATE KEY-----", "orphan END lines: only the key lines just above each END");
+  for (const v of [undefined, null, 5, {}]) assert.equal(typeof redactText(v as unknown as string), "string");
+});

@@ -8642,3 +8642,23 @@ Reviewed the "Review leftovers: settings changes in one write" section above (co
 **Mutation checks**, each applied alone, built and run: lock dropped by `change`; the check against the layers above removed; the scope existence check removed; the guards on the layers above removed; the replayed answer's effects emptied; the create contention answer removed; the meetings sink swallowing every domain error. Before the new tests, three of these (lock, existence, guards) survived; now all seven fail their tests.
 
 **Not changed.** `change` clears the layer's `lastFailure`, which describes the last refused apply of the draft that is still staged; with no product path staging, it is left as is.
+
+## Credential redaction follow-up: clean-context review (Claude agent, Sonnet 5.5, 2026-11-11)
+
+Adversarial review of the scanner above, probing with invented keys only.
+
+**Fixed**
+
+- Two inputs took quadratic time. A base64 dump with no private key END (the old `ORPHAN_END` regex, a repeated line group before a lookahead) took 6 s for 256 KB and did not finish for 1 MB. Text with `eyJ-` repeated (the JWT pattern started at every `\b`) took 5 s for 64 KB. The orphan END is now found by walking back from each END line, and a JWT must start at the beginning of a run. 1 MB of either now takes 0.1-0.7 s.
+- Misses. `KEY=<random value>`: a `=` before a run kept it from the entropy rule, so `AWS_SECRET_ACCESS_KEY=…` and an Azure `AccountKey=…` stayed. The named assignment now matches at the end of a longer name, after `_` or a quote: `DB_PASSWORD=`, `CLIENT_SECRET=`, `client_secret=<64 hex>`, `"password":"…"`, `_authToken=`, `Pwd=`, and the new `access_key`/`secret_key`/`private_key`/`auth_token` forms. `inputToken`, `max_tokens` and `TOKEN_COUNT` still stay. New shapes: `Authorization: Basic …`, AWS `ASIA`/`ABIA`/`ACCA`, Slack `xapp-`, and the "service token" shape (Hugging Face `hf_`, GitLab `glpat-`, Docker `dckr_pat_`, DigitalOcean `dop_v1_`, Shopify `shpat_`). A combining mark on a key's letter is left out of the matching view; the text keeps it, and a span covers the marks on its last character. A lone carriage return splitting a key is joined like a line break.
+- False positives. go.sum `h1:` and `sha256:` + base64 digests stay, and so do SSH public keys (`AAAAB3NzaC1yc2E…`, `AAAAC3NzaC1lZDI1NTE5…`, ecdsa). The AWS prefix stays case-free but its body must be upper case. A case-free body read a derived ID such as `cmp-a3t…` or `cmp-akia…` (20 lower-case characters) as a key, and the C07q compaction test found it.
+- `redactText` no longer throws on a non-string. Three raw error messages are now redacted: start's release recovery line, the launcher's "building it failed", and the MCP stdio bridge's stop message.
+- Tests: four review tests in `secret-scan.test.ts`. Mutations, each killed: view offsets shifted by one at the start, and at the end; marks kept in the view; `=` hiding runs; orphan END never redacted; the JWT `\b` start (by the time test); the named assignment `\b`; trailing marks not covered.
+
+**Not done (decided)**
+
+- Homoglyphs (a Cyrillic `о` or Greek `ο` inside a key) are not folded. Such a string is no longer the key, and anyone who swaps letters on purpose can just as well encode it. A key split by spaces, by quotes (`'ghp_ab' + 'cd'`), or written in JSON `\u` escapes or HTML entities throughout is not caught. Joining across spaces would blank ordinary text.
+- ASSUMPTION: a random value after `=` is now checked by the entropy rule, so a third-party URL `cursor=<32+ random characters>` is blanked. NimbleNewt's own `~` cursors stay. A secret in `KEY=value` lines (.env files, connection strings, `?sig=`) matters more.
+- Still blanked: `xxd -p` hex lines (60 hex), data: URI images, SHA-384/224 hex, PGP signature lines and other long base64 of plain data (as noted above). The prose `the token: expired` is blanked by the named assignment, as before.
+- A key at a line's end followed by a short non-word on the next line (`Ok`, `𝐀`) blanks that word too (the line-joined view).
+- Older copies that are not the shared scanner remain. config `findInlineSecrets` (`SECRET_SHAPES`) and release `service-units` (`SECRETISH`/`SECRET_VALUE`) keep their own shorter, case-sensitive, unfolded lists. The worker and pi-adapter packages have no credential redaction; pi-adapter prints hook error messages raw. Thinking store and job output keep their own orphan-END literals on top of the scanner. The tool bridge, job runs, MCP job call and scratch cleanup strip controls with their own regexes after `redactText`. `onInternalError` passes the raw error to the embedder's sink.

@@ -36,6 +36,8 @@ interface View { readonly text: string; readonly start?: readonly number[]; read
 const startOf = (v: View, k: number): number => (v.start === undefined ? k : v.start[k]!);
 const endOf = (v: View, k: number): number => (v.end === undefined ? k + 1 : v.end[k]!);
 const PLAIN = /^[\t\n\r\x20-\x7e]*$/;
+/** Combining marks are left out of the matching VIEW only (never removed from the text): an accent put on a key's letter (`ghp_ab\u0301c…`) must not hide the key. */
+const MARK = /^\p{M}$/u;
 
 function fold(src: string): View {
   if (PLAIN.test(src)) return { text: src };
@@ -46,7 +48,7 @@ function fold(src: string): View {
   for (const ch of src) {
     const at = i;
     i += ch.length;
-    if (isHidden(ch)) continue;
+    if (isHidden(ch) || MARK.test(ch)) continue;
     const cp = ch.codePointAt(0)!;
     const n = DASHES.has(cp) ? "-" : cp < 0x80 ? ch : ch.normalize("NFKC");
     for (let k = 0; k < n.length; k++) { start.push(at); end.push(i); }
@@ -62,33 +64,54 @@ function joinLines(v: View): View {
   const end: number[] = [];
   let text = "";
   const t = v.text;
-  const BREAK = /[ \t]*\r?\n[ \t]*/y;
+  const BREAK = /[ \t]*(?:\r\n?|\n)[ \t]*/y;
   for (let k = 0; k < t.length;) {
     if ((t[k] === "\n" || t[k] === "\r" || t[k] === " " || t[k] === "\t") && k > 0 && TOKEN_CHAR.test(t[k - 1]!)) {
       BREAK.lastIndex = k;
       const m = BREAK.exec(t);
-      if (m !== null && m[0].includes("\n") && k + m[0].length < t.length && TOKEN_CHAR.test(t[k + m[0].length]!)) { k += m[0].length; continue; }
+      if (m !== null && /[\r\n]/.test(m[0]) && k + m[0].length < t.length && TOKEN_CHAR.test(t[k + m[0].length]!)) { k += m[0].length; continue; }
     }
     text += t[k]; start.push(startOf(v, k)); end.push(endOf(v, k)); k++;
   }
   return text.length === t.length ? v : { text, start, end };
 }
 
-/** Key prefixes matched in any letter case: a model that writes `GHP_…` or `Sk-…` still wrote the key. */
-const CASE_FREE = new Set(["API key (sk-)", "GitHub token", "GitHub fine-grained token", "AWS access key", "Slack token", "npm token"]);
+/** Key prefixes matched in any letter case: a model that writes `GHP_…` or `Sk-…` still wrote the key. (The AWS pattern spells its own case-free prefix: its body stays upper case.) */
+const CASE_FREE = new Set(["API key (sk-)", "GitHub token", "GitHub fine-grained token", "Slack token", "npm token", "service token"]);
 /** Shapes with a fixed prefix and no spaces inside, looked for again with line breaks removed (with the private key block, the only shapes that may honestly cover a line break). */
-export const JOINABLE = new Set(["NimbleNewt token", "API key (sk-)", "GitHub token", "GitHub fine-grained token", "AWS access key", "JSON web token", "Slack token", "Google API key", "Stripe key", "npm token"]);
+export const JOINABLE = new Set(["NimbleNewt token", "API key (sk-)", "GitHub token", "GitHub fine-grained token", "AWS access key", "JSON web token", "Slack token", "Google API key", "Stripe key", "npm token", "service token"]);
 let folded: { name: string; pattern: RegExp; joinable: boolean; url: boolean }[] | undefined;
 /** Compiled on first use: `credential-patterns.ts` imports this module, so the list is not read while the modules load. */
 const FOLDED = (): { name: string; pattern: RegExp; joinable: boolean; url: boolean }[] => (folded ??= CREDENTIAL_PATTERNS.map(({ name, pattern }) => ({ name, pattern: new RegExp(pattern.source, CASE_FREE.has(name) && !pattern.flags.includes("i") ? `${pattern.flags}i` : pattern.flags), joinable: JOINABLE.has(name), url: name === "URL with embedded password" })));
 /**
  * The base64 lines right above a private key's END line that has no BEGIN in this text (the rest of a key split over two texts). The END line itself is not secret and stays: readers such as the
- * job output store look for it to know a key block that began in an earlier piece has ended.
+ * job output store look for it to know a key block that began in an earlier piece has ended. Found by walking back from each END line (linear: a regex with a repeated group before a lookahead
+ * took quadratic time over a long base64 dump with no END, about 6 s for 256 KB).
  */
-const ORPHAN_END = /(?:^[ \t]*[A-Za-z0-9+/=]{4,}[ \t]*\r?\n)+(?=[ \t]*-----END [A-Z ]*PRIVATE KEY-----)/gm;
+const END_LINE = /^[ \t]*-----END [A-Z ]*PRIVATE KEY-----/gm;
+const KEY_LINE = /^[ \t]*[A-Za-z0-9+/=]{4,}[ \t]*\r?$/;
+function orphanEnds(text: string): { start: number; end: number }[] {
+  const out: { start: number; end: number }[] = [];
+  let floor = 0;
+  for (const m of text.matchAll(END_LINE)) {
+    let start = m.index;
+    while (start > floor) {
+      const prev = text.lastIndexOf("\n", start - 2) + 1;
+      if (prev < floor || !KEY_LINE.test(text.slice(prev, start - 1))) break;
+      start = prev;
+    }
+    if (start < m.index) out.push({ start, end: m.index });
+    floor = m.index + m[0].length;
+  }
+  return out;
+}
 
 /** A run of hex or base64 characters, not part of a longer one and not a sealed cursor (`~` + base64url). */
-const RUN = /(?<![A-Za-z0-9+/_=~-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])/g;
+const RUN = /(?<![A-Za-z0-9+/_~-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])/g;
+/** A digest written as `label:` + base64 (go.sum `h1:`, `sha256:`), left as it is. */
+const DIGEST_BEFORE = /(?:^|[^A-Za-z0-9])(?:h1|sha1|sha224|sha256|sha384|sha512|md5|blake2b|blake3):$/i;
+/** An SSH public key's wire format (`ssh-rsa AAAAB3NzaC1yc2E…`, `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5…`, ecdsa `AAAAE2VjZHNh…`): public, shown in authorized_keys and known_hosts. */
+const SSH_PUBLIC = /^AAAA(?:B3NzaC1yc2E|C3NzaC1lZDI1NTE5|E2VjZHNhLXNoYTIt|B3NzaC1kc3)/;
 /** Hex lengths the product shows as digests or IDs with no label: 32 (MD5-sized digests and the bridge's change IDs), 40 (git SHA-1), 64 (SHA-256, git SHA-256), 128 (SHA-512). */
 const HEX_SHOWN = new Set([32, 40, 64, 128]);
 const DIGEST_LABEL = /^(?:sha1|sha224|sha256|sha384|sha512|md5|blake2b|blake3)[-_]/i;
@@ -102,7 +125,7 @@ export const ENTROPY_MAX_WORDS = 0.8;
 /** Whether one run (see RUN) is a key with no known prefix. Exported for tests. */
 export function highEntropy(run: string): boolean {
   const s = run.replace(/=+$/, "");
-  if (s.length < 32 || DIGEST_LABEL.test(s)) return false;
+  if (s.length < 32 || DIGEST_LABEL.test(s) || SSH_PUBLIC.test(s)) return false;
   if (/^[0-9a-f]+$/.test(s) || /^[0-9A-F]+$/.test(s)) return /\d/.test(s) && /[a-f]/i.test(s) && !HEX_SHOWN.has(s.length);
   if (!/[A-Z]/.test(s) || !/[a-z]/.test(s) || !/\d/.test(s)) return false;
   // A path, a URL's path or a name made of words (`backup-20261028T100000Z-scheduled`): most of its pieces are words.
@@ -130,9 +153,9 @@ export function highEntropy(run: string): boolean {
  */
 function runsOnIntoWord(text: string, start: number, end: number, pattern: RegExp): boolean {
   const piece = text.slice(start, end);
-  const brk = piece.search(/\r?\n/);
+  const brk = piece.search(/\r\n?|\n/);
   if (brk < 0) return false;
-  const tail = piece.slice(piece.lastIndexOf("\n") + 1).trim();
+  const tail = piece.slice(Math.max(piece.lastIndexOf("\n"), piece.lastIndexOf("\r")) + 1).trim();
   if (!WORDLIKE.test(tail)) return false;
   const first = new RegExp(`^(?:${pattern.source})$`, pattern.flags.replace("g", ""));
   return first.test(piece.slice(0, brk).replace(/[ \t]+$/, ""));
@@ -144,9 +167,11 @@ export interface SecretSpan { readonly start: number; readonly end: number; read
 export function scanSecrets(text: string): SecretSpan[] {
   const out: SecretSpan[] = [];
   const a = fold(text);
-  const push = (v: View, s: number, e: number, name: string): void => { if (e > s) out.push({ start: startOf(v, s), end: endOf(v, e - 1), name }); };
+  // A span ends after any combining marks on its last character (left out of the view, they belong to that character).
+  const markEnd = (at: number): number => { let k = at; for (;;) { const cp = text.codePointAt(k); if (cp === undefined || !MARK.test(String.fromCodePoint(cp))) return k; k += cp > 0xffff ? 2 : 1; } };
+  const push = (v: View, s: number, e: number, name: string): void => { if (e > s) out.push({ start: startOf(v, s), end: v.start === undefined ? endOf(v, e - 1) : markEnd(endOf(v, e - 1)), name }); };
   // Only a text with a line break can have a token split over lines.
-  const b = a.text.includes("\n") ? joinLines(a) : a;
+  const b = /[\r\n]/.test(a.text) ? joinLines(a) : a;
   for (const { name, pattern, joinable, url } of FOLDED()) {
     for (const v of joinable && b !== a ? [a, b] : [a]) {
       pattern.lastIndex = 0;
@@ -156,8 +181,8 @@ export function scanSecrets(text: string): SecretSpan[] {
       }
     }
   }
-  for (const m of a.text.matchAll(ORPHAN_END)) push(a, m.index, m.index + m[0].length, "private key block");
-  for (const m of a.text.matchAll(RUN)) if (highEntropy(m[0])) push(a, m.index, m.index + m[0].length, HIGH_ENTROPY);
+  for (const o of orphanEnds(a.text)) push(a, o.start, o.end, "private key block");
+  for (const m of a.text.matchAll(RUN)) if (highEntropy(m[0]) && !DIGEST_BEFORE.test(a.text.slice(Math.max(0, m.index - 8), m.index))) push(a, m.index, m.index + m[0].length, HIGH_ENTROPY);
   return out;
 }
 
