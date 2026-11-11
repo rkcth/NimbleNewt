@@ -82,7 +82,7 @@ export interface ToolExecutionDeps {
   readonly credentials: Pick<TaskCredentialService, "authenticate" | "principalOf" | "agentOf">;
   readonly dispatch: Pick<DispatcherService, "get" | "toolOperation">;
   readonly assignments: Pick<AssignmentService, "getAssignment">;
-  readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked">>;
+  readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked" | "revocationOf">>;
   /**
    * The `pause` policy (card T02c): the running call is aborted (what a revoked tool writes never reaches the agent) AND the task of each running call is paused (the owner who revoked is the actor), so the agent does
    * nothing more until the owner resumes it. Absent, or a task that cannot be paused: the call is aborted all the same and the owner is told through `notice`.
@@ -100,6 +100,14 @@ export interface ToolExecutionDeps {
    * `cancel` (the run's signal is aborted and the call ends as failed) or `pause` (each running call is aborted and its task paused, see `pauseTask`). Read, only when calls are running, at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
    */
   readonly revocationPolicy?: () => "finish" | "cancel" | "pause" | Promise<"finish" | "cancel" | "pause">;
+  /**
+   * Card T02d: how often (milliseconds) the service asks the store whether a version one of its running calls uses has been revoked by ANOTHER process. `onRevoked` tells only the process that took the revoke command; with several
+   * controller processes on one store (or a restart that took over the store), a call running here would otherwise never hear. The check runs only while a call is running, and applies the owner's recorded choice (else the standing
+   * `revocationPolicy`) exactly as the listener does. Default 2000; `0` turns it off. Needs `catalog.revocationOf`.
+   */
+  readonly revocationWatchMs?: number;
+  /** The owner who revoked, by principal ID, for the `pause` choice applied after a revocation that another process took. Absent or `undefined` answer: the calls are stopped and the owner is told the tasks could not be paused. */
+  readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
   readonly hosts: Pick<HostService, "status">;
   readonly admission: Pick<AdmissionService, "snapshot">;
   readonly runner: ScriptRunner;
@@ -213,15 +221,64 @@ export class ToolExecutionService {
   /** Runs of the catalogue that have been handed to the runner (or are about to be), by `name|version`, so a revocation can cancel them. */
   readonly #running = new Map<string, Set<{ readonly ctl: AbortController; readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }>>();
   readonly #unsubscribe: (() => void) | undefined;
+  /** Versions (`name|version`) whose revocation this service has applied to its running calls, by the listener or by the store check; bounded. */
+  readonly #applied = new Set<string>();
+  #watch: ReturnType<typeof setInterval> | undefined;
+  #watching = false;
+  #disposed = false;
 
   constructor(deps: ToolExecutionDeps) {
     this.#deps = deps;
     // The listener never rejects: a failure while cancelling must not become an unhandled rejection that ends the process.
-    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls, owner) => { this.#revoked(name, version, runningCalls, owner).catch(() => undefined); });
+    // A revocation the store check already applied (its timer can read the record between the revoke's commit and this listener, or a replayed revoke command calls listeners again) is not applied a second time.
+    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls, owner) => { const key = `${name}|${version}`; if (this.#applied.has(key)) return; this.#markApplied(key); this.#revoked(name, version, runningCalls, owner).catch(() => undefined); });
   }
 
   /** Stops listening for revocations. The service subscribes in its constructor, so whoever builds it once also disposes it once. */
-  dispose(): void { this.#unsubscribe?.(); }
+  dispose(): void { this.#disposed = true; this.#unsubscribe?.(); if (this.#watch !== undefined) { clearInterval(this.#watch); this.#watch = undefined; } }
+
+  #markApplied(key: string): void {
+    this.#applied.add(key);
+    if (this.#applied.size > 1000) { const first = this.#applied.values().next().value; if (first !== undefined) this.#applied.delete(first); }
+  }
+
+  /**
+   * Card T02d: the store check for revocations taken by another process. Runs on a timer only while a call is running (called wherever the running set changes). A read that fails is tried again at the next round: it never cancels
+   * anything, and never throws into the caller.
+   */
+  #noteRunning(): void {
+    const ms = this.#deps.revocationWatchMs ?? 2000;
+    if (this.#deps.catalog.revocationOf === undefined || ms <= 0 || this.#disposed) return;
+    if (this.#running.size === 0) { if (this.#watch !== undefined) { clearInterval(this.#watch); this.#watch = undefined; } return; }
+    if (this.#watch !== undefined) return;
+    this.#watch = setInterval(() => { this.checkRevocations().catch(() => undefined); }, ms);
+    this.#watch.unref();
+  }
+
+  /**
+   * Asks the store about every version a running call uses and applies a revocation this service has not applied yet, with the owner's recorded choice (else the standing policy). Public so a test, or a caller that wants an answer
+   * now (the maintenance round), need not wait for the timer. Returns the versions it acted on.
+   */
+  async checkRevocations(): Promise<string[]> {
+    const revocationOf = this.#deps.catalog.revocationOf?.bind(this.#deps.catalog);
+    if (revocationOf === undefined || this.#watching) return [];
+    this.#watching = true;
+    const acted: string[] = [];
+    try {
+      for (const key of [...this.#running.keys()].filter((k) => !this.#applied.has(k))) {
+        const at = key.indexOf("|");
+        let found: Awaited<ReturnType<typeof revocationOf>>;
+        try { found = await revocationOf(key.slice(0, at), key.slice(at + 1)); } catch { continue; }
+        if (found === undefined || this.#applied.has(key)) continue;
+        this.#markApplied(key);
+        let owner: Principal | undefined;
+        try { owner = await this.#deps.revocationOwner?.(found.revokedBy); } catch { owner = undefined; }
+        acted.push(key);
+        await this.#revoked(key.slice(0, at), key.slice(at + 1), found.runningCalls, owner).catch(() => undefined);
+      }
+    } finally { this.#watching = false; }
+    return acted;
+  }
 
   /**
    * The catalogue calls of a version that are running now (owner decision 2026-10-30: the chat revoke flow lists them and asks whether to let them finish, cancel them or pause their tasks).
@@ -238,7 +295,7 @@ export class ToolExecutionService {
    * What the owner chose on the revoke command decides; with no choice (nobody could be asked) the dependency `revocationPolicy` answers, and without one the run finishes. A policy that cannot be read, or answers
    * anything else, cancels (a revocation is a safety act).
    */
-  async #revoked(name: string, version: string, choice: "finish" | "cancel" | "pause" | undefined, owner: Principal): Promise<void> {
+  async #revoked(name: string, version: string, choice: "finish" | "cancel" | "pause" | undefined, owner: Principal | undefined): Promise<void> {
     const key = `${name}|${version}`;
     const live = this.#running.get(key);
     let policy: unknown = choice;
@@ -258,7 +315,7 @@ export class ToolExecutionService {
         // A task that is already paused (or stopping) itself is held already; pausing it again would only fail. A pause of the whole project does not count: it can be lifted without the task being resumed, so the task is paused on its own as well.
         held = (await this.#deps.pauses.guard(taskId)).blockedBy.some((b) => b.kind === "task" && b.id === taskId);
       } catch { held = false; }
-      if (!held && this.#deps.pauseTask !== undefined) {
+      if (!held && this.#deps.pauseTask !== undefined && owner !== undefined) {
         try { await this.#deps.pauseTask(owner, taskId, reason, `rvp-${createHash("sha256").update(`${name}|${version}|${taskId}`).digest("hex").slice(0, 40)}`); held = true; } catch { held = false; }
       }
       if (!held) {
@@ -679,8 +736,8 @@ export class ToolExecutionService {
     const own = new AbortController();
     const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
     const set = this.#running.get(`${v.name}|${v.version}`) ?? new Set<typeof entry>();
-    set.add(entry); this.#running.set(`${v.name}|${v.version}`, set);
-    try { return await body(own); } finally { set.delete(entry); if (set.size === 0) this.#running.delete(`${v.name}|${v.version}`); }
+    set.add(entry); this.#running.set(`${v.name}|${v.version}`, set); this.#noteRunning();
+    try { return await body(own); } finally { set.delete(entry); if (set.size === 0) this.#running.delete(`${v.name}|${v.version}`); this.#noteRunning(); }
   }
 
   /**
@@ -745,8 +802,8 @@ export class ToolExecutionService {
           const key = `${v.name}|${v.version}`;
           const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
           const set = this.#running.get(key) ?? new Set<typeof entry>();
-          set.add(entry); this.#running.set(key, set);
-          const forget = (): void => { const now = this.#running.get(key); now?.delete(entry); if (now !== undefined && now.size === 0) this.#running.delete(key); };
+          set.add(entry); this.#running.set(key, set); this.#noteRunning();
+          const forget = (): void => { const now = this.#running.get(key); now?.delete(entry); if (now !== undefined && now.size === 0) this.#running.delete(key); this.#noteRunning(); };
           let handed = false;
           try {
             await this.#authorizeStart(c, v, facts, own);

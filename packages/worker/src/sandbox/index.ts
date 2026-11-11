@@ -13,3 +13,4 @@ export { windowsRealHost } from "./windows-real.js";
 export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";
 export { jobLauncher, linuxOrphans, type JobEnd, type JobLauncherOptions, type JobRun } from "./job.js";
 export { linuxProcessTree, linuxStillRunning, splitRunTree, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";
+export { hostScriptRunner, hostScriptBase, ownNodeInstall, type HostInterpreter, type HostScriptFacts, type HostScriptRunner, type HostScriptRunnerOptions } from "./host-runner.js";

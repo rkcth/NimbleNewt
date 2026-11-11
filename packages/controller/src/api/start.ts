@@ -208,7 +208,7 @@ export interface StartOptions {
    * The protected tool bridge for catalogue tools (card T06, wired by T02b): the script runner and which hosts are this machine. Off unless given (and it needs `dispatch`). The service is built ONCE here, over the controller's one
    * catalogue, so a revocation reaches the calls it runs; `revocationPolicy` is the operator\'s own answer for a revocation that carried no owner choice: it beats the owner\'s setting, and `catalog.policy.get` says so (`source: operator`). `pauseTask` and `notice` replace the built-in pause and owner notice (tests).
    */
-  readonly tools?: Pick<ToolExecutionDeps, "runner" | "isLocalHost" | "facts" | "revocationPolicy" | "pauseTask" | "notice">;
+  readonly tools?: Pick<ToolExecutionDeps, "runner" | "isLocalHost" | "facts" | "revocationPolicy" | "pauseTask" | "notice" | "revocationWatchMs">;
   /**
    * Card T07b: long-running jobs agents start through the tool bridge. `launcher` starts a job's process in the sandbox (the worker package's `jobLauncher` over the A03 launcher); `limits` bound how many run at once, how much output
    * they write and how long a stop waits. Off unless given (and it needs `tools`): without it the bridge's job operations answer as unavailable. Whatever is given, every controller with a dispatcher decides the live jobs at start.
@@ -1069,6 +1069,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks,
         // The task, artifact and message requests of the bridge go through the API and the message service every client uses (card C09h: without them a worker's output and messages never reached the task or its activity).
         state: api, messages, activity: (step) => activity.record(dispatch!.principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, generations: dispatch.generation, ...(jobRuns === undefined ? {} : { jobs, jobRuns }), ...(streamSettings === undefined ? {} : { callCheck: async () => { const v = await streamSettings.effective(); return { check: v.checkBridge, require: v.requireRecorded }; } }), revocationPolicy: () => catalogPolicy.effective(),
+        // Card T02d: a revocation taken by another process pauses as the owner who revoked (read from the store, active principals only).
+        revocationOwner: async (id) => { const p = await principals.get(id); return p === undefined || p.kind !== "owner" || p.state !== "active" ? undefined : { id: p.id, kind: p.kind, name: p.name, grants: p.grants }; },
       });
     }
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport

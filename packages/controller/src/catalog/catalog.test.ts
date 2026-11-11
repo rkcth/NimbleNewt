@@ -143,6 +143,23 @@ for (const backend of backends) {
     await refuses("not_found", () => c.cat.revoke(c.owner, { commandId: cid("v"), name: tool.name, version: "7.0.0", reason: "none" }));
   });
 
+  suite("T02d: the store tells a revocation to anyone who asks (revocationOf), with the owner's choice for running calls; unknown, unrevoked and malformed asks answer nothing", async (c) => {
+    const readme = await c.note(c.ann, "docs"); const code = await c.note(c.ann, "code"); const code2 = await c.note(c.ann, "code 2");
+    const tool = await c.cat.register(c.ann, { commandId: cid("r"), name: "probe", kind: "tool", version: "1.0.0", manifest: manifest(), instructionsRecordId: readme, executableRecordId: code });
+    await c.cat.register(c.ann, { commandId: cid("r"), name: "probe", kind: "tool", version: "1.1.0", manifest: manifest(), instructionsRecordId: readme, executableRecordId: code2 });
+    assert.equal(await c.cat.revocationOf(tool.name, "1.0.0"), undefined, "not revoked yet");
+    await c.cat.revoke(c.owner, { commandId: cid("v"), name: tool.name, version: "1.0.0", reason: "bad", runningCalls: "pause" });
+    await c.cat.revoke(c.owner, { commandId: cid("v"), name: tool.name, version: "1.1.0", reason: "bad too" });
+    const first = await c.cat.revocationOf(tool.name, "1.0.0");
+    assert.deepEqual([first?.revokedBy, first?.runningCalls], [c.owner.id, "pause"]);
+    const second = await c.cat.revocationOf(tool.name, "1.1.0");
+    assert.equal(second?.runningCalls, undefined, "nobody was asked: no choice is invented");
+    assert.equal("runningCalls" in (second ?? {}), false);
+    assert.equal(await c.cat.revocationOf(tool.name, "9.9.9"), undefined);
+    assert.equal(await c.cat.revocationOf("not a name", "1.0.0"), undefined);
+    assert.equal(await c.cat.revocationOf(tool.name, "latest"), undefined);
+  });
+
   suite("a version can be set aside or rolled back by the owner: it is no longer chosen, a task that pinned it still runs it, nothing is deleted, and a revoked one is refused (card T02)", async (c) => {
     const readme = await c.note(c.ann, "docs");
     const reg = async (version: string) => c.cat.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "tool", version, manifest: manifest(), instructionsRecordId: readme, executableRecordId: await c.note(c.ann, `code ${version}`) });
