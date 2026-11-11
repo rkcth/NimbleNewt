@@ -118,7 +118,7 @@ export interface StateApiDeps {
   readonly responsibilities?: ResponsibilityService;
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
   readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts" | "start" | "cancel" | "settings" | "setSettings" | "changeIssuers">;
-  readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings" | "remove" | "resolve" | "verify">;
+  readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings" | "remove" | "resolve" | "verify" | "confirm">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */

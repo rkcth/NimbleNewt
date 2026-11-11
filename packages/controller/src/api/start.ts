@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { assignedTaskIn, projectIds, type RouteProbes } from "../dispatch/loops.js";
 import { allows } from "../security/access.js";
+import { WORKER_PROTOCOL } from "../remote/protocol.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
@@ -957,7 +958,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? {} : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}) that you decide. Read it with maintenance.get and decide with maintenance.decide.`.slice(0, 400) });
       // The supervisor who may decide it is named to the owner at the lower level (an agent has no inbox outside a task; it reads its reports' requests with maintenance.list), so the owner knows who was asked.
       else await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}); its supervisor ${n.supervisorId ?? ""} may decide it (maintenance.list shows it to them). You can decide it too.`.slice(0, 400) }); } });
-    const activation = options.releases === undefined ? undefined : ReleaseActivationService.withEpoch(storage, epoch, options.releases);
+    const activation = options.releases === undefined ? undefined : ReleaseActivationService.withEpoch(storage, epoch, { ...options.releases, compat: options.releases.compat ?? { workers: WORKER_PROTOCOL, required: true } });
     activationLive = activation;
     // An interrupted switch is resolved before anything is served: to the old release or the new, from what the launcher's pointer says.
     if (activation !== undefined) { try { const r = await activation.recover(); if (r.resolved === "unresolved") (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))("release activation: an interrupted switch could not be resolved (the pointer names neither release); see release.status"); } catch (error) { (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))(`release activation: recovery failed: ${(error as Error).message.slice(0, 160)}`); } }
@@ -1059,6 +1060,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       void (options.maintenance?.tickMs !== undefined ? Promise.resolve(options.maintenance.tickMs) : maintenance.tickMs()).catch(() => 30_000).then((ms) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, ms); maintenanceTimer.unref(); } });
     };
     void maintenance.tickMs().catch(() => 30_000).then((first) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, options.maintenance?.tickMs ?? first); maintenanceTimer.unref(); } });
+    // Everything is up: a controller started by the launcher from the release the record names as current says so, and that release becomes the last known good (card K02). A failure here never stops the controller.
+    if (activation !== undefined) { try { await activation.confirmStartup(); } catch (error) { (options.print ?? ((l: string) => process.stderr.write(`${l}\n`)))(`release activation: confirming the start failed: ${(error as Error).message.slice(0, 160)}`); } }
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),

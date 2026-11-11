@@ -9,6 +9,8 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import { negotiateProtocol, type VersionRange } from "../remote/protocol.js";
+import { Launcher, parseCompat } from "./launcher.js";
 import { RELEASE_KINDS, candidateIdOf, type ApprovalBody, type CandidateBody, type Cell } from "./release.js";
 
 /**
@@ -36,6 +38,8 @@ export const PROCESS_TOKEN = createHash("sha256").update(`${hostname()}|${proces
 const STATE: AggregateRef = { kind: "release-activation", id: "main" };
 const SETTINGS: AggregateRef = { kind: "release-activation-settings", id: "main" };
 const MANIFEST_FILE = "MANIFEST.json";
+const COMPAT_FILE = "compat.json";
+const RESERVED_ROOTS: ReadonlySet<string> = new Set(["launcher", "updater"]);
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha256 = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
@@ -46,12 +50,14 @@ const idOf = (v: unknown): string => { if (typeof v !== "string" || !CANDIDATE_I
 
 /** What the staged directory holds, fixed at staging: the file digests of the candidate's manifest, with sizes. Its digest is what the owner's word is bound to. */
 export interface StagedManifest { readonly candidateId: string; readonly sourceCommit: string; readonly files: Readonly<Record<string, { readonly sha256: string; readonly size: number }>> }
-export interface StagedBody { readonly candidateId: string; readonly digest: string; readonly bytes: number; readonly files: number; readonly stagedBy: string; readonly stagedAt: string }
+export interface StagedBody { readonly candidateId: string; readonly digest: string; readonly bytes: number; readonly files: number; readonly stagedBy: string; readonly stagedAt: string; /** The worker protocol range the release's controller speaks, from its `compat.json` artifact (a digest-bound file of the release). */ readonly protocol?: VersionRange }
 /** `digest` is the digest of the staged MANIFEST.json (the manifest digest) that the launcher verifies at launch. */
 export interface ReleaseRef { readonly id: string; readonly digest: string }
 export interface JournalBody { readonly kind: "activate" | "rollback"; readonly from?: ReleaseRef; readonly to: ReleaseRef; readonly by: string; readonly startedAt: string }
-export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered" | "resolved"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
-export interface ActivationBody { readonly current?: ReleaseRef & { readonly at: string; readonly by: string }; readonly previous?: ReleaseRef; readonly journal?: JournalBody; readonly history: readonly HistoryEntry[]; readonly updatedAt: string }
+export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered" | "resolved" | "confirmed" | "fell_back"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
+/** The release that last started and reported itself healthy (or that the owner confirmed). Rollback after a failed start goes here, never to an unproven release. */
+export interface KnownGoodRef extends ReleaseRef { readonly confirmedAt: string; readonly via: "startup" | "owner" }
+export interface ActivationBody { readonly current?: ReleaseRef & { readonly at: string; readonly by: string; /** When this release reported a healthy start; absent until then. */ readonly confirmedAt?: string }; readonly lastKnownGood?: KnownGoodRef; readonly previous?: ReleaseRef; readonly journal?: JournalBody; readonly history: readonly HistoryEntry[]; readonly updatedAt: string }
 export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly keepStaged?: number; /** The hard caps, when the owner moved them from the built-in ones (`ACTIVATION_LIMITS`). */ readonly maxStaged?: number; readonly maxFiles?: number; readonly maxFileBytes?: number; readonly updatedBy: string; readonly updatedAt: string }
 
 /** The place the launcher reads the active release from. */
@@ -170,11 +176,23 @@ export interface ActivationOptions {
   readonly incoming?: string;
   /** A `.tmp-*` staging folder this process does not own is only removed when older than this (default one hour). */
   readonly tmpStaleMs?: number;
+  /**
+   * Controller-worker protocol compatibility (checked before an activation or a rollback): `workers` is the protocol range the installation's workers speak. A release declares the range its controller speaks in a
+   * `compat.json` artifact (`{"protocol":{"min":1,"max":1}}`); with `required` (the wiring in `startController` sets it) a release without one cannot be staged, activated or rolled back to. Unset: not checked.
+   */
+  readonly compat?: { readonly workers: VersionRange; readonly required?: boolean };
+  /** The release this process was started from (given by the launcher). When the activation record names it as current, `confirmStartup` records it as the last known good. */
+  readonly runningRelease?: string;
 }
 export interface ActivationStatus {
   readonly revision: number;
   readonly current?: ReleaseRef & { readonly at: string; readonly by: string };
   readonly previous?: ReleaseRef;
+  /** The last release that reported a healthy start, and whether the current one has yet. */
+  readonly lastKnownGood?: KnownGoodRef;
+  readonly confirmed: boolean;
+  /** Releases the launcher found failing to start (never run or activated again), newest last. */
+  readonly failedStarts: readonly { readonly id: string; readonly at: string; readonly reason: string }[];
   readonly journal?: JournalBody;
   /** What the launcher's pointer says now; `diverged` when it is not the release the record says is current (reported, never silently changed). */
   readonly pointer: string | null;
@@ -189,11 +207,15 @@ export class ReleaseActivationService {
   readonly #runner: CommandRunner;
   readonly #o: ActivationOptions;
   readonly #sw: Switcher;
+  readonly #launcher: Launcher;
   readonly #locks = new Map<string, Promise<unknown>>();
   private constructor(runner: CommandRunner, o: ActivationOptions) {
     this.#runner = runner; this.#o = o;
     this.#sw = (o.switcher ?? (process.platform === "win32" ? "pointer" : "symlink")) === "pointer" ? new PointerSwitcher(o.root) : new SymlinkSwitcher(o.root);
+    this.#launcher = new Launcher({ root: o.root, switcher: this.#sw, ...(o.compat === undefined ? {} : { workers: o.compat.workers }) });
   }
+  /** The launcher's own record (last known good, failed starts), for tests and the status view. */
+  get launcher(): Launcher { return this.#launcher; }
   static withEpoch(storage: ControllerStorage, epoch: number, o: ActivationOptions): ReleaseActivationService { return new ReleaseActivationService(new CommandRunner(storage, epoch, o.runner ?? {}), o); }
 
   /** One thing at a time per key in this process; across processes the revision guards decide. */
@@ -305,6 +327,10 @@ export class ReleaseActivationService {
           files[name] = got; bytes += got.size;
           if (settings.maxStagedBytes !== null && used + bytes > settings.maxStagedBytes) throw new DomainError("invalid_transition", `staging would use more than the ${settings.maxStagedBytes} bytes the owner allowed for staged releases`);
         }
+        let protocol: VersionRange | undefined;
+        if (files[COMPAT_FILE] !== undefined) {
+          try { protocol = parseCompat(await readFile(join(tmp, COMPAT_FILE), "utf8")).protocol; } catch (error) { throw new DomainError("invalid_command", `${(error as Error).message} (staged nothing)`, { field: "candidateId" }); }
+        } else if (this.#o.compat?.required === true) throw new DomainError("invalid_command", `the release has no ${COMPAT_FILE} naming the worker protocol range its controller speaks, so it cannot be checked for compatibility (staged nothing)`, { field: "candidateId" });
         const manifest: StagedManifest = { candidateId: id, sourceCommit: candidate.manifest.sourceCommit, files };
         const text = canonicalJson(manifest as unknown as JsonObject);
         const fh = await open(join(tmp, MANIFEST_FILE), "wx", 0o444);
@@ -316,7 +342,7 @@ export class ReleaseActivationService {
         await lockTree(this.#dir(id));
         await syncDir(releases);
         const ref: AggregateRef = { kind: STAGED, id };
-        const body: StagedBody = { candidateId: id, digest, bytes, files: names.length, stagedBy: owner.id, stagedAt: this.#runner.now() };
+        const body: StagedBody = { candidateId: id, digest, bytes, files: names.length, stagedBy: owner.id, stagedAt: this.#runner.now(), ...(protocol === undefined ? {} : { protocol }) };
         await this.#runner.command("release.stage", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
           payload: { candidateId: id },
           build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { candidateId: id, digest, bytes, files: names.length } }),
@@ -337,6 +363,8 @@ export class ReleaseActivationService {
       const parts = n.split("/");
       if (n.length > 128 || n.includes("\\") || parts.some((p) => p === "" || p === "." || p === "..")) bad("candidateId", `${n.slice(0, 40)} is not a safe artifact name`);
       if (n.toLowerCase() === MANIFEST_FILE.toLowerCase()) bad("candidateId", `${MANIFEST_FILE} is reserved`);
+      // The launcher and the updater are not part of a release: a routine release cannot replace them, so no artifact may be placed under their names.
+      if (RESERVED_ROOTS.has(parts[0]!.toLowerCase().replace(/\.[^.]*$/, ""))) bad("candidateId", `${n.slice(0, 40)}: the launcher and the updater are not part of a release`);
       const low = n.toLowerCase();
       if (seen.has(low)) bad("candidateId", `${n.slice(0, 40)} collides with another artifact on a case-insensitive file system`);
       seen.add(low);
@@ -398,6 +426,8 @@ export class ReleaseActivationService {
       if (candidate === undefined) throw new DomainError("not_found", "no such release candidate (its record is gone); it cannot be activated");
       // The approval and the staged files are both bound to this candidate; its ID is the digest of its manifest, so a record that no longer hashes to its ID is refused.
       if (candidateIdOf(candidate.manifest) !== id) throw new DomainError("invalid_transition", "the candidate's record does not match its ID; it is not activated");
+      await this.#startable(id);
+      await this.#compatible(id, "the release");
       const p = this.#platform();
       if (!candidate.manifest.matrix.some((c) => c.os === p.os && c.arch === p.arch)) throw new DomainError("invalid_transition", `the release was not tested for this installation's platform (${p.os}/${p.arch})`);
       if ((await this.settings(owner)).requireApproval && ((await this.#runner.get(RELEASE_KINDS.approval, id))?.body as unknown as ApprovalBody | undefined)?.candidateId !== id) throw new DomainError("invalid_transition", "the release is not approved (release.approve); the owner may switch that requirement off");
@@ -415,8 +445,31 @@ export class ReleaseActivationService {
       const state = await this.#runner.get(STATE.kind, STATE.id);
       const body = state?.body as unknown as ActivationBody | undefined;
       if (body?.previous === undefined || body.previous.id !== id) throw new DomainError("invalid_transition", "that is not the release before the current one");
+      await this.#startable(id);
+      await this.#compatible(id, "the release to go back to");
       return this.#transition(owner, "rollback", command.commandId, body.previous, command.expectedRevision);
     });
+  }
+
+  /** A release the launcher found failing to start is not activated again (a rebuilt candidate has another ID). */
+  async #startable(id: string): Promise<void> {
+    const st = await this.#launcher.read().catch(() => undefined);
+    const f = st?.failed.find((x) => x.id === id);
+    if (f !== undefined) throw new DomainError("invalid_transition", `that release failed to start on this installation (${f.reason.slice(0, 120)}); a rebuilt candidate is a new release`);
+  }
+  /** Controller-worker protocol compatibility, checked before the pointer moves: the release's controller must share a protocol version with the workers (a rollback target too, so mixed versions are never switched into). */
+  async #compatible(id: string, what: string): Promise<void> {
+    const c = this.#o.compat;
+    if (c === undefined) return;
+    const range = ((await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined)?.protocol;
+    if (range === undefined) { if (c.required === true) throw new DomainError("invalid_transition", `${what} declares no worker protocol range (${COMPAT_FILE}), so it is not switched to`); return; }
+    const n = negotiateProtocol(range, c.workers);
+    if (!n.ok) throw new DomainError("invalid_transition", `${what} cannot work with this installation's workers: ${n.reason}`);
+  }
+  /** Tells the launcher which release the pointer may name next, before the pointer moves. */
+  async #announce(ref: ReleaseRef): Promise<void> {
+    const protocol = ((await this.#runner.get(STAGED, ref.id))?.body as unknown as StagedBody | undefined)?.protocol;
+    await this.#launcher.expect({ id: ref.id, digest: ref.digest, ...(protocol === undefined ? {} : { protocol }) });
   }
 
   async #transition(owner: Principal, kind: "activate" | "rollback", commandId: string | undefined, to: ReleaseRef, expectedRevision: number | undefined): Promise<{ revision: number; replayed: boolean }> {
@@ -433,7 +486,7 @@ export class ReleaseActivationService {
         if (b?.current?.id === to.id) throw new DomainError("invalid_transition", "that release is already the current one");
         if (kind === "rollback" && b?.current === undefined) throw new DomainError("invalid_transition", "there is nothing current to roll back from");
         const journal: JournalBody = { kind, ...(b?.current === undefined ? {} : { from: { id: b.current.id, digest: b.current.digest } }), to, by: owner.id, startedAt: this.#runner.now() };
-        const next: ActivationBody = { ...(b?.current === undefined ? {} : { current: b.current }), ...(b?.previous === undefined ? {} : { previous: b.previous }), journal, history: b?.history ?? [], updatedAt: this.#runner.now() };
+        const next: ActivationBody = { ...(b?.current === undefined ? {} : { current: b.current }), ...(b?.previous === undefined ? {} : { previous: b.previous }), ...(b?.lastKnownGood === undefined ? {} : { lastKnownGood: b.lastKnownGood }), journal, history: b?.history ?? [], updatedAt: this.#runner.now() };
         const change = state === undefined ? { type: "create" as const, ref: STATE, body: next as unknown as JsonObject } : { type: "update" as const, ref: STATE, expectedRevision: state.revision, body: next as unknown as JsonObject };
         return { ref: STATE, creates: state === undefined, changes: [change], detail: { kind, from: journal.from?.id ?? null, to: to.id } };
       },
@@ -458,7 +511,7 @@ export class ReleaseActivationService {
     const problems = await this.#verify(journal.to.id, journal.to.digest);
     if (problems.length > 0) { await this.#abort(by, state!.revision, body, `verification failed: ${problems[0]}`).catch(() => undefined); throw new DomainError("invalid_transition", `the release was not switched to: ${problems[0]}`); }
     await this.#o.hook?.("afterVerify");
-    try { await this.#sw.write(journal.to.id); } catch (error) {
+    try { await this.#announce(journal.to); await this.#sw.write(journal.to.id); } catch (error) {
       await this.#abort(by, state!.revision, body, "the switch failed").catch(() => undefined);
       throw new DomainError("unavailable", `the release could not be switched: ${(error as Error).message.slice(0, 120)}`);
     }
@@ -473,6 +526,7 @@ export class ReleaseActivationService {
     const next: ActivationBody = {
       current: { ...j.to, at: this.#runner.now(), by: j.by },
       ...(j.kind === "activate" && j.from !== undefined ? { previous: j.from } : {}),
+      ...(body.lastKnownGood === undefined ? {} : { lastKnownGood: body.lastKnownGood }),
       history: [...body.history, entry].slice(-ACTIVATION_LIMITS.history),
       updatedAt: this.#runner.now(),
     };
@@ -497,12 +551,13 @@ export class ReleaseActivationService {
    * At start: an open journal is resolved by what the launcher's pointer says. At the new release: the switch happened, so it is committed. At the old one (or none, for a first activation): it did not, so the journal is closed.
    * Anything else is left open and shown by `status` (a person decides); nothing is guessed. Leftover temporary staging folders are removed.
    */
-  async recover(): Promise<{ resolved: "none" | "committed" | "aborted" | "unresolved" }> {
+  async recover(): Promise<{ resolved: "none" | "committed" | "aborted" | "unresolved" | "fell_back" }> {
     return this.#serial("switch", async () => {
       await this.#sweep();
       const state = await this.#runner.get(STATE.kind, STATE.id);
       const body = state?.body as unknown as ActivationBody | undefined;
-      if (state === undefined || body?.journal === undefined) return { resolved: "none" };
+      if (state === undefined) return { resolved: "none" };
+      if (body?.journal === undefined) return { resolved: (await this.#reconcileLauncher(state.revision, body!)) ? "fell_back" : "none" };
       const at = await this.#sw.read();
       const j = body.journal;
       if (at === j.to.id) { await this.#commit(j.by, state.revision, body, true); return { resolved: "committed" }; }
@@ -511,10 +566,85 @@ export class ReleaseActivationService {
     });
   }
 
+  /**
+   * The launcher fell back while the controller was down: the pointer names the last known good, the launcher's record lists the record's current release as failed to start. The activation record catches up (the failed release
+   * is no longer current, nothing is "previous" any more) and says so in its history. Anything else (a pointer moved by hand) stays `diverged`, reported and not rewritten.
+   */
+  async #reconcileLauncher(rev: number, body: ActivationBody): Promise<boolean> {
+    const cur = body.current;
+    if (cur === undefined) return false;
+    let st; let pointer;
+    try { st = await this.#launcher.read(); pointer = await this.#sw.read(); } catch { return false; }
+    const known = st.known;
+    const fail = st.failed.find((f) => f.id === cur.id);
+    if (known === undefined || fail === undefined || pointer !== known.id || known.id === cur.id) return false;
+    const at = this.#runner.now();
+    const next: ActivationBody = { current: { id: known.id, digest: known.digest, at, by: "launcher", confirmedAt: known.confirmedAt }, lastKnownGood: { id: known.id, digest: known.digest, confirmedAt: known.confirmedAt, via: body.lastKnownGood?.id === known.id ? body.lastKnownGood.via : "startup" },
+      history: [...body.history, { at, kind: "fell_back" as const, by: "launcher", from: cur.id, to: known.id, reason: fail.reason.slice(0, 200) }].slice(-ACTIVATION_LIMITS.history), updatedAt: at };
+    await this.#runner.command("release.fell_back", { commandId: `release-fell-back-${rev}-${cur.id}`, actor: "launcher" }, async () => ({
+      payload: { from: cur.id, to: known.id, rev },
+      build: async () => ({ ref: STATE, creates: false, changes: [{ type: "update" as const, ref: STATE, expectedRevision: rev, body: next as unknown as JsonObject }], detail: { from: cur.id, to: known.id, reason: fail.reason.slice(0, 200) } }),
+    }));
+    return true;
+  }
+
+  /**
+   * The controller started from the current release reports that it is healthy (called by `startController` when everything is up). The launcher's record makes the release the last known good, and the activation record says
+   * so. Only the release this process was started from (`runningRelease`), only when the record names it as current with no switch open. Safe to call again.
+   */
+  async confirmStartup(): Promise<{ confirmed: boolean; reason?: string }> {
+    const running = this.#o.runningRelease;
+    if (running === undefined) return { confirmed: false, reason: "this process was not started by the launcher" };
+    return this.#serial("switch", async () => {
+      const state = await this.#runner.get(STATE.kind, STATE.id);
+      const body = state?.body as unknown as ActivationBody | undefined;
+      if (state === undefined || body?.current?.id !== running) return { confirmed: false, reason: "the activation record does not name the release this process runs as current" };
+      if (body.journal !== undefined) return { confirmed: false, reason: "a switch is open" };
+      await this.#launcher.confirm(running);
+      const known = (await this.#launcher.read()).known;
+      if (known?.id !== running) return { confirmed: false, reason: "the launcher has no open start of this release" };
+      await this.#markGood(state.revision, body, "startup", known.confirmedAt);
+      return { confirmed: true };
+    });
+  }
+
+  /** Owner only: vouches for the current release when nothing else confirmed it (a release not started by the launcher, or one that reports no health). Its files are verified first. */
+  async confirm(owner: Principal, command: NoActor & { releaseId: string; expectedRevision?: number }): Promise<{ revision: number; releaseId: string }> {
+    strictOwner(owner, "confirm a release as good");
+    known(command, ["commandId", "releaseId", "expectedRevision"]);
+    const id = idOf(command.releaseId);
+    wholeRev(command.expectedRevision);
+    return this.#serial("switch", async () => {
+      const state = await this.#runner.get(STATE.kind, STATE.id);
+      const body = state?.body as unknown as ActivationBody | undefined;
+      if (state === undefined || body?.current?.id !== id) throw new DomainError("invalid_transition", "only the current release can be confirmed as good");
+      if (command.expectedRevision !== undefined && state.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the activation record is at revision ${state.revision}, not ${command.expectedRevision}`, { currentRevision: state.revision });
+      if (body.journal !== undefined) throw new DomainError("invalid_transition", "a switch is open; it resolves first");
+      const problems = await this.#verify(id, body.current.digest);
+      if (problems.length > 0) throw new DomainError("invalid_transition", `the release does not verify, so it is not marked good: ${problems[0]}`);
+      const at = this.#runner.now();
+      const protocol = ((await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined)?.protocol;
+      await this.#launcher.vouch({ id, digest: body.current.digest, ...(protocol === undefined ? {} : { protocol }) });
+      const revision = await this.#markGood(state.revision, body, "owner", at, scopedCommandId(owner.id, command.commandId), owner.id);
+      return { revision, releaseId: id };
+    });
+  }
+
+  async #markGood(rev: number, body: ActivationBody, via: "startup" | "owner", at: string, commandId?: string, actor = "launcher"): Promise<number> {
+    const cur = body.current!;
+    if (cur.confirmedAt !== undefined && body.lastKnownGood?.id === cur.id) return rev;
+    const next: ActivationBody = { ...body, current: { ...cur, confirmedAt: at }, lastKnownGood: { id: cur.id, digest: cur.digest, confirmedAt: at, via }, history: [...body.history, { at, kind: "confirmed" as const, by: actor, to: cur.id, reason: via === "startup" ? "started and reported healthy" : "confirmed by the owner" }].slice(-ACTIVATION_LIMITS.history), updatedAt: at };
+    const r = await this.#runner.command("release.confirm", { commandId: commandId ?? `release-confirm-${cur.id}-${rev}`, actor }, async () => ({
+      payload: { releaseId: cur.id, rev, via },
+      build: async () => ({ ref: STATE, creates: false, changes: [{ type: "update" as const, ref: STATE, expectedRevision: rev, body: next as unknown as JsonObject }], detail: { releaseId: cur.id, via } }),
+    }));
+    return r.revision;
+  }
+
   /** The releases that must stay: current, previous (the rollback target) and both ends of an open switch. */
   async #liveIds(): Promise<Set<string>> {
     const body = (await this.#runner.get(STATE.kind, STATE.id))?.body as unknown as ActivationBody | undefined;
-    return new Set([body?.current?.id, body?.previous?.id, body?.journal?.to.id, body?.journal?.from?.id].filter((v): v is string => v !== undefined));
+    return new Set([body?.current?.id, body?.previous?.id, body?.journal?.to.id, body?.journal?.from?.id, body?.lastKnownGood?.id].filter((v): v is string => v !== undefined));
   }
 
   /** Removes the oldest staged releases beyond `keep`, never a live one and never `spare`. */
@@ -599,6 +729,7 @@ export class ReleaseActivationService {
       if (outcome === "commit") {
         const problems = await this.#verify(j.to.id, j.to.digest);
         if (problems.length > 0) throw new DomainError("invalid_transition", `the new release cannot be made current: ${problems[0]}`);
+        await this.#announce(j.to);
         await this.#sw.write(j.to.id);
         const revision = await this.#commit(owner.id, state.revision, body, false, { ...via, reason: `owner resolved: ${command.action}` });
         return { revision, action: command.action };
@@ -606,6 +737,7 @@ export class ReleaseActivationService {
       if (j.from !== undefined) {
         const problems = await this.#verify(j.from.id, j.from.digest);
         if (problems.length > 0) throw new DomainError("invalid_transition", `the old release cannot be kept: ${problems[0]}`);
+        await this.#announce(j.from);
         await this.#sw.write(j.from.id);
       } else await this.#sw.clear();
       await this.#abort(owner.id, state.revision, body, `owner resolved: ${command.action}`, via);
@@ -639,6 +771,9 @@ export class ReleaseActivationService {
       revision: state?.revision ?? 0,
       ...(body?.current === undefined ? {} : { current: body.current }),
       ...(body?.previous === undefined ? {} : { previous: body.previous }),
+      ...(body?.lastKnownGood === undefined ? {} : { lastKnownGood: body.lastKnownGood }),
+      confirmed: body?.current?.confirmedAt !== undefined,
+      failedStarts: (await this.#launcher.read().catch(() => undefined))?.failed.slice(-10) ?? [],
       ...(body?.journal === undefined ? {} : { journal: body.journal }),
       pointer: pointer ?? null,
       diverged: body?.journal === undefined && (pointer ?? null) !== (body?.current?.id ?? null),
