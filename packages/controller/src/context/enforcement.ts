@@ -58,7 +58,11 @@ export interface CompactionBody {
   readonly summary?: string; readonly digest?: string; readonly summaryId?: string;
   readonly route?: string; readonly degraded?: boolean; readonly attempts?: readonly SummariseAttempt[];
   readonly reason?: string; readonly superseded?: true; readonly startedBy: string;
+  /** Card C07q: set when the task's own process did the compaction (its conversation is the process's, so the controller holds no summary text, only this note: how much was compacted and the summary's digest). */
+  readonly process?: ProcessCompactionNote;
 }
+/** What the controller learns of a compaction the task's process made itself (card C07q). The summary text is not sent: it stays in the process's conversation store. */
+export interface ProcessCompactionNote { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }
 export interface OverflowBody { readonly taskId: string; readonly count: number; readonly total: number; readonly events: readonly string[]; readonly last?: string; readonly blockerId?: string }
 export interface HandoffBody { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly source: "attempt" | "controller"; readonly text: string; readonly endedBecause: string; readonly writtenBy: string }
 /** What a route's fixed part (the system prompt and tool schemas) measured at the last first call admitted on it (card C07f). */
@@ -658,9 +662,52 @@ export class ContextEnforcementService {
     return { kind: "summary", id, summary: body.summary ?? "", summaryId, route: body.route ?? "", degraded: body.degraded === true, generation: body.generation, lineage: body.lineage, ...(body.earlier === undefined ? {} : { earlier: body.earlier }), attempts: body.attempts ?? [], replayed };
   }
 
-  async #begin(principal: Principal, a: { taskId: string; projectId: string; k: string; id: string; ref: AggregateRef; compressorId: string; title: string; command: { sources: readonly SourceRef[]; pinned?: readonly SourceRef[]; parent?: string } }) {
+  /**
+   * A compaction the task's own process made (card C07q). The conversation being compacted lives in the sandbox, in the process's store, and the controller never holds that text, so it cannot be summarised here from
+   * records it can cite. What the controller can truthfully keep is that the compaction happened: it takes its place in the task's compaction chain (generation, bounded lineage, the owner's pinned decisions carried on) with a
+   * note of how many messages were compacted and the digest of the summary the process wrote. No retrieval summary is published for it (the text is not the controller's); `readSummary` answers nothing for it. The same key
+   * is the same compaction (a repeat is answered from the record). If another compaction of the task finished first, this one is closed as superseded and the answer says so.
+   */
+  async recordProcessCompaction(principal: Principal, command: { taskId: string; attemptId: string; key: string; messageCount: number; summaryChars: number; digest: string }): Promise<{ id: string; generation: number; lineage: readonly string[]; earlier?: LineageEarlier; replayed: boolean; superseded?: true }> {
+    onlyKnown(command, ["taskId", "attemptId", "key", "messageCount", "summaryChars", "digest"]);
+    const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const k = key("key", command.key);
+    const projectId = (await this.#dispatch(principal, taskId))!;
+    const count = (value: unknown, field: string, max: number): number => (Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max ? (value as number) : invalid(field, `must be a whole number from 0 to ${max}`));
+    const process: ProcessCompactionNote = { messageCount: count(command.messageCount, "messageCount", 10_000_000), summaryChars: count(command.summaryChars, "summaryChars", 1_000_000_000), digest: typeof command.digest === "string" && /^[0-9a-f]{64}$/.test(command.digest) ? command.digest : invalid("digest", "must be a sha-256 digest in hex") };
+    const id = derivedId("cmp", `${taskId}\0${k}`);
+    const ref: AggregateRef = { kind: "ctx-compaction", id };
+    const chainRef: AggregateRef = { kind: "ctx-chain", id: derivedId("ctx", `${taskId}\0chain`) };
+    const answer = (b: CompactionBody, replayed: boolean) => ({ id, generation: b.generation, lineage: b.lineage, ...(b.earlier === undefined ? {} : { earlier: b.earlier }), replayed });
+    let record = await this.#runner.get(ref.kind, id);
+    if (record !== undefined) {
+      const b = record.body as unknown as CompactionBody;
+      if (b.process === undefined) invalid("key", "names a compaction the controller made itself");
+      if (b.state === "done") return answer(b, true);
+      if (b.state === "failed") return { ...answer(b, true), superseded: true };
+    }
+    if (record === undefined) {
+      // The record continues the latest compaction; a compaction that finishes between the read and the write is met by a retry, which sees the new head.
+      for (let tries = 0; ; tries++) {
+        const head = ((await this.#runner.get(chainRef.kind, chainRef.id))?.body as unknown as ChainBody | undefined)?.head;
+        try {
+          record = await this.#begin(principal, { taskId, projectId, k, id, ref, compressorId: "process", title: `Compaction by the task's process (${process.messageCount} messages)`, process, command: { sources: [], ...(head === undefined ? {} : { parent: head }) } });
+          break;
+        } catch (error) {
+          if (!(error instanceof DomainError && (error.code === "invalid_command" || error.code === "stale_revision" || error.code === "command_conflict")) || tries >= 3) throw error;
+          if (error.code === "invalid_command" && !/parent/.test(String(error.message))) throw error;
+        }
+      }
+    }
+    const full = `The task's own process compacted ${process.messageCount} earlier messages into a summary of ${process.summaryChars} characters (sha-256 ${process.digest}). The summary text stays in the process's conversation store; the controller keeps this note, not the text.`;
+    record = await this.#finish(principal, { id, ref, taskId, full, result: { route: "process", degraded: false, attempts: [] } });
+    const body = record.body as unknown as CompactionBody;
+    void attemptId;
+    return body.state === "done" ? answer(body, false) : { ...answer(body, false), superseded: true };
+  }
+
+  async #begin(principal: Principal, a: { taskId: string; projectId: string; k: string; id: string; ref: AggregateRef; compressorId: string; title: string; process?: ProcessCompactionNote; command: { sources: readonly SourceRef[]; pinned?: readonly SourceRef[]; parent?: string } }) {
     const sources = a.command.sources, pinned = a.command.pinned ?? [];
-    if (!Array.isArray(sources) || sources.length < 1 || sources.length > 50) invalid("sources", "must list 1 to 50 originals");
+    if (!Array.isArray(sources) || sources.length < (a.process === undefined ? 1 : 0) || sources.length > 50) invalid("sources", "must list 1 to 50 originals");
     if (!Array.isArray(pinned) || pinned.length > ENFORCEMENT_LIMITS.pinned) invalid("pinned", `must list at most ${ENFORCEMENT_LIMITS.pinned} decisions`);
     const parent = a.command.parent;
     if (parent !== undefined && !/^cmp-[a-z2-7]{20}$/.test(parent)) invalid("parent", "is not a compaction ID");
@@ -682,7 +729,7 @@ export class ContextEnforcementService {
       const original = await this.#retrieval.fetch(principal, s);
       if (original === undefined || original.projectId !== a.projectId) invalid(i < sources.length ? `sources[${i}]` : `pinned[${i - sources.length}]`, "must exist, be readable by the writer and belong to the task's project");
     }
-    const body: CompactionBody = { taskId: a.taskId, projectId: a.projectId, key: a.k, compressorId: a.compressorId, state: "started", generation, ...(parent === undefined ? {} : { parent }), lineage, ...(earlier === undefined ? {} : { earlier }), sources: [...sources], pinned: allPinned, title: a.title, startedBy: principal.id };
+    const body: CompactionBody = { taskId: a.taskId, projectId: a.projectId, key: a.k, compressorId: a.compressorId, state: "started", generation, ...(parent === undefined ? {} : { parent }), lineage, ...(earlier === undefined ? {} : { earlier }), sources: [...sources], pinned: allPinned, title: a.title, startedBy: principal.id, ...(a.process === undefined ? {} : { process: a.process }) };
     await this.#runner.command("context.compaction.begin", { commandId: `ctx-cbg-${a.id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId: a.taskId, key: a.k, compressorId: a.compressorId, title: a.title, sources: sources as unknown as JsonObject[], pinned: pinned as unknown as JsonObject[], ...(parent === undefined ? {} : { parent }) },
       build: async () => ({ ref: a.ref, creates: true, changes: [{ type: "create", ref: a.ref, body: body as unknown as JsonObject }], detail: { generation } }),

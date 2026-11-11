@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
@@ -84,7 +85,7 @@ const EXTRACT_CHARS = 6000;
  * Pi's context settings for what the host asked (card C07b). The extractive summary is the fallback for a model that has no room left to summarise: the start of what is replaced (the task and the first decisions) and its end (where the work
  * stands), cut to a bound, and it says plainly that it is an extract. It cannot hang, so the hook's ceiling is only a second guard.
  */
-export function contextPolicyOf(context: ChannelStart["context"]): AdapterContextPolicy | undefined {
+export function contextPolicyOf(context: ChannelStart["context"], onCompacted?: (note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => void): AdapterContextPolicy | undefined {
   if (context === undefined) return undefined;
   const extractive = context.compaction?.fallback === "extractive";
   // The owner's decisions the controller gave the process (card C07q): written after every summary, so a compaction never drops them. Pi's own summariser (no `extractive`) is not given them: its text is the model's.
@@ -106,7 +107,10 @@ export function contextPolicyOf(context: ChannelStart["context"]): AdapterContex
         let tailStart = text.length - (EXTRACT_CHARS - head);
         if (tailStart < text.length && isLow(tailStart)) tailStart += 1;
         const body = text.length <= EXTRACT_CHARS ? text : `${text.slice(0, headEnd)}\n[… ${tailStart - headEnd} characters left out …]\n${text.slice(tailStart)}`;
-        return { summary: `Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}${kept}` };
+        const summary = `Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}${kept}`;
+        // Card C07q: the controller is told that the process compacted (how much and the summary's digest, not its text), so the compaction takes its place in the task's chain. A failure to tell never changes the compaction.
+        try { onCompacted?.({ messageCount: request.messageCount, summaryChars: summary.length, digest: createHash("sha256").update(summary).digest("hex") }); } catch { /* the compaction stands */ }
+        return { summary };
       },
       onHookFailure: (error: unknown) => { console.error(`compaction hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
     } : {}),
@@ -251,7 +255,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     bridge = createBridge(transport);
     const tools = composeTools(bridge, [], start.namespaceId);
     toolSchemaChars = JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
-    const contextPolicy = contextPolicyOf(start.context);
+    const contextPolicy = contextPolicyOf(start.context, (note) => send({ t: "compacted", ...note }));
     // Card W04: a turn that yields without a tool call and without work.end is continued, at most three times, with a fixed nudge. Each continuation is asked of the controller first (bridge `turn.continue`): a pause, a stop, a replaced or
     // frozen attempt, or a controller that does not know the operation refuses it, and the answer then ends the turn as it ended (W03 takes it from there). Nothing is continued once the lease is gone, the host has closed the process or work.end
     // was accepted.

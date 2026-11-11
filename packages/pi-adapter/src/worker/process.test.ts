@@ -823,3 +823,17 @@ test("W06: the first model call of every agent carries the completion rules as i
     for (const needle of ["PLAN.md", WORK_END_TOOL, "You do not commit", "blocked or partial", "Never end with prose alone"]) assert.ok(systems[0]!.includes(needle), needle);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a compaction by the process tells the controller how much it replaced and the digest of the summary, not its text; a failure to tell changes nothing (card C07q)", async () => {
+  const { contextPolicyOf } = await import("./process.js");
+  const { createHash } = await import("node:crypto");
+  const told: { messageCount: number; summaryChars: number; digest: string }[] = [];
+  const policy = contextPolicyOf({ compaction: { fallback: "extractive" } }, (note) => { told.push(note); })!;
+  const out = (await policy.beforeCompact!({ key: "k", reason: "overflow", text: "z".repeat(30_000), messageCount: 12, signal: new AbortController().signal })) as { summary: string };
+  assert.equal(told.length, 1);
+  assert.deepEqual(told[0], { messageCount: 12, summaryChars: out.summary.length, digest: createHash("sha256").update(out.summary).digest("hex") });
+  assert.equal(JSON.stringify(told[0]).includes("zzzz"), false, "the text is not sent");
+  const broken = contextPolicyOf({ compaction: { fallback: "extractive" } }, () => { throw new Error("channel closed"); })!;
+  const again = (await broken.beforeCompact!({ key: "k", reason: "overflow", text: "z".repeat(30_000), messageCount: 12, signal: new AbortController().signal })) as { summary: string };
+  assert.equal(again.summary, out.summary);
+});

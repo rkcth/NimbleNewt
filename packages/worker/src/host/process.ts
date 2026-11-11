@@ -21,6 +21,8 @@ export interface ProcessHandlers {
    * Absent: renewals are not answered.
    */
   renew?(): Promise<{ readonly leaseMs: number } | { readonly fenced: string }>;
+  /** The process compacted its own conversation (card C07q): how much and the summary's digest. Told, not asked: a throw is dropped and changes nothing for the process. */
+  compacted?(note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }): Promise<void> | void;
 }
 
 /** `killWaitMs`: how long `close` waits after the kill for the process to end before it gives up and says so (card L02d: a process the OS cannot end is reported, never waited on for ever). */
@@ -155,6 +157,7 @@ export class WorkerProcess {
         if (this.#resultWaiter !== undefined) { const w = this.#resultWaiter; this.#resultWaiter = undefined; w.reject(why); }
         return;
       }
+      case "compacted": { const told = this.#handlers.compacted; if (told !== undefined) { const { messageCount, summaryChars, digest } = m; void Promise.resolve().then(() => told.call(this.#handlers, { messageCount, summaryChars, digest })).catch(() => undefined); } return; }
       case "bridge": void this.#bridge(m); return;
       case "fetch": void this.#fetch(m); return;
       case "fetch.abort": this.#fetches.get(m.id)?.abort(); return;

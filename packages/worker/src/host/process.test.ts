@@ -230,3 +230,20 @@ test("L02d review: the winding-down time is on the monotonic clock; a wall clock
   assert.equal(p.alive, false);
   assert.equal(p.windDownMs(), 300, "set forward: not a year of compute");
 });
+
+test("C07q: a compacted notice from the process reaches the host's handler; a handler that throws or is absent changes nothing", async () => {
+  const note = { messageCount: 9, summaryChars: 400, digest: "b".repeat(64) };
+  const got: unknown[] = [];
+  const f = fake();
+  const process = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, compacted: (n) => { got.push(n); throw new Error("controller down"); } });
+  f.send({ t: "compacted", ...note });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(got, [note]);
+  assert.equal(process.alive, true, "a handler that throws does not end the process");
+  const g = fake();
+  const plain = await launch(g);
+  g.send({ t: "compacted", ...note });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(plain.alive, true);
+  f.exit(); g.exit();
+});

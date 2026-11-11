@@ -130,6 +130,8 @@ export type FromChild =
   | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number; readonly durable?: CheckpointDurability }
   | { readonly t: "tell.ok"; readonly id: number }
   | { readonly t: "compact.ok"; readonly id: number; readonly contextTokens?: number }
+  /** The process compacted its own conversation (card C07q): how many messages it replaced, how long its summary is and the summary's sha-256 in hex. The text stays in the process's store; the host tells the controller, which keeps the compaction in the task's chain. */
+  | { readonly t: "compacted"; readonly messageCount: number; readonly summaryChars: number; readonly digest: string }
   /** The lease ended (card H08b3): told on its own so the host sees it whether or not a turn is open (an unsolicited `result` has no waiter). `reason` is a `LossReason`. */
   | { readonly t: "lease.lost"; readonly reason: string }
   /** Asks the controller to extend the attempt's lease (card H08b); answered `lease.ok` or `lease.fenced` with the same ID, or not at all (the controller could not be asked: the lease runs on and may end). */
@@ -256,6 +258,11 @@ export function parseFromChild(value: unknown): FromChild {
     case "lease.renew": return { t: "lease.renew", id: int(value, "id") };
     case "tell.ok": return { t: "tell.ok", id: int(value, "id") };
     case "compact.ok": { const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens"); return { t: "compact.ok", id: int(value, "id"), ...(contextTokens === undefined ? {} : { contextTokens }) }; }
+    case "compacted": {
+      const digest = str(value, "digest", 64);
+      if (!/^[0-9a-f]{64}$/.test(digest)) fail("digest: must be a sha-256 digest in hex");
+      return { t: "compacted", messageCount: bounded(value, "messageCount", 0, 10_000_000) ?? fail("messageCount: must be a whole number"), summaryChars: bounded(value, "summaryChars", 0, 1_000_000_000) ?? fail("summaryChars: must be a whole number"), digest };
+    }
     case "fault": return { t: "fault", ...(value["id"] === undefined ? {} : { id: int(value, "id") }), message: str(value, "message", 4000) };
     default: return fail(`unknown message ${String(value["t"]).slice(0, 40)}`);
   }
