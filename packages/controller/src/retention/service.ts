@@ -342,7 +342,8 @@ export class RetentionService {
       // Card K06e. What the stall scan keeps about progress. Evidence is per task (one record, ID = task), and a done, cancelled or gone task is final, so nothing writes it again;
       // a measured speed is per route and host and the writer reads before it creates, so a removed one is simply measured again (a record created again under the same ID continues the removed revision, so the removal command of the earlier one is never mistaken for it).
       const evidence: Aggregate[] = [];
-      if (!(await scan(this.#runner, "stall-evidence", (a) => { evidence.push(a); }))) partial = true;
+      const evidenceComplete = await scan(this.#runner, "stall-evidence", (a) => { evidence.push(a); });
+      if (!evidenceComplete) partial = true;
       if (values.stallEvidenceDays !== null) {
         const cutoff = now - values.stallEvidenceDays * DAY;
         const old = evidence.filter((a) => Date.parse((a.body as { lastReportAt?: string }).lastReportAt ?? "") < cutoff);
@@ -363,7 +364,8 @@ export class RetentionService {
           candidates.push({ kind: "stall-evidence", id: a.id, revision: a.revision, projectId: typeof b.projectId === "string" ? b.projectId : undefined, ageDays: Math.floor((now - last) / DAY) });
         }
       }
-      if (values.stallSpeedDays !== null) {
+      // A request in flight in a progress record the scan did not reach could name any route, so no speed is removed on a partial view (K06e review).
+      if (values.stallSpeedDays !== null && evidenceComplete) {
         const cutoff = now - values.stallSpeedDays * DAY;
         // A request in flight names its route: its speed is kept.
         const inFlight = new Set<string>();
