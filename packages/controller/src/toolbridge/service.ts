@@ -27,6 +27,7 @@ import type { LocalJobRuns } from "../jobs/runs.js";
 import { JOB_WAKE_RULE } from "../jobs/wakes.js";
 import type { View } from "../domain/model.js";
 import { checkValue, schemaProblems } from "./schema.js";
+import type { RecallService } from "../context/recall-service.js";
 
 /**
  * The controller side of the protected agent tool bridge (card T06). The extension loaded into the worker (`@nimblenewt/pi-adapter`, `bridge.ts`) exposes a small, fixed set of tools; each call is
@@ -36,7 +37,7 @@ import { checkValue, schemaProblems } from "./schema.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -117,6 +118,8 @@ export interface ToolExecutionDeps {
   readonly desks?: Pick<DeskService, "read" | "write">;
   readonly messages?: Pick<AgentMessageService, "send">;
   readonly state?: Pick<StateApi, "handle">;
+  /** Card W13: the read-only memory tool. Absent: the operation answers as unavailable. */
+  readonly recall?: Pick<RecallService, "recall">;
   /** The host's facts when the composer knows better than `catalogFacts` over the announcement and the declared capacity (the facts always come from the host, never the request). */
   readonly facts?: (hostId: string) => Promise<HostFacts | undefined>;
   /**
@@ -420,6 +423,7 @@ export class ToolExecutionService {
               case "maintenance.request": return await this.#maintenanceRequest(token, context, args);
               case "maintenance.status": return await this.#maintenanceStatus(token, context, args);
               case "turn.continue": return this.#turnContinue(context, args);
+              case "task.recall": return await this.#recall(context, args);
             }
           };
           response = checked.admit !== undefined && ADMITTED.has(request.op as BridgeOperation) ? await this.#admitted(context, request, checked.admit, perform) : await perform();
@@ -646,6 +650,7 @@ export class ToolExecutionService {
       : op === "tool.register" ? { summary: `${c.agent.id} registered tool ${id("name")} through the bridge.`, refs: [{ kind: "catalog-version", id: id("versionId") }] }
       : op === "job.start" && typeof result["jobId"] === "string" ? { summary: `${c.agent.id} started job ${id("jobId")} (${id("tool")} ${id("version")}) through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : op === "maintenance.request" && typeof result["maintenanceId"] === "string" ? { summary: `${c.agent.id} asked for an environment change, maintenance request ${id("maintenanceId")} (${id("status")}), through the bridge.`, refs: [{ kind: "maintenance", id: id("maintenanceId") }] }
+      : op === "task.recall" ? { summary: `${c.agent.id} read its own task's records back with task.recall (${id("part")}; ${typeof result["chars"] === "number" ? result["chars"] : "?"} characters${result["found"] === false ? ", nothing found" : ""}).`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "turn.continue" ? { summary: `The turn of ${c.agent.id} was continued (nudge ${typeof result["n"] === "number" ? result["n"] : "?"} of ${typeof result["max"] === "number" ? result["max"] : "?"}): it had ended ${typeof result["endKind"] === "string" ? `as ${result["endKind"]}` : "early"}, without a tool call or work.end.`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
@@ -686,6 +691,17 @@ export class ToolExecutionService {
     onlyKnown(args, op === "work.note" ? ["kind", "text"] : ["answers"]);
     const response = await this.#deps.state.handle(token, { v: 1, op, commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * Card W13: `task.recall`, the agent's read of its own task's records after a cut. Nothing but the call's own arguments comes from the request: the attempt (and so the task) is the one the credential was bound to, and a request that
+   * names a task, a project or an agent is refused by the service. A read, so a pause does not stop it; it writes nothing (the activity step is counts only).
+   */
+  async #recall(c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.recall === undefined) return refusal("unavailable", "the memory tool is not available");
+    const reply = await this.#deps.recall.recall({ attemptId: c.attemptId, callId: c.callId, by: c.scoped }, args);
+    if (!reply.ok) return refusal(reply.code, reply.message);
+    return ok(reply.result as unknown as JsonObject);
   }
 
   /**

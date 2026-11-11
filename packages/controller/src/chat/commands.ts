@@ -110,7 +110,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
   // Whether a task moving to another model route has its context checked first, and what is counted for a route nobody has measured (card C07f): both on unless the owner turns them off.
   "context.start-size.change": { verb: "Change when the owner is alerted that a task's starting size keeps rising over its hand-offs, or is close to its route's limit", mode: "apply" },
-  "context.route.change": { verb: "Turn on or off the goal anchor (the short block of a task's goal, acceptance criteria and plan that opens each attempt's first prompt and is put back at the top of the agent's memory every time its conversation is cut) or set its size cap, turn the check of a task's context when it moves to another model route (and the rebuilt context put in its first prompt) on or off, or set the size counted for an unmeasured route", mode: "propose" },
+  "context.route.change": { verb: "Turn on or off the goal anchor (the short block of a task's goal, acceptance criteria and plan that opens each attempt's first prompt and is put back at the top of the agent's memory every time its conversation is cut) or set its size cap, turn the agent's memory tool (task.recall: it reads back the agent's own goal, plan, notes, hand-off facts and cut-note text from the controller's records) on or off or set how many times an attempt may use it, turn the check of a task's context when it moves to another model route (and the rebuilt context put in its first prompt) on or off, or set the size counted for an unmeasured route", mode: "propose" },
   "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
   // Whether the controller may remove an ended attempt's scratch workspace is a data-keeping decision: shown first in every profile (owner decision 2026-10-30; default after-handoff).
   "cleanup.settings.change": { verb: "Change whether an ended attempt's scratch workspace is removed", mode: "propose" },
@@ -491,7 +491,7 @@ const EXEMPT = new Set(["section", "taskId", "projectId", "project", "prerequisi
  */
 export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable"]);
 /**
- * `context.route.change` names the settings it turns on, off or back to their defaults (`enable`, `disable`, `unset`) from a fixed list the service checks (`check`, `floorChars`, `anchor`, `anchorChars`; card W12): the owner says
+ * `context.route.change` names the settings it turns on, off or back to their defaults (`enable`, `disable`, `unset`) from a fixed list the service checks (`check`, `floorChars`, `anchor`, `anchorChars`, `recall`, `recallCalls`; cards W12, W13): the owner says
  * "stop reminding the agents of their goal when their memory is cut", the interpreter chooses `anchor`, and the proposal shows the name before anything is applied. The names are not words an owner has to say; an unknown one is refused by the service.
  */
 export const ROUTE_SETTING_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable", "unset"]);

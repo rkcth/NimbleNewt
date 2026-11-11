@@ -8216,7 +8216,7 @@ Owner decision 2026-11-11 (Rob). After Pi cuts a conversation the agent could lo
 - A remote worker's first prompt carries the block and the contract names its digest; the remote channel does not yet hand the process the copy for re-insertion (needs the remote wire to carry `context.compaction.anchor`). Local workers only.
 - Not rerun in full after the last edits: see the suite line above.
 - Plan: the W12 card was added to `scripts/generate_task_plan.py` (the plan tests pass, 361 cards); "needs plan owner" only for its status and AII issue ID, which the generator gives like the other new cards.
-- W13 is not built.
+- W13 is built in the next section.
 
 **ASSUMPTION**: default on, cap 2400 characters and 4 percent of the window, because the card says a small fixed fraction and the owner can change both in chat.
 **ASSUMPTION**: the done contract in the block lists check names and required evidence only, never commands or paths of secrets.
@@ -8233,6 +8233,35 @@ Owner decision 2026-11-11 (Rob). After Pi cuts a conversation the agent could lo
 - Cost of default on: at most 2,400 characters (about 800 tokens at the budget's three characters a token, less on windows under 20,000 tokens where 4 percent of the window caps it) at the top of every attempt's first prompt and of every extractive summary. Kept on as the owner approved the card; the owner sees each block's size on the attempt's record (`anchors[].chars`) and can lower the cap or turn it off in chat.
 - Mutations (each made alone on the built files, each failed a test, then restored): summary ignores the kept tail; a used request ID resubmitted with the block whatever was first sent; the mark back-off in the cut; no `anchorLeftOut` for no room.
 - Left as noted: a start whose records changed (a new note) carries a newer block while the view still shows the older one, so two different blocks are visible until the next cut replaces both.
+
+## W13: task.recall, an agent reads back its own task's records (2026-11-11)
+
+Done:
+- Tool `task.recall` (wire `nimblenewt__task-recall`) through the existing bridge, local and remote. Parts: `anchor`, `decisions` (own notes and hand-off notes, newest first), `archives` (K06c cut notes, list or whole by digest, paged), `activity`. Composer `context/recall.ts`, reader `context/recall-source.ts`, service `context/recall-service.ts`.
+- Task identity only from the credential; any argument naming a task, project, agent or attempt is refused (`invalid_command`). Foreign, missing and malformed IDs give the same shape and the same fixed text. The reader drops any record whose task differs from the attempt's.
+- Bounded (3,000 default, 600 to 8,000, whole characters, cursor), redacted, control, bidi and tag characters stripped, quoted in an `[NN-RECALL v1 ...]` frame; `datum` and the delimiter rewrite now also cover `NN-RECALL`. No writes (a storage proxy test counts zero writes and only allowed record kinds read). Replays answer again at no cost; per-attempt cap (default 20) refuses with a clear text. Activity shows counts only.
+- Version skew: an older controller's "not an operation of the bridge" and a transport failure become words to the model in the Pi adapter, never a crash.
+- Anchor carries one line naming the tool (only while the switch is on); anchor digest tests updated.
+- Owner control in chat: `context.route.change` settings `recall` (switch) and `recallCalls` (1 to 100), interpreter prompt and op-table tests.
+- Tests: composer, 4-backend record test, bridge suite, remote protocol test (4 backends), pi-adapter test, chat and settings tests on 4 backends, composed-controller test (`api/start-recall.test.ts`), real sandboxed worker after real cuts (`integration/src/w13-recall.test.ts`). Mutation checks (each killed, then restored): task from argument, foreign-id membership, reader task guard, size clamp, redaction, extra fields shown, write path.
+- Docs: `context-window-stalls.md` item 10, `api-v1.md` regenerated, plan card W13 (generator, `g07` 362, README roadmap).
+
+Not done:
+- The MCP door for outside agents does not carry the tool.
+- The call count is in controller memory (a restart resets it).
+- The full exhaustive shards were not all run here; targeted suites for everything touched were (2286 tests, 0 failures).
+
+ASSUMPTION: the default cap of 20 calls per attempt and the 3,000 character default page are the smallest safe values that still cover a typical recovery; the owner can change the cap in chat.
+ASSUMPTION: the activity part lists the task's attempts only (no other tasks), newest first, at most 20 attempts.
+
+W13 review (clean-context Opus, 2026-11-11):
+- Fixed, a credential with an invisible character inside it (zero-width, tag, half surrogate, bidi isolate) came out whole: `cleanText` redacted before removing those characters, so the token did not have a credential's shape until after. It now redacts again once they are gone (also in the W12 anchor block, which shares it).
+- Fixed, an answer could pass `maxChars`: (1) reading one hand-off note or cut note by id put the other party's words (`endedBecause` up to 120, the cut note's description up to 200 characters) in the head without counting them against the page, so at 600 the answer was up to 680 characters; the head's free words are now cut so the page keeps at least 40 characters, and the page takes exactly what is left. (2) A listed line too long for the room was cut by code points while the room is counted in UTF-16 units (as `chars` is), so a note of emoji gave 694 at 600; it is cut by units now. A cut inside a quoted datum also drops a half escape and closes the quote.
+- Fixed (small): the per-attempt call count forgot the attempt that STARTED using the tool longest ago once 512 attempts had used it, so a long attempt that kept asking got a fresh count; it now forgets the one that used it longest ago.
+- Checked, no change: identity only from the bound credential (running, current generation, not frozen, agent, task and project match); `__proto__` and other names are refused; ids are matched by strict ASCII patterns, so lookalikes read as missing; foreign, missing and malformed ids give the same answer and the cut-note store is read for each; cursors only move within the caller's own records; frames: no line break survives in data, `NN-RECALL` and `NN-ANCHOR` are rewritten after the invisible characters go, the random fuzz (23,040 answers) found exactly one begin and one end line each time; the call cap counts call IDs, so argument spellings do not matter; a restart resetting the count is noted above; the activity step (counts only) is the card's own requirement. The running notes and report of an earlier attempt by another agent of the same task are shown: the next attempt is already told them (W10 `earlierReport`), so this is not a new reach.
+- Left as noted: the Pi extension lists the tool whatever the owner's switch (the list is fixed when the worker starts); with the switch off a call is answered "switched off by the owner" in words and the anchor does not name the tool. A forged cursor pointing at a combining mark starts a page with that mark (only the caller's own text).
+- Mutations (each alone on the built files, each failed the named new test, then restored): no second redaction; the line cut by code points; the head not shrunk; the closing quote left off; the call count not moved on use.
+
 ## A05b follow-up: the controller supplies each target's version (2026-11-11)
 
 Card status is NOT changed. This builds the hook A05b left unset: `startController` now gives the dispatcher a real `targetVersion`, so a live call whose target has a readable version is bound to it (asked at the version, admitted only at the same version).
