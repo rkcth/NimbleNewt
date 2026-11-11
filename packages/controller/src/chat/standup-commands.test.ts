@@ -581,7 +581,13 @@ for (const backend of backends) {
     const p1 = only((await say(w, chat, "Tell the stand-up: thirty.")).outcomes);
     script["Tell the stand-up: seven."] = [cmd("standup.answer-question", { answer: "seven" }, "Tell the stand-up: seven")];
     const p2 = only((await say(w, chat, "Tell the stand-up: seven.")).outcomes);
+    script["Say thirty to the stand-up."] = [cmd("standup.answer-question", { answer: "thirty" }, "Say thirty to the stand-up")];
+    const p3 = only((await say(w, chat, "Say thirty to the stand-up.")).outcomes);
     assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: p1.proposalId! })).applied, true);
+    // A proposal with the very words already recorded is the step already done (as a replay after a crash would be): it applies and changes nothing.
+    const same = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: p3.proposalId! });
+    assert.equal(same.applied, true, JSON.stringify(same));
+    assert.match(JSON.stringify(same.results), /already answered with these words/);
     const second = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: p2.proposalId! });
     assert.equal(second.applied, false, JSON.stringify(second));
     assert.match(String(second.failure?.message), /already answered/);
