@@ -16,6 +16,18 @@ Protect the updater, artifact verification, health-check policy, and release aut
 
 Implement launcher/service and filesystem operations for macOS, Linux, and Windows. A durable active-release record must resolve to either the previous release or the candidate after interruption, never an installation assembled from parts of both. Verify the actual platform behavior rather than assuming one shell command or symlink swap works everywhere.
 
+### The release launcher program (built as a program and a library, card K02a; not yet a service)
+
+`scripts/nimblenewt-launcher.mjs --root RELEASE_ROOT [--entry controller.js] [--switcher pointer|symlink] [-- controller arguments]` runs the controller of the release the pointer names, as a child process with `NIMBLENEWT_RUNNING_RELEASE=<release id>` in its environment. It is separate from the release-update tooling that stages releases; it is not part of any release. It reads only the pointer, the release directory and `launcher-state.json`; it never opens the database, so it runs when the database cannot. Its decisions are the existing ones (`Launcher.prepare()`, `watch()`); the supervisor library (`packages/controller/src/release/supervisor.ts`) adds the process handling:
+
+- A start the controller never confirms inside the startup window is stopped (SIGTERM to the child's process group, SIGKILL after `--grace-seconds`, default 10) and the launcher falls back to the last known good. The last known good is never quarantined.
+- A controller that exits, for any reason, is started again through the same decision (an unconfirmed start is judged failed there). Restarts slow down: the n-th short run in a row waits `initial * 2^(n-1)` ms up to a maximum; a run of `--stable-seconds` (default 60) resets the count; after `--give-up-after` (default 20) short runs in a row the launcher exits 4.
+- The window is measured on a clock that does not jump, so a wall clock set while a release starts neither fails a healthy start nor stretches the window.
+- Exit codes: 0 stopped by SIGTERM/SIGINT, 1 usage or unexpected error, 2 blocked (nothing safe to run; the owner decides), 3 no release is active, 4 crash loop. A service manager should not restart it on 2.
+- Logs (stderr) name release IDs, process IDs, exit codes, signals and the launcher's own reasons; never the environment or the controller's output.
+
+Not built: service-manager units (launchd, systemd, Windows service), running it on macOS and Windows (the process-group stop is POSIX; Windows uses `child.kill()`), and the updater program.
+
 ## Maintenance sequence
 
 1. **Prepare:** acquire and verify the exact authorized release before the window. Candidate building, if used by a development deployment, has already happened in a separate pipeline. Test migrations and recovery using isolated copies and fake services without production credentials. Check space for release artifacts and consistent state backups.
