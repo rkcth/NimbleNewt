@@ -83,6 +83,11 @@ export class BackupEncryption {
     return this.#now().getTime() - since > (this.#o.proofEveryDays ?? 92) * 86_400_000;
   }
 
+  /** For the quarterly reminder (card K01b3): whether a proof is due, since when it is counted, and the period. */
+  proofDue(): boolean { return this.#proofDue(); }
+  proofSince(): string { return this.#lastOk?.at ?? this.#o.keyring.createdAt; }
+  get proofEveryDays(): number { return this.#o.proofEveryDays ?? 92; }
+
   get keyring(): Keyring { return this.#o.keyring; }
   #now(): Date { return (this.#o.now ?? (() => new Date()))(); }
 
