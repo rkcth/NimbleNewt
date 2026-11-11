@@ -44,7 +44,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Where local-only data may go is where work is done: shown to the owner first in every profile (card H07c).
   // Which event sources are watched decides what wakes agents and spends work (card H13f): shown first in every profile (provisional; see the notes).
   // Withdrawing a tool version (owner decision 2026-10-30; the pause choice was added by card T02c): always shown first; when calls of it are running, the owner is asked whether they finish, are cancelled, or their tasks are paused.
-  "catalog.revoke": { verb: "Revoke tool version (runningCalls: finish, cancel or pause)", mode: "propose" },
+  "catalog.revoke": { verb: "Revoke tool version (runningCalls: finish, cancel or pause; the choice also reaches calls running in another controller process on the same store, within seconds)", mode: "propose" },
   // The standing answer for running calls when a revoke names none (card T02c): shown first (provisional); the revision is read for the owner.
   "catalog.policy.change": { verb: "Change what happens to running tool calls when a version is revoked (runningCalls: finish, cancel or pause; null for the default)", mode: "propose", revision: "catalog-policy" },
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },

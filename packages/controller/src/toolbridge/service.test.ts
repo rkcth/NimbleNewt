@@ -426,6 +426,98 @@ for (const backend of backends) {
     });
   }
 
+  // Card T02d: a revocation taken by ANOTHER process. `other` stands for a second controller process on the same store: its catalogue view has no `onRevoked` (the listener lives in the process that took the command), so the only
+  // way it can hear is the store check. The owner's choice is read from the revocation record.
+  for (const choice of ["finish", "cancel", "pause", "none-policy-cancel", "none-policy-finish"] as const) {
+    suite(`T02d: a revoke taken by another process reaches a call running here (choice ${choice})`, async (c) => {
+      const ann = await c.agentFor("ann");
+      const t = await c.task("t", ann);
+      let aborted = false;
+      let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
+      let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+      const paused: string[] = [];
+      const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+      const view = { get: c.catalog.get.bind(c.catalog), list: c.catalog.list.bind(c.catalog), register: c.catalog.register.bind(c.catalog), content: c.catalog.content.bind(c.catalog), authorizeRun: c.catalog.authorizeRun.bind(c.catalog), revocationOf: c.catalog.revocationOf.bind(c.catalog) };
+      const other = new ToolExecutionService({
+        principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) }, assignments: c.assignments,
+        catalog: view, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, facts: async () => hostFacts, isLocalHost: () => true, revocationWatchMs: 15,
+        runner: { run: async (_l, signal) => { started(); await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { aborted = true; resolve(); }); void gate.then(resolve); }); return { text: '{"ok":true}', cpuMs: 1 }; } },
+        revocationPolicy: () => (choice === "none-policy-cancel" ? "cancel" : "finish"),
+        revocationOwner: async (id) => (id === c.owner.id ? c.owner : undefined),
+        pauseTask: async (owner, taskId, reason, commandId) => { assert.equal(owner.id, c.owner.id); paused.push(taskId); return c.pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }); },
+      });
+      const out: Record<string, BridgeResponse> = {};
+      try {
+        c.worker.script = c.session(async (s) => {
+          const name = await c.install(s, "slow", "1.0.0");
+          const args = { tool: name, version: "1.0.0", input: { url: "u" } };
+          await c.clear(s, args, "long-call");
+          const running = other.handle(s.token, s.gateway, { op: "tool.invoke", callId: "long-call", args });
+          await hasStarted;
+          assert.equal(other.runningTotal(name, "1.0.0"), 1);
+          // The process that takes the command is not the one that runs the call: nothing is aborted by a listener.
+          await c.catalog.revoke(c.owner, { commandId: uid("rv"), name, version: "1.0.0", reason: "bad", ...(choice === "finish" || choice === "cancel" || choice === "pause" ? { runningCalls: choice } : {}) });
+          const deadline = Date.now() + 3000;
+          while (Date.now() < deadline && (choice === "finish" || choice === "none-policy-finish" ? false : !aborted)) await new Promise((r) => setTimeout(r, 10));
+          // Give a finishing call a few rounds of the check to prove it is left alone.
+          if (choice === "finish" || choice === "none-policy-finish") await new Promise((r) => setTimeout(r, 120));
+          out["aborted-before-release"] = { ok: true, result: { aborted } };
+          release();
+          out["running"] = await running;
+        });
+        await c.tick();
+        const cancels = choice === "cancel" || choice === "pause" || choice === "none-policy-cancel";
+        assert.equal(good(out["aborted-before-release"]!)["aborted"], cancels);
+        assert.equal(good(out["running"]!)["state"], cancels ? "failed" : "confirmed");
+        assert.deepEqual(paused, choice === "pause" ? [t.taskId] : [], "only the pause choice pauses the task");
+        if (choice === "pause") assert.ok((await c.pauses.guard(t.taskId)).blockedBy.some((b) => b.kind === "task" && b.id === t.taskId));
+      } finally { other.dispose(); }
+    });
+  }
+
+  suite("T02d: the store check never cancels on a failed read, applies each revocation once, acts on an explicit check, and stops its timer when nothing runs or the service is disposed", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    let reads = 0;
+    let broken = true;
+    let aborted = 0;
+    let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+    const view = { get: c.catalog.get.bind(c.catalog), list: c.catalog.list.bind(c.catalog), register: c.catalog.register.bind(c.catalog), content: c.catalog.content.bind(c.catalog), authorizeRun: c.catalog.authorizeRun.bind(c.catalog), revocationOf: async (n: string, v: string) => { reads++; if (broken) throw new Error("store unavailable"); return c.catalog.revocationOf(n, v); } };
+    const other = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) }, assignments: c.assignments,
+      catalog: view, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, facts: async () => hostFacts, isLocalHost: () => true, revocationWatchMs: 0,
+      runner: { run: async (_l, signal) => { started(); await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { aborted++; resolve(); }); void gate.then(resolve); }); return { text: '{"ok":true}', cpuMs: 1 }; } },
+      revocationPolicy: () => "cancel",
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const name = await c.install(s, "slow", "1.0.0");
+      const args = { tool: name, version: "1.0.0", input: { url: "u" } };
+      await c.clear(s, args, "long-call");
+      const running = other.handle(s.token, s.gateway, { op: "tool.invoke", callId: "long-call", args });
+      await hasStarted;
+      // Nothing revoked: nothing acted on (and a store that cannot answer is not a revocation).
+      assert.deepEqual(await other.checkRevocations(), []);
+      await c.catalog.revoke(c.owner, { commandId: uid("rv"), name, version: "1.0.0", reason: "bad" });
+      assert.deepEqual(await other.checkRevocations(), [], "the store could not be read: nothing is cancelled");
+      assert.equal(aborted, 0);
+      broken = false;
+      assert.deepEqual(await other.checkRevocations(), [`${name}|1.0.0`]);
+      assert.equal(aborted, 1);
+      const before = reads;
+      assert.deepEqual(await other.checkRevocations(), [], "a revocation is applied once");
+      assert.equal(reads, before, "and its version is not asked about again");
+      release();
+      out["running"] = await running;
+      assert.equal(other.runningTotal(name, "1.0.0"), 0);
+    });
+    await c.tick();
+    assert.equal(good(out["running"]!)["state"], "failed");
+    other.dispose();
+  });
+
   suite("the credential decides who is asking: another agent's, a wrong, an ended or another attempt's credential is refused; a caller cannot name a principal, actor, project or task", async (c) => {
     const ann = await c.agentFor("ann");
     const ben = await c.agentFor("ben");

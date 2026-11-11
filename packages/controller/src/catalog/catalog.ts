@@ -56,7 +56,7 @@ export interface VersionBody {
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
 /** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, cancel them, or stop them and pause their tasks (`pause` was added by card T02c). Absent: nobody was asked (the caller is not chat, or gave no answer), and the policy in force answers (the operator's startup option, else the owner's standing setting, default `finish`). */
 export type RunningCallsChoice = "finish" | "cancel" | "pause";
-export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string }
+export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string; /** The owner's choice for calls that were running (card T02d: recorded so a process that did not take the revoke command applies the same choice to its own running calls). Absent: nobody was asked. */ readonly runningCalls?: RunningCallsChoice }
 export interface UsageBody {
   readonly versionId: string;
   readonly name: string;
@@ -302,7 +302,7 @@ export class CatalogService {
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (entry === undefined || prior === undefined || !prior.versions.includes(command.version)) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
         if (prior.revoked.includes(command.version) || (await this.#runner.get(ref.kind, ref.id)) !== undefined) throw new DomainError("invalid_command", "that version is already revoked", { field: "version" });
-        const body: RevocationBody = { revokedBy: owner.id, reason, at: this.#runner.now() };
+        const body: RevocationBody = { revokedBy: owner.id, reason, at: this.#runner.now(), ...(runningCalls === undefined ? {} : { runningCalls }) };
         const next: EntryBody = { ...prior, revoked: [...prior.revoked, command.version] };
         return {
           ref, creates: true,
@@ -312,6 +312,21 @@ export class CatalogService {
       },
     }));
     for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls, owner); } catch { /* the revocation stands whatever a listener does */ } }
+  }
+
+  /**
+   * Whether a version has been revoked, as the store says now (card T02d). A tool execution service in ANOTHER process learns of a revocation only from the store (the listener of `onRevoked` is in the process that took the command),
+   * so it asks this for the versions its running calls use. No principal and no content: it answers who, when and the owner's choice for running calls. A name that is not canonical, an unknown version or one not revoked answer `undefined`.
+   */
+  async revocationOf(name: string, version: string): Promise<{ readonly revokedBy: string; readonly at: string; readonly runningCalls?: RunningCallsChoice } | undefined> {
+    const parsed = parseName(name);
+    if (parsed === null || typeof version !== "string" || !VERSION.test(version)) return undefined;
+    const entry = (await this.#runner.get("catalog-entry", derivedId("cat", parsed.canonical)))?.body as unknown as EntryBody | undefined;
+    if (entry === undefined || !entry.revoked.includes(version)) return undefined;
+    const r = (await this.#runner.get("catalog-revocation", derivedId("cav", `${parsed.canonical}|${version}`)))?.body as unknown as RevocationBody | undefined;
+    if (r === undefined) return undefined;
+    const choice = r.runningCalls === "finish" || r.runningCalls === "cancel" || r.runningCalls === "pause" ? r.runningCalls : undefined;
+    return { revokedBy: r.revokedBy, at: r.at, ...(choice === undefined ? {} : { runningCalls: choice }) };
   }
 
   /**
