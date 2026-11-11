@@ -115,6 +115,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "backup.encryption.verify": { verb: "Check that a backup unlock method still works", mode: "apply" },
   // Approving a new backup key decides who can read every later backup: always a proposal, shown first in every profile.
   "backup.encryption.rekey": { verb: "Approve a new backup key", mode: "propose" },
+  // Switching backup encryption off, or narrowing what it covers, makes later backups less protected; switching it on is the safe direction, but one command does both, so it is always a proposal shown first (card K01b3).
+  "backup.encryption.set": { verb: "Switch backup encryption on or off, or choose what it covers (off writes plain backups)", mode: "propose" },
+  // A new signing key changes who the owner trusts to have made a backup: shown first.
+  "backup.signing.rotate": { verb: "Make a new backup signing key", mode: "propose" },
   // A restore replaces everything with an older copy: always a proposal with the exact preview (backup.restore.preview) shown first, never applied from an interpreter's words, in every profile (card K01h).
   "backup.restore.apply": { verb: "Restore a backup (replaces all current data)", mode: "propose" },
   // Withdrawing a prepared restore only puts things back as they were: the safe direction.

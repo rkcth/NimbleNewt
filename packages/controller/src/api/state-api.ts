@@ -55,7 +55,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
-import type { BackupEncryption, BackupKeyPinService, BackupService } from "../backup/index.js";
+import type { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
@@ -214,6 +214,8 @@ export interface StateApiDeps {
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
+  readonly backupEncryptionSetting?: Pick<BackupEncryptionSettingService, "get" | "set">;
+  readonly backupSigning?: Pick<BackupSigningService, "status" | "rotate">;
   readonly backupRestore?: Context["backupRestore"];
   readonly databaseTransfer?: Context["databaseTransfer"];
   /** While it says true (the maintenance barrier is up, card K01h) every command except the restore's own and the owner's reads is refused as unavailable. */
@@ -359,6 +361,8 @@ export class StateApi {
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
         ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
         ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
+        ...(this.#deps.backupEncryptionSetting === undefined ? {} : { backupEncryptionSetting: this.#deps.backupEncryptionSetting }),
+        ...(this.#deps.backupSigning === undefined ? {} : { backupSigning: this.#deps.backupSigning }),
         ...(this.#deps.backupRestore === undefined ? {} : { backupRestore: this.#deps.backupRestore }),
         ...(this.#deps.databaseTransfer === undefined ? {} : { databaseTransfer: this.#deps.databaseTransfer }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),

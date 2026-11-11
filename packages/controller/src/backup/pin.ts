@@ -60,6 +60,9 @@ export class BackupKeyPinService {
     return { fingerprint, first: false, approved: true };
   }
 
+  /** Controller side (the start): whether this installation has ever pinned a backup key, that is, ever made encrypted backups. */
+  async hasPin(): Promise<boolean> { return (await this.#runner.get(REF.kind, REF.id)) !== undefined; }
+
   /** What is pinned and what the owner approved for the next start (owner only, as the rest of the encryption status). */
   async get(by: Principal): Promise<{ readonly revision: number; readonly pinned?: { fingerprint: string; keyId: string; pinnedAt: string }; readonly approved?: { fingerprint: string; at: string } }> {
     if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read the backup key pin`);

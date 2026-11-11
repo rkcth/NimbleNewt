@@ -87,3 +87,16 @@ test("the prompt tells the model how the owner switches the MCP door off and on 
   assert.match(system, /policy_edit/);
   assert.match(system, /apply_proposal/);
 });
+
+test("the model is told how the owner switches backup encryption off and on, narrows it and gets a new signing key, with the argument names and no secret in any argument (card K01b3)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  const listed = acceptedArgs("backup.encryption.set")!.filter((k) => k !== "projectName");
+  assert.ok(system.includes(`backup.encryption.set(${listed.join(", ")}) - `), "the operation is listed with its argument names");
+  for (const k of ["enabled", "scope", "expectedRevision"]) assert.ok(listed.includes(k), k);
+  assert.ok(system.includes("backup.signing.rotate("));
+  assert.match(system, /use backup\.encryption\.set with enabled \(true or false\) and\/or scope \(everything or secrets\)/);
+  assert.match(system, /Off means new backups are written in plain/);
+  assert.match(system, /Never put a passcode, a recovery code or a key in any argument/);
+});

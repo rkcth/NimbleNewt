@@ -784,6 +784,9 @@ export class ChatService {
     if (intent.op === "decision.record" && (intent.args["basedOn"] !== undefined || intent.args["session"] !== undefined)) return refuse("invalid_command", "basedOn and session are set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
+    // Backup encryption takes only a switch and one of two scopes (card K01b3): any other value is refused before a proposal is made, so text the model put there (a passcode, say) is never stored or shown.
+    if (intent.op === "backup.encryption.set" && ((args["enabled"] !== undefined && typeof args["enabled"] !== "boolean") || (args["scope"] !== undefined && args["scope"] !== "everything" && args["scope"] !== "secrets"))) return refuse("invalid_command", "backup encryption is set with enabled (true or false) and scope (everything or secrets) only");
+    if (intent.op === "backup.signing.rotate" && args["revokePrevious"] !== undefined && typeof args["revokePrevious"] !== "boolean") return refuse("invalid_command", "revokePrevious is true or false");
     if (intent.op === "decision.record" && args["category"] === "gate") args["topic"] = GATE_TOPIC;
     // Cancelling a release test applies at once: it names an attempt ID the owner said, or a candidate (also in the owner's words) with exactly one test running.
     if (intent.op === "release.cancel") {

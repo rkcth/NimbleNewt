@@ -1165,13 +1165,23 @@ Result: `{ item: { items, next? } }`.
 
 #### `backup.encryption.status`
 
-Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the key generation, the last proof and the last proof that worked (kept across restarts) with whether a new proof is due (every three months: `proofDue`; ask the owner to put the passcode or recovery file in place and run backup.encryption.verify), and warnings (a recovery file left on the host, a proof overdue). It never holds a passcode, a recovery key or any key material. Encryption is switched on and off, an extra passcode added, and a passcode removed or replaced (which rotates to a new key, a new recovery file or printable recovery code) on the host with `backup encryption-setup`, `encryption-add-passcode` and `encryption-rotate`, because they need the passcode and recovery file, which never travel through chat; tell the owner those commands when they ask.
+Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the key generation, the last proof and the last proof that worked (kept across restarts) with whether a new proof is due (every three months: `proofDue`; ask the owner to put the passcode or recovery file in place and run backup.encryption.verify), and warnings (a recovery file left on the host, a proof overdue). It never holds a passcode, a recovery key or any key material. Whether new backups are encrypted and for what (`setting`: on or off, scope `everything` or `secrets`, said in `setting.text`) is changed by the owner with backup.encryption.set. The key itself is made, an extra passcode added, and a passcode removed or replaced (which rotates to a new key, a new recovery file or printable recovery code) on the host with `backup encryption-setup`, `encryption-add-passcode` and `encryption-rotate`, because they need the passcode and recovery file, which never travel through chat; tell the owner those commands when they ask.
 
 Arguments:
 
 - none
 
-Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+Result: `{ item: { enabled, setting?: { enabled, scope, revision, changedAt?, changedBy?, text }, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+
+#### `backup.signing.status`
+
+Owner only: the keys that sign backups (card K01b3): each generation's key ID, public key (base64; not secret), when it was made and when it stopped signing, and when signing began. Keep a copy of the public keys OFF the server (one per line in a file) and give it to `backup verify` or `backup restore` as --trusted-signing-key-file for a check that does not depend on the running server. A valid signature shows the backup was made with the server's signing key; if the running server was compromised it could sign a forgery. The private key lives in the host's secret store and is never shown.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, since?, keys: [{ keyId, publicKey, generation, createdAt, retiredAt? }] } }`.
 
 #### `backup.restore.preview`
 
@@ -4080,6 +4090,33 @@ Arguments:
 - `expectedRevision` (optional): the pinRevision you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.encryption.set`
+
+Owner only, recorded and announced to the owner's inbox: switches backup encryption on or off, or chooses its scope, without touching the key or any old backup (they stay readable with the passcode or recovery file). `enabled: false` means new backups are written in PLAIN, so say that to the owner and have them agree first. Scope `everything` seals every file of a backup; `secrets` seals only secret values, and since no secret values are in a backup today (they stay in the secret store) that writes plain backups too. The installation refuses to start with its backup keyring removed from the configuration unless this setting says off, so taking the option away is no way around it. The same call turns encryption back on. It applies from the next backup. Give `expectedRevision` from backup.encryption.status `setting.revision`.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `scope` (optional): `everything` or `secrets`
+- `expectedRevision` (optional): the setting.revision you read
+
+Result: `{ revision, enabled, scope, weaker, changed, text }`; `weaker` is true when later backups are less protected; `text` says in plain words how new backups are written.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.signing.rotate`
+
+Owner only, recorded and announced to the owner's inbox: makes a new backup signing key (after the old key may have been exposed, say). The old key stops signing; its public key stays trusted so backups it signed still verify, unless `revokePrevious: true` (the owner says the key was exposed or stolen): then every earlier key is trusted for no backup at all, since whoever holds it could sign a forgery with any date, and backups those keys signed can only be restored with the host command without a trusted key. The owner should then save the new public key (backup.signing.status) off the server.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read from backup.signing.status
+- `revokePrevious` (optional): true when the old key may be in someone else's hands
+
+Result: `{ revision, keyId, generation, revoked }`; `revoked` is how many earlier keys are no longer trusted.
 
 Completion: finished when accepted (`completed: true`).
 
