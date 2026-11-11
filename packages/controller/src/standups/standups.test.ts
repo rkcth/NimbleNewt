@@ -141,6 +141,21 @@ for (const backend of backends) {
 
   // ---- configuration --------------------------------------------------------------------------------------------------------
 
+  suite("the controller can ask which projects have an active stand-up: none, active, paused and ended are told apart (card U11d)", async (c) => {
+    assert.equal((await c.standups.activeProjects()).size, 0, "no stand-up yet");
+    const made = await c.schedule();
+    assert.deepEqual([...await c.standups.activeProjects()], [c.a]);
+    let rev = (await c.standups.standup(c.mgr, made.scheduleId))!.schedule.revision;
+    await c.standups.update(c.mgr, { commandId: cid("u"), scheduleId: made.scheduleId, expectedRevision: rev, state: "paused" });
+    assert.equal((await c.standups.activeProjects()).size, 0, "paused is not scheduled");
+    rev = (await c.standups.standup(c.mgr, made.scheduleId))!.schedule.revision;
+    await c.standups.update(c.mgr, { commandId: cid("u"), scheduleId: made.scheduleId, expectedRevision: rev, state: "active" });
+    assert.deepEqual([...await c.standups.activeProjects()], [c.a]);
+    rev = (await c.standups.standup(c.mgr, made.scheduleId))!.schedule.revision;
+    await c.standups.update(c.mgr, { commandId: cid("u"), scheduleId: made.scheduleId, expectedRevision: rev, state: "ended" });
+    assert.equal((await c.standups.activeProjects()).size, 0, "ended is not scheduled");
+  });
+
   suite("a stand-up is a daily schedule with a participant group, length, zone and a daily window its time must lie in; a refused set-up leaves nothing behind and a repeat returns the same stand-up", async (c) => {
     const id = cid("conf");
     // Outside the window, running past its end, reversed, or in an unknown zone: refused before anything is created.

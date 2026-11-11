@@ -26,7 +26,7 @@ import { cutNote, type HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
-import { describePolicyContext, type PolicyService } from "../policy/index.js";
+import { describePolicyContext, type Decision, type PolicyService } from "../policy/index.js";
 import { ActionCatalog } from "../policy/catalog.js";
 import { handoffBrief } from "./handoff-brief.js";
 import type { ReviewService } from "../review/index.js";
@@ -128,6 +128,8 @@ export interface DispatcherDeps {
    */
   /** Told when the approval policy denies a tool call outright (card U11c: repeated denials of one agent can become Urgent). Best effort: a failure never changes the refusal. */
   readonly denied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
+  /** Told what the approval policy decided for a tool call, with the call's operation ID (card U08: the approval-load figures count how much ran by rule, grant, agent review or the owner). Best effort: a failure never changes the call; the ID names the record, so a judgement made twice counts once. */
+  readonly decided?: (decision: Decision, actionId: string) => Promise<unknown>;
   readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
   readonly blockers: Pick<BlockerService, "openBlocker" | "openFor">;
@@ -163,6 +165,14 @@ export interface DispatcherDeps {
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
+  /**
+   * The version of a call's target as the controller can read it right now (a commit, a content digest, a revision), or `undefined` when the target has no readable version. The review is then bound to
+   * that version when it is asked for and the version is read again immediately before the approval is used: a target that changed in between makes the approval refuse (card A05b). It is the
+   * controller's own reading, never the agent's claim; an error here refuses the call (nothing is admitted on a version that could not be read), and so does no answer within `targetVersionMs`.
+   */
+  readonly targetVersion?: (target: { readonly kind: string; readonly id: string }, taskId: string) => Promise<string | undefined>;
+  /** How long one `targetVersion` reading may take before the call is refused as unreadable (default 10 s): a reading that never answers must not hold the call forever. */
+  readonly targetVersionMs?: number;
   readonly budgets?: Pick<BudgetService, "accounting" | "charge"> & Partial<Pick<BudgetService, "reserve" | "settle" | "markUncertain" | "release">>;
   readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
   /** Whether the approved manifest of this exact tool version says a call may be run again after a restart (T06: the catalogue answers, as the agent; the worker never says). Without it no catalogue tool is replay-safe. */

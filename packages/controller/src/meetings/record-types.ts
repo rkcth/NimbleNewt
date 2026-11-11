@@ -70,7 +70,12 @@ export interface RecordBody {
   readonly endedAt?: string;
   readonly endedBy?: string;
   readonly endReason?: string;
+  /** The owner's answers to questions this meeting put to them when a decision was deferred (card M05), oldest first, the newest 10 kept. Written when the owner answers; the question's own record stays the source. */
+  readonly ownerAnswers?: readonly OwnerAnswerNote[];
 }
+
+/** One owner answer as the meeting record carries it: the question's ID (its record), the topic and the words asked and answered, cut for the record. */
+export interface OwnerAnswerNote { readonly questionId: string; readonly topic: string; readonly question: string; readonly answer: string; readonly answeredAt: string }
 
 export type MotionState = "proposed" | "voting" | "tie-pending" | "adopted" | "rejected" | "failed" | "no-quorum" | "tabled" | "void";
 export const FINAL_MOTION_STATES: readonly MotionState[] = ["adopted", "rejected", "failed", "no-quorum", "tabled", "void"];

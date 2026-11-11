@@ -1,3 +1,4 @@
+import { ApprovalLoadService } from "../policy/index.js";
 import { HarnessCatalog } from "../harness/index.js";
 import { isProtectedBy } from "../policy/protected-branches.js";
 import assert from "node:assert/strict";
@@ -450,6 +451,29 @@ for (const backend of backends) {
     assert.ok(out.every((r) => r.state === "refused" && /denied by policy/.test((r as { reason: string }).reason)), JSON.stringify(out));
     assert.deepEqual(told.map((t) => t.callId).sort(), ["a", "b", "c"], JSON.stringify(told));
     assert.deepEqual([told[0]!.agentId, told[0]!.projectId], ["agent:ann", c.project]);
+  });
+
+  suite("what the approval policy decided for each call is counted once for the approval-load figures, and a failure to count never changes the call (card U08)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.task("t", ann);
+    const load = ApprovalLoadService.withEpoch(c.storage, c.epoch, c.grants);
+    // The second report fails: the call it belongs to goes on all the same, and its count is only missing.
+    let reports = 0;
+    c.dispatcher = c.restart({ decided: (decision, actionId) => { reports++; if (reports === 2) throw new Error("the counter is down"); return load.recordDecision(decision, { actionId }); } });
+    const out: ToolResult[] = [];
+    c.worker.script = async ({ gateway }) => {
+      out.push(await gateway.call(read("a"), local()));
+      out.push(await gateway.call(read("a"), local()));
+      out.push(...await Promise.all([gateway.call(read("b"), local()), gateway.call(read("b"), local())]));
+      out.push(await gateway.call(read("c"), local()));
+      return { status: "completed", text: "x" };
+    };
+    await c.run();
+    assert.ok(out.every((r) => r.state === "confirmed"), JSON.stringify(out));
+    const counted = (await load.load(c.owner, 1)).decidedBy;
+    const total = counted.rule + counted.grant + counted.agentReview + counted.owner + counted.denied;
+    assert.ok(reports >= 3, `the policy decided for every distinct call: ${reports}`);
+    assert.ok(total >= 2 && total <= 3, `three different calls, each counted at most once, the failed report missing: ${JSON.stringify(counted)}`);
   });
 
   suite("a worker that lost its generation cannot call; its attempt is not dispatched again", async (c) => {

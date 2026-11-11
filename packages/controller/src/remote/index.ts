@@ -11,3 +11,4 @@ export { DEFAULT_MAX_GAP_MS, DEFAULT_QUIET_AFTER_MS, QUIET_HOST_KIND, QUIET_HOST
 export { ReconnectSettingsService, profileReaccept, type ReacceptMode, type ReconnectSettingsBody } from "./reconnect-settings.js";
 export { WorkspaceResponder } from "./responder.js";
 export { CONTRACT_FORMAT, CONTRACT_FEATURES, checkContract, contractDigest, contractProblems, enforcementFor, requiresOf, sealContract, type ContractEnforcement, type WorkerAbilities } from "./contract.js";
+export { RELEASE_RUNNER_LIMITS, ReleaseHostRunner, type ReleaseHostRunnerOptions, type ReleaseSuiteJob, type ReleaseSuiteResult, type ReleaseTested } from "./release-runner.js";

@@ -47,6 +47,7 @@ import type { StreamSettingsService } from "../generation/index.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
+import type { ApprovalsFacade } from "../policy/facade.js";
 import type { RemoteWorkerService } from "../remote/service.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
@@ -80,7 +81,7 @@ import type { CommandService } from "../commands/index.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
-import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ContinuationOps } from "./operations.js";
+import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ContinuationOps, type WebAccessPort } from "./operations.js";
 
 export const API_VERSION = 1;
 
@@ -147,6 +148,8 @@ export interface StateApiDeps {
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept" | "pending">;
+  /** When present, the owner can read the approval load, answer standing-rule proposals and the profile suggestion (cards A07b, A07c; U08). */
+  readonly approvals?: ApprovalsFacade;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change" | "setBestEffort" | "enforced">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;
@@ -164,6 +167,7 @@ export interface StateApiDeps {
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   /** The coordinator, looked up when asked. */
   readonly coordinator?: () => Pick<CoordinatorService, "get" | "configure" | "setState"> | undefined;
+  readonly webAccess?: () => WebAccessPort | undefined;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
@@ -206,7 +210,7 @@ export interface StateApiDeps {
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly thinkingStore?: Pick<ThinkingStore, "collection" | "setCollection" | "summary">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent" | "ownerQuestions" | "answerQuestion">;
   readonly watchControl?: {
@@ -329,10 +333,12 @@ export class StateApi {
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
         ...(this.#deps.reconnect === undefined ? {} : { reconnect: this.#deps.reconnect }),
+        ...(this.#deps.approvals === undefined ? {} : { approvals: this.#deps.approvals }),
         ...(this.#deps.agreedLimits === undefined ? {} : { agreedLimits: this.#deps.agreedLimits }),
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),
         ...(this.#deps.coordinator === undefined ? {} : { coordinator: this.#deps.coordinator }),
+        ...(this.#deps.webAccess === undefined ? {} : { webAccess: this.#deps.webAccess }),
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
         ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
         ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),

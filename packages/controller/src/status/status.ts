@@ -10,6 +10,7 @@ import { TASK_STATES, onlyKnown, projectId as checkProjectId, taskId as checkTas
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { WaitBody, WaitService } from "../domain/waits.js";
 import type { HandlingBody, WatchService } from "../events/handling.js";
+import type { WebBrowser, WebSettings } from "../web/index.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
@@ -32,6 +33,7 @@ import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
+import type { ApprovalsFacade } from "../policy/facade.js";
 import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
@@ -249,9 +251,11 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
+  web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
+  approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
@@ -315,10 +319,12 @@ export type StatusRequest =
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string; readonly stepKind?: string; readonly since?: string; readonly until?: string }
   | { readonly kind: "thinking"; readonly taskId: string; readonly after?: number; readonly limit?: number }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
+  | { readonly kind: "approval_load"; readonly days?: number }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
@@ -348,6 +354,8 @@ export interface StatusDeps {
     /** Each configured route's length and reasoning budget (card W07), from the routing table. Absent: the view says nothing about budgets. */
     readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number; /** The endpoint kind the controller's own configuration names for the route (it names the request fields); absent when the controller has none. */ readonly kind?: string }[]>;
   };
+  /** The web chat listener's settings and signed-in browsers (card U07b). Absent, or no listener running: the view is not offered. */
+  readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
   /** The live jobs (card T07b). Absent: the view is not offered. */
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
   readonly environments?: Pick<EnvironmentService, "get">;
@@ -382,6 +390,8 @@ export interface StatusDeps {
    * `status` is the staging and activation state; absent: the view says staging is not set up here. Absent altogether: the view is not offered.
    */
   readonly release?: Pick<ReleaseService, "gate" | "attempts" | "candidates"> & { gateAndAttempts?(by: Principal, candidateId: string): Promise<{ gate: Gate; attempts: readonly (ReleaseAttemptBody & { id: string })[] }>, status?(by: Principal): Promise<ActivationStatus> };
+  /** The approval load, the standing-rule proposals and the profile suggestion (cards A07b, A07c; U08). Absent: the view is not offered. */
+  readonly approvals?: ApprovalsFacade;
   /** Whether reconnected remote workers take their attempts up again by themselves, and the attempts that wait for the owner's decision (card H09b). Absent: the view is not offered. */
   readonly reconnect?: {
     get(by: Principal): Promise<{ readonly revision: number; readonly reaccept: string | null; readonly profile: string; readonly effective: string; readonly patienceHours: number | "off"; readonly patienceChosen: boolean }>;
@@ -637,9 +647,11 @@ export class StatusService {
       case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
       case "standup_questions": { onlyKnown(request, ["kind", "projectId"]); return this.standupQuestionLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
+      case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
+      case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
@@ -815,7 +827,21 @@ export class StatusService {
     ];
   }
 
-  /** The retention values in force and which of them the owner set. Owner only. */
+  /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */
+  webAccessLines(by: Principal): { readonly observedAt: string; readonly lines: readonly Line[] } | undefined {
+    const w = by.kind === "owner" ? this.#deps.webAccess?.() : undefined;
+    if (w === undefined) return undefined;
+    const c = cite("web-chat", "listener");
+    const st = w.settings();
+    const browsers = w.browsers(by.id);
+    const proxy = st.trustedProxy.enabled ? `trusted proxy: ${st.trustedProxy.addresses.map((a) => shown(a, 45)).join(", ")} (client address from ${shown(st.trustedProxy.header, 20)})` : "no trusted proxy (every client is the connection's own address)";
+    return { observedAt: this.#runner.now(), lines: [
+      line(`The web chat listens on ${shown(st.host, 45)}:${st.port}, reachable from ${st.network === "loopback" ? "this machine only" : "your private network"}; ${st.tls ? "with its own TLS" : st.behindTlsProxy ? "behind a TLS proxy" : "plain HTTP"}; ${proxy}.`, c),
+      line(`Sign-in limits: ${st.limits.failedLoginsPerAddressPerMinute} failures a minute per client address and ${st.limits.failedLoginsGlobalPerMinute} in all; a session ends after ${Math.round(st.session.idleMs / 3600_000)} h idle or ${Math.round(st.session.maxMs / 86_400_000)} days.`, c),
+      ...(browsers.length === 0 ? [line("No browser is signed in.", c)] : [line(`${browsers.length} browser(s) signed in:`, c), ...browsers.slice(0, 20).map((b) => line(`${shown(b.label, 60)}: signed in ${b.createdAt}, last used ${b.lastSeen}`, c))]),
+    ] };
+  }
+
   /** Which event sources are watched (card H13f): each source the controller has, its kind, whether it is on, and for one the owner defined what it watches. Owner only. */
   async eventSourceLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.eventSources === undefined || by.kind !== "owner") return undefined;
@@ -1055,6 +1081,7 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
+  /** The retention values in force and which of them the owner set. Owner only. */
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
     let got;
@@ -1099,6 +1126,43 @@ export class StatusService {
       lines.push(line(`Attempt ${shown(p.attemptId, 40)} (placement ${p.placement}) on ${shown(p.hostId, 80)} waits for your decision since ${shown(p.at, 40)}; the worker's session is ${shown(p.sessionId, 40)}. Approve it or stop it (reconnect.reaccept).`, cite("attempt", p.attemptId)));
     }
     if (pending.next !== undefined) lines.push(line("More attempts wait than are shown.", c));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The approval load for the owner (card U08): decisions per day, the average wait, how many actions ran by rule, grant, agent review or the owner, every ask still waiting with its age (the oldest first, at most 10 shown),
+   * the standing-rule proposals waiting for an answer with what each would have covered, and whether the profile question is due. Owner only. The pieces that are not running here are left out, said so.
+   */
+  async approvalLoadLines(by: Principal, days?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.approvals === undefined || by.kind !== "owner") return undefined;
+    const window = days === undefined ? 7 : Number.isSafeInteger(days) && days >= 1 && days <= 90 ? days : invalid("days", "must be a whole number from 1 to 90");
+    const a = this.#deps.approvals;
+    const f = await a.load.load(by, window);
+    const c = cite("approval-load", "main");
+    const minutes = (m: number): string => (m < 90 ? `${m} minute${m === 1 ? "" : "s"}` : m < 2880 ? `${Math.round(m / 60)} hours` : `${Math.round(m / 1440)} days`);
+    const lines: Line[] = [
+      line(`In the last ${f.days} day${f.days === 1 ? "" : "s"} you decided ${f.ownerDecisions} ask${f.ownerDecisions === 1 ? "" : "s"}${f.averageOwnerWaitMinutes === null ? "" : `, each after waiting ${minutes(f.averageOwnerWaitMinutes)} on average`}; agents decided ${f.agentDecisions}.`, c),
+      line(Object.values(f.decidedBy).every((x) => x === 0) ? "No policy decision is recorded in this window, so there is no split between rule, standing grant, agent review and you." : `Of the actions the policy decided, ${f.decidedBy.rule} ran by a rule, ${f.decidedBy.grant} by a standing grant, ${f.decidedBy.agentReview} went to an agent review, ${f.decidedBy.owner} to you and ${f.decidedBy.denied} were denied.`, c),
+      line(`Your decisions per day: ${f.perDay.map((d) => `${shown(d.day, 10)} ${d.ownerDecisions}`).join(", ")}.`, c),
+    ];
+    const waiting = f.pending.length;
+    if (waiting === 0) lines.push(line("No ask is waiting.", c));
+    else {
+      lines.push(line(`${waiting} ask${waiting === 1 ? " is" : "s are"} waiting (longest first${waiting > 10 ? ", 10 shown" : ""}):`, c));
+      for (const p of f.pending.slice(0, 10)) lines.push(line(`${shown(p.tool, 80)} for ${shown(p.requester, 80)} in project ${shown(p.projectId, 60)}, waiting on ${p.waitingOn === "owner" ? "you" : "an agent review"} for ${minutes(p.waitingMinutes)}.`, cite("review", p.reviewId)));
+    }
+    const allOpen = await a.load.proposals(by, "open");
+    const open = allOpen.slice(-10);
+    if (open.length === 0) lines.push(line("No standing-rule proposal waits for your answer.", c));
+    else if (allOpen.length > open.length) lines.push(line(`${allOpen.length} standing-rule proposals wait for your answer (${open.length} shown).`, c));
+    for (const p of open) {
+      const b = p;
+      lines.push(line(`Proposal ${shown(p.id, 40)} (revision ${p.revision}): you approved ${shown(b.cls, 40)} for ${shown(b.requester, 80)} in project ${shown(b.projectId, 60)} (${shown(b.environment, 20)}) ${b.count} times, and could instead let it stand as an approval grant for ${b.defaultLength?.days ?? b.suggestion.days} days${b.defaultLength === undefined ? "" : ` (${shown(b.defaultLength.why, 200)})`}. Accepting, or switching to the derived profile instead, or dismissing it, is your choice; nothing is applied until you answer.`, cite("standing-proposal", p.id, p.revision)));
+    }
+    const s = await a.suggestion.check(by);
+    const sc = cite("profile-suggestion", "installation", s.revision === 0 ? undefined : s.revision);
+    if (s.due) lines.push(line(`You are due to be asked about the derived profile (${s.kind === "trial-ended" ? "your trial of it has ended" : `you have approved ${s.approvalsSince} asks since the last answer`}): ${s.answers?.map((x) => shown(x, 20)).join(", ")} (the first is the default).${s.preview === undefined || s.preview.notes.length === 0 ? "" : ` Switching would change this: ${s.preview.notes.slice(0, 5).map((n) => shown(n, 300)).join("; ")}.`}`, sc));
+    else lines.push(line("The derived-profile question is not due.", sc));
     return { observedAt: this.#runner.now(), lines };
   }
 
