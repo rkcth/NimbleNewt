@@ -29,7 +29,10 @@ test("a stream cut in the middle of a work.end call: the partial call never ends
     assert.equal(first.state, "interrupted");
     assert.equal(first.interrupted?.kind, "corrected");
     assert.ok(first.toolCalls.every((c) => c.state !== "admitted" && c.state !== "complete" && c.effectId === undefined), JSON.stringify(first.toolCalls));
+    assert.equal(first.toolCalls[0]?.state, "dropped", JSON.stringify(first.toolCalls));
     assert.ok(!first.toolCalls.some((c) => c.args.includes("STALE-NOTE")), "the tail that arrived after the correction was not applied");
+    // The tail did reach the relay after the correction (so the test is not passing because nothing came): it is recorded as a late piece of the same call.
+    assert.ok(first.late.some((l) => l.kind === "tool_call" && l.toolCallId === first.toolCalls[0]?.id), JSON.stringify(first.late));
     // The task ended with the second generation's call, bound to the new revision, and nothing of the stale call reached the model or the record.
     const d = await x.get();
     assert.equal(d.state, "finished");
@@ -58,8 +61,9 @@ test("a complete work.end call that arrives after the owner's correction is held
     await running;
     const first = (await view(1))!;
     assert.equal(first.state, "interrupted");
-    assert.ok(first.late.some((l) => l.kind === "tool_call" || l.kind === "completion"), JSON.stringify(first.late));
-    assert.ok(first.toolCalls.every((c) => c.state !== "admitted" && c.effectId === undefined), JSON.stringify(first.toolCalls));
+    // The complete call itself arrived and is recorded as late (a failed stream's end is always a late `completion`, so that alone would not show the call came).
+    assert.ok(first.late.some((l) => l.kind === "tool_call" && l.toolCallId !== undefined), JSON.stringify(first.late));
+    assert.deepEqual(first.toolCalls, [], "the late call is not recorded as a call of the generation");
     const d = await x.get();
     assert.equal(d.outcome?.status, "succeeded", d.outcome?.summary);
     assert.equal(JSON.stringify(d).includes("STALE-DONE-7"), false, "the stale report did not end the task");

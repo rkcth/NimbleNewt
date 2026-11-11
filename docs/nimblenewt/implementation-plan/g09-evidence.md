@@ -42,8 +42,10 @@ Branch entries written into the parent's history (4 fail); update dedupe removed
 | Acceptance text | Test | What is asserted |
 |---|---|---|
 | Stream interruption and partial tool calls cannot admit stale actions | "a stream cut in the middle of a work.end call" | The endpoint sends the first half of a `work.end` call's arguments and waits; L05 records the call `partial`; the owner corrects (revision 1 to 2); the endpoint then sends the rest. The first run is `interrupted/corrected`, no call is `admitted` or `complete`, no effect ID exists, the tail is not in the run. The task ends only through the second generation (revision 2), whose request carries the correction; the stale words are in no later request and not in the attempt's record. |
-| same | "a complete work.end call that arrives after the owner's correction" | A complete `work.end` call that arrives after the correction is recorded as late (`tool_call`/`completion`), never admitted; the task does not end with its report; the stale text is in nothing the model is shown later. |
+| same | "a complete work.end call that arrives after the owner's correction" | A complete `work.end` call that arrives after the correction is recorded as a late `tool_call` (digest only; the generation records no call), never admitted; the task does not end with its report; the stale text is in nothing the model is shown later. |
 
-Mutation check: with the relay's "reply held back" throw removed, both tests fail (the stale call reaches the worker). Restored afterwards.
+Mutation check: with the relay's "reply held back" throw removed, both tests fail (the stale call reaches the worker). Restored afterwards. Repeated by the clean-context review (2026-11-10), which also tightened two assertions: the second test accepted a late `completion` alone, which every failed stream records, so it would have passed if the complete call had never reached the relay; it now requires the late `tool_call`. The first test now also requires the cut call to be `dropped` and its tail to be recorded as a late piece of the same call.
+
+The first pass's code under test is commit `80b7ce54` (the "lead appends the hash" note above was not filled in); this addendum's is the commit that adds it, on top of `970c46ed`.
 
 Still not shown: a real model (none was used; one connection only was available and the benchmark has it), a worker killed in the middle of a call, and continuity across a provider change or a restart through the composed controller (those stay shown at the adapter and service level above).
