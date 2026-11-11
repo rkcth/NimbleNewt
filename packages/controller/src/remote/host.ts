@@ -109,7 +109,8 @@ export class RemoteWorkerHost implements WorkerHost {
     // The figures the dispatcher put in the contract (the agent's environment cut by the installation, card A08d) and the owner's now: the smaller of each, never the owner's alone (that would drop an environment's tighter figure).
     const limits = tightenLimits(await policy.limits(), c?.limits);
     const bestEffort = await policy.bestEffort();
-    return sealContract(order, { taskContractVersion: c?.taskContractVersion ?? 0, permissions: c?.permissions ?? [], ...(c?.budget === undefined ? {} : { budget: c.budget }), ...(limits === undefined ? {} : { limits }), bestEffort });
+    // The goal anchor the dispatcher named stays named (W12 follow-up: sealed again without it, a remote worker could never find the block to put back after a cut).
+    return sealContract(order, { taskContractVersion: c?.taskContractVersion ?? 0, permissions: c?.permissions ?? [], ...(c?.budget === undefined ? {} : { budget: c.budget }), ...(limits === undefined ? {} : { limits }), bestEffort, ...(c?.anchorDigest === undefined ? {} : { anchorDigest: c.anchorDigest }) });
   }
 
   /**
