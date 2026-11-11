@@ -957,7 +957,7 @@ test("W12: a process that goes on with a conversation already showing the same a
   assert.equal(await withoutShownAnchor(adapter, `${other}\n\nKeep going`, findAnchors(other)[0]!.digest), `${other}\n\nKeep going`, "a block the view does not show is kept");
   assert.equal(await withoutShownAnchor(adapter, `${GOAL}\n\nKeep going`, undefined), `${GOAL}\n\nKeep going`);
   // The same request again after a restart of the process in its turn (a recipe change): the conversation holds this very input, and it must be submitted unchanged (other content under the same request ID is a conflict).
-  assert.equal(await withoutShownAnchor(adapter, `${GOAL}\n\nWater the plants`, digest), `${GOAL}\n\nWater the plants`, "the input the conversation already holds is not altered");
+  assert.equal(await withoutShownAnchor(adapter, `${GOAL}\n\nWater the plants`, digest, async (c) => (c === `${GOAL}\n\nWater the plants` ? "same" : "different")), `${GOAL}\n\nWater the plants`, "the input the conversation already holds is not altered");
   const cutAway = [{ id: 1, text: `${GOAL}`, role: "user" }, { id: 2, text: "summary without it", role: "user", head: 2 }];
   assert.equal(await withoutShownAnchor({ root: () => ({ transcript: async () => cutAway }) } as never, `${GOAL}\n\nKeep going`, digest), `${GOAL}\n\nKeep going`, "an entry before the view's start is not shown to the model");
   assert.equal(await withoutShownAnchor({ root: () => ({ transcript: async () => { throw new Error("store"); } }) } as never, `${GOAL}\n\nx`, digest), `${GOAL}\n\nx`, "a store that cannot be read changes nothing");
@@ -982,4 +982,57 @@ test("U09b: the thinking a turn returned is reported once, before its result, as
   assert.ok(block!.text.length <= 8000);
   h.send({ t: "close" });
   await h.done;
+});
+
+test("W12 review: a cut whose kept tail already holds the same anchor (a later input that carried it) does not put a second copy at the top of the summary: the model sees exactly one", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-w12k-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const offline = createOfflineModels();
+    const hooks: WorkerHooks = { models: () => offline.models, storage };
+    const seenCalls: string[][] = [];
+    const answer = (text: string) => (context: { messages: readonly unknown[] }) => { seenCalls.push(context.messages.map(textOfMessage)); return fauxAssistantMessage(text); };
+    const NEWER = anchorBlock("Written by the controller.\nTask tsk-1 (project prj-1), attempt att-1.\nGoal: \"Water the plants\"\nWhere you stand: 1 done.");
+    const countIn = (calls: readonly string[]): number => calls.reduce((n, t) => n + findAnchors(t).length, 0);
+    const turnOf = async (id: string, block: string, content: string, cutFirst: boolean): Promise<void> => {
+      offline.faux.setResponses([answer(`answer to ${id}`)]);
+      const h = host(hooks);
+      h.send({ t: "start", v: 1, start: { ...offlineStart, model: { ...offlineStart.model, contextWindow: 65536 }, context: { compaction: { fallback: "extractive" as const, anchor: { text: block } } } } });
+      await h.next("ready");
+      if (cutFirst) {
+        const mark = h.seen.length;
+        h.send({ t: "compact", id: 41 });
+        assert.equal((await Promise.race([h.next("compact.ok", mark), h.next("fault", mark)])).t, "compact.ok");
+      }
+      h.send({ t: "run", requestId: id, content: `${block}\n\n${content}` });
+      assert.equal((await h.next("result")).status, "completed");
+      h.send({ t: "close" });
+      await h.done;
+    };
+    await turnOf("req-1", GOAL, `Water the plants. ${"Some detail of the task. ".repeat(1200)}`, false);
+    await turnOf("req-2", GOAL, `Keep going. ${"More detail. ".repeat(2400)}`, false);
+    // The records changed (a note): the next start carries a newer block, which the view does not show yet, so it stays in the (short) input.
+    await turnOf("req-3", NEWER, "Keep going, briefly.", false);
+    // A cut now summarises the oldest turn and keeps the recent ones, the input with the newer block among them.
+    await turnOf("req-4", NEWER, "And again.", true);
+    const call = seenCalls.at(-1)!;
+    assert.equal(countIn(call), 1, `exactly one anchor after the cut (${call.map((t) => findAnchors(t).length).join(",")})`);
+    assert.equal(findAnchors(call.join("\n"))[0]!.text, NEWER);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W12 review: the anchor is left out of a new request by its request ID, not by its text: a readmit whose input equals an earlier one does not add a second copy, and a restart resubmits exactly what it sent", async () => {
+  const { withoutShownAnchor } = await import("./process.js");
+  const digest = findAnchors(GOAL)[0]!.digest;
+  const input = `${GOAL}\n\nWater the plants`;
+  const entries = [{ id: 1, text: input, role: "user" }];
+  const adapter = { root: () => ({ transcript: async () => entries }) } as never;
+  // A new request ID (a readmit or a wake) whose content is the very input the conversation already shows: one copy is enough.
+  assert.equal(await withoutShownAnchor(adapter, input, digest, async () => "unused"), "Water the plants");
+  // The same request ID again (a process restarted in its turn): what was sent first is sent again, with or without the block.
+  assert.equal(await withoutShownAnchor(adapter, input, digest, async (c: string) => (c === input ? "same" : "different")), input);
+  assert.equal(await withoutShownAnchor(adapter, input, digest, async (c: string) => (c === "Water the plants" ? "same" : "different")), "Water the plants");
+  // A restart whose earlier input had the block left out, after a cut that took the view's copy away: the stripped text is still what is sent.
+  const cutAway = { root: () => ({ transcript: async () => [{ id: 1, text: input, role: "user" }, { id: 2, text: "summary without it", role: "user", head: 2 }] }) } as never;
+  assert.equal(await withoutShownAnchor(cutAway, input, digest, async (c: string) => (c === "Water the plants" ? "same" : "different")), "Water the plants");
 });

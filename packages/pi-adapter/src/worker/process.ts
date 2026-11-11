@@ -87,14 +87,15 @@ const EXTRACT_CHARS = 6000;
  * Pi's context settings for what the host asked (card C07b). The extractive summary is the fallback for a model that has no room left to summarise: the start of what is replaced (the task and the first decisions) and its end (where the work
  * stands), cut to a bound, and it says plainly that it is an extract. It cannot hang, so the hook's ceiling is only a second guard.
  */
-export function contextPolicyOf(context: ChannelStart["context"], onCompacted?: (note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => void): AdapterContextPolicy | undefined {
+export function contextPolicyOf(context: ChannelStart["context"], onCompacted?: (note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => void, keptAnchors?: (firstKept: number) => Promise<readonly string[]>): AdapterContextPolicy | undefined {
   if (context === undefined) return undefined;
   const extractive = context.compaction?.fallback === "extractive";
   // The owner's decisions the controller gave the process (card C07q): written after every summary, so a compaction never drops them. Pi's own summariser (no `extractive`) is not given them: its text is the model's.
   const keep = context.compaction?.keep;
   const kept = keep === undefined || keep.lines.length === 0 ? "" : `\n\n${keep.note}\n${keep.lines.map((l) => `- ${l}`).join("\n")}`;
   // Card W12: the controller's goal anchor, put at the top of every summary (replacing the one in the conversation that is summarised, which is taken out of the extract first), so the conversation that goes on holds one.
-  const anchor = context.compaction?.anchor !== undefined && verifyAnchor(context.compaction.anchor.text) !== undefined ? context.compaction.anchor.text : undefined;
+  const anchorDigest = context.compaction?.anchor === undefined ? undefined : verifyAnchor(context.compaction.anchor.text);
+  const anchor = anchorDigest === undefined ? undefined : context.compaction!.anchor!.text;
   return {
     ...(context.streamTimeoutMs === undefined ? {} : { streamTimeoutMs: context.streamTimeoutMs }),
     ...(context.streamMaxRetries === undefined ? {} : { streamMaxRetries: context.streamMaxRetries }),
@@ -112,7 +113,11 @@ export function contextPolicyOf(context: ChannelStart["context"], onCompacted?: 
         let tailStart = text.length - (EXTRACT_CHARS - head);
         if (tailStart < text.length && isLow(tailStart)) tailStart += 1;
         const body = text.length <= EXTRACT_CHARS ? text : `${text.slice(0, headEnd)}\n[… ${tailStart - headEnd} characters left out …]\n${text.slice(tailStart)}`;
-        const summary = `${anchor === undefined ? "" : `${anchor}\n\n`}Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}${kept}`;
+        // The part the summary keeps verbatim may already hold this very block (a later input that carried it, because the view did not show it then): the model would read it twice, so the summary leaves it out (W12 review). A
+        // store that cannot be read is taken as not holding it.
+        let keptHolds = false;
+        if (anchorDigest !== undefined && keptAnchors !== undefined && request.firstKept !== undefined) { try { keptHolds = (await keptAnchors(request.firstKept)).includes(anchorDigest); } catch { keptHolds = false; } }
+        const summary = `${anchor === undefined || keptHolds ? "" : `${anchor}\n\n`}Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}${kept}`;
         // Card C07q: the controller is told that the process compacted (how much and the summary's digest, not its text), so the compaction takes its place in the task's chain. A failure to tell never changes the compaction.
         try { onCompacted?.({ messageCount: request.messageCount, summaryChars: summary.length, digest: createHash("sha256").update(summary).digest("hex") }); } catch { /* the compaction stands */ }
         return { summary };
@@ -136,23 +141,32 @@ export async function durabilityOf(adapter: Pick<PiAdapter, "verifyCheckpoint">,
 
 /**
  * Card W12: a process that goes on with a conversation another process of the attempt began (a readmit, a wake, a restart) is sent the whole order again, anchor included. When the conversation the model still sees already holds that very
- * block, the copy in the new input is left out, so the model sees one (unless the input is the one the conversation already holds: the same request is submitted unchanged). A block that differs (the records changed meanwhile) stays: the next summary replaces every block with the current one. Never throws.
+ * block, the copy in the new input is left out, so the model sees one. A request ID that was already used (a restart of the process in the middle of its turn) is sent again exactly as it was first sent, with or without the block, because
+ * other content under the same ID is a conflict; that is judged by the ID (`sentBefore`), not by the text, so a new request whose text equals an earlier input still loses its copy (W12 review). A block that differs (the records changed
+ * meanwhile) stays: the next summary replaces every block with the current one. Never throws.
  */
-export async function withoutShownAnchor(adapter: Pick<PiAdapter, "root">, content: string, digest: string | undefined): Promise<string> {
+export async function withoutShownAnchor(adapter: Pick<PiAdapter, "root">, content: string, digest: string | undefined, sentBefore?: (candidate: string) => Promise<"unused" | "same" | "different">): Promise<string> {
   if (digest === undefined) return content;
   try {
     const mine = findAnchors(content).filter((a) => a.digest === digest);
     if (mine.length === 0) return content;
+    let stripped = content;
+    for (const a of mine) stripped = stripped.replace(a.text, "");
+    stripped = stripped.replace(/^\s+/, "");
+    const use = sentBefore === undefined ? "unused" : await sentBefore(content);
+    if (use === "same") return content;
+    if (use === "different") return (await sentBefore!(stripped)) === "same" ? stripped : content;
     const entries = await adapter.root().transcript();
     let from = 0;
     for (const e of entries) if (e.head !== undefined) from = e.head;
-    // The same request again (a restart of the process in the middle of its turn): the conversation already holds this very input, and it is submitted as it was, because a request ID with other content is a conflict.
-    if (entries.some((e) => e.text.includes(content))) return content;
     if (!entries.some((e) => e.id >= from && findAnchors(e.text).some((a) => a.digest === digest))) return content;
-    let out = content;
-    for (const a of mine) out = out.replace(a.text, "");
-    return out.replace(/^\s+/, "");
+    return stripped;
   } catch { return content; }
+}
+
+/** The digests of the anchor blocks that check out in the entries from `firstKept` on (what a summary starting there keeps verbatim). */
+async function anchorsFrom(adapter: Pick<PiAdapter, "root">, firstKept: number): Promise<string[]> {
+  return (await adapter.root().transcript()).filter((e) => e.id >= firstKept).flatMap((e) => findAnchors(e.text).map((a) => a.digest));
 }
 
 /** A rough size of the stored conversation in tokens (three characters to a token, the budget's own estimate), for the resume decision. */
@@ -282,7 +296,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     bridge = createBridge(transport);
     const tools = composeTools(bridge, [], start.namespaceId);
     toolSchemaChars = JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
-    const contextPolicy = contextPolicyOf(start.context, (note) => send({ t: "compacted", ...note }));
+    const contextPolicy = contextPolicyOf(start.context, (note) => send({ t: "compacted", ...note }), async (firstKept) => (adapter === undefined ? [] : anchorsFrom(adapter, firstKept)));
     // Card W04: a turn that yields without a tool call and without work.end is continued, at most three times, with a fixed nudge. Each continuation is asked of the controller first (bridge `turn.continue`): a pause, a stop, a replaced or
     // frozen attempt, or a controller that does not know the operation refuses it, and the answer then ends the turn as it ended (W03 takes it from there). Nothing is continued once the lease is gone, the host has closed the process or work.end
     // was accepted.
@@ -332,8 +346,9 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       let shown = "";
       try { await bridge!.declarations.openRequest(requestIdText); shown = bridge!.declarations.textOf(requestIdText); } catch { /* the model works without the list; it can still ask tool-discover */ }
       const anchored = started.context?.compaction?.anchor === undefined ? undefined : verifyAnchor(started.context.compaction.anchor.text);
-      const body = await withoutShownAnchor(adapter, content, anchored);
-      const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: shown === "" ? body : `${body}\n\n${volatileContext(shown)}` });
+      const withVolatile = (text: string): string => (shown === "" ? text : `${text}\n\n${volatileContext(shown)}`);
+      const body = await withoutShownAnchor(adapter, content, anchored, async (candidate) => adapter!.root().requestUse({ kind: "input", requestId: requestId(requestIdText), content: withVolatile(candidate) }));
+      const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: withVolatile(body) });
       const result = await handle.result();
       // Card U09b: the model's thinking returned in this turn is reported to the host (bounded, untrusted text); a failure to report never changes the turn.
       try {
