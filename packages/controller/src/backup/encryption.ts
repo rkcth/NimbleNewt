@@ -71,12 +71,16 @@ export class BackupEncryption {
   async attachProofStore(store: ProofStore): Promise<void> {
     this.#store = store;
     const saved = await store.load().catch(() => undefined);
-    if (saved !== undefined && saved.keyId === this.#o.keyring.keyId && (this.#lastOk === undefined || saved.at > this.#lastOk.at)) this.#lastOk = { at: saved.at, method: saved.method };
+    // A record that is not a proof of this key with a readable time does not count (an unreadable time would otherwise never fall due).
+    if (saved === undefined || saved === null || typeof saved !== "object" || saved.keyId !== this.#o.keyring.keyId || (saved.method !== "passcode" && saved.method !== "recovery") || typeof saved.at !== "string" || Number.isNaN(Date.parse(saved.at))) return;
+    if (this.#lastOk === undefined || Date.parse(saved.at) > Date.parse(this.#lastOk.at)) this.#lastOk = { at: new Date(saved.at).toISOString(), method: saved.method };
   }
 
   #proofDue(): boolean {
-    const since = this.#lastOk?.at ?? this.#o.keyring.createdAt;
-    return this.#now().getTime() - new Date(since).getTime() > (this.#o.proofEveryDays ?? 92) * 86_400_000;
+    const since = Date.parse(this.#lastOk?.at ?? this.#o.keyring.createdAt);
+    // No readable time to count from (a hand-edited keyring's creation time) means a proof is due: the reminder fails towards asking, never towards silence.
+    if (Number.isNaN(since)) return true;
+    return this.#now().getTime() - since > (this.#o.proofEveryDays ?? 92) * 86_400_000;
   }
 
   get keyring(): Keyring { return this.#o.keyring; }

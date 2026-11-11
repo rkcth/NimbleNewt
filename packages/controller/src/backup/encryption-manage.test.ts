@@ -171,3 +171,71 @@ test("a successful proof is kept across restarts and the quarterly proof falls d
     assert.equal(second.status().proofDue, true);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+test("only the canonical recovery code is accepted: every other character at every position is refused (review: the 4 padding bits were not checked)", async () => {
+  const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  for (let round = 0; round < 8; round += 1) {
+    const { recoveryFile } = await createKeyring({ passcode: PASS, scrypt: FAST });
+    const code = recoveryCodeOf(recoveryFile);
+    for (let i = 0; i < code.length; i += 1) {
+      if (code[i] === "-") continue;
+      for (const other of ALPHABET) {
+        if (other === code[i]) continue;
+        assert.throws(() => recoveryKeyFromCode(code.slice(0, i) + other + code.slice(i + 1)), RecoveryCodeInvalid, `round ${round} position ${i} ${other}`);
+      }
+    }
+  }
+});
+
+test("setup leaves a file that was already at the recovery path as it was, and keeps nothing of its own (review: the existing recovery file was deleted)", async () => {
+  const d = tmp();
+  try {
+    const pf = join(d, "pass"); writeFileSync(pf, `${PASS}\n`, { mode: 0o600 });
+    const old = join(d, "old-recovery.json"); writeFileSync(old, "the owner's earlier recovery file\n", { mode: 0o600 });
+    const codeOld = join(d, "old-code.txt"); writeFileSync(codeOld, "the owner's earlier code\n", { mode: 0o600 });
+    const out: string[] = [];
+    assert.equal(await runBackupCli(["encryption-setup", join(d, "k1.json"), "--passcode-file", pf, "--recovery-out", old], (l) => { out.push(l); }), 1);
+    assert.equal(readFileSync(old, "utf8"), "the owner's earlier recovery file\n");
+    assert.ok(!existsSync(join(d, "k1.json")));
+    // The code path already taken: the new recovery file and keyring are taken away again, the old code file stays.
+    assert.equal(await runBackupCli(["encryption-setup", join(d, "k2.json"), "--passcode-file", pf, "--recovery-out", join(d, "new-rec.json"), "--recovery-code-out", codeOld], (l) => { out.push(l); }), 1);
+    assert.equal(readFileSync(codeOld, "utf8"), "the owner's earlier code\n");
+    assert.ok(!existsSync(join(d, "k2.json")) && !existsSync(join(d, "new-rec.json")));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a rotation that stopped after keeping the old generation can be run again; a different file at the archive path is never replaced (review)", { timeout: 120_000 }, async () => {
+  const d = tmp();
+  try {
+    const run = async (...argv: string[]): Promise<number> => runBackupCli(argv, () => undefined);
+    const pf = join(d, "pass"); writeFileSync(pf, `${PASS}\n`, { mode: 0o600 });
+    const keyringFile = join(d, "keyring.json");
+    assert.equal(await run("encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", join(d, "rec1.json")), 0);
+    const before = readFileSync(keyringFile, "utf8");
+    // As if an earlier rotation had copied the old generation and then stopped.
+    writeFileSync(`${keyringFile}.generation-1`, before, { mode: 0o600 });
+    assert.equal(await run("encryption-rotate", keyringFile, "--passcode-file", pf, "--new-passcode-file", pf, "--recovery-out", join(d, "rec2.json")), 0);
+    assert.equal(readFileSync(`${keyringFile}.generation-1`, "utf8"), before);
+    assert.equal((JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring).generation, 2);
+    // A different file already at the next archive path: refused, nothing changed, nothing of the run left behind.
+    const gen2 = readFileSync(keyringFile, "utf8");
+    writeFileSync(`${keyringFile}.generation-2`, "something else\n", { mode: 0o600 });
+    assert.equal(await run("encryption-rotate", keyringFile, "--passcode-file", pf, "--new-passcode-file", pf, "--recovery-out", join(d, "rec3.json")), 1);
+    assert.equal(readFileSync(keyringFile, "utf8"), gen2);
+    assert.equal(readFileSync(`${keyringFile}.generation-2`, "utf8"), "something else\n");
+    assert.ok(!existsSync(join(d, "rec3.json")));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a proof record or key creation time that cannot be read makes a proof due rather than never due (review)", async () => {
+  const { keyring } = await createKeyring({ passcode: PASS, scrypt: FAST });
+  const now = new Date(keyring.createdAt);
+  const bad = new BackupEncryption({ keyring: { ...keyring, createdAt: "not a time" }, now: () => now });
+  assert.equal(bad.status().proofDue, true);
+  const e = new BackupEncryption({ keyring, now: () => new Date(now.getTime() + 100 * 86_400_000) });
+  await e.attachProofStore({ load: async () => ({ method: "passcode", at: "garbage", keyId: keyring.keyId }), save: async () => undefined });
+  assert.equal(e.status().proofDue, true);
+  assert.equal(e.status().lastSuccessfulProof, undefined);
+  await e.attachProofStore({ load: async () => ({ method: "telepathy" as never, at: now.toISOString(), keyId: keyring.keyId }), save: async () => undefined });
+  assert.equal(e.status().proofDue, true);
+});

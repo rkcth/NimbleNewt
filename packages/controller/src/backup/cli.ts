@@ -2,7 +2,7 @@ import { FileBlobStore } from "../artifacts/index.js";
 import { PostgresStorage } from "../storage/postgres/index.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { DeletionLedger, LEDGER_FILE } from "../retention/ledger.js";
 import { PasscodeRefused, RecoveryCodeInvalid, UnlockFailed, addPasscode, createKeyring, keyringFingerprint, parseKeyring, recoveryCodeOf, rotateKeyring, unlockWithPasscode, unlockWithRecovery, unlockWithRecoveryCode, type BackupKey, type Keyring } from "./crypto.js";
@@ -70,7 +70,9 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       await mkdir(dirname(folder), { recursive: true });
       // The keyring is written first and the recovery file second; if the second cannot be written the first is taken away again, so no recovery file is left for a keyring that was never kept (and none is left without its keyring).
       await writeNew(folder, `${JSON.stringify(keyring, null, 2)}\n`);
-      try { await writeNew(o.get("recovery-out")!, `${JSON.stringify(recoveryFile)}\n`); if (codeOut !== undefined) await writeNew(codeOut, `${recoveryCodeOf(recoveryFile)}\n`); } catch (error) { await rm(folder, { force: true }).catch(() => undefined); await rm(o.get("recovery-out")!, { force: true }).catch(() => undefined); throw error; }
+      // Only files this command made are taken away again: a path that already held a file (say, the owner's earlier recovery file) refuses the write and is left as it was.
+      const made = [folder];
+      try { await writeNew(o.get("recovery-out")!, `${JSON.stringify(recoveryFile)}\n`); made.push(o.get("recovery-out")!); if (codeOut !== undefined) { await writeNew(codeOut, `${recoveryCodeOf(recoveryFile)}\n`); made.push(codeOut); } } catch (error) { for (const f of made) await rm(f, { force: true }).catch(() => undefined); throw error; }
       print(`encryption set up: key ${keyring.keyId}, fingerprint ${keyringFingerprint(keyring)}; the recovery file is in ${o.get("recovery-out")!}. Keep it OFF this machine (and the passcode in your own safe place): with neither, the encrypted backups cannot be read by anyone. Remove the passcode file now; put a file back only for the moment of a proof.`);
       return 0;
     }
@@ -165,7 +167,22 @@ async function unlockKeyring(keyring: Keyring, o: Map<string, string>): Promise<
 async function replaceKeyringFile(path: string, keyring: Keyring): Promise<void> {
   const temp = `${path}.new-${process.pid}`;
   await writeNew(temp, `${JSON.stringify(keyring, null, 2)}\n`);
-  try { await rename(temp, path); } catch (error) { await rm(temp, { force: true }).catch(() => undefined); throw error; }
+  // The new file's bytes reach the disk before the rename, and the rename before the command reports success: a power cut never leaves an empty keyring in place of the old one.
+  try { await syncFile(temp); await rename(temp, path); } catch (error) { await rm(temp, { force: true }).catch(() => undefined); throw error; }
+  await syncDir(dirname(resolve(path)));
+}
+async function syncFile(path: string): Promise<void> { const h = await open(path, "r"); try { await h.sync(); } finally { await h.close(); } }
+async function syncDir(path: string): Promise<void> { const h = await open(path, "r").catch(() => undefined); if (h === undefined) return; try { await h.sync().catch(() => undefined); } finally { await h.close(); } }
+/** Keeps the old generation's keyring beside the new one, never overwriting a file there. The same content left by an earlier run that stopped part way is taken as already kept, so the rotation can be run again. */
+async function archiveKeyring(from: string, to: string): Promise<boolean> {
+  try { await copyFile(from, to, 1); } catch (error) { // COPYFILE_EXCL
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const [a, b] = await Promise.all([readFile(from), readFile(to)]);
+    if (!a.equals(b)) throw error;
+    return false;
+  }
+  await syncFile(to);
+  return true;
 }
 
 /**
@@ -196,13 +213,13 @@ async function manageKey(command: "encryption-add-passcode" | "encryption-rotate
   const archive = `${keyringPath}.generation-${keyring.generation ?? 1}`;
   const made: string[] = [];
   try {
-    await copyFile(keyringPath, archive, 1); made.push(archive); // COPYFILE_EXCL: the old generation is never overwritten
+    if (await archiveKeyring(keyringPath, archive)) made.push(archive);
     await writeNew(o.get("recovery-out")!, `${JSON.stringify(recoveryFile)}\n`); made.push(o.get("recovery-out")!);
     if (o.get("recovery-code-out") !== undefined) { await writeNew(o.get("recovery-code-out")!, `${recoveryCodeOf(recoveryFile)}\n`); made.push(o.get("recovery-code-out")!); }
     await replaceKeyringFile(keyringPath, next);
   } catch (error) { for (const f of made) await rm(f, { force: true }).catch(() => undefined); throw error; }
   print(`the key was rotated to generation ${next.generation}: new key ${next.keyId}, fingerprint ${keyringFingerprint(next)}. The new recovery file is in ${o.get("recovery-out")!}; keep it off this machine. The old recovery file no longer opens new backups.`);
-  print(`Next: approve the new fingerprint (backup.encryption.rekey), then restart the controller with the new keyring. The old keyring is kept as ${archive}.`);
+  print(`Next: approve the new fingerprint (backup.encryption.rekey), then restart the controller with the new keyring. The old keyring is kept as ${archive}; until the new fingerprint is approved the controller refuses to start with the new keyring, so if it must restart before then, put the old keyring back from that file first.`);
   print("Be aware: a passcode you left out no longer opens backups made from now on, but it still opens every backup made before this rotation (and so does the old recovery file). If a passcode was exposed, treat those older backups as readable by whoever has it; they cannot be re-sealed without the old key.");
   return 0;
 }

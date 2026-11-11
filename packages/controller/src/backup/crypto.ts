@@ -184,6 +184,8 @@ export function recoveryKeyFromCode(code: string): string {
     if (bits >= 8) { out.push((acc >>> (bits - 8)) & 255); bits -= 8; acc &= (1 << bits) - 1; }
   }
   const key = Buffer.from(out);
+  // 52 characters carry 260 bits: the last 4 are padding and must be zero, or a changed last character would decode to the same key and slip past the checksum (only the canonical code is accepted).
+  if (bits !== 4 || acc !== 0) throw new RecoveryCodeInvalid();
   if (key.length !== 32 || codeCheck(key) !== clean.slice(52)) throw new RecoveryCodeInvalid();
   return b64(key);
 }
