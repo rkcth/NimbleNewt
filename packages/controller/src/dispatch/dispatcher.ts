@@ -163,6 +163,12 @@ export interface DispatcherDeps {
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
+  /**
+   * The version of a call's target as the controller can read it right now (a commit, a content digest, a revision), or `undefined` when the target has no readable version. The review is then bound to
+   * that version when it is asked for and the version is read again immediately before the approval is used: a target that changed in between makes the approval refuse (card A05b). It is the
+   * controller's own reading, never the agent's claim; an error here refuses the call (nothing is admitted on a version that could not be read).
+   */
+  readonly targetVersion?: (target: { readonly kind: string; readonly id: string }, taskId: string) => Promise<string | undefined>;
   readonly budgets?: Pick<BudgetService, "accounting" | "charge"> & Partial<Pick<BudgetService, "reserve" | "settle" | "markUncertain" | "release">>;
   readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
   /** Whether the approved manifest of this exact tool version says a call may be run again after a restart (T06: the catalogue answers, as the agent; the worker never says). Without it no catalogue tool is replay-safe. */
