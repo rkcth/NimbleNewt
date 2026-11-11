@@ -22,8 +22,9 @@ async function fixture(extra: Record<string, unknown> = {}) {
     const rob = await s.principals.authenticate(boot.token);
     const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
     const ids: Record<string, string> = {};
+    ids["team"] = (await s.agents.createTeam(rob, { commandId: "tm1", name: "core" })).id;
     for (const n of ["ann", "cat"]) {
-      ids[n] = (await s.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id;
+      ids[n] = (await s.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n, ...(n === "cat" ? { teamId: ids["team"] } : {}) })).id;
       await s.grants.grant(rob, { commandId: `g-${n}`, grantee: `agent:${ids[n]}`, action: "task.read", project, source: "direct", basis: "test" });
       await s.grants.grant(rob, { commandId: `h-${n}`, grantee: `agent:${ids[n]}`, action: "history.read", project, source: "direct", basis: "test" });
     }
@@ -38,7 +39,7 @@ async function fixture(extra: Record<string, unknown> = {}) {
       return occurrenceId;
     };
     const seat = async (occurrenceId: string, agent: string) => ((await call("meeting.attend.status", { occurrenceId })).result.item.participants as any[]).find((a) => a.who === `agent:${ids[agent]}`);
-    return { c, call, ids, rob, open, seat, availability: (n: string) => c.services.pauses.availability(`agent:${ids[n]}`), close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
+    return { c, call, ids, rob, open, seat, availability: (n: string) => c.services.pauses.availability(`agent:${ids[n]}`), work: (n: string) => c.services.pauses.workAvailability(`agent:${ids[n]}`), close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
   } catch (e) { await c.close(); throw e; }
 }
 
@@ -101,5 +102,51 @@ test("a host the embedding application supplies is used as before, and the compo
     assert.equal((await call("lifecycle.stop", { scope: { kind: "agent", id: ids["cat"] }, mode: "stop", reason: "night" }, "st1")).result.outcome.state, "stopped");
     assert.equal(await f.availability("cat"), "paused", "own host: the pause gate answers as it always did");
     assert.deepEqual(recovered, []);
+  } finally { await f.close(); }
+});
+
+test("a meeting wake does not outlive the stop it woke the agent from, does not make the agent a reviewer, and is refused when another pause also holds the agent (card M04h, review)", async () => {
+  const f = await fixture();
+  try {
+    const { call, ids } = f;
+    const cat = `agent:${ids["cat"]}`;
+    assert.ok((await call("lifecycle.stop", { scope: { kind: "agent", id: ids["cat"] }, mode: "stop", reason: "night" }, "st1")).ok);
+    const occurrenceId = await f.open();
+    assert.ok((await call("meeting.attend.wake", { occurrenceId, agent: cat }, "wk1")).ok);
+    assert.equal(await f.availability("cat"), "available");
+    // New work is not handed to it: for choosing a reviewer it is still stopped.
+    assert.equal(await f.work("cat"), "stopped");
+    // The owner resumes it and stops it again while the room is still open: the new stop holds, the old wake does not lift it.
+    assert.ok((await call("lifecycle.resume", { scope: { kind: "agent", id: ids["cat"] }, reason: "back" }, "re1")).ok);
+    assert.equal(await f.availability("cat"), "available");
+    assert.ok((await call("lifecycle.stop", { scope: { kind: "agent", id: ids["cat"] }, mode: "stop", reason: "again" }, "st2")).ok);
+    assert.equal(await f.availability("cat"), "stopped", "a stop made after the wake is not overridden by it");
+    // A pause of its team on top of the stop: the agent reports stopped, but a wake could not make it available, so it is refused instead of accepted with no effect.
+    assert.ok((await call("lifecycle.pause", { scope: { kind: "team", id: ids["team"] }, reason: "hold" }, "pt1")).ok);
+    assert.equal(await f.availability("cat"), "stopped");
+    const blocked = await call("meeting.attend.wake", { occurrenceId, agent: cat }, "wk2");
+    assert.equal(blocked.ok, false, JSON.stringify(blocked));
+    assert.match(blocked.error!.message, /^the host did not wake/);
+    assert.equal(await f.availability("cat"), "stopped");
+    // The team pause lifted, a fresh wake of the new stop works.
+    assert.ok((await call("lifecycle.resume", { scope: { kind: "team", id: ids["team"] }, reason: "go" }, "rt1")).ok);
+    assert.ok((await call("meeting.attend.wake", { occurrenceId, agent: cat }, "wk3")).ok);
+    assert.equal(await f.availability("cat"), "available");
+    assert.equal(await f.work("cat"), "stopped");
+  } finally { await f.close(); }
+});
+
+test("a stop of the agent's team is a rest the owner can wake it from for one meeting (card M04h, review)", async () => {
+  const f = await fixture();
+  try {
+    const { call, ids } = f;
+    assert.ok((await call("lifecycle.stop", { scope: { kind: "team", id: ids["team"] }, mode: "suspend", reason: "night" }, "st1")).ok);
+    assert.equal(await f.availability("cat"), "suspended");
+    assert.equal(await f.availability("ann"), "available");
+    const occurrenceId = await f.open();
+    assert.ok((await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids["cat"]}` }, "wk1")).ok);
+    assert.equal(await f.availability("cat"), "available");
+    assert.ok((await call("meeting.attend.end", { occurrenceId, decisions: [] }, "en1")).ok);
+    assert.equal(await f.availability("cat"), "suspended");
   } finally { await f.close(); }
 });

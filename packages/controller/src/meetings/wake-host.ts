@@ -9,7 +9,7 @@ import type { HostWakeRequest } from "./wake-sink.js";
 /** What the host needs to know of the lifecycle; the controller supplies it from its stop and pause services. */
 export interface WakeHostLifecycle {
   /** Whether the agent is at rest because a finished Suspend or Stop of its own or its team's is still the cause of its gate. */
-  rest(agentId: string): Promise<{ readonly state: "suspended" | "stopped"; readonly scope: { readonly kind: string; readonly id: string } } | undefined>;
+  rest(agentId: string): Promise<{ readonly state: "suspended" | "stopped"; readonly intentId: string; readonly scope: { readonly kind: string; readonly id: string } } | undefined>;
   /** The scopes whose pause holds the agent now. */
   holds(agentId: string): Promise<readonly { readonly scope: { readonly kind: string; readonly id: string } }[]>;
 }
@@ -18,7 +18,8 @@ export const WAKE_LEASE_KIND = "meeting-wake-lease";
 export const WAKE_LEASE_LIMIT = 20;
 const AGENT = /^agent:(agt-[a-z2-7]{20})$/;
 
-interface LeaseEntry { readonly occurrenceId: string; readonly projectId: string; readonly key: string; readonly at: string }
+/** `intentId` is the stop the agent was woken from: a later stop (the owner resumed it and stopped it again) is not lifted by this lease. */
+interface LeaseEntry { readonly occurrenceId: string; readonly projectId: string; readonly key: string; readonly at: string; readonly intentId?: string }
 interface LeaseBody { readonly agent: string; readonly leases: readonly LeaseEntry[] }
 interface RoomView { readonly state: string; readonly roster: readonly string[] }
 
@@ -42,7 +43,10 @@ export class MeetingWakeHost {
   recover = async (request: HostWakeRequest): Promise<void> => {
     const agentId = AGENT.exec(request.agent)?.[1];
     if (agentId === undefined) throw new DomainError("invalid_command", "the agent is not an agent principal");
-    if ((await this.#life.rest(agentId)) === undefined) throw new DomainError("unavailable", `${request.agent} is not at rest through a finished suspend or stop`);
+    const rest = await this.#life.rest(agentId);
+    if (rest === undefined) throw new DomainError("unavailable", `${request.agent} is not at rest through a finished suspend or stop`);
+    // A wake that could not make the agent available is refused rather than accepted with no effect: the installation's brake, or another pause besides the stop's own, keeps holding it.
+    if ((await this.#life.holds(agentId)).some((h) => h.scope.kind === "installation" || h.scope.kind !== rest.scope.kind || h.scope.id !== rest.scope.id)) throw new DomainError("unavailable", `${request.agent} is also held by another pause`);
     const room = await this.#room(request.occurrenceId);
     if (room === undefined || room.state === "ended" || !room.roster.includes(request.agent)) throw new DomainError("unavailable", "the meeting is not open for that agent");
     const leaseId = derivedId("mwl", request.agent);
@@ -54,7 +58,7 @@ export class MeetingWakeHost {
         const old = (found?.body as unknown as LeaseBody | undefined)?.leases ?? [];
         const live: LeaseEntry[] = [];
         for (const l of old) if (l.occurrenceId !== request.occurrenceId && (await this.#open(l.occurrenceId, request.agent))) live.push(l);
-        const next: LeaseBody = { agent: request.agent, leases: [...live, { occurrenceId: request.occurrenceId, projectId: request.projectId, key: request.key, at: this.#runner.now() }].slice(-WAKE_LEASE_LIMIT) };
+        const next: LeaseBody = { agent: request.agent, leases: [...live, { occurrenceId: request.occurrenceId, projectId: request.projectId, key: request.key, at: this.#runner.now(), intentId: rest.intentId }].slice(-WAKE_LEASE_LIMIT) };
         const ref = { kind: WAKE_LEASE_KIND, id: leaseId };
         const body = JSON.parse(JSON.stringify(next)) as JsonObject;
         return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref, body } : { type: "update" as const, ref, expectedRevision: found.revision, body }], detail: { agent: request.agent, occurrenceId: request.occurrenceId, key: request.key } };
@@ -62,8 +66,8 @@ export class MeetingWakeHost {
     }));
   };
 
-  /** What this host says about an agent a pause holds: undefined when it is not at rest by a stop (the pause's own answer stands). */
-  availability = async (principalId: string): Promise<Availability | undefined> => {
+  /** What this host says about an agent a pause holds: undefined when it is not at rest by a stop (the pause's own answer stands). With `meetingWake: false` the wake is not counted (new work, such as choosing a reviewer, must not go to a stopped agent that is only up for a meeting). */
+  availability = async (principalId: string, options?: { readonly meetingWake?: boolean }): Promise<Availability | undefined> => {
     const agentId = AGENT.exec(typeof principalId === "string" ? principalId : "")?.[1];
     if (agentId === undefined) return undefined;
     const rest = await this.#life.rest(agentId);
@@ -72,12 +76,12 @@ export class MeetingWakeHost {
     // The whole installation paused is the emergency brake; a second pause by someone else is not the stop's to lift.
     if (holds.some((h) => h.scope.kind === "installation")) return undefined;
     if (holds.some((h) => h.scope.kind !== rest.scope.kind || h.scope.id !== rest.scope.id)) return rest.state;
-    return (await this.#woken(principalId)) ? "available" : rest.state;
+    return options?.meetingWake !== false && (await this.#woken(principalId, rest.intentId)) ? "available" : rest.state;
   };
 
-  async #woken(agent: string): Promise<boolean> {
+  async #woken(agent: string, intentId: string): Promise<boolean> {
     const lease = (await this.#runner.get(WAKE_LEASE_KIND, derivedId("mwl", agent)))?.body as unknown as LeaseBody | undefined;
-    for (const l of lease?.leases ?? []) if (await this.#open(l.occurrenceId, agent)) return true;
+    for (const l of lease?.leases ?? []) if (l.intentId === intentId && (await this.#open(l.occurrenceId, agent))) return true;
     return false;
   }
 

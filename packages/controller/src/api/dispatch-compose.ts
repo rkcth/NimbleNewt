@@ -226,7 +226,7 @@ export interface ComposeInput {
   /** Brings an agent the host reports stopped or suspended up for one meeting, after the owner authorized it (card M04f). Absent: the owner's authorization is refused ("no wake path"). */
   readonly meetingWake?: WakeSink;
   /** Card M04h: what the composed meeting wake host says about an agent a pause holds (the same function the controller's own pause service uses); the dispatcher's pause service answers the attendance the same way. */
-  readonly pausedAvailability?: (principalId: string) => Promise<Availability | undefined>;
+  readonly pausedAvailability?: (principalId: string, options?: { readonly meetingWake?: boolean }) => Promise<Availability | undefined>;
   /** Whether a task's work is a safe long-running operation during a meeting (card M04g, asked only for a running attempt). `options.dispatcher.safeLongRunning` replaces it. */
   readonly safeLongRunning?: (taskId: string, attemptId: string) => Promise<boolean>;
   /** Card W11: the jobs of a task an attempt that ends its turn can wait for (the job service's `waitable`). With it the attempt parks for them and their ends wake the task; whether the task is stopped is read from `stops`. */

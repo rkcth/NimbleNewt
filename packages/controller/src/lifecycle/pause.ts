@@ -126,7 +126,7 @@ export interface PauseOptions extends RunnerOptions {
   /** Reports suspended and stopped agents (L02, L03 will supply it) for `availability`; consulted only when no pause applies. Default: available. */
   readonly otherAvailability?: (principalId: string) => Promise<Availability>;
   /** Card M04h: asked only for an agent a pause holds, and replaces `paused` with what it answers (the agent is stopped or suspended, or a meeting wake made it available); undefined keeps `paused`. */
-  readonly pausedAvailability?: (principalId: string) => Promise<Availability | undefined>;
+  readonly pausedAvailability?: (principalId: string, options?: { readonly meetingWake?: boolean }) => Promise<Availability | undefined>;
 }
 
 export const PAUSE_LIMITS = { reason: 500, evidence: 500, summary: 1000, jobRef: 120, chain: 64 } as const;
@@ -644,11 +644,16 @@ export class PauseService implements PauseGuard, PauseLookup {
    * The conversation availability hook (T05): `paused` when the agent's own gate, its team chain's or the installation's is paused, so its messages are queued; otherwise whatever `otherAvailability` says (suspended and stopped, from L02/L03), else `available`.
    * A task-level pause does not make the agent unavailable: it can still answer. Nothing in the conversation service writes a gate, so a message arriving never lifts a pause.
    */
-  availability = async (principalId: string): Promise<Availability> => {
+  availability = async (principalId: string): Promise<Availability> => this.#availabilityOf(principalId, true);
+
+  /** `availability` for handing out new work (choosing a reviewer): an agent a meeting wake made available for its meeting is still reported stopped or suspended here (card M04h). */
+  workAvailability = async (principalId: string): Promise<Availability> => this.#availabilityOf(principalId, false);
+
+  async #availabilityOf(principalId: string, meetingWake: boolean): Promise<Availability> {
     const m = /^agent:(agt-[a-z2-7]{20})$/.exec(typeof principalId === "string" ? principalId : "");
-    if (m !== null) for (const scope of await this.#chain({ kind: "agent", id: m[1]! })) if (await this.#paused(scope)) return (await this.#pausedAs?.(principalId)) ?? "paused";
+    if (m !== null) for (const scope of await this.#chain({ kind: "agent", id: m[1]! })) if (await this.#paused(scope)) return (await this.#pausedAs?.(principalId, meetingWake ? undefined : { meetingWake: false })) ?? "paused";
     return this.#other === undefined ? "available" : this.#other(principalId);
-  };
+  }
 
   /**
    * A paused agent keeps its tasks: an idle replacement, an urgent deadline or elapsed time are not reasons to take a paused task away. Anything that would reassign work on one of those grounds calls this first and is refused while any gate on the task's chain is paused.

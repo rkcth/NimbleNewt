@@ -6679,7 +6679,12 @@ Not done (follow-up, remains in M04h):
 - A caller for `carriesOnDuringMeeting` (needs the agent's conversation idle, `conversationIdle: true`), and result handling for an attempt waiting on its background jobs.
 - T07 follow-ups: `jobs.decide` restart during a meeting without asking; jobs admitted by host or service credentials skip the gate; the gate racing a meeting created after it read; a withheld seat over-refused near a meeting.
 - The woken agent stays `available` until the room ends even if it leaves earlier; the real local worker host's own start of the woken agent's attempt (the lease only changes what the controller reports) is the L02/L03 worker side.
-- A Suspend/Stop of a team is covered by `agentRest`, but only the agent-scope case has a composed-controller test.
+
+Review (clean-context, 2026-11-11), three bugs fixed:
+- A wake outlived a newer stop: woken, then resumed and stopped again while the room was still open, the agent stayed `available`. Each lease entry now names the stop intent it woke the agent from, and only a lease for the stop that holds the agent now counts.
+- A woken agent could be chosen as a reviewer while its meeting was open (the review service read `PauseService.availability`). `PauseService.workAvailability` leaves the meeting wake out (`pausedAvailability(p, { meetingWake: false })`), and the review service is wired to it; the attendance, meetings, stand-ups, conversations and messages still see the wake (task messages stay held by the agent's gate through the task guard).
+- A wake of an agent another pause also holds (a team pause on top of its own stop) was accepted and did nothing. `recover` now refuses it ("the host did not wake").
+Tests: two more in `api/start-wake-host.test.ts` (the three cases, and a Suspend of the agent's team woken for one meeting and suspended again after it).
 
 ASSUMPTION: a stop of the whole installation is never woken for a meeting (the brake is not overridden, as for pauses); the owner resumes it first.
 ASSUMPTION: the composed host is on by default and replaced entirely by `meetingWake` when the application supplies one; it covers only stops the controller itself recorded, so an agent that only an application `availability` hook calls stopped gets "the host did not wake" unless the application also supplies `meetingWake`.
