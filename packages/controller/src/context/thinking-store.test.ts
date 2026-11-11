@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer, type World } from "../domain/testing/backends.js";
 import { RETENTION_DEFAULTS, RetentionService } from "../retention/index.js";
@@ -29,6 +30,16 @@ test("cleanThinking: control and invisible characters go, credentials are hidden
   assert.ok(!key.text.includes(AWS), key.text);
   // A secret broken up by invisible characters is still found: they are removed before the scan.
   assert.ok(!cleanThinking(`AKIA${ZW}ABCDEFGHIJKLMNOP`).text.includes("ABCDEFGHIJKLMNOP"));
+  // So is one split by invisible tag characters, variation selectors or a combining grapheme joiner.
+  for (const cp of [0xe0041, 0xe0020, 0xfe0f, 0x34f, 0x3164]) {
+    const split = cleanThinking(`key AKIAABCD${String.fromCodePoint(cp)}EFGHIJKLMNOP done`);
+    assert.ok(!split.text.includes("EFGHIJKLMNOP") && split.redacted, `split by U+${cp.toString(16)}: ${split.text}`);
+  }
+  // The rest of a private key whose BEGIN line was in the previous block is hidden too, with whatever came before its END line.
+  const tail = cleanThinking("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\nabc==\n-----END PRIVATE KEY-----\nthen I will run the tests");
+  assert.equal(tail.text, "[redacted]\nthen I will run the tests");
+  assert.equal(tail.redacted, true);
+  assert.equal(cleanThinking("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY----- after").text, "[redacted] after", "a whole key is hidden as before");
   // A secret across the cut is replaced whole, never shown as a prefix.
   const edge = cleanThinking(`${"x".repeat(THINKING_COLLECT.blockChars - 9)} ${AWS}`);
   assert.ok(!edge.text.includes("AKIAABCD"), "no prefix of the credential survives the cut");
@@ -128,6 +139,27 @@ for (const backend of backends) {
     assert.equal(seen.length, 200);
     assert.deepEqual([seen[0], seen[199]], ["t100", "t299"], "the newest 200, in order");
     assert.equal(new Set(seen).size, 200);
+  });
+
+  suite("full-size blocks: the record stays within the storage's body limit (newest kept, the rest counted), so collection never stops because the record grew too big", async (c) => {
+    // Three-byte characters at the full block length: one message of 50 such blocks alone is far over the storage's 256 KB body limit.
+    const wide = (i: number) => `${i} ${"思".repeat(THINKING_COLLECT.blockChars)}`;
+    let total = 0;
+    for (let at = 0; at < 6; at++) {
+      const r = await put(c, c.ta, Array.from({ length: 50 }, (_, i) => rep(at * 50 + i, at % 2 === 0 ? wide(at * 50 + i) : `${at * 50 + i} ${"x".repeat(5000)}`)));
+      assert.equal(r.kept, 50, `message ${at} was kept`);
+      total += 50;
+    }
+    const s = (await c.store.summary(c.owner, c.ta))!;
+    assert.equal(s.kept + s.dropped, total, "every block is either kept or counted");
+    assert.ok(s.kept >= 1 && s.kept <= THINKING_COLLECT.blocksKept);
+    const raw = await c.world.storage.getAggregate({ kind: "thinking-record", id: derivedId("tkr", `record\0${c.ta}`) });
+    assert.ok(raw !== undefined && Buffer.byteLength(JSON.stringify(raw.body), "utf8") <= THINKING_COLLECT.recordBytes + 16 * 1024, "the stored record is bounded in bytes");
+    const p = await look(c, c.owner, c.ta, { limit: 200 });
+    assert.equal(p.blocks!.length, s.kept);
+    assert.ok(p.blocks![p.blocks!.length - 1]!.text.startsWith("299 "), "the newest block is kept");
+    // A later short block is still collected.
+    assert.deepEqual(await put(c, c.ta, [rep(1000, "still collecting")]), { kept: 1 });
   });
 
   suite("replay safety: the same message again keeps nothing more, an overlapping one keeps only what is new, an older attempt's numbers do not hide a newer attempt's, and a racing writer loses nothing", async (c) => {

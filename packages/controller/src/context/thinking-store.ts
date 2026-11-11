@@ -5,7 +5,7 @@ import { onlyKnown, revision as checkRevision } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import { redactText } from "../security/redact.js";
+import { REDACTED, redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { ThinkingBlock, ThinkingSource } from "./thinking.js";
 
@@ -15,13 +15,14 @@ import type { ThinkingBlock, ThinkingSource } from "./thinking.js";
  *
  * - **Untrusted text.** A block is the model's own output. Before it is stored, control characters (and invisible formatting such as bidirectional overrides) are removed, the text goes through the secret redaction used for private
  *   scratch, and it is cut to `THINKING_COLLECT.blockChars`. It is shown labelled as model output and is never given back to any model, agent or tool as an instruction: no code path reads it except the owner's look.
- * - **Bounded.** One record per task holds at most `blocksKept` blocks (the newest; older ones are counted in `dropped`), a message holds at most `blocksPerMessage`, a block at most `blockChars` characters.
+ * - **Bounded.** One record per task holds at most `blocksKept` blocks and at most `recordBytes` of them as stored (the newest; older ones are counted in `dropped`; the storage refuses a body over 256 KB), a message holds at most
+ *   `blocksPerMessage`, a block at most `blockChars` characters.
  * - **Retention.** The record is removed by the retention rule `thinkingDays` (14 days after the task is finished) and leaves a small marker (`removedAt`); nothing is collected for a task after that.
  * - **Owner switch.** The owner turns collection off or on (`setCollection`, default on). Off stops new blocks being kept; blocks kept earlier stay until retention removes them.
  * - **Replay safe.** Each block is kept once: a message sent again (same command) is answered as before, and a block at or below the highest (entry, block) seen from the same attempt is skipped.
  * - **Who writes, who reads.** Only the controller side (a host or a service principal) records, and only for the task's current attempt (the caller checks that, as for compaction notes). Nobody but `ThinkingService` reads, and it reads only for the owner.
  */
-export const THINKING_COLLECT = { blockChars: 4000, blocksPerMessage: 50, blocksKept: 200, inputChars: 64_000, marks: 20, modelChars: 200, providerChars: 80, idChars: 200 } as const;
+export const THINKING_COLLECT = { blockChars: 4000, blocksPerMessage: 50, blocksKept: 200, recordBytes: 200 * 1024, inputChars: 64_000, marks: 20, modelChars: 200, providerChars: 80, idChars: 200 } as const;
 
 export const THINKING_RECORD = "thinking-record";
 const COLLECTION: AggregateRef = { kind: "thinking-collection", id: "installation" };
@@ -51,15 +52,19 @@ export interface ThinkingRecordBody {
 }
 export interface ThinkingCollectionBody { readonly enabled: boolean; readonly updatedBy: string; readonly updatedAt: string }
 
-/** Code point ranges removed from model text: C0 controls except tab and newline, DEL and C1, soft hyphen, bidirectional and invisible formatting, line and paragraph separators, annotation marks. */
-const HIDDEN: readonly (readonly [number, number])[] = [[0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c], [0x180e, 0x180e], [0x200b, 0x200f], [0x2028, 0x2029], [0x202a, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff], [0xfff9, 0xfffb]];
+/**
+ * Code point ranges removed from model text: C0 controls except tab and newline, DEL and C1, soft hyphen, combining grapheme joiner, Hangul and Khmer fillers, bidirectional and invisible formatting, line and paragraph separators,
+ * variation selectors, annotation marks, shorthand format controls, musical formatting, and the tag characters (invisible copies of ASCII that can carry hidden text or split a credential so the redaction does not see it).
+ */
+const HIDDEN: readonly (readonly [number, number])[] = [[0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c], [0x180e, 0x180e], [0x200b, 0x200f], [0x2028, 0x2029], [0x202a, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff], [0xfff9, 0xfffb], [0x34f, 0x34f], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xffa0, 0xffa0], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe007f], [0xe0100, 0xe01ef]];
 const withoutHidden = (text: string): string => { let out = ""; for (const ch of text) { const cp = ch.codePointAt(0)!; if (!HIDDEN.some(([a, b]) => cp >= a && cp <= b)) out += ch; } return out; };
 
 /** What untrusted thinking text becomes before it is kept: bounded input, control and invisible characters gone, credential shapes replaced, cut to size at a character boundary. */
 export function cleanThinking(raw: string): { text: string; truncated: boolean; redacted: boolean } {
   const capped = raw.length > THINKING_COLLECT.inputChars ? raw.slice(0, THINKING_COLLECT.inputChars) : raw;
   const stripped = withoutHidden(capped.replace(/\r\n?/g, "\n")).normalize("NFC");
-  const hidden = redactText(stripped);
+  // A private key whose BEGIN line was in an earlier block (the model split its thinking there) is still a key: after the redaction any END line left has no BEGIN before it in this block, so everything up to it goes.
+  const hidden = redactText(stripped).replace(/^[\s\S]*-----END [A-Z ]*PRIVATE KEY-----/, REDACTED);
   let text = hidden;
   let truncated = raw.length > capped.length;
   if (text.length > THINKING_COLLECT.blockChars) {
@@ -158,7 +163,13 @@ export class ThinkingStore {
               return { seq: next++, attemptId, entryId: b.entryId, block: b.block, provider: b.provider, model: b.model, text: clean.text, opaque: b.opaque, truncated: clean.truncated, redacted: clean.redacted, at };
             });
             const all = [...(was?.blocks ?? []), ...added];
-            const cut = Math.max(0, all.length - THINKING_COLLECT.blocksKept);
+            // The newest blocks are kept within the count and within `recordBytes` of stored JSON (the storage refuses a body over 256 KB, and 200 blocks of 4000 characters can be three times that): older ones are counted as dropped.
+            let keep = 0;
+            for (let bytes = 0; keep < Math.min(all.length, THINKING_COLLECT.blocksKept); keep++) {
+              bytes += Buffer.byteLength(JSON.stringify(all[all.length - 1 - keep]), "utf8") + 1;
+              if (bytes > THINKING_COLLECT.recordBytes && keep > 0) break;
+            }
+            const cut = all.length - keep;
             const top = fresh[fresh.length - 1]!;
             marks.delete(attemptId);
             marks.set(attemptId, { attemptId, entryId: top.entryId, block: top.block });
