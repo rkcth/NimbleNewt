@@ -4,9 +4,10 @@ import { basename, join } from "node:path";
 import { SNAPSHOT_TABLES, canonicalJson } from "../storage/index.js";
 import { MAX_JSON_BYTES, UnlockFailed, hasherFor, parseKeyring, readPlain, type BackupCipher, type BackupKey } from "./crypto.js";
 import { parsePiIndex } from "./pi-state.js";
+import { checkSignature, type SignatureCheck, type SignatureTrust } from "./signing.js";
 import { ARTIFACT_FOLDER, PI_FOLDER, PI_INDEX, SEALED_SUFFIX, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
 
-export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[] }
+export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[]; /** Present when the signature was looked at (card K01b3): valid, unsigned before signing began, or not checked (no trusted key), with the plain statement of what it shows. */ readonly signature?: SignatureCheck }
 
 /** Reads and checks a backup's manifest (not the files): the format, the product, the complete mark and a file for every table. */
 export async function readManifest(path: string): Promise<{ manifest?: BackupManifest; problems: string[] }> {
@@ -43,11 +44,14 @@ export function cipherOf(manifest: BackupManifest, unlock: BackupKey | undefined
 }
 
 /** Checks every file of a backup against its manifest: it is there, the size and the SHA-256 are as written, and the rows can be counted. A backup that fails any check is not restored from. */
-export async function verifyBackup(path: string, options: { unlock?: BackupKey; /** Refuse a backup that is not encrypted (so a plain copy swapped in for an encrypted one is not accepted). */ requireEncrypted?: boolean } = {}): Promise<BackupCheck> {
+export async function verifyBackup(path: string, options: { unlock?: BackupKey; /** Refuse a backup that is not encrypted (so a plain copy swapped in for an encrypted one is not accepted). */ requireEncrypted?: boolean; /** The signing public keys already trusted (never taken from the backup): the signature is then required; absent, it is reported as not checked. */ signatureTrust?: SignatureTrust } = {}): Promise<BackupCheck> {
   const read = await readManifest(path);
   if (read.manifest === undefined) return { ok: false, problems: read.problems };
   const manifest = read.manifest;
   const problems: string[] = [];
+  // The signature is checked first, against keys the caller already trusts: a forged or swapped backup is refused before any of its files are read.
+  const signature = await checkSignature(path, manifest, options.signatureTrust);
+  if (signature.problems.length > 0) return { ok: false, manifest, problems: signature.problems, signature };
   if (options.requireEncrypted === true && manifest.encryption === undefined) return { ok: false, manifest, problems: ["the backup is not encrypted, and encryption is required"] };
   let cipher: BackupCipher | undefined;
   try { cipher = cipherOf(manifest, options.unlock); } catch (error) { return { ok: false, manifest, problems: [error instanceof Error ? error.message : "the backup cannot be unlocked"] }; }
@@ -78,7 +82,7 @@ export async function verifyBackup(path: string, options: { unlock?: BackupKey; 
   }
   if (manifest.artifacts !== undefined) problems.push(...await verifyArtifacts(path, manifest, cipher));
   if (manifest.piState !== undefined) problems.push(...await verifyPiState(path, manifest, cipher));
-  return { ok: problems.length === 0, manifest, problems };
+  return { ok: problems.length === 0, manifest, problems, signature };
 }
 
 /** The artifact index matches the manifest, and every blob it lists is there with the size it says and the SHA-256 that is its name. */

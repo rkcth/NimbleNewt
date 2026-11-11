@@ -242,13 +242,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `coordinator.get`
 
-The coordinator, as the owner reads it (owner only): its principal, its model routes in the order tried (the primary first, then the fallbacks), the order the owner last gave and, when the principal is an agent record (a hosted coordinator, card U03c), the agent it runs as and where (`hosted: { agentId, host }`). For a hosted coordinator `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` lists the pause gates that hold it (its own, a team's, the installation's) with what each reported; pausing, stopping or resuming the agent, or a team above it, therefore changes this at once. Its grants are the agent's grants (`grant.list` with its principal) and are revoked like any agent's. `item` is null when no coordinator is set up.
+The coordinator, as the owner reads it (owner only): its principal, its model routes in the order tried (the primary first, then the fallbacks), the order the owner last gave and, when the principal is an agent record (a hosted coordinator, card U03c), the agent it runs as and where (`hosted: { agentId, host }`). For a hosted coordinator `state` is what the agent controls say now (running, paused, stopping, suspended or stopped) and `lifecycle` lists the pause gates that hold it (its own, a team's, the installation's) with what each reported (`state` is `unknown`, with no `lifecycle`, when the agent controls cannot be read: it is not claimed to be stopped; a pause made through the agent's own controls is reported reached by the coordinator when this is read); `routeSource` says where its routes come from now (`owner`, `profile`, `role` or `stored`, see `coordinator.configure`) and `profile` the agent's; pausing, stopping or resuming the agent, or a team above it, therefore changes this at once. Its grants are the agent's grants (`grant.list` with its principal) and are revoked like any agent's. `item` is null when no coordinator is set up.
 
 Arguments:
 
 - none
 
-Result: `{ item }`: `id`, `revision`, `principalId`, `routes`, `state`, `hosted?`, `lifecycle?: { agent, state, heldBy: [{ scope, observed?, reason?, by? }] }`.
+Result: `{ item }`: `id`, `revision`, `principalId`, `routes`, `explicitRoutes?`, `state` (also `unknown`), `hosted?`, `routeSource?`, `profile?`, `lifecycle?: { agent, state, profile?, heldBy: [{ scope, observed?, reason?, by? }] }`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1165,13 +1165,23 @@ Result: `{ item: { items, next? } }`.
 
 #### `backup.encryption.status`
 
-Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the key generation, the last proof and the last proof that worked (kept across restarts) with whether a new proof is due (every three months: `proofDue`; ask the owner to put the passcode or recovery file in place and run backup.encryption.verify), and warnings (a recovery file left on the host, a proof overdue). It never holds a passcode, a recovery key or any key material. Encryption is switched on and off, an extra passcode added, and a passcode removed or replaced (which rotates to a new key, a new recovery file or printable recovery code) on the host with `backup encryption-setup`, `encryption-add-passcode` and `encryption-rotate`, because they need the passcode and recovery file, which never travel through chat; tell the owner those commands when they ask.
+Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the key generation, the last proof and the last proof that worked (kept across restarts) with whether a new proof is due (every three months: `proofDue`; ask the owner to put the passcode or recovery file in place and run backup.encryption.verify), and warnings (a recovery file left on the host, a proof overdue). It never holds a passcode, a recovery key or any key material. Whether new backups are encrypted and for what (`setting`: on or off, scope `everything` or `secrets`, said in `setting.text`) is changed by the owner with backup.encryption.set. The key itself is made, an extra passcode added, and a passcode removed or replaced (which rotates to a new key, a new recovery file or printable recovery code) on the host with `backup encryption-setup`, `encryption-add-passcode` and `encryption-rotate`, because they need the passcode and recovery file, which never travel through chat; tell the owner those commands when they ask.
 
 Arguments:
 
 - none
 
-Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+Result: `{ item: { enabled, setting?: { enabled, scope, revision, changedAt?, changedBy?, text }, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+
+#### `backup.signing.status`
+
+Owner only: the keys that sign backups (card K01b3): each generation's key ID, public key (base64; not secret), when it was made and when it stopped signing, and when signing began. Keep a copy of the public keys OFF the server (one per line in a file) and give it to `backup verify` or `backup restore` as --trusted-signing-key-file for a check that does not depend on the running server. A valid signature shows the backup was made with the server's signing key; if the running server was compromised it could sign a forgery. The private key lives in the host's secret store and is never shown.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, since?, keys: [{ keyId, publicKey, generation, createdAt, retiredAt? }] } }`.
 
 #### `backup.restore.preview`
 
@@ -1614,17 +1624,17 @@ Result: `{ item }`.
 
 #### `agent.get`
 
-One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`.
+One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`. When the owner asks and the agent is the hosted coordinator (card U03c), the record carries a `coordinator` field (see `agent.list`).
 
 Arguments:
 
 - `agentId`: the agent's ID
 
-Result: `{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision.
+Result: `{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision, and for the hosted coordinator, to the owner only, `coordinator`.
 
 #### `agent.list`
 
-Agent records (needs `agent.read` or `agent.manage`).
+Agent records (needs `agent.read` or `agent.manage`). To the owner the agent that is the hosted coordinator (card U03c) is marked: its record carries `coordinator: { state, heldBy?, routeSource?, profile? }`, where `state` is what the agent controls say now (running, paused, stopping, suspended, stopped, or `unknown` when they cannot be read) and `heldBy` the pause gates holding it (scope, what was reported, reason, who). No other caller sees the field.
 
 Arguments:
 
@@ -1633,7 +1643,7 @@ Arguments:
 - `limit` (optional): 1 to 100, default 20
 - `after` (optional): the `next` of the previous page
 
-Result: `{ items, next? }`.
+Result: `{ items, next? }`: each agent as `agent.get` shows it.
 
 #### `team.list`
 
@@ -1999,6 +2009,17 @@ Arguments:
 - `limit` (optional): 1 to 200 (default 100)
 
 Result: `{ projectId, items, redactions, next?, partial? }`.
+
+#### `lease.list`
+
+The maintenance leases of a project's managed resources: who holds each, why, until when, whether it ran out unreleased (`expired`), how many times another agent was blocked and the last few blocks (who, when, why), how a holding ended (validation result and response) and from whom a lease was taken over.
+
+Arguments:
+
+- `projectId`: the project
+- `resourceId` (optional): only this resource
+
+Result: `{ items }`.
 
 #### `service.observe`
 
@@ -2423,6 +2444,33 @@ Arguments:
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `coordinator.configure`
+
+Owner only: sets the coordinator up (without `expectedRevision`) or changes its principal and routes (with the revision `coordinator.get` showed). The chat does the same in free words. A `principalId` that is an agent record (`agent:agt-...`, an active agent) makes the coordinator a hosted agent (card U03c): it starts paused under the agent's own pause gate, which only the owner lifts (`coordinator.state` or the agent controls), and it gains no right by this. Its routes (up to four, the primary first) are optional for a hosted coordinator. The precedence for a hosted coordinator, the first that gives a route winning: the `routes` stated here (only those the routing table lets the coordinator use, in the order given: a configured route, local data, not paid, not disabled or excluded), the routing table's routes for the agent's `defaultProfile`, the routes of the coordinator role, then routes stored by an earlier set-up; `coordinator.get` says which applies (`routeSource`). Its model calls are recorded as usage of the agent (shared overhead under the rule `the coordinator's own model calls (hosted agent)`; `budget.usage` by agent), and record without ever refusing a call. To take it off its agent, set it up again with a `principalId` that is not an agent record (such as `agent:coordinator`) and `routes`: it comes back paused and held by the controller as before. A set-up refused after its pause (a concurrent change) lifts the pause it made, unless the coordinator now set up is this same agent (then the pause holds it until the owner starts it).
+
+Arguments:
+
+- `principalId`: the coordinator's principal: `agent:agt-...` for a hosted agent, else an agent principal such as `agent:coordinator`
+- `routes` (optional): up to 4 provider route names in the order to try; needed unless the principal is an agent record
+- `expectedRevision` (optional): the revision you read; leave out to set it up the first time
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `coordinator.state`
+
+Owner only: starts (`running`), pauses (`paused`) or stops (`stopped`) the coordinator, on the revision `coordinator.get` showed. A hosted coordinator (card U03c) is started, paused and stopped through its agent's own pause gate and Stop, as for any agent; starting it lifts only its own gate, and `stillHeldBy` lists a team or the installation that still holds it. A stopped coordinator can only be started. The coordinator cannot do this for itself: it holds no right to its own agent scope.
+
+Arguments:
+
+- `to`: `running`, `paused` or `stopped`
+- `expectedRevision`: the revision you read
+
+Result: `{ id, revision, replayed, stillHeldBy? }`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -4083,6 +4131,33 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `backup.encryption.set`
+
+Owner only, recorded and announced to the owner's inbox: switches backup encryption on or off, or chooses its scope, without touching the key or any old backup (they stay readable with the passcode or recovery file). `enabled: false` means new backups are written in PLAIN, so say that to the owner and have them agree first. Scope `everything` seals every file of a backup; `secrets` seals only secret values, and since no secret values are in a backup today (they stay in the secret store) that writes plain backups too. The installation refuses to start with its backup keyring removed from the configuration unless this setting says off, so taking the option away is no way around it. The same call turns encryption back on. It applies from the next backup. Give `expectedRevision` from backup.encryption.status `setting.revision`.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `scope` (optional): `everything` or `secrets`
+- `expectedRevision` (optional): the setting.revision you read
+
+Result: `{ revision, enabled, scope, weaker, changed, text }`; `weaker` is true when later backups are less protected; `text` says in plain words how new backups are written.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.signing.rotate`
+
+Owner only, recorded and announced to the owner's inbox: makes a new backup signing key (after the old key may have been exposed, say). The old key stops signing; its public key stays trusted so backups it signed still verify, unless `revokePrevious: true` (the owner says the key was exposed or stolen): then every earlier key is trusted for no backup at all, since whoever holds it could sign a forgery with any date, and backups those keys signed can only be restored with the host command without a trusted key. The owner should then save the new public key (backup.signing.status) off the server.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read from backup.signing.status
+- `revokePrevious` (optional): true when the old key may be in someone else's hands
+
+Result: `{ revision, keyId, generation, revoked }`; `revoked` is how many earlier keys are no longer trusted.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `backup.encryption.verify`
 
 Owner only: proves that a passcode or the recovery file still opens the backup key. The secret is NOT an argument: the owner puts it in the file the host was told about (mode 600), and this reads it for the moment of the proof; it says only ok or that it failed. One proof at a time, at most one every 10 seconds. The server sees the passcode at that moment and drops the unwrapped key at once.
@@ -5450,6 +5525,37 @@ Arguments:
 - `taskId`: the task
 
 Result: `{ taskId, restored, conflicts, conflictDetails }` (a reason for each conflict).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lease.acquire`
+
+Takes (or, for the holder, renews) the maintenance lease on a resource a responsibility manages, before changing it. Only one agent holds it at a time: if another agent holds it the answer is `status: blocked` with the holder and the time, and the attempt is recorded visibly on the lease. A lease that ran out unreleased is taken over and the previous holder recorded. For the answerable agent, the owner or a holder of `responsibility.write`; a paused responsibility starts no new maintenance.
+
+Arguments:
+
+- `resourceId`: the managed resource's ID
+- `purpose`: what the maintenance is for
+- `minutes` (optional): how long, 1 to 1440 (default 60)
+- `commandId`: required
+
+Result: `{ status: granted | blocked, lease }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lease.release`
+
+Gives back a maintenance lease with the result of validating the change: `validation` passed or failed. A failed validation needs `onFailure`: `rollback` (only when the responsibility permits the action `rollback`) or `escalate` (opens an incident and escalates it at once to the responsibility's escalation target or the owner). Both are recorded in the responsibility's history. The owner may instead release another agent's lease by force: give only `evidence` (the reason), no `validation`.
+
+Arguments:
+
+- `resourceId`: the resource
+- `validation` (optional): `passed` or `failed` (leave out only for the owner's forced release)
+- `evidence`: what shows the result, or the reason for a forced release
+- `onFailure` (optional): `rollback` or `escalate`, with a failed validation
+- `commandId`: required
+
+Result: `{ lease, response?, incidentId? }`.
 
 Completion: finished when accepted (`completed: true`).
 

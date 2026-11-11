@@ -13,7 +13,7 @@ import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
-import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -55,7 +55,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
-import type { BackupEncryption, BackupKeyPinService, BackupService } from "../backup/index.js";
+import type { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
@@ -159,10 +159,11 @@ export interface StateApiDeps {
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   /** The coordinator, looked up when asked. */
-  readonly coordinator?: () => Pick<CoordinatorService, "get"> | undefined;
+  readonly coordinator?: () => Pick<CoordinatorService, "get" | "configure" | "setState"> | undefined;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
+  readonly leases?: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
@@ -214,6 +215,8 @@ export interface StateApiDeps {
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
+  readonly backupEncryptionSetting?: Pick<BackupEncryptionSettingService, "get" | "set">;
+  readonly backupSigning?: Pick<BackupSigningService, "status" | "rotate">;
   readonly backupRestore?: Context["backupRestore"];
   readonly databaseTransfer?: Context["databaseTransfer"];
   /** While it says true (the maintenance barrier is up, card K01h) every command except the restore's own and the owner's reads is refused as unavailable. */
@@ -328,6 +331,7 @@ export class StateApi {
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
         ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
         ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
+        ...(this.#deps.leases === undefined ? {} : { leases: this.#deps.leases }),
         ...(this.#deps.retention === undefined ? {} : { retention: this.#deps.retention }),
         ...(this.#deps.retentionSettings === undefined ? {} : { retentionSettings: this.#deps.retentionSettings }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
@@ -359,6 +363,8 @@ export class StateApi {
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
         ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
         ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
+        ...(this.#deps.backupEncryptionSetting === undefined ? {} : { backupEncryptionSetting: this.#deps.backupEncryptionSetting }),
+        ...(this.#deps.backupSigning === undefined ? {} : { backupSigning: this.#deps.backupSigning }),
         ...(this.#deps.backupRestore === undefined ? {} : { backupRestore: this.#deps.backupRestore }),
         ...(this.#deps.databaseTransfer === undefined ? {} : { databaseTransfer: this.#deps.databaseTransfer }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),
