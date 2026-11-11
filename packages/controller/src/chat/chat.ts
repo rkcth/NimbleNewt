@@ -143,7 +143,14 @@ export const FOLLOW_UP_PROJECTS = 5;
 export const FOLLOW_UP_SHOWN = 3;
 
 /** What the channel a message came by can do. A channel that keeps what it shows (the web page's outbox) says `secrets: false`. */
-export interface ChatChannel { readonly secrets?: boolean }
+export interface ChatChannel {
+  readonly secrets?: boolean;
+  /**
+   * What the message means, already decided by code that built the message (the web page's buttons, card U08b): checked like an interpreter's answer, and planned, shown and applied exactly as if the
+   * assistant had read the words. The words are still the owner's evidence, so a proposal-first command is still shown first. Only in-process callers can set it; no API operation passes it.
+   */
+  readonly fixedIntents?: readonly unknown[];
+}
 /** Operations whose result carries a secret shown once (card U14b). */
 export const SECRET_OPS: ReadonlySet<string> = new Set(["credential.issue"]);
 const NO_SECRET_CHANNEL = "this channel keeps what it shows, so it cannot show a credential once; issue it in the terminal chat (or through the API)";
@@ -279,10 +286,11 @@ export class ChatService {
       const focus = await this.#focus(tok, context.focusProjectId);
       // A message that is a typed command (`/nimblenewt.grant-list`) is not read by the assistant: it is the command, as the owner typed it.
       const typed = split.text.trim();
-      const isCommand = quoted.length === 0 && parseInvocation(typed) !== undefined;
+      const fixed = options.fixedIntents === undefined ? undefined : checkIntents([...options.fixedIntents]);
+      const isCommand = fixed === undefined && quoted.length === 0 && parseInvocation(typed) !== undefined;
       // A short form of a routing order is expanded and shown, not run (card U06b): the exact line it stands for is what runs.
-      const short = isCommand || quoted.length > 0 ? undefined : expandShorthand(typed);
-      const interpreted = isCommand || short !== undefined ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
+      const short = fixed !== undefined || isCommand || quoted.length > 0 ? undefined : expandShorthand(typed);
+      const interpreted = fixed !== undefined ? { intents: fixed } : isCommand || short !== undefined ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
       if ("unavailable" in interpreted) return { turnId, replayed: false, outcomes: [], reply: ["The assistant that reads free-form messages is unavailable right now. Nothing was done; the commands of the API and the proposals you already have work as usual."] };
       const planned = short !== undefined
         ? { items: [{ i: 0, kind: "refused", code: "needs_confirmation", message: "typed" in short ? `That short form stands for this order. It has not run; send the line as it is to run it:\n${short.typed}` : short.error } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }

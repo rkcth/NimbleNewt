@@ -1187,6 +1187,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // The web page keeps what it receives in the browser (its outbox), so it is never given a credential shown once: those operations are refused here and done in the terminal chat.
         // Whatever the web listener passes (its `stillAllowed` check), the secrets flag is set here and cannot be overridden by it.
         submit: (token, message, options) => owned.submit(token, message, { ...options, secrets: false }),
+        decide: (token, message, options) => owned.submit(token, { messageId: message.messageId, text: message.text }, { ...options, secrets: false, fixedIntents: message.intents }),
         applyProposal: (token, request, options) => owned.applyProposal(token, request, { ...options, secrets: false }),
         discardProposal: (token, request, options) => owned.discardProposal(token, request, options),
         query: async (token, op, args) => {
