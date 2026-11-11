@@ -8,6 +8,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
+import { LAUNCH_LIMIT_BOUNDS } from "./launch-limits.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 
 /** What an agent's environment is made of (card A08). Everything here is a name, a version or a digest: no secret and no path an agent could choose. */
@@ -22,7 +23,8 @@ export interface EnvironmentManifest {
   readonly capabilities: readonly string[];
   /** The configuration revision in force at each layer when the environment was made. */
   readonly configuration: Readonly<Record<string, number>>;
-  readonly limits: { readonly cpus: number; readonly memoryMb: number; readonly diskMb: number; readonly processes: number };
+  /** What a launch of the agent may use (card A08). `wallTimeMs` (card A08d, optional: a manifest made before it has none and the installation's figure applies) is how long one launch of the agent's process may run. At a launch these are cut down by the installation's limits, never raised. */
+  readonly limits: { readonly cpus: number; readonly memoryMb: number; readonly diskMb: number; readonly processes: number; readonly wallTimeMs?: number };
   /** Controller-owned extensions loaded at worker start, with the digest each must have. They must match the system versions in the catalog. */
   readonly protectedExtensions: readonly { readonly name: string; readonly digest: string }[];
 }
@@ -83,9 +85,12 @@ export function checkEnvironmentManifest(value: unknown, capacity?: HostCapacity
   if (typeof cfg !== "object" || cfg === null || Array.isArray(cfg) || Object.keys(cfg).length > ENV_LIMITS.configLayers) invalid("manifest.configuration", "must map layers to revisions");
   for (const [k, v] of Object.entries(cfg)) configuration[NAME.test(k) ? k : invalid("manifest.configuration", `${k} is not a layer name`)] = typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : invalid(`manifest.configuration.${k}`, "must be a revision number");
   const l = m["limits"] as Record<string, unknown> | undefined;
-  if (typeof l !== "object" || l === null) return invalid("manifest.limits", "needs cpus, memoryMb, diskMb and processes");
+  if (typeof l !== "object" || l === null || Array.isArray(l)) return invalid("manifest.limits", "needs cpus, memoryMb, diskMb and processes");
+  onlyKnown(l, ["cpus", "memoryMb", "diskMb", "processes", "wallTimeMs"]);
   const whole = (key: string, max: number): number => (typeof l[key] === "number" && Number.isSafeInteger(l[key]) && (l[key] as number) >= 1 && (l[key] as number) <= max ? (l[key] as number) : invalid(`manifest.limits.${key}`, `must be a whole number from 1 to ${max}`));
-  const limits = { cpus: whole("cpus", 4096), memoryMb: whole("memoryMb", 100_000_000), diskMb: whole("diskMb", 1_000_000_000), processes: whole("processes", 1_000_000) };
+  const wall = l["wallTimeMs"] === undefined ? undefined : typeof l["wallTimeMs"] === "number" && Number.isSafeInteger(l["wallTimeMs"]) && l["wallTimeMs"] >= LAUNCH_LIMIT_BOUNDS.wallTimeMs[0] && l["wallTimeMs"] <= LAUNCH_LIMIT_BOUNDS.wallTimeMs[1] ? l["wallTimeMs"] : invalid("manifest.limits.wallTimeMs", `must be a whole number of milliseconds from ${LAUNCH_LIMIT_BOUNDS.wallTimeMs[0]} to ${LAUNCH_LIMIT_BOUNDS.wallTimeMs[1]}`);
+  // `wallTimeMs` is left out when absent, so the digest of a manifest without one is what it always was.
+  const limits = { cpus: whole("cpus", 4096), memoryMb: whole("memoryMb", 100_000_000), diskMb: whole("diskMb", 1_000_000_000), processes: whole("processes", 1_000_000), ...(wall === undefined ? {} : { wallTimeMs: wall }) };
   if (capacity !== undefined) {
     // An agent never gets all of the host: a share is held back for the controller.
     const keep = 1 - (capacity.reserveFraction ?? 0.1);

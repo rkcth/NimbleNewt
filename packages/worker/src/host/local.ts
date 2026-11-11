@@ -29,6 +29,27 @@ export interface HostOrder {
   readonly recipe: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: ResourceLimits };
   readonly expiresAt?: string;
   readonly resumeFrom?: JsonObj;
+  /** The dispatch contract (card H12a) as far as the host reads it: the limits the dispatcher worked out for this launch (card A08d: the agent's environment cut by the installation's), applied on top of the host's own and the owner's, never instead of them. */
+  readonly contract?: { readonly limits?: ResourceLimits };
+}
+
+/**
+ * The limits the dispatch contract carries for this launch (card A08d), checked: an object of known figures that are whole numbers (wall time from 1000 ms to a week). Throws on anything else, so the launch is refused (and recorded as
+ * refused) rather than made with a figure nobody can read. `undefined` when the contract states none.
+ */
+export function contractLimitsOf(order: Pick<HostOrder, "contract">): ResourceLimits | undefined {
+  const l = order.contract?.limits as unknown;
+  if (l === undefined) return undefined;
+  if (l === null || typeof l !== "object" || Array.isArray(l)) throw new Error("the dispatch contract's limits are not an object");
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(l)) {
+    if (value === undefined) continue;
+    if (!(["cpus", "memoryMb", "diskMb", "processes", "wallTimeMs"] as readonly string[]).includes(key)) throw new Error(`the dispatch contract limits ${key.slice(0, 30)}, which is not a limit`);
+    const [lo, hi] = key === "wallTimeMs" ? [1000, 604_800_000] : [1, Number.MAX_SAFE_INTEGER];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < lo || value > hi) throw new Error(`the dispatch contract's ${key} (${String(value).slice(0, 30)}) must be a whole number from ${lo} to ${hi}`);
+    out[key] = value;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 export interface HostTurnResult {
@@ -402,7 +423,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let process: WorkerProcess;
       try {
         const ownerLimits = await options.limits?.(order);
-        requested = strictestLimits(entry.limits, ownerLimits) ?? {};
+        requested = strictestLimits(strictestLimits(entry.limits, ownerLimits), contractLimitsOf(order)) ?? {};
         stricter = stricterThanOwner(entry.limits, ownerLimits);
         bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(order)) === true;
         if (requested.wallTimeMs !== undefined) wallTimeMs = Math.min(remaining, requested.wallTimeMs);
@@ -521,7 +542,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let requested: ResourceLimits;
       let bestEffort: boolean;
       try {
-        requested = strictestLimits(entry.limits, await options.limits?.(entry.order)) ?? {};
+        requested = strictestLimits(strictestLimits(entry.limits, await options.limits?.(entry.order)), contractLimitsOf(entry.order)) ?? {};
         bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(entry.order)) === true;
       } catch (error) { return { state: "not-run", reason: `the owner's limits could not be read: ${String((error as Error)?.message ?? error).slice(0, 200)}` }; }
       const { wallTimeMs, ...processLimits } = requested;

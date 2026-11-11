@@ -870,7 +870,7 @@ export class StatusService {
     else {
       const packages = a.manifest.packages.map((p) => `${p.name} ${p.version}`).join(", ") || "none";
       lines.push(line(`${agent}'s environment is at revision ${a.revision} of ${env.latest} (${a.digest.slice(0, 19)}...), made by ${a.createdBy} at ${a.createdAt}.`, cite("environment-revision", `${agent}|${a.revision}`)));
-      lines.push(line(`Base ${a.manifest.base.name} ${a.manifest.base.version}; own packages: ${packages}; ${a.manifest.skills.length} skill${a.manifest.skills.length === 1 ? "" : "s"}; limits ${a.manifest.limits.cpus} cpus, ${a.manifest.limits.memoryMb} MB memory, ${a.manifest.limits.diskMb} MB disk, ${a.manifest.limits.processes} processes.`, c));
+      lines.push(line(`Base ${a.manifest.base.name} ${a.manifest.base.version}; own packages: ${packages}; ${a.manifest.skills.length} skill${a.manifest.skills.length === 1 ? "" : "s"}; limits ${a.manifest.limits.cpus} cpus, ${a.manifest.limits.memoryMb} MB memory, ${a.manifest.limits.diskMb} MB disk, ${a.manifest.limits.processes} processes${a.manifest.limits.wallTimeMs === undefined ? ", no time limit of its own (the installation's applies)" : `, ${a.manifest.limits.wallTimeMs} ms for one launch`}; each launch uses these cut down by the limits you set for all agents, never more.`, c));
       lines.push(line(`Why revision ${a.revision} exists: ${a.reason}${a.rollbackOf === undefined ? "" : ` (it restores revision ${a.rollbackOf})`}.`, cite("environment-revision", `${agent}|${a.revision}`)));
     }
     if (env.latest > (a?.revision ?? 0)) {

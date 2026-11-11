@@ -22,6 +22,7 @@ import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
 import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import type { EnvironmentService } from "../environments/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -274,6 +275,8 @@ export interface ComposeInput {
   readonly landingPolicy?: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicyFigures>;
   /** The owner's best-effort switch and the place launches are recorded (card H12k). */
   readonly workerPolicy?: { readonly bestEffortAllowed: () => Promise<boolean>; readonly recordLaunch: (record: LaunchRecord) => Promise<void> };
+  /** The agents' environments (card A08): each attempt pins its agent's active revision, and the revision's limits, cut by the installation's, are the limits of the launch (card A08d). */
+  readonly environments?: Pick<EnvironmentService, "pin" | "resume">;
   /** The owner's dispatcher limits (attempt time, attempts), read on every claim and re-admission; absent: the start-up options. */
   readonly dispatchLimits?: () => Promise<DispatcherLimitFigures>;
   /** The configured `time.maxMinutes` of a task, for the claim; absent: not applied. */
@@ -507,6 +510,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
   const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
   const monitorOf = reporter === undefined ? undefined : (order: WorkOrder & { readonly hostId?: string }): RelayMonitor => relayMonitor(order, reporter, (error) => i.onError?.(error));
+  // The host's launch report goes to the owner's launch record (with what the dispatcher gave the launch and whose each figure was, card A08d) and onto the attempt's own record. The attempt's note is best effort: a note that
+  // cannot be written never undoes a launch the host has made.
+  const recordLaunch = async (record: LaunchRecord): Promise<void> => {
+    let given: Awaited<ReturnType<DispatcherService["launchLimitsOf"]>>;
+    try { given = await holder.dispatcher?.launchLimitsOf(record.attemptId); } catch (error) { i.onError?.(error); }
+    await i.workerPolicy?.recordLaunch(given === undefined ? record : { ...record, environment: { ...(given.environmentRevision === undefined ? {} : { revision: given.environmentRevision }), sources: given.sources, ...(given.capped === undefined ? {} : { capped: given.capped }) } });
+    try { await holder.dispatcher?.noteLaunch({ attemptId: record.attemptId, outcome: record.outcome, requested: record.requested, bestEffort: record.bestEffort, enforcement: record.enforcement, ...(record.reason === undefined ? {} : { reason: record.reason }) }); } catch (error) { i.onError?.(error); }
+  };
   if (i.options.local !== undefined) {
     const limits = checkLocalWorkerLimits(i.options.local.limits);
     const guards = controllerGuards({
@@ -624,7 +635,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         void Promise.resolve(i.securityReport?.(LOCAL_HOST_REPORTER, { kind: event.kind, key: event.key, ...(projectId === undefined ? {} : { projectId }) })).catch((error: unknown) => i.onError?.(error));
       } catch (error) { try { i.onError?.(error); } catch { /* ignored */ } }
     };
-    const built = await i.options.local.build({ guards, reportSecurity: reportLocal, landingPolicy: async (call) => i.landingPolicy === undefined ? {} : i.landingPolicy(call), currentLimits: async () => i.workerLimits === undefined ? limits : i.workerLimits(), bestEffortAllowed: async () => i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed(), recordLaunch: async (record) => { await i.workerPolicy?.recordLaunch(record); }, recordCompaction, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }), ...(mcpParts === undefined ? {} : { mcp: { connector: mcpParts.connector, client: mcpParts.client } }), ...(bridge === undefined ? {} : { bridge }), namespaceId: (order) => personalNamespace(order.agentId).slice(2) });
+    const built = await i.options.local.build({ guards, reportSecurity: reportLocal, landingPolicy: async (call) => i.landingPolicy === undefined ? {} : i.landingPolicy(call), currentLimits: async () => i.workerLimits === undefined ? limits : i.workerLimits(), bestEffortAllowed: async () => i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed(), recordLaunch: async (record) => { await recordLaunch(record); }, recordCompaction, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }), ...(mcpParts === undefined ? {} : { mcp: { connector: mcpParts.connector, client: mcpParts.client } }), ...(bridge === undefined ? {} : { bridge }), namespaceId: (order) => personalNamespace(order.agentId).slice(2) });
     // The controller hands the host builder the owner's limits, best-effort setting and launch record. A host that does not say it connected them would run every agent unlimited whatever the owner set, so it is refused here, at start,
     // unless the operator states that it applies no owner limits (`acceptUnenforcedLimits`).
     if (built.ownerPolicy !== true && i.options.local.acceptUnenforcedLimits !== true) {
@@ -654,7 +665,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id), liveAttempts: (by) => d().liveAttempts(by) },
         ...(i.options.dispatcher?.bridges === undefined ? {} : { bridges: i.options.dispatcher.bridges }),
-        ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await i.workerPolicy!.recordLaunch(r as never); } }),
+        ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await recordLaunch(r as never); } }),
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
         ...(i.options.remote.reaccept === undefined ? {} : { reaccept: i.options.remote.reaccept }),
@@ -705,7 +716,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.onError === undefined ? {} : { onError: i.onError }),
     });
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
+      ...(i.toolBridge === undefined ? {} : { replaySafe: i.toolBridge.replaySafe }), ...(i.environments === undefined ? {} : { environments: i.environments }), launchDefaults: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, decided: (decision, actionId) => ApprovalLoadService.withEpoch(storage, epoch, i.grants, ro).recordDecision(decision, { actionId }), protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), ...(i.onDenied === undefined ? {} : { denied: i.onDenied }), effects, blockers, route, ...(modelCalls === undefined ? {} : { modelCalls }),
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses,
       ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
