@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -119,5 +120,37 @@ test("a statement citing a shared artifact is shown verified to a reader; one ci
     assert.equal(by("My notes say Sundays fail.").verifiable, false);
     assert.equal(by("My notes say Sundays fail.").sources, undefined);
     assert.equal(by("Some artifact that is not there.").verifiable, false);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a meeting's outcomes go back to its agenda topic by themselves through the running dispatcher, once, without a question for the owner (card M03i)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-mrec-return-"));
+  const timer = new ManualTimer();
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer, intervalMs: 1000 }, meetingRecords: { autoReturnMinutes: 0 } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "meeting.attend", project }] });
+    const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
+    const item = await call(boot.token, "agenda.capture", { projectId: project, topic: "Cover the beds?", question: "Should we cover the beds?", urgency: "urgent", intent: "delegated-decision" }, "ag1");
+    assert.ok(item.ok, JSON.stringify(item));
+    const urgent = await call(boot.token, "meeting.call-urgent", { projectId: project, title: "Beds", reason: "frost tonight", roster: ["agent:ann"] }, "mu1");
+    const rec = (await call(boot.token, "meeting.record.open", { occurrenceId: urgent.result.id, chair: "agent:ann" }, "mo1")).result.id as string;
+    assert.ok((await call(ann, "meeting.record.join", { recordId: rec }, "j1")).ok);
+    const motion = await call(ann, "meeting.record.move", { recordId: rec, text: "Cover the beds tonight.", agendaItemId: item.result.id }, "mv1");
+    assert.ok(motion.ok, JSON.stringify(motion));
+    assert.ok((await call(boot.token, "meeting.record.table", { motionId: motion.result.id, reason: "needs a forecast" }, "tb1")).ok);
+    assert.ok((await call(boot.token, "meeting.record.finish", { recordId: rec }, "f1")).ok);
+    const state = async () => (await call(boot.token, "agenda.get", { itemId: item.result.id })).result?.item as { state: string; ownerQuestionId?: string } | undefined;
+    assert.equal((await state())?.state, "scheduled");
+    await c.dispatch!.dispatcher.tick();
+    const after = await state();
+    assert.equal(after?.state, "deferred", "the dispatcher's lease returned the outcome");
+    assert.equal(after?.ownerQuestionId, undefined, "and asked the owner nothing");
+    const again = await c.dispatch!.dispatcher.tick();
+    assert.ok(again.loops.some((l) => l.name === "meeting-records.sweep" && l.ok));
+    assert.equal((await state())?.state, "deferred");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

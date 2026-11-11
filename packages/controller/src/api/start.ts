@@ -212,6 +212,8 @@ export interface StartOptions {
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
    */
   readonly dispatch?: DispatchStartOptions;
+  /** Meeting records (card M03i): minutes after a meeting ends before the lease hands its outcomes back by itself (default 60; the owner can return them with a question before then). */
+  readonly meetingRecords?: { readonly autoReturnMinutes?: number };
   /** Reviewed environment changes (card A09). The applier makes an approved change in the agent's environment; without one every approved change waits (pending) and the owner is not misled. */
   readonly maintenance?: { readonly applier?: MaintenanceApplier; /** The host side of the real environment applier (card A09): the disposable trial, the worker reload and the validation. With it, and without an `applier` of its own, approved package and extension requests are carried out by `EnvironmentChangeApplier`; without both, approved changes wait. */ readonly environmentRuntime?: EnvironmentRuntime; /** How long the suspension for an environment change may take (default one minute). */ readonly suspendMs?: number; /** The maintenance loop period in milliseconds (default 30000). */ readonly tickMs?: number; /** The claim heartbeat in milliseconds (default a third of the lease; 0 = off). */ readonly heartbeatMs?: number };
   /**
@@ -932,6 +934,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         await activity.record({ id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal, { commandId: `mdn-act:${e.decisionId}:${e.index}:${e.state}`, taskId: e.target.id, kind: "meeting-decision", summary: `A meeting decision ${e.state === "applied" ? "changed" : "could not change"} this task: ${e.summary}${e.reason === undefined ? "" : ` (${e.reason})`}.`, manifest: { refs: [{ kind: "meeting-decision", id: e.decisionId }] } } as never);
       },
       authority: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); },
+      ...(options.meetingRecords?.autoReturnMinutes === undefined ? {} : { autoReturnMinutes: options.meetingRecords.autoReturnMinutes }),
     });
     recordsLive = records;
     // The attendance service lives with the dispatcher (it needs the budget and the pause service it was composed with), which starts after the API: calls reach it when it is there.
